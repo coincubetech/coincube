@@ -35,6 +35,28 @@ fn descriptor_key(
         bip32::ChildNumber::from_hardened_idx(48).unwrap(),
         bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
     ]);
+    descriptor_key_at(signer, origin, secp)
+}
+
+fn keychain_descriptor_key(
+    signer: &MasterSigner,
+    account: u32,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) -> DescriptorPublicKey {
+    let origin = DerivationPath::from(vec![
+        bip32::ChildNumber::from_hardened_idx(48).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(2).unwrap(),
+    ]);
+    descriptor_key_at(signer, origin, secp)
+}
+
+fn descriptor_key_at(
+    signer: &MasterSigner,
+    origin: DerivationPath,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) -> DescriptorPublicKey {
     DescriptorPublicKey::MultiXPub(DescriptorMultiXKey {
         origin: Some((signer.fingerprint(secp), origin.clone())),
         xkey: signer.xpub_at(&origin, secp),
@@ -62,17 +84,28 @@ fn funding_transaction(output: TxOut, marker: u32) -> Transaction {
 }
 
 pub(crate) fn fixture(input_count: usize) -> Fixture {
+    fixture_with_keys(input_count, descriptor_key)
+}
+
+fn keychain_fixture(input_count: usize) -> Fixture {
+    fixture_with_keys(input_count, keychain_descriptor_key)
+}
+
+fn fixture_with_keys(
+    input_count: usize,
+    key_at: fn(&MasterSigner, u32, &secp256k1::Secp256k1<secp256k1::All>) -> DescriptorPublicKey,
+) -> Fixture {
     let secp = secp256k1::Secp256k1::new();
     let signers = vec![signer(1), signer(2), signer(3), signer(4)];
     let primary = PathInfo::Multi(
         2,
         vec![
-            descriptor_key(&signers[0], 0, &secp),
-            descriptor_key(&signers[1], 0, &secp),
-            descriptor_key(&signers[2], 0, &secp),
+            key_at(&signers[0], 0, &secp),
+            key_at(&signers[1], 0, &secp),
+            key_at(&signers[2], 0, &secp),
         ],
     );
-    let recovery = PathInfo::Single(descriptor_key(&signers[2], 1, &secp));
+    let recovery = PathInfo::Single(key_at(&signers[2], 1, &secp));
     let descriptor = CoincubeDescriptor::new(
         CoincubePolicy::new_legacy(primary, [(46, recovery)].iter().cloned().collect()).unwrap(),
     );
@@ -165,23 +198,30 @@ fn deterministic_primary_and_recovery_keys_sign_and_verify() {
 
 fn signer_target(
     signer: &MasterSigner,
-    branch: u32,
+    account: u32,
     secp: &secp256k1::Secp256k1<secp256k1::All>,
 ) -> UnifiedSignerTarget {
     let account_path = DerivationPath::from(vec![
         bip32::ChildNumber::from_hardened_idx(48).unwrap(),
-        bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(2).unwrap(),
     ]);
-    UnifiedSignerTarget::new(account_path.clone(), signer.xpub_at(&account_path, secp))
+    UnifiedSignerTarget::new(
+        Network::Bitcoin,
+        account_path.clone(),
+        signer.xpub_at(&account_path, secp),
+    )
+    .unwrap()
 }
 
 #[test]
 fn authenticated_target_signs_only_its_account_not_sibling_or_recovery_accounts() {
     let secp = secp256k1::Secp256k1::new();
-    let fixture = fixture(1);
+    let fixture = keychain_fixture(1);
 
-    // Signer 2 owns both a primary key below m/48'/0' and the recovery key
-    // below m/48'/1'. Approving the primary account must not sign the sibling.
+    // Signer 2 owns both a primary key below m/48'/0'/0'/2' and the recovery
+    // key below m/48'/0'/1'/2'. Approving one account must not sign the sibling.
     let primary_target = signer_target(&fixture.signers[2], 0, &secp);
     let primary = sign_p2wsh_all_unified_for_target(
         &fixture.signers[2],
@@ -225,8 +265,13 @@ fn authenticated_target_signs_only_its_account_not_sibling_or_recovery_accounts(
 fn target_xpub_must_match_the_mnemonic_and_account_path() {
     let secp = secp256k1::Secp256k1::new();
     let fixture = fixture(1);
-    let path = DerivationPath::from_str("m/48'/0'").unwrap();
-    let wrong = UnifiedSignerTarget::new(path.clone(), fixture.signers[1].xpub_at(&path, &secp));
+    let path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+    let wrong = UnifiedSignerTarget::new(
+        Network::Bitcoin,
+        path.clone(),
+        fixture.signers[1].xpub_at(&path, &secp),
+    )
+    .unwrap();
     assert!(matches!(
         sign_p2wsh_all_unified_for_target(&fixture.signers[0], &wrong, &fixture.psbt, &secp),
         Err(UnifiedSigningError::SignerTargetMismatch { .. })
@@ -234,9 +279,70 @@ fn target_xpub_must_match_the_mnemonic_and_account_path() {
 }
 
 #[test]
+fn signer_target_rejects_authority_expanding_or_malformed_account_paths() {
+    let secp = secp256k1::Secp256k1::new();
+    let signer = signer(1);
+    for path in [
+        "m",
+        "m/48'",
+        "m/48'/0'",
+        "m/48'/0'/0'",
+        "m/47'/0'/0'/2'",
+        "m/48'/0'/0'/1'",
+        "m/48/0'/0'/2'",
+        "m/48'/0/0'/2'",
+        "m/48'/0'/0/2'",
+        "m/48'/0'/0'/2",
+    ] {
+        let path = DerivationPath::from_str(path).unwrap();
+        let xpub = signer.xpub_at(&path, &secp);
+        assert!(matches!(
+            UnifiedSignerTarget::new(Network::Bitcoin, path, xpub),
+            Err(UnifiedSignerTargetError::InvalidAccountPath { .. })
+        ));
+    }
+}
+
+#[test]
+fn signer_target_rejects_coin_type_and_xpub_metadata_mismatches() {
+    let secp = secp256k1::Secp256k1::new();
+    let signer = signer(1);
+    let main_path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+    let test_path = DerivationPath::from_str("m/48'/1'/0'/2'").unwrap();
+    let main_xpub = signer.xpub_at(&main_path, &secp);
+
+    assert!(matches!(
+        UnifiedSignerTarget::new(Network::Bitcoin, test_path.clone(), main_xpub),
+        Err(UnifiedSignerTargetError::CoinTypeMismatch { .. })
+    ));
+
+    let test_mnemonic = bip39::Mnemonic::from_entropy(&[1; 16]).unwrap();
+    let test_signer = MasterSigner::from_mnemonic(Network::Testnet, test_mnemonic).unwrap();
+    let test_xpub = test_signer.xpub_at(&test_path, &secp);
+    assert_eq!(
+        UnifiedSignerTarget::new(Network::Bitcoin, main_path.clone(), test_xpub),
+        Err(UnifiedSignerTargetError::XpubNetworkMismatch)
+    );
+
+    let shallow_path = DerivationPath::from_str("m/48'/0'").unwrap();
+    let shallow_xpub = signer.xpub_at(&shallow_path, &secp);
+    assert!(matches!(
+        UnifiedSignerTarget::new(Network::Bitcoin, main_path.clone(), shallow_xpub),
+        Err(UnifiedSignerTargetError::XpubDepthMismatch { .. })
+    ));
+
+    let wrong_leaf = DerivationPath::from_str("m/48'/0'/0'/1'").unwrap();
+    let wrong_leaf_xpub = signer.xpub_at(&wrong_leaf, &secp);
+    assert!(matches!(
+        UnifiedSignerTarget::new(Network::Bitcoin, main_path, wrong_leaf_xpub),
+        Err(UnifiedSignerTargetError::XpubChildNumberMismatch { .. })
+    ));
+}
+
+#[test]
 fn keychain_target_accepts_witness_only_p2wsh_without_weakening_desktop_signing() {
     let secp = secp256k1::Secp256k1::new();
-    let fixture = fixture(1);
+    let fixture = keychain_fixture(1);
     let mut witness_only = fixture.psbt.clone();
     witness_only.psbt_mut().inputs[0].non_witness_utxo = None;
     let target = signer_target(&fixture.signers[0], 0, &secp);
@@ -257,7 +363,7 @@ fn keychain_target_accepts_witness_only_p2wsh_without_weakening_desktop_signing(
 #[test]
 fn keychain_prevout_policy_rejects_conflicts_and_non_segwit_witness_only_inputs() {
     let secp = secp256k1::Secp256k1::new();
-    let fixture = fixture(1);
+    let fixture = keychain_fixture(1);
     let target = signer_target(&fixture.signers[0], 0, &secp);
 
     let mut conflict = fixture.psbt.clone();

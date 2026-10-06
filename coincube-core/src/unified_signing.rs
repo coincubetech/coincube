@@ -19,10 +19,10 @@ use std::{collections::BTreeSet, error, fmt};
 
 use miniscript::{
     bitcoin::{
-        bip32::{DerivationPath, Xpub},
+        bip32::{ChildNumber, DerivationPath, Xpub},
         hashes::Hash,
         psbt::{raw::ProprietaryKey, Psbt, PsbtSighashType},
-        secp256k1, PublicKey, ScriptBuf, TxOut,
+        secp256k1, Network, PublicKey, ScriptBuf, TxOut,
     },
     ExtParams, Miniscript, Segwitv0, Terminal,
 };
@@ -101,6 +101,60 @@ pub enum UnifiedSigningError {
     Sighash(UnifiedSighashError),
     PsbtConstruction(String),
 }
+
+/// Refusals while binding an authenticated Keychain record to a BIP-48 account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UnifiedSignerTargetError {
+    InvalidAccountPath {
+        path: DerivationPath,
+    },
+    CoinTypeMismatch {
+        network: Network,
+        expected: ChildNumber,
+        actual: ChildNumber,
+    },
+    XpubNetworkMismatch,
+    XpubDepthMismatch {
+        expected: u8,
+        actual: u8,
+    },
+    XpubChildNumberMismatch {
+        expected: ChildNumber,
+        actual: ChildNumber,
+    },
+}
+
+impl fmt::Display for UnifiedSignerTargetError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::InvalidAccountPath { path } => write!(
+                f,
+                "signer target path {path} must have the hardened BIP-48 account shape m/48'/<coin>'/<account>'/2'"
+            ),
+            Self::CoinTypeMismatch {
+                network,
+                expected,
+                actual,
+            } => write!(
+                f,
+                "signer target coin type {actual} does not match {network}; expected {expected}"
+            ),
+            Self::XpubNetworkMismatch => {
+                write!(f, "signer target xpub network does not match the supplied network")
+            }
+            Self::XpubDepthMismatch { expected, actual } => write!(
+                f,
+                "signer target xpub depth is {actual}; expected {expected} for a BIP-48 account"
+            ),
+            Self::XpubChildNumberMismatch { expected, actual } => write!(
+                f,
+                "signer target xpub child number is {actual}; expected account path leaf {expected}"
+            ),
+        }
+    }
+}
+
+impl error::Error for UnifiedSignerTargetError {}
 
 impl fmt::Display for UnifiedSigningError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -207,11 +261,52 @@ pub struct UnifiedSignerTarget {
 }
 
 impl UnifiedSignerTarget {
-    pub fn new(account_path: DerivationPath, account_xpub: Xpub) -> Self {
-        Self {
+    pub fn new(
+        network: Network,
+        account_path: DerivationPath,
+        account_xpub: Xpub,
+    ) -> Result<Self, UnifiedSignerTargetError> {
+        let components = account_path.as_ref();
+        let purpose = ChildNumber::from_hardened_idx(48).expect("48 is a valid child index");
+        let expected_coin =
+            ChildNumber::from_hardened_idx(if network == Network::Bitcoin { 0 } else { 1 })
+                .expect("BIP-44 coin types are valid child indices");
+        let script = ChildNumber::from_hardened_idx(2).expect("2 is a valid child index");
+        if components.len() != 4
+            || components[0] != purpose
+            || !components[1].is_hardened()
+            || !components[2].is_hardened()
+            || components[3] != script
+        {
+            return Err(UnifiedSignerTargetError::InvalidAccountPath { path: account_path });
+        }
+        if components[1] != expected_coin {
+            return Err(UnifiedSignerTargetError::CoinTypeMismatch {
+                network,
+                expected: expected_coin,
+                actual: components[1],
+            });
+        }
+        if account_xpub.network != network.into() {
+            return Err(UnifiedSignerTargetError::XpubNetworkMismatch);
+        }
+        let expected_depth = components.len() as u8;
+        if account_xpub.depth != expected_depth {
+            return Err(UnifiedSignerTargetError::XpubDepthMismatch {
+                expected: expected_depth,
+                actual: account_xpub.depth,
+            });
+        }
+        if account_xpub.child_number != components[3] {
+            return Err(UnifiedSignerTargetError::XpubChildNumberMismatch {
+                expected: components[3],
+                actual: account_xpub.child_number,
+            });
+        }
+        Ok(Self {
             account_path,
             account_xpub,
-        }
+        })
     }
 
     pub fn account_path(&self) -> &DerivationPath {

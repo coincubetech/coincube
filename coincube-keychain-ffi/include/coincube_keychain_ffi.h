@@ -148,9 +148,11 @@ int32_t coincube_unified_psbt_digest(
 /*
  * Entry 2b — sign one authenticated Keychain account target. target_path and
  * target_xpub are the exact BIP32 account path and xpub from the local signer
- * record. Core derives the xpub from the mnemonic and refuses a mismatch, then
- * signs only PSBT derivations below that path. Sibling accounts sharing the
- * master fingerprint are left untouched.
+ * record. target_path must be m/48'/<coin>'/<account>'/2', with every component
+ * hardened and the coin type and xpub network matching network. Core derives
+ * the xpub from the mnemonic and refuses a mismatch, then signs only PSBT
+ * derivations below that path. Sibling accounts sharing the master fingerprint
+ * are left untouched.
  *
  * The signer arrives as a BIP39 phrase (UTF-8, not NUL-terminated) because that
  * is what core's MasterSigner is rooted in and because per-input derivation is

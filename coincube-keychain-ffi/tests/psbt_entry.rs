@@ -39,12 +39,14 @@ fn signer(byte: u8) -> MasterSigner {
 
 fn descriptor_key(
     signer: &MasterSigner,
-    branch: u32,
+    account: u32,
     secp: &secp256k1::Secp256k1<secp256k1::All>,
 ) -> DescriptorPublicKey {
     let origin = DerivationPath::from(vec![
         bip32::ChildNumber::from_hardened_idx(48).unwrap(),
-        bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(2).unwrap(),
     ]);
     DescriptorPublicKey::MultiXPub(DescriptorMultiXKey {
         origin: Some((signer.fingerprint(secp), origin.clone())),
@@ -223,11 +225,13 @@ fn verify_through_ffi(bytes: &[u8]) -> (FfiResult, usize) {
 }
 
 /// Sign through the ABI using the two-call length protocol.
-fn sign_through_ffi(bytes: &[u8], signer: &MasterSigner, branch: u32) -> (FfiResult, Vec<u8>) {
+fn sign_through_ffi(bytes: &[u8], signer: &MasterSigner, account: u32) -> (FfiResult, Vec<u8>) {
     let secp = secp256k1::Secp256k1::new();
     let target_path = DerivationPath::from(vec![
         bip32::ChildNumber::from_hardened_idx(48).unwrap(),
-        bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(2).unwrap(),
     ]);
     let target_xpub = signer.xpub_at(&target_path, &secp).to_string();
     let phrase = signer.mnemonic_str();
@@ -686,8 +690,8 @@ fn unknown_network_is_rejected() {
             bytes.len(),
             phrase.as_bytes().as_ptr(),
             phrase.len(),
-            b"m/48'/0'".as_ptr(),
-            b"m/48'/0'".len(),
+            b"m/48'/0'/0'/2'".as_ptr(),
+            b"m/48'/0'/0'/2'".len(),
             b"xpub-invalid".as_ptr(),
             b"xpub-invalid".len(),
             99,
@@ -711,7 +715,7 @@ fn invalid_target_path_and_xpub_are_typed_boundary_refusals() {
 
     for (path, xpub, expected) in [
         ("not-a-path", "not-an-xpub", CC_ERR_INVALID_DERIVATION_PATH),
-        ("m/48'/0'", "not-an-xpub", CC_ERR_INVALID_XPUB),
+        ("m/48'/0'/0'/2'", "not-an-xpub", CC_ERR_INVALID_XPUB),
     ] {
         let mut detail = CcErrorDetail::default();
         let mut written = 0usize;
@@ -735,6 +739,56 @@ fn invalid_target_path_and_xpub_are_typed_boundary_refusals() {
             )
         };
         assert_eq!(code, expected, "path={path} xpub={xpub}");
+    }
+}
+
+#[test]
+fn malformed_or_authority_expanding_targets_are_refused_before_signing() {
+    let fixture = fixture(1);
+    let bytes = export_standard(&fixture.psbt).unwrap();
+    let signer = &fixture.signers[2];
+    let phrase = signer.mnemonic_str();
+    let secp = secp256k1::Secp256k1::new();
+
+    for path in [
+        "m",
+        "m/48'",
+        "m/48'/0'",
+        "m/48'/0'/0'",
+        "m/47'/0'/0'/2'",
+        "m/48'/1'/0'/2'",
+        "m/48'/0'/0'/1'",
+        "m/48/0'/0'/2'",
+        "m/48'/0/0'/2'",
+        "m/48'/0'/0/2'",
+        "m/48'/0'/0'/2",
+    ] {
+        let derivation = DerivationPath::from_str(path).unwrap();
+        let xpub = signer.xpub_at(&derivation, &secp).to_string();
+        let mut detail = CcErrorDetail::default();
+        let mut written = 0usize;
+        let mut message = [0u8; 512];
+        let code = unsafe {
+            coincube_unified_psbt_sign(
+                bytes.as_ptr(),
+                bytes.len(),
+                phrase.as_bytes().as_ptr(),
+                phrase.len(),
+                path.as_bytes().as_ptr(),
+                path.len(),
+                xpub.as_bytes().as_ptr(),
+                xpub.len(),
+                CC_NETWORK_BITCOIN,
+                std::ptr::null_mut(),
+                0,
+                &mut written,
+                &mut detail,
+                message.as_mut_ptr(),
+                message.len(),
+            )
+        };
+        assert_eq!(code, CC_ERR_SIGNING, "path={path}");
+        assert_eq!(written, 0, "path={path}");
     }
 }
 

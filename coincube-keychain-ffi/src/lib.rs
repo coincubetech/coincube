@@ -416,7 +416,8 @@ pub unsafe extern "C" fn coincube_unified_psbt_sign(
         })?;
         let target_xpub = Xpub::from_str(target_xpub)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_XPUB, err.to_string()))?;
-        let target = UnifiedSignerTarget::new(target_path, target_xpub);
+        let target = UnifiedSignerTarget::new(network, target_path, target_xpub)
+            .map_err(|err| Failure::with_message(CC_ERR_SIGNING, err.to_string()))?;
         let parsed = bip39::Mnemonic::parse_normalized(phrase)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_MNEMONIC, err.to_string()))?;
         let signer = MasterSigner::from_mnemonic(network, parsed)

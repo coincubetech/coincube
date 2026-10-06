@@ -25,6 +25,10 @@ first. Four entries:
 | `coincube_unified_psbt_sign` | Signs only the authenticated account path+xpub target; native P2WSH accepts either PSBT prevout form. |
 | `coincube_unified_psbt_verify` | Verifies the Keychain native-P2WSH contract, including witness-only inputs. |
 
+The signing target must be the exact hardened native-P2WSH account path
+`m/48'/<coin>'/<account>'/2'`. Its coin type and xpub network must match the
+supplied network before the signer is allowed to inspect PSBT derivations.
+
 ## Why there are two digest entries
 
 The raw-fields entry is not a convenience. The upstream unified-sighash vector
