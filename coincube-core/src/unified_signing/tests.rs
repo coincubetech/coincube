@@ -163,6 +163,136 @@ fn deterministic_primary_and_recovery_keys_sign_and_verify() {
     assert_eq!(unified_signatures(&signed).unwrap().len(), 3);
 }
 
+fn signer_target(
+    signer: &MasterSigner,
+    branch: u32,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) -> UnifiedSignerTarget {
+    let account_path = DerivationPath::from(vec![
+        bip32::ChildNumber::from_hardened_idx(48).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
+    ]);
+    UnifiedSignerTarget::new(account_path.clone(), signer.xpub_at(&account_path, secp))
+}
+
+#[test]
+fn authenticated_target_signs_only_its_account_not_sibling_or_recovery_accounts() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(1);
+
+    // Signer 2 owns both a primary key below m/48'/0' and the recovery key
+    // below m/48'/1'. Approving the primary account must not sign the sibling.
+    let primary_target = signer_target(&fixture.signers[2], 0, &secp);
+    let primary = sign_p2wsh_all_unified_for_target(
+        &fixture.signers[2],
+        &primary_target,
+        &fixture.psbt,
+        &secp,
+    )
+    .unwrap();
+    let primary_records = unified_signatures(&primary).unwrap();
+    assert_eq!(primary_records.len(), 1);
+    let primary_origin = fixture.psbt.psbt().inputs[0].bip32_derivation
+        [&primary_records[0].public_key.inner]
+        .1
+        .clone();
+    assert!(primary_origin
+        .as_ref()
+        .starts_with(primary_target.account_path().as_ref()));
+
+    // The recovery account is independently usable only when it is the exact
+    // authenticated target.
+    let recovery_target = signer_target(&fixture.signers[2], 1, &secp);
+    let recovery = sign_p2wsh_all_unified_for_target(
+        &fixture.signers[2],
+        &recovery_target,
+        &fixture.psbt,
+        &secp,
+    )
+    .unwrap();
+    let recovery_records = unified_signatures(&recovery).unwrap();
+    assert_eq!(recovery_records.len(), 1);
+    let recovery_origin = fixture.psbt.psbt().inputs[0].bip32_derivation
+        [&recovery_records[0].public_key.inner]
+        .1
+        .clone();
+    assert!(recovery_origin
+        .as_ref()
+        .starts_with(recovery_target.account_path().as_ref()));
+}
+
+#[test]
+fn target_xpub_must_match_the_mnemonic_and_account_path() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(1);
+    let path = DerivationPath::from_str("m/48'/0'").unwrap();
+    let wrong = UnifiedSignerTarget::new(path.clone(), fixture.signers[1].xpub_at(&path, &secp));
+    assert!(matches!(
+        sign_p2wsh_all_unified_for_target(&fixture.signers[0], &wrong, &fixture.psbt, &secp),
+        Err(UnifiedSigningError::SignerTargetMismatch { .. })
+    ));
+}
+
+#[test]
+fn keychain_target_accepts_witness_only_p2wsh_without_weakening_desktop_signing() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(1);
+    let mut witness_only = fixture.psbt.clone();
+    witness_only.psbt_mut().inputs[0].non_witness_utxo = None;
+    let target = signer_target(&fixture.signers[0], 0, &secp);
+
+    let signed =
+        sign_p2wsh_all_unified_for_target(&fixture.signers[0], &target, &witness_only, &secp)
+            .unwrap();
+    assert_eq!(verify_keychain_p2wsh_all_unified(&signed, &secp), Ok(1));
+    assert!(matches!(
+        sign_p2wsh_all_unified(&fixture.signers[0], &witness_only, &secp),
+        Err(UnifiedSigningError::InputAuthentication {
+            input: 0,
+            reason: InputAuthError::MissingPreviousTransaction,
+        })
+    ));
+}
+
+#[test]
+fn keychain_prevout_policy_rejects_conflicts_and_non_segwit_witness_only_inputs() {
+    let secp = secp256k1::Secp256k1::new();
+    let fixture = fixture(1);
+    let target = signer_target(&fixture.signers[0], 0, &secp);
+
+    let mut conflict = fixture.psbt.clone();
+    conflict.psbt_mut().inputs[0]
+        .witness_utxo
+        .as_mut()
+        .unwrap()
+        .value = Amount::from_sat(1);
+    assert!(matches!(
+        sign_p2wsh_all_unified_for_target(&fixture.signers[0], &target, &conflict, &secp),
+        Err(UnifiedSigningError::InputAuthentication {
+            input: 0,
+            reason: InputAuthError::WitnessUtxoConflict,
+        })
+    ));
+
+    let mut legacy = fixture.psbt.clone();
+    legacy.psbt_mut().inputs[0].non_witness_utxo = None;
+    legacy.psbt_mut().inputs[0]
+        .witness_utxo
+        .as_mut()
+        .unwrap()
+        .script_pubkey = ScriptBuf::new_p2pkh(
+        &fixture.signers[0]
+            .xpriv_at(&DerivationPath::from_str("m/9").unwrap(), &secp)
+            .to_priv()
+            .public_key(&secp)
+            .pubkey_hash(),
+    );
+    assert!(matches!(
+        sign_p2wsh_all_unified_for_target(&fixture.signers[0], &target, &legacy, &secp),
+        Err(UnifiedSigningError::UnsupportedPrevoutScript { input: 0 })
+    ));
+}
+
 #[test]
 fn produced_signature_matches_shared_unified_digest_contract() {
     let secp = secp256k1::Secp256k1::new();
@@ -171,7 +301,7 @@ fn produced_signature_matches_shared_unified_digest_contract() {
     let record = unified_signatures(&signed).unwrap().remove(0);
     assert_eq!(record.signature.last(), Some(&UNIFIED_SIGHASH_ALL));
 
-    let contexts = validate_inputs(&signed).unwrap();
+    let contexts = validate_inputs(&signed, PrevoutPolicy::FullPreviousTransaction).unwrap();
     let spent_outputs: Vec<_> = contexts
         .iter()
         .map(|context| context.spent_output.clone())

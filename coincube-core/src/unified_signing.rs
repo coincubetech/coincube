@@ -19,6 +19,7 @@ use std::{collections::BTreeSet, error, fmt};
 
 use miniscript::{
     bitcoin::{
+        bip32::{DerivationPath, Xpub},
         hashes::Hash,
         psbt::{raw::ProprietaryKey, Psbt, PsbtSighashType},
         secp256k1, PublicKey, ScriptBuf, TxOut,
@@ -72,6 +73,13 @@ pub enum UnifiedSigningError {
     IncompatibleSighash {
         input: usize,
         actual: u32,
+    },
+    SignerTargetPathTooDeep {
+        depth: usize,
+    },
+    SignerTargetMismatch {
+        expected: Xpub,
+        actual: Xpub,
     },
     DerivationPathTooDeep {
         input: usize,
@@ -130,6 +138,14 @@ impl fmt::Display for UnifiedSigningError {
                 f,
                 "input {input} requests incompatible sighash 0x{actual:08x}"
             ),
+            Self::SignerTargetPathTooDeep { depth } => write!(
+                f,
+                "signer target derivation path has depth {depth}, exceeding BIP32's maximum of 255"
+            ),
+            Self::SignerTargetMismatch { expected, actual } => write!(
+                f,
+                "signer target xpub mismatch: expected {expected}, derived {actual}"
+            ),
             Self::DerivationPathTooDeep {
                 input,
                 public_key,
@@ -178,6 +194,41 @@ struct InputContext {
     miniscript: Miniscript<PublicKey, Segwitv0>,
 }
 
+/// The authenticated Keychain account that one signing session approved.
+///
+/// Keychain signer records are account-scoped: the path identifies the BIP-48
+/// account and the xpub is the public key committed by the authenticated
+/// session descriptor. Both are required so a sibling account sharing the same
+/// master fingerprint cannot be selected by PSBT metadata alone.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UnifiedSignerTarget {
+    account_path: DerivationPath,
+    account_xpub: Xpub,
+}
+
+impl UnifiedSignerTarget {
+    pub fn new(account_path: DerivationPath, account_xpub: Xpub) -> Self {
+        Self {
+            account_path,
+            account_xpub,
+        }
+    }
+
+    pub fn account_path(&self) -> &DerivationPath {
+        &self.account_path
+    }
+
+    pub fn account_xpub(&self) -> Xpub {
+        self.account_xpub
+    }
+}
+
+#[derive(Clone, Copy)]
+enum PrevoutPolicy {
+    FullPreviousTransaction,
+    KeychainSegwit,
+}
+
 /// Sign every supported input key derived from `signer` with ALL|UNIFIED.
 ///
 /// The input is immutable. All inputs and all existing unified signatures are
@@ -191,7 +242,56 @@ pub fn sign_p2wsh_all_unified(
     psbt: &UnifiedPsbt,
     secp: &secp256k1::Secp256k1<secp256k1::All>,
 ) -> Result<UnifiedPsbt, UnifiedSigningError> {
-    let contexts = validate_inputs(psbt)?;
+    sign_p2wsh_all_unified_inner(
+        signer,
+        None,
+        psbt,
+        secp,
+        PrevoutPolicy::FullPreviousTransaction,
+    )
+}
+
+/// Sign only keys below an authenticated Keychain account target.
+///
+/// Unlike the desktop signing entry, this accepts a native-P2WSH input backed
+/// by `witness_utxo` when the full previous transaction is absent. If both are
+/// present they must agree. Inputs outside the approved account path are left
+/// byte-identical even when they share the signer's master fingerprint.
+pub fn sign_p2wsh_all_unified_for_target(
+    signer: &MasterSigner,
+    target: &UnifiedSignerTarget,
+    psbt: &UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) -> Result<UnifiedPsbt, UnifiedSigningError> {
+    if target.account_path.len() > usize::from(u8::MAX) {
+        return Err(UnifiedSigningError::SignerTargetPathTooDeep {
+            depth: target.account_path.len(),
+        });
+    }
+    let actual = signer.xpub_at(&target.account_path, secp);
+    if actual != target.account_xpub {
+        return Err(UnifiedSigningError::SignerTargetMismatch {
+            expected: target.account_xpub,
+            actual,
+        });
+    }
+    sign_p2wsh_all_unified_inner(
+        signer,
+        Some(target),
+        psbt,
+        secp,
+        PrevoutPolicy::KeychainSegwit,
+    )
+}
+
+fn sign_p2wsh_all_unified_inner(
+    signer: &MasterSigner,
+    target: Option<&UnifiedSignerTarget>,
+    psbt: &UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+    prevout_policy: PrevoutPolicy,
+) -> Result<UnifiedPsbt, UnifiedSigningError> {
+    let contexts = validate_inputs(psbt, prevout_policy)?;
     verify_with_contexts(psbt, secp, &contexts)?;
 
     let fingerprint = signer.fingerprint(secp);
@@ -200,6 +300,10 @@ pub fn sign_p2wsh_all_unified(
         let context = &contexts[input_index];
         for (raw_public_key, (origin, path)) in &input.bip32_derivation {
             if *origin != fingerprint {
+                continue;
+            }
+            if target.is_some_and(|target| !path.as_ref().starts_with(target.account_path.as_ref()))
+            {
                 continue;
             }
             let public_key = PublicKey::new(*raw_public_key);
@@ -265,7 +369,7 @@ pub fn sign_p2wsh_all_unified(
             Some(PsbtSighashType::from_u32(u32::from(UNIFIED_SIGHASH_ALL)));
     }
     validate_internal(&result)?;
-    verify_p2wsh_all_unified(&result, secp)?;
+    verify_with_contexts(&result, secp, &contexts)?;
     Ok(result)
 }
 
@@ -278,11 +382,56 @@ pub fn verify_p2wsh_all_unified<C: secp256k1::Verification>(
     psbt: &UnifiedPsbt,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<usize, UnifiedSigningError> {
-    let contexts = validate_inputs(psbt)?;
+    let contexts = validate_inputs(psbt, PrevoutPolicy::FullPreviousTransaction)?;
     verify_with_contexts(psbt, secp, &contexts)
 }
 
-fn validate_inputs(psbt: &UnifiedPsbt) -> Result<Vec<InputContext>, UnifiedSigningError> {
+/// Verify unified signatures using Keychain's SegWit prevout contract.
+///
+/// Native P2WSH inputs may use `witness_utxo` without a full previous
+/// transaction. Every other validation and signature rule is identical to
+/// [`verify_p2wsh_all_unified`].
+pub fn verify_keychain_p2wsh_all_unified<C: secp256k1::Verification>(
+    psbt: &UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<usize, UnifiedSigningError> {
+    let contexts = validate_inputs(psbt, PrevoutPolicy::KeychainSegwit)?;
+    verify_with_contexts(psbt, secp, &contexts)
+}
+
+/// Compute one Keychain production digest after validating every PSBT input
+/// and every unified signature already present.
+pub fn keychain_p2wsh_all_unified_digest<C: secp256k1::Verification>(
+    psbt: &UnifiedPsbt,
+    input_index: usize,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<[u8; 32], UnifiedSigningError> {
+    let contexts = validate_inputs(psbt, PrevoutPolicy::KeychainSegwit)?;
+    verify_with_contexts(psbt, secp, &contexts)?;
+    let context = contexts.get(input_index).ok_or({
+        UnifiedSigningError::Sighash(UnifiedSighashError::InputIndexOutOfBounds {
+            index: input_index,
+            inputs: contexts.len(),
+        })
+    })?;
+    let spent_outputs: Vec<_> = contexts
+        .iter()
+        .map(|ctx| ctx.spent_output.clone())
+        .collect();
+    UnifiedSighashCache::new(&psbt.psbt().unsigned_tx, &spent_outputs)?
+        .signature_hash(
+            input_index,
+            UNIFIED_SIGHASH_ALL,
+            SCRIPT_TYPE_WITNESS_V0,
+            &context.witness_script,
+        )
+        .map_err(Into::into)
+}
+
+fn validate_inputs(
+    psbt: &UnifiedPsbt,
+    prevout_policy: PrevoutPolicy,
+) -> Result<Vec<InputContext>, UnifiedSigningError> {
     validate_internal(psbt)?;
     let mut contexts = Vec::with_capacity(psbt.psbt().inputs.len());
     for (input_index, (txin, input)) in psbt
@@ -293,10 +442,11 @@ fn validate_inputs(psbt: &UnifiedPsbt) -> Result<Vec<InputContext>, UnifiedSigni
         .zip(&psbt.psbt().inputs)
         .enumerate()
     {
-        let spent_output = authenticate_previous_output(
+        let spent_output = authenticate_unified_input(
             &txin.previous_output,
             input.non_witness_utxo.as_ref(),
             input.witness_utxo.as_ref(),
+            prevout_policy,
         )
         .map_err(|reason| UnifiedSigningError::InputAuthentication {
             input: input_index,
@@ -335,6 +485,22 @@ fn validate_inputs(psbt: &UnifiedPsbt) -> Result<Vec<InputContext>, UnifiedSigni
         });
     }
     Ok(contexts)
+}
+
+fn authenticate_unified_input(
+    outpoint: &miniscript::bitcoin::OutPoint,
+    previous_tx: Option<&miniscript::bitcoin::Transaction>,
+    witness_utxo: Option<&TxOut>,
+    policy: PrevoutPolicy,
+) -> Result<TxOut, InputAuthError> {
+    if previous_tx.is_some() || matches!(policy, PrevoutPolicy::FullPreviousTransaction) {
+        return authenticate_previous_output(outpoint, previous_tx, witness_utxo);
+    }
+    let output = witness_utxo.ok_or(InputAuthError::MissingPreviousTransaction)?;
+    if output.value > miniscript::bitcoin::Amount::MAX_MONEY {
+        return Err(InputAuthError::InvalidAmount(output.value));
+    }
+    Ok(output.clone())
 }
 
 fn verify_with_contexts<C: secp256k1::Verification>(
