@@ -2339,12 +2339,6 @@ impl SignModal {
         format!("#{}", fp)
     }
 
-    /// Keychain-flow banners for the unified picker (errors, degraded stream,
-    /// unaddressable signers) — surfaced above the signer list. Empty when no
-    /// keychain flow is active or everything is healthy.
-    ///
-    /// `pub(super)` so `keychain_sign`'s tests can pin this surface to the
-    /// same copy as the modal's own view.
     /// Notices shown above the signing paths. On a Bitcoin Blake2b Vault
     /// whose picker lists a connected hardware device for one of its keys,
     /// the device copy from the Split flow comes first: the device calls the
@@ -2364,6 +2358,12 @@ impl SignModal {
         notices
     }
 
+    /// Keychain-flow banners for the unified picker (errors, degraded stream,
+    /// unaddressable signers) — surfaced above the signer list. Empty when no
+    /// keychain flow is active or everything is healthy.
+    ///
+    /// `pub(super)` so `keychain_sign`'s tests can pin this surface to the
+    /// same copy as the modal's own view.
     pub(super) fn keychain_notices(&self) -> Vec<String> {
         let Some(k) = self.keychain.as_ref() else {
             return Vec::new();
