@@ -142,6 +142,51 @@ fn fixture(input_count: usize) -> Fixture {
     }
 }
 
+fn retarget_signer_key(
+    fixture: &mut Fixture,
+    signer_index: usize,
+    path: DerivationPath,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) {
+    let fingerprint = fixture.signers[signer_index].fingerprint(secp);
+    let old_public_key = fixture.psbt.psbt().inputs[0]
+        .bip32_derivation
+        .iter()
+        .find(|(_, source)| source.0 == fingerprint)
+        .map(|(public_key, _)| *public_key)
+        .unwrap();
+    let new_public_key = fixture.signers[signer_index]
+        .xpriv_at(&path, secp)
+        .to_priv()
+        .public_key(secp)
+        .inner;
+
+    let input = &mut fixture.psbt.psbt_mut().inputs[0];
+    input.bip32_derivation.remove(&old_public_key);
+    input
+        .bip32_derivation
+        .insert(new_public_key, (fingerprint, path));
+    let mut witness_script = input.witness_script.take().unwrap().into_bytes();
+    let position = witness_script
+        .windows(old_public_key.serialize().len())
+        .position(|window| window == old_public_key.serialize())
+        .unwrap();
+    witness_script[position..position + new_public_key.serialize().len()]
+        .copy_from_slice(&new_public_key.serialize());
+    let witness_script = ScriptBuf::from_bytes(witness_script);
+    input.witness_script = Some(witness_script.clone());
+    let output = TxOut {
+        value: input.witness_utxo.as_ref().unwrap().value,
+        script_pubkey: ScriptBuf::new_p2wsh(&witness_script.wscript_hash()),
+    };
+    input.witness_utxo = Some(output.clone());
+    input.non_witness_utxo.as_mut().unwrap().output[0] = output;
+    let txid = input.non_witness_utxo.as_ref().unwrap().compute_txid();
+    fixture.psbt.psbt_mut().unsigned_tx.input[0]
+        .previous_output
+        .txid = txid;
+}
+
 /// The digest core produces for one input, computed without going near the ABI.
 fn core_digest(psbt: &UnifiedPsbt, index: usize) -> [u8; 32] {
     let spent_outputs: Vec<TxOut> = psbt
@@ -465,6 +510,28 @@ fn ffi_signing_is_confined_to_the_authenticated_account_target() {
     let (result, verified) = verify_through_ffi(&recovery);
     assert_eq!(result.code, CC_OK, "{}", result.message);
     assert_eq!(verified, 1);
+}
+
+#[test]
+fn ffi_refuses_account_node_and_hardened_descendant_derivations() {
+    let secp = secp256k1::Secp256k1::new();
+    let signer = signer(1);
+    let account_path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+    let hardened_child = account_path
+        .clone()
+        .child(bip32::ChildNumber::from_hardened_idx(7).unwrap());
+
+    for path in [account_path, hardened_child] {
+        let mut fixture = fixture(1);
+        retarget_signer_key(&mut fixture, 0, path, &secp);
+        let bytes = export_standard(&fixture.psbt).unwrap();
+        let (result, signed) = sign_through_ffi(&bytes, &signer, 0);
+        assert_eq!(result.code, CC_OK, "{}", result.message);
+        assert_eq!(signed, bytes);
+        let (result, verified) = verify_through_ffi(&signed);
+        assert_eq!(result.code, CC_OK, "{}", result.message);
+        assert_eq!(verified, 0);
+    }
 }
 
 /// A PSBT carrying only `non_witness_utxo` still produces a digest.

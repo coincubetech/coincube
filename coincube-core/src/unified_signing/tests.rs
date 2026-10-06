@@ -215,6 +215,51 @@ fn signer_target(
     .unwrap()
 }
 
+fn retarget_signer_key(
+    fixture: &mut Fixture,
+    signer_index: usize,
+    path: DerivationPath,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) {
+    let fingerprint = fixture.signers[signer_index].fingerprint(secp);
+    let old_public_key = fixture.psbt.psbt().inputs[0]
+        .bip32_derivation
+        .iter()
+        .find(|(_, source)| source.0 == fingerprint)
+        .map(|(public_key, _)| *public_key)
+        .unwrap();
+    let new_public_key = fixture.signers[signer_index]
+        .xpriv_at(&path, secp)
+        .to_priv()
+        .public_key(secp)
+        .inner;
+
+    let input = &mut fixture.psbt.psbt_mut().inputs[0];
+    input.bip32_derivation.remove(&old_public_key);
+    input
+        .bip32_derivation
+        .insert(new_public_key, (fingerprint, path));
+    let mut witness_script = input.witness_script.take().unwrap().into_bytes();
+    let position = witness_script
+        .windows(old_public_key.serialize().len())
+        .position(|window| window == old_public_key.serialize())
+        .unwrap();
+    witness_script[position..position + new_public_key.serialize().len()]
+        .copy_from_slice(&new_public_key.serialize());
+    let witness_script = ScriptBuf::from_bytes(witness_script);
+    input.witness_script = Some(witness_script.clone());
+    let output = TxOut {
+        value: input.witness_utxo.as_ref().unwrap().value,
+        script_pubkey: ScriptBuf::new_p2wsh(&witness_script.wscript_hash()),
+    };
+    input.witness_utxo = Some(output.clone());
+    input.non_witness_utxo.as_mut().unwrap().output[0] = output;
+    let txid = input.non_witness_utxo.as_ref().unwrap().compute_txid();
+    fixture.psbt.psbt_mut().unsigned_tx.input[0]
+        .previous_output
+        .txid = txid;
+}
+
 #[test]
 fn authenticated_target_signs_only_its_account_not_sibling_or_recovery_accounts() {
     let secp = secp256k1::Secp256k1::new();
@@ -259,6 +304,25 @@ fn authenticated_target_signs_only_its_account_not_sibling_or_recovery_accounts(
     assert!(recovery_origin
         .as_ref()
         .starts_with(recovery_target.account_path().as_ref()));
+}
+
+#[test]
+fn authenticated_target_rejects_account_node_and_hardened_descendants() {
+    let secp = secp256k1::Secp256k1::new();
+    let signer = signer(1);
+    let target = signer_target(&signer, 0, &secp);
+    let account_path = target.account_path().clone();
+    let hardened_child = account_path.child(bip32::ChildNumber::from_hardened_idx(7).unwrap());
+
+    for path in [account_path, hardened_child] {
+        let mut fixture = keychain_fixture(1);
+        retarget_signer_key(&mut fixture, 0, path, &secp);
+        let before = serialize_internal(&fixture.psbt).unwrap();
+        let result =
+            sign_p2wsh_all_unified_for_target(&signer, &target, &fixture.psbt, &secp).unwrap();
+        assert_eq!(serialize_internal(&result).unwrap(), before);
+        assert!(unified_signatures(&result).unwrap().is_empty());
+    }
 }
 
 #[test]

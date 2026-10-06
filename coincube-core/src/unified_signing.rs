@@ -316,6 +316,23 @@ impl UnifiedSignerTarget {
     pub fn account_xpub(&self) -> Xpub {
         self.account_xpub
     }
+
+    fn authorizes(
+        &self,
+        path: &DerivationPath,
+        public_key: &secp256k1::PublicKey,
+        secp: &secp256k1::Secp256k1<secp256k1::All>,
+    ) -> bool {
+        let Some(relative_path) = path.as_ref().strip_prefix(self.account_path.as_ref()) else {
+            return false;
+        };
+        if relative_path.is_empty() || relative_path.iter().any(ChildNumber::is_hardened) {
+            return false;
+        }
+        self.account_xpub
+            .derive_pub(secp, &relative_path)
+            .is_ok_and(|derived| derived.public_key == *public_key)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -397,8 +414,7 @@ fn sign_p2wsh_all_unified_inner(
             if *origin != fingerprint {
                 continue;
             }
-            if target.is_some_and(|target| !path.as_ref().starts_with(target.account_path.as_ref()))
-            {
+            if target.is_some_and(|target| !target.authorizes(path, raw_public_key, secp)) {
                 continue;
             }
             let public_key = PublicKey::new(*raw_public_key);
