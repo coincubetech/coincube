@@ -794,7 +794,7 @@ impl Step for SelectBitcoindTypeStep {
     ) -> Element<Message> {
         view::select_bitcoind_type(
             progress,
-            self.network,
+            self.chain,
             self.install_node,
             self.show_advanced,
             PRUNE_DEFAULT,

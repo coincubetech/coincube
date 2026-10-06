@@ -1424,13 +1424,56 @@ fn node_flavor_selector<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn select_bitcoind_type<'a>(
     progress: (usize, usize),
-    network: bitcoin::Network,
+    chain: crate::chain::ChainId,
     install_node: bool,
     show_advanced: bool,
     prune_default_mb: u32,
     connect_authenticated: bool,
     node_flavor: crate::node::bitcoind::NodeFlavor,
 ) -> Element<'a, Message> {
+    use crate::chain::ChainIdExt;
+    if chain.is_blake2b() {
+        // Authenticated Connect is the only implemented fork startup route.
+        // Match the view to the state guard instead of offering ignored actions.
+        let chain_name = chain.label();
+        let content = Container::new(
+            Column::new()
+                .spacing(20)
+                .max_width(620)
+                .push(text("Start with COINCUBE | Connect").bold())
+                .push(text(format!(
+                    "Your Vault will use our hosted Bitcoin Knots node for {chain_name} \
+                 through Esplora. No local node setup is required."
+                )))
+                .push(checkbox(false).label("Also install a pruned Bitcoin node on my device"))
+                .push(text(format!(
+                    "Installing a pruned Bitcoin Knots node for {chain_name} on your device \
+                 is not available in this version of Tenshu."
+                )))
+                .push(text(format!(
+                    "Your Vault will use COINCUBE | Connect as its only {chain_name} backend."
+                )))
+                .push(
+                    button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
+                        message::SelectBitcoindTypeMsg::ContinueWithConnect,
+                    )),
+                ),
+        )
+        .padding(30);
+        return layout(
+            progress,
+            None,
+            if chain == crate::chain::ChainId::BitcoinBlake2b {
+                "Bitcoin Blake2b node management"
+            } else {
+                "Bitcoin Blake2b Testnet4 node management"
+            },
+            content,
+            true,
+            Some(Message::Previous),
+        );
+    }
+    let network = chain.bitcoin_network();
     let content: Column<'a, Message> =
         if network == bitcoin::Network::Regtest {
             // Regtest: offer only the two node-based options inline.
@@ -1624,7 +1667,7 @@ pub fn select_bitcoind_type<'a>(
                 ))
                 .push(
                     checkbox(install_node)
-                        .label("Also install a Bitcoin node on my device")
+                        .label("Also install a pruned Bitcoin node on my device")
                         .on_toggle(|_| {
                             Message::SelectBitcoindType(
                                 message::SelectBitcoindTypeMsg::ToggleInstallNode,
@@ -3154,7 +3197,7 @@ mod tests {
 
         let _ = select_bitcoind_type(
             (2, 4),
-            bitcoin::Network::Regtest,
+            crate::chain::ChainId::Regtest,
             false,
             false,
             15_000,
@@ -3163,7 +3206,7 @@ mod tests {
         );
         let _ = select_bitcoind_type(
             (2, 4),
-            bitcoin::Network::Bitcoin,
+            crate::chain::ChainId::Bitcoin,
             true,
             true,
             15_000,
@@ -3172,7 +3215,7 @@ mod tests {
         );
         let _ = select_bitcoind_type(
             (2, 4),
-            bitcoin::Network::Bitcoin,
+            crate::chain::ChainId::Bitcoin,
             false,
             false,
             15_000,
@@ -3288,5 +3331,96 @@ mod tests {
             true,
             None,
         );
+    }
+}
+
+#[cfg(test)]
+mod node_management_chain_tests {
+    use super::*;
+    use crate::{chain::ChainId, node::bitcoind::NodeFlavor};
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+
+    #[derive(Default)]
+    struct Labels(Vec<String>);
+    impl Operation for Labels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+            self.0.push(text.to_owned());
+        }
+    }
+
+    #[tokio::test]
+    async fn node_management_copy_and_choices_follow_exact_chain() {
+        use crate::chain::ChainIdExt;
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let mut element = select_bitcoind_type(
+                (0, 2),
+                chain,
+                false,
+                true,
+                15000,
+                true,
+                if chain.is_blake2b() {
+                    NodeFlavor::KnotsBlake2b
+                } else {
+                    NodeFlavor::Knots
+                },
+            );
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1600.0, 2200.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            assert!(labels
+                .0
+                .iter()
+                .any(|s| s == "Also install a pruned Bitcoin node on my device"));
+            if chain.is_blake2b() {
+                assert!(labels.0.iter().any(
+                    |s| s.contains(&format!("hosted Bitcoin Knots node for {}", chain.label()))
+                ));
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|s| s.contains("Installing a pruned Bitcoin Knots node")
+                        && s.contains("not available in this version")));
+                assert!(!labels.0.iter().any(|s| s.contains("Advanced options")
+                    || s == "Install a node only"
+                    || s == "I already have a node"));
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|s| s == &format!("{} node management", chain.label())));
+            } else {
+                assert!(labels.0.iter().any(|s| s == "Install a node only"));
+                assert!(!labels
+                    .0
+                    .iter()
+                    .any(|s| s.contains("not available in this version")));
+            }
+        }
     }
 }
