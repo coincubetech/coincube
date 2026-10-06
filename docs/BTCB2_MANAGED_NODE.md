@@ -1,13 +1,32 @@
-# BTCB2 managed node: the dormant `KnotsBlake2b` provider
+# BTCB2 managed pruned node
 
-The desktop's managed-node layer (`coincube-gui/src/node/`) knows a third
-provider, `NodeFlavor::KnotsBlake2b`, pinned to Bitcoin Knots
-`29.4.1.knots20260508` — the BLAKE2b proof-of-work hardfork build. It is
-**dormant**: every `ChainId` it serves reports `RuntimeSupport::Dormant`, so no
-installer, loader or settings path can download, configure or start it. What
-this slice ships is the isolation — directories, ports, provider/chain
-refusals, planner scope — that a later activation builds on. Activation is
-**not** a flag flip: the remaining gates are listed at the end of this note.
+The authenticated Bitcoin Blake2b installer offers a pruned local Bitcoin Knots
+node, pinned to `29.4.1.knots20260508`, for mainnet and testnet4. Connect remains
+the wallet backend while the companion node completes initial block download;
+the app then switches automatically after exact-chain local admission. The
+installer labels the software, chain, pruning and outbound-only connectivity.
+
+Generic fork startup remains dormant: this feature uses explicit authenticated
+Connect and embedded local-node entry points, native P2WSH descriptors only.
+External daemon sockets, Electrum, generic migration, Taproot and duress routes
+are unchanged. Local installation is offered in the installer; installing into
+an existing Connect-only Cube, inbound Tor and post-install resource editing
+remain unavailable for Blake2b in this release.
+
+The local wallet trusts its own consensus-validating node. Before wallet or
+database writes, and again before wallet RPCs, the daemon reads a bounded,
+coherent snapshot: the selected network, exact activation height (961640 mainnet,
+150308 testnet4), active top-level `blake2b` deployment, completed IBD and a
+version-2 block header at the same tip. A final best-hash read rejects a moving
+snapshot. Schedule-only checks admit a syncing companion, never a wallet.
+Ordinary Bitcoin, absent or different schedules, pre-fork headers, inactive forks
+and inconsistent tips are refused. This is local-node trust, not an independent
+header proof or Connect anchor. RDTS expiry is not an admission requirement.
+
+Connect authentication remains runtime-only, including tokens on a saved local
+node's fallback configuration. The loader can restart an already admitted local
+backend without a Connect feature-status request. Account unlock/session setup
+continues to use the existing authenticated Cube flow.
 
 ## What is isolated, and where
 
@@ -162,14 +181,10 @@ families, and it runs before any side effect:
 - `Bitcoind::maybe_start` (every start path: loader, installer, settings):
   before the identity marker is written, the conf migrated or a binary
   resolved;
-- `Bitcoind::maybe_start_for_chain` (the loader's entry, keyed on `ChainId`):
-  refuses a `Dormant` chain first, then any non-Bitcoin family, then a
-  ledger-named provider that cannot serve the chain — all via the
-  side-effect-free `Bitcoind::preflight_for_chain`, which the loader also
-  runs on its own **before** it provisions Tor, rewrites the managed conf for
-  inbound (`prepare_inbound_tor` rewrites even with Tor off) or stops a
-  running node, so a mismatched persisted provider leaves every file
-  byte-identical.
+- `Bitcoind::maybe_start_for_chain` selects the family by `ChainId`, checks
+  the configured provider, exact managed cookie and persisted RPC address, and
+  checks the running node's fork schedule before reuse. A wrong-family node is
+  refused. The fork path never runs Bitcoin's flavour reconciliation.
 
 `select_managed_bitcoind_exe` searches only the provider's own family root, so
 a Bitcoin chain never resolves a Blake2b binary and the Blake2b provider has no
@@ -278,32 +293,20 @@ A chain-health probe must therefore read the two objects independently: a
 node with `blake2b` but no `reduced_data` is a scheduled hardfork with RDTS
 unscheduled — not a failed deployment, and not "unscheduled" either.
 
-## Gates before the provider can be un-dormant
+## Runtime and Tor isolation
 
-Flipping `RuntimeSupport` alone would not produce a working Blake2b node. The
-integration work that remains, in the order it is needed:
+Fork starts resolve only the fork release under `bitcoind-blake2b`, with that
+family's cookie, marker lock and flavour ledger. Existing Bitcoin files retain
+their paths and contents. A missing fork binary cannot fall back to Bitcoin.
 
-1. **coincubed chain health** — done (#376, `docs/BTCB2_CHAIN_HEALTH.md`):
-   a reader keyed on the top-level `blake2b.{height,active}` object and on
-   `deployments.reduced_data` as a flag-day schedule with an expiry. The old
-   Bitcoin-chain `deployment_status("reduced_data")` probe was a repair input,
-   never a hardfork reader, and was deleted in RDTS sunset PR 4 (#510).
-2. **Concurrent port allocation** — done: allocate-and-persist and every
-   conf rewriter are serialised by the datadir-wide lock and persisted
-   atomically (see *Serialisation and atomic persistence*), within the limits
-   stated there (no protection against writers that do not take the lock).
-3. **A Blake2b start path** — `Bitcoind::maybe_start` is the Bitcoin family's
-   (its datadir, ledger, lock and `-chain=` argument are Bitcoin's);
-   `maybe_start_for_chain` refuses the Blake2b family outright. A start path
-   that spawns from `bitcoind-blake2b/`, writes that family's ledger and lock,
-   and never runs the RDTS reconciliation is not written.
-4. **Product surfaces** — an installer/settings picker that offers the
-   provider only for a Blake2b Vault (`ChainId`-keyed, never the
-   `bitcoin::Network`-keyed screens that exist today), with the settings
-   screen itself carrying the Vault's `ChainId`.
-5. **Live verification** — a node test on a **synthetic, temporary regtest
-   datadir** with `-testactivationheight=blake2b@N -rdtsexpiry=T`; nothing in
-   this slice starts a node, and none of its tests do.
+`prepare_inbound_tor_for_chain` clears stale inbound fields in the fork's own
+configuration under the shared managed-conf transaction. It never provisions,
+replaces or stops the Bitcoin Tor process. Fork nodes use outbound P2P connections
+and cannot accept inbound peers in this release. A separate managed Tor lifecycle
+is required before inbound Tor can be offered for Blake2b.
 
-Until those exist the provider stays `Dormant`, and every entry point above
-refuses it before touching disk.
+Validation covers real HTTP RPC snapshots and rejected wallet mutations, family
+ledger/config/port isolation, installer choice persistence and the release's
+signature/checksum fixtures. A disposable real-node smoke test can validate startup
+and fork RPC fields without syncing a production chain; full mainnet IBD and a
+real funded Cube are not automated tests.

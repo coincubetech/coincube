@@ -1819,7 +1819,7 @@ impl Tab {
                                 ),
                             )));
                         };
-                        match App::new_for_chain(
+                        match App::new_for_chain_with_node(
                             cache,
                             wallet,
                             loader.cube_encryption_key.clone(),
@@ -1828,6 +1828,7 @@ impl Tab {
                             daemon,
                             loader.datadir_path.clone(),
                             cube_settings,
+                            bitcoind,
                         ) {
                             Ok((app, task)) => {
                                 self.state = State::App(app);

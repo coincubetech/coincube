@@ -334,6 +334,8 @@ pub struct BitcoinD {
     config: config::BitcoindConfig,
     /// How many times we'll retry upon failure to send a request.
     retries: usize,
+    /// Exact-chain admission for a local Blake2b wallet; never inferred from encoding.
+    local_fork_chain: Option<coincube_core::chain::ChainId>,
 }
 
 macro_rules! params {
@@ -347,6 +349,7 @@ macro_rules! params {
     };
 }
 
+mod local_fork;
 mod poll;
 
 impl BitcoinD {
@@ -422,6 +425,7 @@ impl BitcoinD {
             watchonly_wallet_path: watchonly_wallet_path.clone(),
             config: config.clone(),
             retries: 0,
+            local_fork_chain: None,
         };
         log::info!("Checking the connection to bitcoind.");
         dummy_bitcoind.check_connection()?;
@@ -463,6 +467,7 @@ impl BitcoinD {
             watchonly_wallet_path,
             config: config.clone(),
             retries: BITCOIND_RETRY_LIMIT,
+            local_fork_chain: None,
         })
     }
 
@@ -612,10 +617,16 @@ impl BitcoinD {
                 return Err(BitcoindError::PollAborted);
             }
             let req = client.build_request(method, params);
+            let guarded = || {
+                if let Some(chain) = self.local_fork_chain {
+                    self.validate_local_fork(chain, true)?;
+                }
+                self.try_request(client, req.clone())
+            };
             if retry {
-                self.retry(|| self.try_request(client, req.clone()))
+                self.retry(guarded)
             } else {
-                self.try_request(client, req)
+                guarded()
             }
         };
         let slot = self.client(kind);

@@ -602,21 +602,28 @@ fn persist_inbound_fields(
 /// outbound-only on anything but [`Network::Bitcoin`].
 /// Prepare the supported managed Tor lifecycle using explicit chain identity.
 /// BTCB2 has a separate node directory but no separate Tor registry/bundle yet.
-/// Refuse before touching either family's configuration or the global process;
-/// Connect-only BTCB2 never needs to call this function.
+/// Fork nodes clear their own stale inbound fields and run outbound-only,
+/// without touching the Bitcoin Tor registry. Connect-only startup skips this.
 pub fn prepare_inbound_tor_for_chain(
     coincube_datadir: &CoincubeDirectory,
     chain: crate::chain::ChainId,
 ) -> Result<bool, PrepareInboundTorError> {
     if chain.is_blake2b() {
-        return Err(PrepareInboundTorError(
-            crate::node::managed_conf::ManagedConfError::Edit(
-                crate::node::managed_conf::ManagedConfEditError::Other(
-                    "Managed Bitcoin Blake2b Tor startup is unavailable; use Connect Esplora"
-                        .to_string(),
-                ),
-            ),
-        ));
+        // Fork nodes run outbound-only in this release. Clear their own stale
+        // inbound fields without provisioning, replacing or stopping Bitcoin Tor.
+        return crate::node::managed_conf::update_managed_conf(
+            coincube_datadir,
+            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+            |txn| {
+                let conf = txn.conf.clone().map(|mut conf| {
+                    InboundFields::OutboundOnly.apply(&mut conf);
+                    conf
+                });
+                Ok((false, conf))
+            },
+        )
+        .map(|outcome| outcome.logged("preparing the outbound-only Blake2b node"))
+        .map_err(PrepareInboundTorError);
     }
     prepare_inbound_tor(coincube_datadir, chain.bitcoin_network())
 }
@@ -850,14 +857,17 @@ mod tests {
     }
 
     #[test]
-    fn fork_tor_preparation_refuses_before_creating_or_changing_files() {
+    fn fork_tor_preparation_leaves_bitcoin_files_and_malformed_fork_files_untouched() {
         use crate::{chain::ChainId, node::bitcoind::NodeChainFamily};
         let _guard = registry_test_guard();
         for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
             let root = temp_datadir("fork-refusal");
-            let fresh = prepare_inbound_tor_for_chain(&root, chain).unwrap_err();
-            assert!(fresh.to_string().contains("use Connect Esplora"));
-            assert!(!root.path().exists());
+            assert!(!prepare_inbound_tor_for_chain(&root, chain).unwrap());
+            assert!(!crate::node::bitcoind::internal_bitcoind_datadir_for(
+                &root,
+                NodeChainFamily::Bitcoin
+            )
+            .exists());
             let mut paths = Vec::new();
             for family in [NodeChainFamily::Bitcoin, NodeChainFamily::BitcoinBlake2b] {
                 let dir = crate::node::bitcoind::internal_bitcoind_datadir_for(&root, family);
@@ -1293,6 +1303,26 @@ mod tests {
         let process = register_fake(ports);
         assert_eq!(managed_tor_ports(), Some(ports));
         assert!(alive(&process));
+        // Preparing a Blake2b companion must also leave this registered
+        // Bitcoin Tor child alive, while clearing only the fork's config.
+        let fork_dir = crate::node::bitcoind::internal_bitcoind_datadir_for(
+            &datadir,
+            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+        );
+        std::fs::create_dir_all(&fork_dir).unwrap();
+        let fork_path = internal_bitcoind_config_path(&fork_dir);
+        conf.to_file(&fork_path).unwrap();
+        assert!(
+            !prepare_inbound_tor_for_chain(&datadir, crate::chain::ChainId::BitcoinBlake2b)
+                .unwrap()
+        );
+        assert!(alive(&process));
+        assert_eq!(managed_tor_ports(), Some(ports));
+        assert_eq!(std::fs::read(&config_path).unwrap(), before);
+        let fork = InternalBitcoindConfig::from_file(&fork_path).unwrap();
+        assert!(!fork.inbound_tor);
+        assert!(fork.tor_control_port.is_none());
+        assert_eq!(fork.networks.len(), conf.networks.len());
 
         // Refusal: the lock is busy for the whole (quick) bounded wait.
         let held = ManagedConfLock::acquire(&datadir).unwrap();

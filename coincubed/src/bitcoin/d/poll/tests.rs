@@ -14,6 +14,7 @@ fn backend(addr: SocketAddr) -> BitcoinD {
     };
     let client = |kind| RwLock::new(BitcoinD::build_client(&config, "poll-test", kind).unwrap());
     BitcoinD {
+        local_fork_chain: None,
         poll_node_client: client(ClientKind::PollNode),
         poll_wallet_client: client(ClientKind::PollWallet),
         poll_abort: Default::default(),
@@ -1051,4 +1052,177 @@ fn malformed_mempool_entry_is_an_error_not_a_panic() {
         assert!(!control.bitcoin.is_poisoned());
         assert_eq!(control.db.connection().change_index(), change_index);
     }
+}
+
+fn local_fork_snapshot(chain: coincube_core::chain::ChainId) -> Vec<(&'static str, Json, Json)> {
+    let hash = "01".repeat(32);
+    let (name, height) = if chain == coincube_core::chain::ChainId::BitcoinBlake2b {
+        ("main", 961_640)
+    } else {
+        ("testnet4", 150_308)
+    };
+    vec![
+        (
+            "getblockchaininfo",
+            serde_json::json!({"chain":name, "blocks":height+1, "bestblockhash":hash, "initialblockdownload":false}),
+            Json::Null,
+        ),
+        (
+            "getdeploymentinfo",
+            serde_json::json!({"hash":hash, "height":height+1, "blake2b":{"height":height,"active":true}}),
+            Json::Null,
+        ),
+        (
+            "getblockheader",
+            serde_json::json!({"hash":hash,"height":height+1,"header_version":2,"confirmations":1}),
+            Json::Null,
+        ),
+        ("getbestblockhash", Json::String(hash), Json::Null),
+    ]
+}
+
+#[test]
+fn local_fork_admission_requires_coherent_active_tip_for_both_chains() {
+    use coincube_core::chain::ChainId;
+    for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+        responses(local_fork_snapshot(chain), |bit| {
+            bit.check_local_fork_chain(chain, true).unwrap()
+        });
+        for failure in 0..9 {
+            let mut snapshot = local_fork_snapshot(chain);
+            match failure {
+                0 => {
+                    snapshot[0].1["chain"] = Json::String("signet".into());
+                    snapshot.truncate(1);
+                }
+                1 => {
+                    snapshot[1].1["blake2b"]["height"] = Json::from(1);
+                    snapshot.truncate(2);
+                }
+                2 => {
+                    snapshot[1].1["hash"] = Json::String("02".repeat(32));
+                    snapshot.truncate(2);
+                }
+                3 => {
+                    snapshot[0].1["initialblockdownload"] = Json::Bool(true);
+                    snapshot.truncate(3);
+                }
+                4 => {
+                    snapshot[1].1["blake2b"]["active"] = Json::Bool(false);
+                    snapshot.truncate(3);
+                }
+                5 => {
+                    snapshot[2].1["header_version"] = Json::from(0);
+                    snapshot.truncate(3);
+                }
+                6 => {
+                    snapshot[2].1["height"] = Json::from(2);
+                    snapshot.truncate(3);
+                }
+                7 => {
+                    snapshot[2].1["confirmations"] = Json::from(-1);
+                    snapshot.truncate(3);
+                }
+                _ => {
+                    snapshot[3].1 = Json::String("02".repeat(32));
+                }
+            }
+            responses(snapshot, |bit| {
+                assert!(
+                    bit.check_local_fork_chain(chain, true).is_err(),
+                    "failure {}",
+                    failure
+                )
+            });
+        }
+    }
+}
+
+#[test]
+fn local_fork_schedule_allows_syncing_companion_but_not_wallet() {
+    use coincube_core::chain::ChainId;
+    let chain = ChainId::BitcoinBlake2b;
+    let mut snapshot = local_fork_snapshot(chain);
+    snapshot[0].1["initialblockdownload"] = Json::Bool(true);
+    snapshot[0].1["blocks"] = Json::from(10);
+    snapshot[1].1["height"] = Json::from(10);
+    snapshot[1].1["blake2b"]["active"] = Json::Bool(false);
+    snapshot.remove(2);
+    responses(snapshot, |bit| {
+        bit.check_local_fork_chain(chain, false).unwrap()
+    });
+    let mut snapshot = local_fork_snapshot(chain);
+    snapshot[0].1.as_object_mut().unwrap().remove("blocks");
+    responses(snapshot[..1].to_vec(), |bit| {
+        assert!(bit.check_local_fork_chain(chain, false).is_err())
+    });
+}
+
+#[test]
+fn local_fork_guard_refuses_wallet_rpc_after_wrong_chain_restart() {
+    use coincube_core::chain::ChainId;
+    let chain = ChainId::BitcoinBlake2b;
+    let mut snapshot = local_fork_snapshot(chain);
+    snapshot.push((
+        "getblockchaininfo",
+        serde_json::json!({"chain":"main"}),
+        Json::Null,
+    ));
+    // Missing blocks/hash on a restarted ordinary Bitcoin node: no requested
+    // importdescriptors mutation is ever sent to it.
+    responses(snapshot, |bit| {
+        let guarded = backend(bit.config.addr).admit_local_fork(chain).unwrap();
+        assert!(guarded
+            .make_request_inner(
+                ClientKind::Watchonly,
+                "importdescriptors",
+                params!(Json::Array(vec![])),
+                false
+            )
+            .is_err());
+    });
+}
+
+#[test]
+fn local_fork_start_rejects_bitcoin_before_creating_wallet_files() {
+    use crate::{
+        config::{BitcoinBackend, BitcoinConfig, Config},
+        datadir::DataDirectory,
+        DaemonHandle,
+    };
+    use coincube_core::chain::ChainId;
+    let dir = std::env::temp_dir().join(format!("btcb2-admission-no-write-{}", std::process::id()));
+    assert!(!dir.exists());
+    let desc = coincube_core::descriptors::CoincubeDescriptor::from_str(concat!(
+        "wsh(andor(pk([aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4z",
+        "LqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*),older(10000),pk([aabbccdd]xpub68JJT",
+        "Xc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8Uut",
+        "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn")).unwrap();
+    responses(
+        vec![
+            ("echo", Json::Array(vec![]), Json::Null),
+            ("echo", Json::Array(vec![]), Json::Null),
+            (
+                "getblockchaininfo",
+                serde_json::json!({"chain":"main","blocks":970000,"bestblockhash":"01".repeat(32)}),
+                Json::Null,
+            ),
+            (
+                "getdeploymentinfo",
+                serde_json::json!({"height":970000,"hash":"01".repeat(32),"deployments":{}}),
+                Json::Null,
+            ),
+        ],
+        |bit| {
+            let cfg = Config::new(
+                BitcoinConfig::new(ChainId::BitcoinBlake2b, Duration::from_secs(10)),
+                Some(BitcoinBackend::Bitcoind(bit.config.clone())),
+                log::LevelFilter::Info,
+                desc,
+                DataDirectory::new(dir.clone()),
+            );
+            assert!(DaemonHandle::start_with_local_node(cfg).is_err());
+        },
+    );
+    assert!(!dir.exists(), "refused node created wallet data");
 }

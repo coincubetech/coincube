@@ -553,6 +553,7 @@ fn setup_bitcoind(
     config: &Config,
     data_dir: &DataDirectory,
     fresh_data_dir: bool,
+    admitted: Option<BitcoinD>,
 ) -> Result<BitcoinD, StartupError> {
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
     let wo_path_str = wo_path.to_str().expect("Must be valid unicode").to_string();
@@ -572,7 +573,10 @@ fn setup_bitcoind(
         Some(config::BitcoinBackend::Bitcoind(bitcoind_config)) => bitcoind_config,
         _ => Err(StartupError::MissingBitcoindConfig)?,
     };
-    let bitcoind = BitcoinD::new(bitcoind_config, wo_path_str)?;
+    let bitcoind = match admitted {
+        Some(bitcoind) => bitcoind,
+        None => BitcoinD::new(bitcoind_config, wo_path_str)?,
+    };
     bitcoind.node_sanity_checks(
         config.bitcoin_config.network,
         config.main_descriptor.is_taproot(),
@@ -813,6 +817,7 @@ impl DaemonHandle {
             db,
             with_rpc_server,
             None,
+            false,
             chain_runtime_gate,
         )
     }
@@ -843,18 +848,51 @@ impl DaemonHandle {
             Option::<SqliteDb>::None,
             false,
             Some(backend),
+            false,
             // Only this authenticated, embedded, native-P2WSH entry point opens
             // the fork runtime. start/start_default retain chain_runtime_gate.
             |_| Ok(()),
         )
     }
 
+    /// Embedded local fork wallet. The local validating node must prove a
+    /// coherent post-fork chain tip before any wallet/database write. This does
+    /// not enable generic fork startup, external sockets, Electrum or Taproot.
+    pub fn start_with_local_node(config: Config) -> Result<Self, StartupError> {
+        if !config.bitcoin_config.chain.is_blake2b()
+            || config.pending_bitcoind.is_some()
+            || !matches!(
+                &config.bitcoin_backend,
+                Some(config::BitcoinBackend::Bitcoind(node)) if node.addr.ip().is_loopback()
+            )
+            || !matches!(
+                config.main_descriptor.descriptor(),
+                miniscript::Descriptor::Wsh(_)
+            )
+        {
+            return Err(StartupError::ConnectAdmission(
+                connect::AdmissionError::InvalidBackend,
+            ));
+        }
+        Self::start_inner(
+            config,
+            Option::<BitcoinD>::None,
+            Option::<SqliteDb>::None,
+            false,
+            None,
+            true,
+            |_| Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn start_inner(
         config: Config,
         bitcoin: Option<impl BitcoinInterface + 'static>,
         db: Option<impl DatabaseInterface + 'static>,
         with_rpc_server: bool,
         connect: Option<connect::ConnectBackend>,
+        local_fork: bool,
         // Generic startup refuses forks. Authenticated embedded startup has its
         // own narrow capability checks before entering this shared sequence.
         runtime_gate: fn(ChainId) -> Result<(), StartupError>,
@@ -891,7 +929,7 @@ impl DaemonHandle {
                 )
                 .map_err(connect_startup_error)?,
             ),
-            None if config.bitcoin_config.chain.is_blake2b() => {
+            None if config.bitcoin_config.chain.is_blake2b() && !local_fork => {
                 return Err(StartupError::ConnectAdmission(
                     connect::AdmissionError::MissingAuth,
                 ))
@@ -904,6 +942,19 @@ impl DaemonHandle {
         let data_dir = config
             .data_directory()
             .ok_or(StartupError::DefaultDataDirNotFound)?;
+        let admitted_local = if local_fork {
+            let node = match &config.bitcoin_backend {
+                Some(config::BitcoinBackend::Bitcoind(node)) => node,
+                _ => return Err(StartupError::MissingBitcoindConfig),
+            };
+            let wo_path = data_dir
+                .coincubed_watchonly_wallet_path()
+                .to_string_lossy()
+                .into_owned();
+            Some(BitcoinD::new(node, wo_path)?.admit_local_fork(config.bitcoin_config.chain)?)
+        } else {
+            None
+        };
         let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
         if !fresh_data_dir {
             preflight_existing_database(&config, &data_dir.sqlite_db_file_path())?;
@@ -927,7 +978,12 @@ impl DaemonHandle {
         // migration when setting up SQLite below.
         let mut bitcoind = if bitcoin.is_none() {
             if let Some(config::BitcoinBackend::Bitcoind(_)) = &config.bitcoin_backend {
-                Some(setup_bitcoind(&config, &data_dir, fresh_data_dir)?)
+                Some(setup_bitcoind(
+                    &config,
+                    &data_dir,
+                    fresh_data_dir,
+                    admitted_local,
+                )?)
             } else {
                 None
             }
@@ -2106,6 +2162,10 @@ mod tests {
                 secondary_fallback_addr: None,
                 secondary_fallback_token: Some("synthetic-second".into()),
             }));
+            config.fallback_esplora = match &config.bitcoin_backend {
+                Some(config::BitcoinBackend::Esplora(backend)) => Some(backend.clone()),
+                _ => None,
+            };
             let encoded = toml::to_string(&config.for_persistence()).unwrap();
             assert!(!encoded.contains("synthetic-"));
             assert!(encoded.contains("fixture.invalid"));
@@ -2155,6 +2215,7 @@ mod tests {
                 Option::<SqliteDb>::None,
                 false,
                 None,
+                false,
                 |_| Ok(()),
             );
             assert!(matches!(

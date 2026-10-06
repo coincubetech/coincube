@@ -149,17 +149,55 @@ impl EmbeddedDaemon {
         })
     }
 
+    /// Local fork startup trusts the selected consensus-validating node and
+    /// requires its exact-chain RPC admission before wallet/database writes.
+    pub fn start_local_fork(config: Config) -> Result<Self, DaemonError> {
+        let handle =
+            DaemonHandle::start_with_local_node(config.clone()).map_err(DaemonError::Start)?;
+        Ok(Self {
+            config,
+            handle: std::sync::Arc::new(Mutex::new(Some(handle))),
+            connect_session: None,
+        })
+    }
+
     /// Only explicit authenticated Connect authority can admit a fork daemon.
     /// The retained configuration is safe for existing UI persistence callers.
     pub async fn start_authenticated(
-        config: Config,
+        mut config: Config,
         client: crate::services::coincube::CoincubeClient,
     ) -> Result<Self, DaemonError> {
         let chain = config.bitcoin_config.chain;
-        if !chain.is_blake2b() || config.pending_bitcoind.is_some() {
+        if !chain.is_blake2b() {
             return Err(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
             ));
+        }
+        if let Some(pending) = &config.pending_bitcoind {
+            let managed = config
+                .data_directory()
+                .and_then(|dir| {
+                    dir.path().ancestors().nth(3).map(|root| {
+                        let expected = crate::node::bitcoind::internal_bitcoind_datadir_for(
+                            &CoincubeDirectory::new(root.to_path_buf()),
+                            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+                        );
+                        pending.addr.ip().is_loopback()
+                            && pending.rpc_auth
+                                == coincubed::config::BitcoindRpcAuth::CookieFile(
+                                    crate::node::bitcoind::internal_bitcoind_cookie_path(
+                                        &expected,
+                                        &chain.bitcoin_network(),
+                                    ),
+                                )
+                    })
+                })
+                .unwrap_or(false);
+            if !managed {
+                return Err(DaemonError::ConnectAnchor(
+                    coincubed::connect::AdmissionError::InvalidBackend.into(),
+                ));
+            }
         }
         let endpoint = match &config.bitcoin_backend {
             Some(coincubed::config::BitcoinBackend::Esplora(esplora))
@@ -178,6 +216,9 @@ impl EmbeddedDaemon {
             .await
             .map_err(DaemonError::ConnectAnchor)?;
         let retained_config = config.for_persistence();
+        // The GUI owns the syncing companion; the authenticated daemon retains
+        // its narrow Connect-only capability and never starts a pending node.
+        config.pending_bitcoind = None;
         let result = tokio::task::spawn_blocking(move || {
             DaemonHandle::start_with_connect(config, backend, false)
                 .map(|handle| PendingConnectDaemon(Some(handle)))
