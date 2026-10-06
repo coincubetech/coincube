@@ -233,12 +233,8 @@ impl State for WalletSettingsState {
                 Task::none()
             }
             Message::View(view::Message::Settings(view::SettingsMessage::RegisterWallet)) => {
-                if self.wallet.chain.is_blake2b() {
-                    self.warning = Some(Error::Unexpected(
-                        "Hardware wallet registration is unavailable for Bitcoin Blake2b.".into(),
-                    ));
-                    return Task::none();
-                }
+                // Every chain, Bitcoin Blake2b included (HW-1): a device
+                // registers the same descriptor string it did at creation.
                 self.modal = Modal::RegisterWallet(RegisterWalletModal::new(
                     self.data_dir.clone(),
                     self.wallet.clone(),
@@ -457,11 +453,6 @@ async fn register_wallet(
     wallet: Arc<Wallet>,
     daemon: Arc<dyn Daemon + Sync + Send>,
 ) -> Result<Arc<Wallet>, Error> {
-    if wallet.chain.is_blake2b() {
-        return Err(Error::Unexpected(
-            "Hardware wallet registration is unavailable for Bitcoin Blake2b.".into(),
-        ));
-    }
     let hmac = hw
         .register_wallet(&wallet.name, &wallet.main_descriptor.to_string())
         .await
@@ -728,28 +719,192 @@ mod chain_tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    /// HW-1 Amendment B: on both Bitcoin Blake2b chains, as on Bitcoin,
+    /// Settings' "Register wallet" opens the registration modal with no
+    /// warning.
     #[test]
-    fn fork_hardware_registration_message_is_refused() {
-        let wallet = Arc::new(
-            Wallet::new(crate::app::state::vault::test_support::unified::fixture().descriptor)
-                .with_chain(ChainId::BitcoinBlake2b),
-        );
-        let dir = CoincubeDirectory::new(
-            std::env::temp_dir().join(format!("coincube-hw-refusal-{}", uuid::Uuid::new_v4())),
-        );
-        let mut state = WalletSettingsState::new(dir.clone(), wallet, Arc::new(Config::new(false)));
-        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
-            crate::utils::mock::Daemon::new(vec![]).run(),
-        ));
-        let _task = state.update(
-            Some(daemon),
-            &Cache::default(),
-            Message::View(view::Message::Settings(
-                view::SettingsMessage::RegisterWallet,
-            )),
-        );
-        assert!(state.warning.is_some());
-        assert!(!matches!(state.modal, Modal::RegisterWallet(_)));
-        assert!(!dir.path().exists());
+    fn hardware_registration_message_opens_the_modal_on_every_chain() {
+        for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Bitcoin,
+        ] {
+            let wallet = Arc::new(
+                Wallet::new(crate::app::state::vault::test_support::unified::fixture().descriptor)
+                    .with_chain(chain),
+            );
+            let dir = CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("coincube-hw-register-{}", uuid::Uuid::new_v4())),
+            );
+            let mut state =
+                WalletSettingsState::new(dir.clone(), wallet, Arc::new(Config::new(false)));
+            let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![]).run(),
+            ));
+            let _task = state.update(
+                Some(daemon),
+                &Cache::default(),
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::RegisterWallet,
+                )),
+            );
+            assert!(state.warning.is_none(), "{:?}", chain);
+            assert!(
+                matches!(state.modal, Modal::RegisterWallet(_)),
+                "{:?}",
+                chain
+            );
+            let _ = std::fs::remove_dir_all(dir.path());
+        }
+    }
+
+    /// A device that records each registration request and answers with an
+    /// HMAC.
+    #[derive(Debug, Default)]
+    struct RecordingDevice {
+        calls: std::sync::Mutex<Vec<(String, String)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl async_hwi::HWI for RecordingDevice {
+        fn device_kind(&self) -> async_hwi::DeviceKind {
+            async_hwi::DeviceKind::Ledger
+        }
+        async fn get_version(&self) -> Result<async_hwi::Version, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn get_master_fingerprint(&self) -> Result<Fingerprint, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn get_extended_pubkey(
+            &self,
+            _path: &coincube_core::miniscript::bitcoin::bip32::DerivationPath,
+        ) -> Result<coincube_core::miniscript::bitcoin::bip32::Xpub, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn register_wallet(
+            &self,
+            name: &str,
+            policy: &str,
+        ) -> Result<Option<[u8; 32]>, async_hwi::Error> {
+            self.calls
+                .lock()
+                .unwrap()
+                .push((name.to_string(), policy.to_string()));
+            Ok(Some([7; 32]))
+        }
+        async fn is_wallet_registered(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<bool, async_hwi::Error> {
+            Ok(false)
+        }
+        async fn display_address(
+            &self,
+            _script: &async_hwi::AddressScript,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn sign_tx(
+            &self,
+            _psbt: &mut coincube_core::miniscript::bitcoin::Psbt,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+    }
+
+    /// HW-1 Amendment B: on both Bitcoin Blake2b chains, as on Bitcoin,
+    /// `register_wallet` sends the device the Vault's name and descriptor
+    /// string unchanged, stores the returned HMAC in that chain's settings
+    /// only, and returns the Vault with the device recorded.
+    #[tokio::test]
+    async fn register_wallet_reaches_the_device_on_every_chain() {
+        let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+        let fingerprint = Fingerprint::from([9, 9, 9, 9]);
+        for chain in [
+            ChainId::BitcoinBlake2b,
+            ChainId::BitcoinBlake2bTestnet4,
+            ChainId::Bitcoin,
+        ] {
+            let root =
+                std::env::temp_dir().join(format!("coincube-hw-register-{}", uuid::Uuid::new_v4()));
+            let dir = CoincubeDirectory::new(root.clone());
+            let wallet = Arc::new(Wallet::new(descriptor.clone()).with_chain(chain));
+            let other = if chain.is_blake2b() {
+                ChainId::from(chain.bitcoin_network())
+            } else {
+                ChainId::BitcoinBlake2b
+            };
+            let settings = settings::Settings {
+                wallets: vec![settings::WalletSettings {
+                    name: wallet.name.clone(),
+                    alias: None,
+                    descriptor_checksum: wallet.descriptor_checksum.clone(),
+                    pinned_at: wallet.pinned_at,
+                    keys: vec![],
+                    hardware_wallets: vec![],
+                    remote_backend_auth: None,
+                    start_internal_bitcoind: None,
+                    pending_rescan: None,
+                    keychain_keys_recorded: false,
+                }],
+                ..Default::default()
+            };
+            let original = serde_json::to_vec(&settings).unwrap();
+            for target in [chain, other] {
+                let path = dir.network_directory(target);
+                std::fs::create_dir_all(path.path()).unwrap();
+                std::fs::write(path.path().join(settings::SETTINGS_FILE_NAME), &original).unwrap();
+            }
+            let device = Arc::new(RecordingDevice::default());
+            let daemon = Arc::new(crate::daemon::client::Coincubed::new(
+                crate::utils::mock::Daemon::new(vec![]).run(),
+            ));
+            let updated = register_wallet(
+                dir.clone(),
+                device.clone(),
+                fingerprint,
+                wallet.clone(),
+                daemon,
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{:?}: {:?}", chain, e));
+
+            assert_eq!(
+                *device.calls.lock().unwrap(),
+                vec![(wallet.name.clone(), wallet.main_descriptor.to_string())],
+                "{:?}",
+                chain
+            );
+            let fields = |cfgs: &[HardwareWalletConfig]| {
+                cfgs.iter()
+                    .map(|c| (c.kind.clone(), c.token.clone(), c.fingerprint))
+                    .collect::<Vec<_>>()
+            };
+            let expected = vec![(
+                async_hwi::DeviceKind::Ledger.to_string(),
+                hex::encode([7u8; 32]),
+                fingerprint,
+            )];
+            assert_eq!(fields(&updated.hardware_wallets), expected, "{:?}", chain);
+            let stored = settings::Settings::from_file(&dir.network_directory(chain)).unwrap();
+            assert_eq!(
+                fields(&stored.wallets[0].hardware_wallets),
+                expected,
+                "{:?}",
+                chain
+            );
+            assert_eq!(
+                std::fs::read(
+                    dir.network_directory(other)
+                        .path()
+                        .join(settings::SETTINGS_FILE_NAME)
+                )
+                .unwrap(),
+                original
+            );
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }
