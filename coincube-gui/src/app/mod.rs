@@ -2194,12 +2194,33 @@ pub struct LocalNodeSync {
 }
 
 /// The Vault scan a backend switch would discard, if one is running: the
-/// wallet catching up (for a Connect Vault this includes its startup address
-/// scan, until the session's first poll succeeds) or a pending rescan.
+/// wallet catching up, its first address scan through an Esplora/Electrum
+/// backend, or a pending rescan.
+///
+/// `sync_status` alone misses a Connect Vault's *first-ever* full scan: the
+/// database has no tip yet, so `blockheight` is 0, and its `blockheight <= 0`
+/// arm (which does not list Esplora) returns before the "no poll this
+/// session" arm can run — it reports `Synced`. So for an embedded
+/// Esplora/Electrum backend, no completed poll this session counts as a scan
+/// whatever the height. (`sync_status` itself is left alone here; sibling
+/// PR #670 reworks it.)
+///
+/// Known gap: a full scan started *mid-session* — a user rescan whose
+/// `getinfo` blocks on the backend lock, or the forced full scan after a
+/// `CannotConnect` with no rescan timestamp — is seen only if a poll result
+/// happens to show it. Sibling PR #670 (`fix/vault-history-sync-state`) adds a
+/// lock-free `history_sync` report to `getinfo` and makes `sync_status` return
+/// `WalletFullScan` while a full scan runs; this predicate picks that up
+/// through `wallet_is_syncing()` once both have merged.
 pub(crate) fn running_vault_scan(
     daemon_backend: DaemonBackend,
     cache: &Cache,
 ) -> Option<local_switch::RunningScan> {
+    let scans_addresses = matches!(
+        daemon_backend,
+        DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
+            | DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum))
+    );
     let status = sync_status(
         daemon_backend,
         cache.blockheight(),
@@ -2208,7 +2229,12 @@ pub(crate) fn running_vault_scan(
         cache.last_poll_at_startup,
     );
     local_switch::running_scan(
-        status.wallet_is_syncing(),
+        status.wallet_is_syncing()
+            || local_switch::first_address_scan_pending(
+                scans_addresses,
+                cache.last_poll_timestamp(),
+                cache.last_poll_at_startup,
+            ),
         cache.rescan_progress().is_some(),
     )
 }
@@ -12863,10 +12889,53 @@ mod local_node_sync_tests {
         drop(app.update(Message::BitcoindSyncProgress {
             config: pending,
             result: Ok(synced(pruned)),
-            vault_history: Some(VaultHistory::From(970_000)),
+            vault_history: Some(VaultHistory::From(971_000)),
         }));
         assert!(app.daemon_switch_in_progress, "deferred switch never fired");
         assert_eq!(app.local_switch_hold, None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Connect Vault's first-ever full scan: no tip in the database yet
+    /// (`blockheight` 0, which `sync_status` reports as `Synced` for Esplora)
+    /// and no poll completed this session. The promotion must still wait.
+    #[test]
+    fn auto_switch_waits_for_a_connect_vaults_first_scan() {
+        use local_switch::{NodePruning, RunningScan, SwitchHold};
+
+        let root = std::env::temp_dir().join(format!("local-switch-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        assert!(matches!(
+            cfg.bitcoin_backend,
+            Some(BitcoinBackend::Esplora(_))
+        ));
+        let pending = node(8333);
+        cfg.pending_bitcoind = Some(pending.clone());
+        cfg.auto_switch_to_pending = Some(true);
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
+        app.cache.daemon_cache.blockheight = 0;
+        app.cache.daemon_cache.last_poll_timestamp = None;
+        app.cache.daemon_cache.rescan_progress = None;
+        app.cache.last_poll_at_startup = None;
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending,
+            result: Ok(LocalNodeSync {
+                progress: 1.0,
+                ibd: false,
+                blocks: 970_500,
+                headers: 970_500,
+                subversion: None,
+                pruning: Some(NodePruning::Unpruned),
+            }),
+            vault_history: None,
+        }));
+        assert!(!app.daemon_switch_in_progress, "switched mid first scan");
+        assert_eq!(
+            app.local_switch_hold,
+            Some(SwitchHold::Scanning(RunningScan::WalletSync))
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 }

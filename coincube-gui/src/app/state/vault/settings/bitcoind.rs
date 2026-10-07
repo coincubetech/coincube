@@ -2151,8 +2151,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Daemon for TestDaemon {
+        // Mirrors `EmbeddedDaemon::backend`: the node type follows the config.
         fn backend(&self) -> DaemonBackend {
-            DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind))
+            DaemonBackend::EmbeddedCoincubed(
+                self.config
+                    .as_ref()
+                    .and_then(|c| c.bitcoin_backend.as_ref())
+                    .map(NodeType::from)
+                    .or(Some(NodeType::Bitcoind)),
+            )
         }
 
         fn config(&self) -> Option<&Config> {
@@ -3603,7 +3610,7 @@ mod tests {
         cache.node_bitcoind_pruning = Some(NodePruning::Pruned {
             prune_height: 969_938,
         });
-        cache.local_switch_history = Some(VaultHistory::From(970_000));
+        cache.local_switch_history = Some(VaultHistory::From(971_000));
         assert!(pruned_switch_refusal(&cache).is_none());
         let mut state = fresh(&cache);
         let _ = state.update(Some(daemon.clone()), &cache, switch());
@@ -3657,5 +3664,41 @@ mod tests {
         let _ = state.update(Some(daemon.clone()), &cache, switch());
         assert_eq!(state.pending_scan_discard, None);
         assert!(state.node_switch_processing, "switch dispatched");
+    }
+
+    /// A Connect Vault's first-ever full scan: the database has no tip yet
+    /// (`blockheight` 0) and no poll has completed this session. `sync_status`
+    /// reads that as `Synced` for an Esplora backend, so the scan must be
+    /// recognised from the missing poll instead.
+    #[test]
+    fn manual_switch_confirms_during_a_connect_vaults_first_scan() {
+        use crate::app::local_switch::{NodePruning, RunningScan};
+
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+            "/tmp/bitcoin/.cookie",
+        ))));
+        cfg.auto_switch_to_pending = Some(true);
+        let daemon = daemon(Some(cfg.clone()));
+        let cache = Cache {
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(NodePruning::Unpruned),
+            last_poll_at_startup: None,
+            daemon_cache: crate::app::cache::DaemonCache {
+                blockheight: 0,
+                last_poll_timestamp: None,
+                rescan_progress: None,
+                ..Default::default()
+            },
+            ..Cache::default()
+        };
+        let mut state = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+        let _ = state.update(
+            Some(daemon),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        assert_eq!(state.pending_scan_discard, Some(RunningScan::WalletSync));
+        assert!(!state.node_switch_processing, "switched mid first scan");
     }
 }

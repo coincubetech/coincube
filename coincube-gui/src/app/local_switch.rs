@@ -74,10 +74,20 @@ impl VaultHistory {
     }
 }
 
+/// Blocks a pruned node must keep *below* a Vault's earliest coin.
+///
+/// bitcoind rescans from a block *timestamp*, less a 2 h window
+/// (`TIMESTAMP_WINDOW`), and block timestamps may themselves be up to 2 h off,
+/// so a rescan for a coin at height M can start a few dozen blocks before M.
+/// A pruned node also keeps advancing its prune height as the chain grows
+/// (`prune=550` is a size target). One day of blocks covers both with room.
+pub const PRUNE_MARGIN_BLOCKS: u64 = 144;
+
 /// Why a pruned node cannot serve this Vault.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrunedHistory {
-    /// The Vault has coins from `earliest`, below the node's prune height.
+    /// The Vault has coins from `earliest`, below the node's prune height or
+    /// within [`PRUNE_MARGIN_BLOCKS`] above it.
     CoinsBelowPrune { prune_height: u64, earliest: u32 },
     /// The Vault's history has not been found yet (a restore still owing its
     /// rescan), so it may lie anywhere below the prune height.
@@ -90,10 +100,20 @@ impl fmt::Display for PrunedHistory {
             Self::CoinsBelowPrune {
                 prune_height,
                 earliest,
-            } => write!(
+            } if u64::from(*earliest) < *prune_height => write!(
                 f,
                 "Your local node keeps blocks only from height {prune_height}, but this Vault \
                  has coins from block {earliest}. Switching would hide them. Keep using \
+                 COINCUBE | Connect, or re-sync the node without pruning."
+            ),
+            Self::CoinsBelowPrune {
+                prune_height,
+                earliest,
+            } => write!(
+                f,
+                "Your local node keeps blocks only from height {prune_height}, and this Vault \
+                 has coins from block {earliest}, too close to that height for the node to \
+                 rescan them reliably. Switching could hide them. Keep using \
                  COINCUBE | Connect, or re-sync the node without pruning."
             ),
             Self::HistoryUnknown { prune_height } => write!(
@@ -110,9 +130,9 @@ impl fmt::Display for PrunedHistory {
 /// Whether a node with `pruning` can show this Vault's coins.
 ///
 /// `Ok(())` for an unpruned node whatever the history, and for a pruned one
-/// that still has every block the Vault needs. A pruned node whose prune height
-/// is above the Vault's earliest coin, or a pruned node and a Vault whose
-/// history is unknown, cannot.
+/// that keeps at least [`PRUNE_MARGIN_BLOCKS`] blocks below the Vault's earliest
+/// coin (`prune_height + PRUNE_MARGIN_BLOCKS <= earliest`). A pruned node short
+/// of that, or a pruned node and a Vault whose history is unknown, cannot.
 pub fn pruned_node_serves(
     pruning: NodePruning,
     history: VaultHistory,
@@ -121,7 +141,9 @@ pub fn pruned_node_serves(
         return Ok(());
     };
     match history {
-        VaultHistory::From(earliest) if prune_height > u64::from(earliest) => {
+        VaultHistory::From(earliest)
+            if prune_height.saturating_add(PRUNE_MARGIN_BLOCKS) > u64::from(earliest) =>
+        {
             Err(PrunedHistory::CoinsBelowPrune {
                 prune_height,
                 earliest,
@@ -143,6 +165,19 @@ pub enum RunningScan {
     WalletSync,
     /// A rescan the user (or a restore) started is still running.
     Rescan,
+}
+
+/// Whether an address-scanning backend (Esplora/Electrum) is still on the
+/// session's first scan: no poll has completed since startup
+/// (`last_poll <= last_poll_at_startup`, `None` counting as "never").
+/// Independent of the wallet's block height, which is 0 until that first
+/// scan has written a tip.
+pub fn first_address_scan_pending(
+    scans_addresses: bool,
+    last_poll: Option<u32>,
+    last_poll_at_startup: Option<u32>,
+) -> bool {
+    scans_addresses && last_poll <= last_poll_at_startup
 }
 
 /// The scan in flight, if any. A rescan is reported first since it is the
@@ -216,15 +251,53 @@ mod tests {
     }
 
     #[test]
-    fn pruned_node_serves_coins_at_or_above_its_prune_height() {
+    fn pruned_node_serves_coins_a_margin_above_its_prune_height() {
+        let margin = PRUNE_MARGIN_BLOCKS as u32;
+        // Exactly the margin: the rescan look-back still lands on kept blocks.
         assert_eq!(
-            pruned_node_serves(PRUNED, VaultHistory::From(PRUNE as u32)),
+            pruned_node_serves(PRUNED, VaultHistory::From(PRUNE as u32 + margin)),
             Ok(())
         );
         assert_eq!(
             pruned_node_serves(PRUNED, VaultHistory::From(PRUNE as u32 + 500)),
             Ok(())
         );
+    }
+
+    #[test]
+    fn pruned_node_refuses_coins_inside_the_margin() {
+        let margin = PRUNE_MARGIN_BLOCKS as u32;
+        for earliest in [PRUNE as u32, PRUNE as u32 + 1, PRUNE as u32 + margin - 1] {
+            assert_eq!(
+                pruned_node_serves(PRUNED, VaultHistory::From(earliest)),
+                Err(PrunedHistory::CoinsBelowPrune {
+                    prune_height: PRUNE,
+                    earliest,
+                }),
+                "{}",
+                earliest
+            );
+        }
+        // The copy does not claim the coin is below the prune height.
+        let copy = PrunedHistory::CoinsBelowPrune {
+            prune_height: PRUNE,
+            earliest: PRUNE as u32 + 10,
+        }
+        .to_string();
+        assert!(copy.contains("too close"), "{}", copy);
+        assert!(!copy.contains("but this Vault"), "{}", copy);
+    }
+
+    #[test]
+    fn first_address_scan_is_pending_until_a_poll_this_session() {
+        // Never polled, startup unknown: the first-ever scan.
+        assert!(first_address_scan_pending(true, None, None));
+        assert!(first_address_scan_pending(true, Some(100), Some(100)));
+        assert!(first_address_scan_pending(true, None, Some(100)));
+        assert!(!first_address_scan_pending(true, Some(200), Some(100)));
+        assert!(!first_address_scan_pending(true, Some(200), None));
+        // A local bitcoind does no address scan.
+        assert!(!first_address_scan_pending(false, None, None));
     }
 
     #[test]
@@ -254,7 +327,7 @@ mod tests {
             Err(PrunedHistory::CoinsBelowPrune { .. })
         ));
         // ... and spent coins above the prune height are fine.
-        let history = VaultHistory::from_coin_heights([Some(970_000)], false);
+        let history = VaultHistory::from_coin_heights([Some(971_000)], false);
         assert_eq!(pruned_node_serves(PRUNED, history), Ok(()));
     }
 
@@ -352,7 +425,7 @@ mod tests {
             }))
         );
         assert_eq!(
-            auto_switch_hold(None, Some(PRUNED), Some(VaultHistory::From(970_000))),
+            auto_switch_hold(None, Some(PRUNED), Some(VaultHistory::From(971_000))),
             None
         );
     }
