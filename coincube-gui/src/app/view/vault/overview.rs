@@ -88,14 +88,27 @@ pub(crate) fn balance_sync_state(
     awaiting_rescan_date: bool,
 ) -> SyncState {
     let empty = total_balance == bitcoin::Amount::ZERO;
+    let awaiting_label = "Balance unknown until this Vault's history is scanned. \
+                          Pick the date it was created to start.";
     match sync_status {
-        SyncStatus::Synced if empty && awaiting_rescan_date => SyncState::Unknown {
-            progress: None,
-            label: "Balance unknown until this Vault's history is scanned. \
-                    Pick the date it was created to start."
-                .to_string(),
-            failing: true,
-        },
+        // However far the node or the wallet has synced, a restore awaiting its
+        // rescan date has no history: its zero is not a balance.
+        SyncStatus::Synced | SyncStatus::LatestWalletSync if empty && awaiting_rescan_date => {
+            SyncState::Unknown {
+                progress: None,
+                label: awaiting_label.to_string(),
+                failing: true,
+            }
+        }
+        SyncStatus::BlockchainSync(progress) if empty && awaiting_rescan_date => {
+            SyncState::Unknown {
+                progress: Some(*progress),
+                label: "Syncing blockchain; the balance stays unknown until this Vault's \
+                        history is scanned"
+                    .to_string(),
+                failing: false,
+            }
+        }
         SyncStatus::Synced => SyncState::Synced,
         SyncStatus::BlockchainSync(progress) => SyncState::Syncing {
             progress: Some(*progress),
@@ -722,6 +735,29 @@ mod balance_state_tests {
         assert!(matches!(
             balance_sync_state(&SyncStatus::Synced, Amount::ZERO, false),
             SyncState::Synced
+        ));
+        // Nor while the node or the wallet is still syncing: the blockchain's
+        // progress is kept, but no zero is shown.
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::BlockchainSync(0.4), Amount::ZERO, true),
+            SyncState::Unknown {
+                progress: Some(p),
+                failing: false,
+                ..
+            } if p == 0.4
+        ));
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::LatestWalletSync, Amount::ZERO, true),
+            SyncState::Unknown { failing: true, .. }
+        ));
+        // A funded Vault keeps showing its coins while syncing.
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::BlockchainSync(0.4), Amount::from_sat(5), true),
+            SyncState::Syncing { .. }
+        ));
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::LatestWalletSync, Amount::from_sat(5), true),
+            SyncState::Checking
         ));
     }
 

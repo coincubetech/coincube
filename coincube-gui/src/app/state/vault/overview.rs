@@ -280,6 +280,12 @@ impl State for VaultOverview {
                 }
             },
             Message::UpdatePanelCache(is_current) => {
+                // `rescan_progress` is the daemon's definitive signal: it is
+                // reported for exactly as long as the persisted rescan
+                // timestamp is set, and only `complete_rescan` clears that,
+                // after the post-rescan update succeeds. An interrupted rescan
+                // keeps it and goes on reporting progress (0% if the backend
+                // is unreachable); a failed refresh leaves this cache as it was.
                 if cache.rescan_progress().is_some() {
                     self.rescan_seen_running = true;
                 } else if self.rescan_seen_running {
