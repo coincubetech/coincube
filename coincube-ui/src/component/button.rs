@@ -10,28 +10,32 @@ use iced::widget::{button, container, row};
 
 pub fn menu<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
     Button::new(content_menu(icon.map(|i| i.style(theme::text::secondary)), t).padding(10))
+        .width(iced::Length::Shrink)
         .style(theme::button::menu)
 }
 
 pub fn menu_active<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
     Button::new(content_menu(icon.map(|i| i.style(theme::text::secondary)), t).padding(10))
+        .width(iced::Length::Shrink)
         .style(theme::button::menu_pressed)
 }
 
 pub fn menu_small<'a, T: 'a>(icon: Text<'a>) -> Button<'a, T> {
     Button::new(container(icon.style(theme::text::secondary)).padding(10))
+        .width(iced::Length::Shrink)
         .style(theme::button::menu)
 }
 
 pub fn menu_active_small<'a, T: 'a>(icon: Text<'a>) -> Button<'a, T> {
     Button::new(container(icon.style(theme::text::secondary)).padding(10))
+        .width(iced::Length::Shrink)
         .style(theme::button::menu_pressed)
 }
 
 fn content_menu<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Container<'a, T> {
     match icon {
-        None => container(text(t)).padding(5),
-        Some(i) => container(row![i, text(t)].spacing(10).align_y(Vertical::Center)).padding(5),
+        None => content(None, text(t)),
+        Some(i) => content(Some(i), text(t)),
     }
 }
 
@@ -50,12 +54,13 @@ pub fn primary<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a,
     .style(theme::button::primary)
 }
 
-/// Compact primary button - shrinks to content, left-aligned (for action buttons)
+/// Compact primary button - shrinks to content, centered (for action buttons)
 pub fn primary_compact<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
-    Button::new(content_left_aligned(
+    Button::new(content(
         icon,
         text(t).font(MEDIUM).align_y(iced::Alignment::Center),
     ))
+    .width(iced::Length::Shrink)
     .style(theme::button::primary)
 }
 
@@ -79,35 +84,29 @@ pub fn secondary<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'
     .style(theme::button::secondary)
 }
 
-/// Compact secondary button - shrinks to content, left-aligned (for action buttons like "share xpubs")
+/// Compact secondary button - shrinks to content, centered (for action buttons like "share xpubs")
 pub fn secondary_compact<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
-    Button::new(content_left_aligned(
-        icon,
-        text(t).align_y(iced::Alignment::Center),
-    ))
-    .style(theme::button::secondary)
+    Button::new(content(icon, text(t).align_y(iced::Alignment::Center)))
+        .width(iced::Length::Shrink)
+        .style(theme::button::secondary)
 }
 
 pub fn border<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
-    Button::new(content_left_aligned(
-        icon,
-        text(t).align_y(iced::Alignment::Center),
-    ))
-    .style(theme::button::secondary)
+    Button::new(content(icon, text(t).align_y(iced::Alignment::Center)))
+        .width(iced::Length::Shrink)
+        .style(theme::button::secondary)
 }
 
 pub fn transparent_border<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
-    button(content_left_aligned(
-        icon,
-        text(t).align_y(iced::Alignment::Center),
-    ))
-    .style(theme::button::container_border)
+    button(content(icon, text(t).align_y(iced::Alignment::Center)))
+        .width(iced::Length::Shrink)
+        .style(theme::button::container_border)
 }
 
 /// Transparent bordered button with centered content — for segmented toggles
 /// where the button has a fixed/fill width and the label should sit in the
-/// middle (e.g. the Spark Receive method picker). Same style as
-/// [`transparent_border`], but centered rather than left-aligned.
+/// middle (e.g. the Spark Receive method picker). Same style and alignment as
+/// [`transparent_border`].
 pub fn transparent_border_centered<'a, T: 'a>(
     icon: Option<Text<'a>>,
     t: &'static str,
@@ -138,7 +137,9 @@ pub fn orange_outline<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> But
 }
 
 pub fn link<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
-    Button::new(content_left_aligned(icon, text(t))).style(theme::button::link)
+    Button::new(content(icon, text(t)))
+        .width(iced::Length::Shrink)
+        .style(theme::button::link)
 }
 
 /// Primary button that reflects an in-flight async action: while `loading`
@@ -195,6 +196,7 @@ fn content_loading<'a, T: Clone + 'a>(t: &'static str) -> Container<'a, T> {
 
 // Content function for centered buttons (primary, secondary, transparent)
 fn content<'a, T: 'a>(icon: Option<Text<'a>>, text: Text<'a>) -> Container<'a, T> {
+    let text = text.align_x(Horizontal::Center);
     match icon {
         None => container(text)
             .align_y(Vertical::Center)
@@ -210,13 +212,5 @@ fn content<'a, T: 'a>(icon: Option<Text<'a>>, text: Text<'a>) -> Container<'a, T
         .align_x(Horizontal::Center)
         .width(iced::Length::Fill)
         .padding(5),
-    }
-}
-
-// Content function for left-aligned buttons (border, transparent_border, link)
-fn content_left_aligned<'a, T: 'a>(icon: Option<Text<'a>>, text: Text<'a>) -> Container<'a, T> {
-    match icon {
-        None => container(text).align_y(Vertical::Center).padding(5),
-        Some(i) => container(row![i, text].spacing(10).align_y(Vertical::Center)).padding(5),
     }
 }

@@ -4164,17 +4164,21 @@ impl App {
     /// installed by [`Message::SplitPortsBuilt`], unless a later refresh or
     /// a revocation came first.
     fn refresh_split_session(&mut self) -> Task<Message> {
-        let session = self.fork_connect_client.clone().and_then(|bound| {
-            let current = self.panels.connect.account.authenticated_client()?;
-            if current.base_url != bound.base_url || current.token() != bound.token() {
-                return None;
-            }
-            let account = self.panels.connect.account.user.as_ref()?.id.to_string();
-            Some(state::vault::claim::ConnectSession {
-                client: bound,
-                account,
-            })
-        });
+        let session = self
+            .fork_connect_client
+            .clone()
+            .filter(|_| self.panels.connect.account.bitcoin_blake2b_enabled())
+            .and_then(|bound| {
+                let current = self.panels.connect.account.authenticated_client()?;
+                if current.base_url != bound.base_url || current.token() != bound.token() {
+                    return None;
+                }
+                let account = self.panels.connect.account.user.as_ref()?.id.to_string();
+                Some(state::vault::claim::ConnectSession {
+                    client: bound,
+                    account,
+                })
+            });
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
@@ -4226,7 +4230,7 @@ impl App {
     /// #625 F3c: install the ports a refresh built, if no later refresh or
     /// revocation came first, and let the panel continue.
     fn install_split_ports(&mut self, seq: u64, ports: Option<Box<SplitPorts>>) -> Task<Message> {
-        if seq != self.split_port_seq {
+        if seq != self.split_port_seq || !self.panels.connect.account.bitcoin_blake2b_enabled() {
             return Task::none();
         }
         let Some(panel) = self.split_panel.as_mut() else {
@@ -7432,6 +7436,9 @@ impl App {
                 // the Connect panel from the view layer.
                 self.cache.btcb2_server_enabled =
                     self.panels.connect.account.bitcoin_blake2b_enabled();
+                if current_features_result && !self.cache.btcb2_server_enabled {
+                    self.pending_claim = false;
+                }
                 if self.cache.chain().is_blake2b()
                     && current_features_result
                     && !self.cache.btcb2_server_enabled
@@ -8532,6 +8539,7 @@ impl App {
     /// A new authenticated startup is required; an old authority is never reused.
     pub fn invalidate_fork_session(&mut self) {
         if self.cache.chain().is_blake2b() {
+            self.revoke_claim();
             self.revoke_split_handoff();
             self.drop_split_port_builds();
             if let Some(panel) = &mut self.split_panel {
@@ -9870,6 +9878,12 @@ mod tests {
                 email_verified: Some(true),
             });
             app.fork_connect_client = Some(client);
+            app.panels.connect.account.features = Some(
+                serde_json::from_value(serde_json::json!({
+                    "plans": [], "bitcoinBlake2bEnabled": true,
+                }))
+                .unwrap(),
+            );
         }
         settle_split_ports(&mut app);
         app
@@ -10105,6 +10119,8 @@ mod tests {
         let mut app = start_split_app(&root, Some(true));
         assert!(app.authenticated_coincube_client().is_some());
         let generation = app.panels.connect.account.session_generation();
+        let claim_generation = *app.panels.claim_generation.borrow();
+        app.pending_claim = true;
         let denied =
             serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":false}))
                 .unwrap();
@@ -10123,7 +10139,38 @@ mod tests {
         ))));
         assert!(app.authenticated_coincube_client().is_none());
         assert!(!app.cache.btcb2_server_enabled);
+        assert!(!app.pending_claim);
+        assert_ne!(*app.panels.claim_generation.borrow(), claim_generation);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_beta_gate_refuses_split_ports_without_a_fresh_grant() {
+        let root =
+            std::env::temp_dir().join(format!("coincube-beta-split-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, true, true);
+        let messages = task_messages(app.refresh_split_session());
+        assert!(messages
+            .iter()
+            .any(|m| matches!(m, Message::SplitPortsBuilt(..))));
+        app.panels.connect.account.features = None;
+        let panel = app.split_panel.as_mut().unwrap();
+        panel.set_connect(None);
+        panel.set_step2_port(None);
+        panel.set_recon_port(None);
+        panel.set_unified_port(None);
+        for message in messages {
+            drop(app.update(message));
+        }
+        // A completion may not resurrect ports after a grant disappears,
+        // even when its sequence is still current.
+        assert_eq!(split_ports_held(&app), (false, false));
+        settle_split_ports(&mut app);
+        assert!(app.split_port_session.is_none());
+        assert!(task_messages(app.refresh_split_session())
+            .iter()
+            .all(|m| !matches!(m, Message::SplitPortsBuilt(..))));
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

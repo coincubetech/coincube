@@ -981,6 +981,13 @@ impl Home {
             }
         }
         if !self.displayed_networks.contains(&self.network) {
+            self.abandon_creation_backup();
+            self.create_cube_pin.clear();
+            self.create_cube_pin_confirm.clear();
+            for word in &mut self.recovery_words {
+                word.clear();
+            }
+            self.pending_cube_id = None;
             self.network = ChainId::Bitcoin;
             self.error = None;
             self.server_cube_limit = None;
@@ -4719,30 +4726,36 @@ fn advisory_notice_modal(
     advisory: &'static crate::hw_advisory::Advisory,
 ) -> Element<'static, Message> {
     Container::new(
-        Column::new()
-            .spacing(15)
-            .padding(25)
-            .width(Length::Fixed(560.0))
-            .push(h4_bold(advisory.headline))
-            .push(p1_regular(advisory.notice))
-            .push(
-                Row::new()
-                    .spacing(10)
-                    .push(
-                        button::secondary(Some(icon::link_icon()), advisory.guide_label)
-                            .on_press(Message::View(ViewMessage::OpenUrl(
-                                advisory.url.to_string(),
-                            )))
-                            .width(Length::Fill),
-                    )
-                    .push(
-                        button::primary(Some(icon::check_icon()), "Got it")
-                            .on_press(Message::View(ViewMessage::DismissAdvisoryNotice))
-                            .width(Length::Fill),
-                    ),
-            ),
+        Container::new(scrollable(
+            Column::new()
+                .spacing(15)
+                .padding(25)
+                .width(Length::Fill)
+                .push(h4_bold(advisory.headline))
+                .push(p1_regular(advisory.notice))
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(
+                            button::secondary(Some(icon::link_icon()), advisory.guide_label)
+                                .on_press(Message::View(ViewMessage::OpenUrl(
+                                    advisory.url.to_string(),
+                                )))
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            button::primary(Some(icon::check_icon()), "Got it")
+                                .on_press(Message::View(ViewMessage::DismissAdvisoryNotice))
+                                .width(Length::Fill),
+                        ),
+                ),
+        ))
+        .width(Length::Fill)
+        .max_width(560)
+        .max_height(700)
+        .style(theme::card::modal),
     )
-    .style(theme::card::modal)
+    .padding(16)
     .into()
 }
 
@@ -4836,17 +4849,19 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             ic::down_icon()
         };
         let connect_button: Element<Message> = iced::widget::Button::new(
-            Row::new()
-                .spacing(10)
-                .align_y(iced::alignment::Vertical::Center)
-                .push(ic::connect_icon().style(coincube_ui::theme::text::secondary))
-                .push(
-                    coincube_ui::component::text::p1_regular("Connect")
-                        .style(coincube_ui::theme::text::secondary),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(connect_chevron.style(coincube_ui::theme::text::secondary))
-                .padding(10),
+            Container::new(
+                Row::new()
+                    .spacing(10)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .push(ic::connect_icon().style(coincube_ui::theme::text::secondary))
+                    .push(
+                        coincube_ui::component::text::p1_regular("Connect")
+                            .style(coincube_ui::theme::text::secondary),
+                    )
+                    .push(connect_chevron.style(coincube_ui::theme::text::secondary)),
+            )
+            .center_x(Length::Fill)
+            .padding(10),
         )
         .width(Length::Fill)
         .style(coincube_ui::theme::button::menu)
@@ -4858,13 +4873,15 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
                 Button::new(
                     txt::caption(&user.email)
                         .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                        .align_x(Alignment::Center)
+                        .width(Length::Fill),
                 )
                 .padding(iced::Padding {
                     top: 0.0,
                     right: 10.0,
                     bottom: 10.0,
-                    left: 40.0,
+                    left: 10.0,
                 })
                 .width(Length::Fill)
                 .style(theme::button::menu)
@@ -4898,12 +4915,10 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             );
             let item = if is_active {
                 Row::new()
-                    .push(Space::new().width(Length::Fixed(20.0)))
                     .push(btn::menu_active(None, label).width(Length::Fill))
                     .width(Length::Fill)
             } else {
                 Row::new()
-                    .push(Space::new().width(Length::Fixed(20.0)))
                     .push(
                         btn::menu(None, label)
                             .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
@@ -10409,6 +10424,22 @@ mod chain_identity_open_tests {
                 .connect_account
                 .bitcoin_blake2b_opt_in
         );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn global_settings_network_reset_scrubs_staged_creation_and_recovery() {
+        let dir = tmp_datadir("global-settings-creation");
+        let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Signet)).0;
+        home.creation_backup_words = Some(zeroize::Zeroizing::new(vec!["synthetic".into()]));
+        home.recovery_words[0] = "synthetic".into();
+        home.state = State::CreationBackup(CreationBackupStep::Choice);
+        home.creating_cube = true;
+        drop(home.reload_global_settings());
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.creation_backup_words.is_none());
+        assert!(home.recovery_words.iter().all(String::is_empty));
+        assert!(!home.creating_cube);
         std::fs::remove_dir_all(dir).unwrap();
     }
 

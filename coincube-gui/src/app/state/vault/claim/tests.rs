@@ -3182,6 +3182,26 @@ mod flow {
         seen
     }
 
+    // Signing in refreshes account capabilities. A claim can rebind only once
+    // the new session has received its own positive server grant.
+    async fn grant_current_beta_features(app: &mut crate::app::App) {
+        let generation = app.panels.connect.account.session_generation();
+        let features = serde_json::from_value(json!({
+            "plans": [], "bitcoinBlake2bEnabled": true,
+        }))
+        .unwrap();
+        let task = app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(features), generation),
+        )));
+        drive_claim_messages(app, task).await;
+        // The unavailable route was hidden while capabilities refreshed.
+        // Re-enter it after the new session has been granted access.
+        let entry = app.update(Message::View(view::Message::Menu(Menu::Vault(
+            crate::app::menu::VaultSubMenu::Claim,
+        ))));
+        drive_claim_messages(app, entry).await;
+    }
+
     fn app_claim_state(app: &crate::app::App) -> (bool, Option<String>, bool, bool) {
         session_state(app.panels.claim.as_ref().unwrap())
     }
@@ -3272,8 +3292,8 @@ mod flow {
     /// now) is applied; the queued `SessionLoaded` it produced is applied;
     /// the real post-sign-in duress gate reveals the dashboard, and that
     /// account message runs the hook, which re-binds a revoked claim. Every
-    /// claim completion is driven; the panel's other network follow-ups
-    /// (features, plan) are dropped.
+    /// claim completion is driven. The fresh session's positive feature
+    /// response is applied; unrelated plan follow-ups are dropped.
     async fn sign_in_here_by_refresh(app: &mut crate::app::App, f: &Flow, user_id: u32) {
         f._server
             .mock_async(|when, then| {
@@ -3333,6 +3353,7 @@ mod flow {
             view::ConnectAccountMessage::DuressStateChecked(duress, generation, 0),
         )));
         drive_claim_messages(app, gate).await;
+        grant_current_beta_features(app).await;
     }
 
     fn replacement_config(f: &Flow) -> coincubed::config::Config {
@@ -4336,6 +4357,7 @@ mod flow {
                 ),
             )));
             drive_claim_messages(app, gate).await;
+            grant_current_beta_features(app).await;
             let refresh = app.update(intent(view::ClaimMessage::Refresh));
             drive_claim_messages(app, refresh).await;
             assert_eq!(app_claim_state(app), (true, None, false, true));

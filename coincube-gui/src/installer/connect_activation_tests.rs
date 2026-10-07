@@ -231,7 +231,7 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let cube_id = installer.context.seed_cube_id().to_owned();
     let fingerprint = installer.master_signer_fingerprint();
     let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
-    assert!(!root_path.exists());
+    assert_eq!(std::fs::read_dir(&root_path).unwrap().count(), 1);
     let settings = install_local_wallet(
         installer.context.clone(),
         wallet_id,
