@@ -32,9 +32,8 @@ use crate::{
     },
     node::bitcoind::{
         self, bitcoind_network_dir, internal_bitcoind_cookie_path, internal_bitcoind_datadir,
-        internal_bitcoind_directory, Bitcoind, ConfigField, InternalBitcoindConfig,
-        InternalBitcoindNetworkConfig, NodeFlavor, NodeResources, RpcAuthType, RpcAuthValues,
-        StartInternalBitcoindError,
+        Bitcoind, ConfigField, InternalBitcoindConfig, InternalBitcoindNetworkConfig, NodeFlavor,
+        NodeResources, RpcAuthType, RpcAuthValues, StartInternalBitcoindError,
     },
 };
 
@@ -633,15 +632,18 @@ impl SelectBitcoindTypeStep {
 
 impl Step for SelectBitcoindTypeStep {
     fn load_context(&mut self, ctx: &Context) {
+        let chain_changed = self.chain != ctx.bitcoin_config.chain;
         self.network = ctx.network;
         self.chain = ctx.bitcoin_config.chain;
         self.connect_authenticated = ctx.use_coincube_connect;
         if self.chain.is_blake2b() {
             // Do not inspect or inherit the Bitcoin family's global node config.
             // Connect-only remains the default until managed loader isolation lands.
-            self.use_connect = true;
-            self.use_external = true;
-            self.install_node = false;
+            if chain_changed {
+                self.use_connect = true;
+                self.use_external = true;
+                self.install_node = false;
+            }
             self.show_advanced = false;
             self.node_flavor = NodeFlavor::KnotsBlake2b;
             self.existing_flavor = None;
@@ -678,6 +680,7 @@ impl Step for SelectBitcoindTypeStep {
                     msg,
                     message::SelectBitcoindTypeMsg::ContinueWithConnect
                         | message::SelectBitcoindTypeMsg::UseConnect
+                        | message::SelectBitcoindTypeMsg::ToggleInstallNode
                 )
             {
                 return Task::none();
@@ -712,7 +715,7 @@ impl Step for SelectBitcoindTypeStep {
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
         if ctx.bitcoin_config.chain.is_blake2b() {
-            if !self.use_connect || self.install_node || !self.use_external {
+            if !self.use_connect {
                 return false;
             }
             let Some(token) = &ctx.connect_jwt else {
@@ -723,11 +726,13 @@ impl Step for SelectBitcoindTypeStep {
             ));
             ctx.node_flavor = NodeFlavor::KnotsBlake2b;
             ctx.use_coincube_connect = true;
-            ctx.install_node_alongside_connect = false;
-            ctx.bitcoind_is_external = true;
-            ctx.internal_bitcoind_config = None;
-            ctx.pending_bitcoind_config = None;
-            ctx.internal_bitcoind = None;
+            ctx.install_node_alongside_connect = self.install_node;
+            ctx.bitcoind_is_external = !self.install_node;
+            if !self.install_node {
+                ctx.internal_bitcoind_config = None;
+                ctx.pending_bitcoind_config = None;
+                ctx.internal_bitcoind = None;
+            }
             return true;
         }
         // Carry the chosen managed-node flavour to the InternalBitcoindStep.
@@ -960,6 +965,7 @@ pub struct InternalBitcoindStep {
     coincube_datadir: CoincubeDirectory,
     bitcoind_datadir: PathBuf,
     network: Network,
+    chain: crate::chain::ChainId,
     /// Which managed node flavour to install. Defaults to Core; the
     /// node-management step's picker defaults to Knots and overrides it.
     flavor: NodeFlavor,
@@ -1005,6 +1011,7 @@ impl InternalBitcoindStep {
             coincube_datadir: coincube_datadir.clone(),
             bitcoind_datadir: internal_bitcoind_datadir(coincube_datadir),
             network: Network::Bitcoin,
+            chain: crate::chain::ChainId::Bitcoin,
             flavor: NodeFlavor::default(),
             manifest: None,
             started: None,
@@ -1034,7 +1041,7 @@ impl InternalBitcoindStep {
     /// and the datadir under `bitcoind/` is never touched by a Bitcoin Blake2b
     /// provider (or vice versa).
     fn provider_mismatch(&mut self) -> bool {
-        match self.flavor.check_chain(self.network.into()) {
+        match self.flavor.check_chain(self.chain) {
             Ok(()) => false,
             Err(e) => {
                 self.error = Some(e.to_string());
@@ -1084,16 +1091,35 @@ impl Step for InternalBitcoindStep {
         // override an explicit Knots pick — installing Core for a user who asked
         // for Knots. `DefineConfig` reuses a matching on-disk config (ports /
         // ports) and rebuilds it on a flavour change.
+        if self.chain != ctx.bitcoin_config.chain {
+            self.stop();
+            self.exe_path = None;
+            self.exe_download = None;
+            self.install_state = None;
+            self.started = None;
+            self.bitcoind_config = None;
+            self.internal_bitcoind_config = None;
+            self.flavor_confirmed = false;
+            self.resources_loaded = false;
+        }
+        self.chain = ctx.bitcoin_config.chain;
         self.flavor = ctx.node_flavor;
+        self.bitcoind_datadir = bitcoind::internal_bitcoind_datadir_for(
+            &self.coincube_datadir,
+            self.flavor.chain_family(),
+        );
         // Flavour already configured on disk (if any) — drives the picker's
         // "…switches every Vault" warning when the user changes it.
-        self.existing_flavor =
-            crate::node::bitcoind::configured_managed_flavor(&self.coincube_datadir);
+        self.existing_flavor = crate::node::bitcoind::configured_managed_flavor_for(
+            &self.coincube_datadir,
+            self.flavor.chain_family(),
+        );
         if self.exe_path.is_none() {
             // Check if current managed bitcoind version is already installed.
             // For new installations, we ignore any previous managed bitcoind versions that might be installed.
-            let exe_path = bitcoind::internal_bitcoind_exe_path(
+            let exe_path = bitcoind::internal_bitcoind_exe_path_for(
                 &ctx.coincube_directory,
+                self.flavor.chain_family(),
                 self.flavor.version(),
             );
             if exe_path.exists() {
@@ -1162,7 +1188,7 @@ impl Step for InternalBitcoindStep {
                 message::InternalBitcoindMsg::SelectFlavor(flavor) => {
                     // Only before the user confirms and the flow kicks off, and
                     // only a provider of this chain's family.
-                    if let Err(e) = flavor.check_chain(self.network.into()) {
+                    if let Err(e) = flavor.check_chain(self.chain) {
                         self.error = Some(e.to_string());
                         return Task::none();
                     }
@@ -1179,8 +1205,9 @@ impl Step for InternalBitcoindStep {
                         self.flavor_confirmed = true;
                         // Resolve the binary for the chosen flavour: reuse it if
                         // already installed, else queue a download.
-                        let exe_path = bitcoind::internal_bitcoind_exe_path(
+                        let exe_path = bitcoind::internal_bitcoind_exe_path_for(
                             &self.coincube_datadir,
+                            self.flavor.chain_family(),
                             self.flavor.version(),
                         );
                         if exe_path.exists() {
@@ -1429,15 +1456,19 @@ impl Step for InternalBitcoindStep {
                             info!("Installing {}...", flavor.display_name());
                             self.install_state = Some(InstallState::InProgress);
                             match install_bitcoind(
-                                &internal_bitcoind_directory(&self.coincube_datadir),
+                                &bitcoind::internal_bitcoind_directory_for(
+                                    &self.coincube_datadir,
+                                    self.flavor.chain_family(),
+                                ),
                                 bytes,
                                 &verification,
                             ) {
                                 Ok(_) => {
                                     info!("Installation of bitcoind complete.");
                                     self.install_state = Some(InstallState::Finished);
-                                    self.exe_path = Some(bitcoind::internal_bitcoind_exe_path(
+                                    self.exe_path = Some(bitcoind::internal_bitcoind_exe_path_for(
                                         &self.coincube_datadir,
+                                        flavor.chain_family(),
                                         flavor.version(),
                                     ));
                                     return Task::perform(async {}, |_| {
@@ -1468,8 +1499,23 @@ impl Step for InternalBitcoindStep {
                         .as_ref()
                         .expect("already added")
                         .clone();
-                    match Bitcoind::maybe_start(
-                        self.network,
+                    if self.chain.is_blake2b() {
+                        if let Err(e) = crate::node::tor::prepare_inbound_tor_for_chain(
+                            &self.coincube_datadir,
+                            self.chain,
+                        ) {
+                            // Record it as the start's outcome, like the other
+                            // refusals here: with `started` left unset, `load`
+                            // dispatched `Start` again on every reload and the
+                            // view never showed the start as failed.
+                            self.started = Some(Err(
+                                StartInternalBitcoindError::ConfigUnavailable(e.to_string()),
+                            ));
+                            return Task::none();
+                        }
+                    }
+                    match Bitcoind::maybe_start_for_chain(
+                        self.chain,
                         bitcoind_config,
                         &self.coincube_datadir,
                     ) {
@@ -1600,6 +1646,49 @@ mod tests {
     use super::*;
     use bitcoin_hashes::sha256;
 
+    /// A Blake2b start whose managed conf cannot be prepared is refused, and the
+    /// refusal is the start's recorded outcome. Left unrecorded, `load` dispatched
+    /// `Start` again on every reload and the step never showed the start as failed.
+    #[test]
+    fn a_refused_conf_preparation_is_recorded_as_the_start_outcome() {
+        let dir = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("conf-refused-{}", uuid::Uuid::new_v4())),
+        );
+        let mut step = InternalBitcoindStep::new(&dir);
+        step.chain = crate::chain::ChainId::BitcoinBlake2b;
+        std::fs::create_dir_all(&step.bitcoind_datadir).unwrap();
+        step.bitcoind_config = Some(BitcoindConfig {
+            rpc_auth: BitcoindRpcAuth::CookieFile(step.bitcoind_datadir.join(".cookie")),
+            addr: internal_bitcoind_address(8332),
+        });
+        // A conf that cannot be read: a directory where the file belongs.
+        let conf =
+            bitcoind::internal_bitcoind_config_path(&bitcoind::internal_bitcoind_datadir_for(
+                &dir,
+                bitcoind::NodeChainFamily::BitcoinBlake2b,
+            ));
+        std::fs::create_dir_all(&conf).unwrap();
+
+        let mut hws = HardwareWallets::new(dir.clone(), Network::Bitcoin);
+        let _ = step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::Start),
+        );
+        assert!(
+            matches!(
+                step.started,
+                Some(Err(StartInternalBitcoindError::ConfigUnavailable(_)))
+            ),
+            "{:?}",
+            step.started
+        );
+        assert!(
+            step.error.is_none(),
+            "reported once, as the start's outcome"
+        );
+        std::fs::remove_dir_all(dir.path()).ok();
+    }
+
     #[test]
     fn fork_connect_selection_keeps_auth_chain_and_has_no_bitcoin_fallback() {
         use crate::{chain::ChainId, installer::context::RemoteBackend};
@@ -1633,7 +1722,17 @@ mod tests {
             assert!(!ctx.coincube_directory.path().exists());
 
             step.install_node = true;
-            assert!(!step.apply(&mut ctx), "managed path is not ready");
+            assert!(
+                step.apply(&mut ctx),
+                "explicit managed installation is supported"
+            );
+            assert!(ctx.install_node_alongside_connect);
+            assert!(!ctx.bitcoind_is_external);
+            step.load_context(&ctx);
+            assert!(
+                step.install_node,
+                "context reload must preserve the checkbox choice"
+            );
             step.install_node = false;
             step.use_connect = false;
             assert!(!step.apply(&mut ctx), "arbitrary external path refused");
@@ -1663,6 +1762,53 @@ mod tests {
             assert!(config.fallback_addr.is_none());
             assert!(config.secondary_fallback_addr.is_none());
             assert!(!dir.path().exists());
+        }
+    }
+
+    #[test]
+    fn blake2b_installer_config_and_cookie_stay_in_the_fork_family() {
+        use crate::{
+            chain::ChainId, installer::context::RemoteBackend, node::bitcoind::NodeChainFamily,
+        };
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let dir = CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("btcb2-install-config-{}", uuid::Uuid::new_v4())),
+            );
+            let bitcoin = bitcoind::internal_bitcoind_datadir(&dir);
+            std::fs::create_dir_all(&bitcoin).unwrap();
+            let mut sentinel = InternalBitcoindConfig::for_flavor(NodeFlavor::Core);
+            sentinel.networks.insert(
+                Network::Bitcoin,
+                InternalBitcoindNetworkConfig {
+                    rpc_port: 12345,
+                    p2p_port: 12346,
+                    prune: 550,
+                    rpc_auth: None,
+                },
+            );
+            sentinel.to_file(&bitcoin.join("bitcoin.conf")).unwrap();
+            let before = std::fs::read(bitcoin.join("bitcoin.conf")).unwrap();
+            let mut ctx =
+                Context::new_for_chain(chain, dir.clone(), RemoteBackend::None, None, None);
+            ctx.node_flavor = NodeFlavor::KnotsBlake2b;
+            let mut step = InternalBitcoindStep::new(&dir);
+            Step::load_context(&mut step, &ctx);
+            let conf = define_config(&mut step);
+            assert!(conf.networks.contains_key(&chain.bitcoin_network()));
+            assert_eq!(
+                step.bitcoind_datadir,
+                bitcoind::internal_bitcoind_datadir_for(&dir, NodeChainFamily::BitcoinBlake2b)
+            );
+            assert_eq!(
+                step.bitcoind_config.as_ref().unwrap().rpc_auth,
+                BitcoindRpcAuth::CookieFile(internal_bitcoind_cookie_path(
+                    &step.bitcoind_datadir,
+                    &chain.bitcoin_network()
+                ))
+            );
+            assert_eq!(std::fs::read(bitcoin.join("bitcoin.conf")).unwrap(), before);
+            assert!(!crate::node::revalidate::ManagedNodeState::path(&dir).exists());
+            std::fs::remove_dir_all(dir.path()).unwrap();
         }
     }
 

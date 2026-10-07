@@ -1898,7 +1898,15 @@ pub struct Bitcoind {
 /// to launch whatever is installed. That was not true while the config carried a
 /// Knots-only key.
 pub fn configured_managed_flavor(coincube_datadir: &CoincubeDirectory) -> Option<NodeFlavor> {
-    let state = crate::node::revalidate::ManagedNodeState::load(coincube_datadir);
+    configured_managed_flavor_for(coincube_datadir, NodeChainFamily::Bitcoin)
+}
+
+pub fn configured_managed_flavor_for(
+    coincube_datadir: &CoincubeDirectory,
+    family: NodeChainFamily,
+) -> Option<NodeFlavor> {
+    let state =
+        crate::node::revalidate::ManagedNodeState::try_load_for(coincube_datadir, family).ok()?;
     if let Some(flavor) = state.configured_flavor {
         return Some(flavor);
     }
@@ -2050,18 +2058,16 @@ impl Bitcoind {
 
     /// Start the managed node for a chain, by identity.
     ///
-    /// The chain-aware entry point: a chain this build cannot run is refused
-    /// before anything is read or written, and a Bitcoin chain is handed to
-    /// [`Self::maybe_start`] under its encoding. The Bitcoin Blake2b family has
-    /// no start path in this build — the runtime is dormant — so it is refused
-    /// here too rather than reaching a datadir it would have to create.
+    /// Select a managed family by exact identity. Fork nodes use their own
+    /// binary, configuration, cookie and lock; generic wallet runtime admission
+    /// remains separate from starting a syncing companion.
     pub fn maybe_start_for_chain(
         chain: crate::chain::ChainId,
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
         Self::preflight_for_chain(chain, coincube_datadir)?;
-        Self::maybe_start(chain.bitcoin_network(), config, coincube_datadir)
+        Self::maybe_start_on_chain(chain, config, coincube_datadir)
     }
 
     /// Everything [`Self::maybe_start_for_chain`] refuses, decided without a
@@ -2076,18 +2082,13 @@ impl Bitcoind {
         chain: crate::chain::ChainId,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<NodeFlavor, StartInternalBitcoindError> {
-        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
-            return Err(StartInternalBitcoindError::ChainUnavailable(reason));
-        }
-        if NodeChainFamily::from_chain(chain) != NodeChainFamily::Bitcoin {
-            // Unreachable while the Blake2b family is dormant; refusing rather
-            // than panicking keeps the guard above the only thing standing
-            // between a flag and a spawn.
-            return Err(StartInternalBitcoindError::ChainUnavailable(
-                crate::chain::BTCB2_DORMANT_REASON,
-            ));
-        }
-        let configured = configured_managed_flavor(coincube_datadir).unwrap_or(NodeFlavor::Core);
+        let family = NodeChainFamily::from_chain(chain);
+        let default = if chain.is_blake2b() {
+            NodeFlavor::KnotsBlake2b
+        } else {
+            NodeFlavor::Core
+        };
+        let configured = configured_managed_flavor_for(coincube_datadir, family).unwrap_or(default);
         configured
             .check_chain(chain)
             .map_err(StartInternalBitcoindError::ProviderChainMismatch)?;
@@ -2107,13 +2108,44 @@ impl Bitcoind {
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
-        let chain = crate::chain::ChainId::from(network);
-        let configured_flavor =
-            configured_managed_flavor(coincube_datadir).unwrap_or(NodeFlavor::Core);
+        Self::maybe_start_on_chain(network.into(), config, coincube_datadir)
+    }
+
+    fn maybe_start_on_chain(
+        chain: crate::chain::ChainId,
+        config: BitcoindConfig,
+        coincube_datadir: &CoincubeDirectory,
+    ) -> Result<Self, StartInternalBitcoindError> {
+        let network = chain.bitcoin_network();
+        let family = NodeChainFamily::from_chain(chain);
+        let configured_flavor = Self::preflight_for_chain(chain, coincube_datadir)?;
+        if chain.is_blake2b() {
+            let dir = internal_bitcoind_datadir_for(coincube_datadir, family);
+            let conf = InternalBitcoindConfig::from_file(&internal_bitcoind_config_path(&dir))
+                .map_err(|e| StartInternalBitcoindError::ConfigUnavailable(e.to_string()))?;
+            let Some(section) = conf.networks.get(&network) else {
+                return Err(StartInternalBitcoindError::ConfigUnavailable(
+                    "Missing managed fork network configuration".into(),
+                ));
+            };
+            if config.addr
+                != crate::installer::step::node::bitcoind::internal_bitcoind_address(
+                    section.rpc_port,
+                )
+                || config.rpc_auth
+                    != coincubed::config::BitcoindRpcAuth::CookieFile(
+                        internal_bitcoind_cookie_path(&dir, &network),
+                    )
+            {
+                return Err(StartInternalBitcoindError::ConfigUnavailable(
+                    "Local fork RPC configuration differs from the managed node".into(),
+                ));
+            }
+        }
         configured_flavor
             .check_chain(chain)
             .map_err(StartInternalBitcoindError::ProviderChainMismatch)?;
-        let bitcoind_datadir = internal_bitcoind_datadir(coincube_datadir);
+        let bitcoind_datadir = internal_bitcoind_datadir_for(coincube_datadir, family);
         // Settle the datadir's identity before the first connection to it, not after.
         // Every managed-node start comes through here — the loader with a config it read
         // off disk, the installer with one it just wrote, the settings switch — and each
@@ -2128,7 +2160,9 @@ impl Bitcoind {
         let identity = establish_node_identity(&config);
         // And give a file written before claim step 1 the OP_RETURN relay cap
         // the step's marker needs (Bitcoin family only).
-        ensure_data_carrier_size(coincube_datadir);
+        if !chain.is_blake2b() {
+            ensure_data_carrier_size(coincube_datadir);
+        }
         // Launch the binary the user asked for. Nothing in the conf forces our
         // hand (it carries no Knots-only key; those go on the command line,
         // per binary — see `NodeFlavor::managed_spawn_args`), but the choice is
@@ -2142,14 +2176,23 @@ impl Bitcoind {
         let running = coincubed::BitcoinD::new(&config, "internal_bitcoind_start".to_string())
             .ok()
             .map(|running| {
-                let running_flavor = running
-                    .subversion()
-                    .as_deref()
-                    .map(NodeFlavor::from_subversion)
-                    .unwrap_or(configured_flavor);
+                let running_flavor = if chain.is_blake2b() {
+                    configured_flavor
+                } else {
+                    running
+                        .subversion()
+                        .as_deref()
+                        .map(NodeFlavor::from_subversion)
+                        .unwrap_or(configured_flavor)
+                };
                 (running, running_flavor)
             });
-        if let Some((_, running_flavor)) = &running {
+        if let Some((running_node, running_flavor)) = &running {
+            if chain.is_blake2b() {
+                running_node
+                    .check_local_fork_chain(chain, false)
+                    .map_err(|e| StartInternalBitcoindError::BitcoinDError(e.to_string()))?;
+            }
             // The managed node is shared by every Vault, so flavour is global.
             // If the running node already matches the configured flavour, reuse
             // it: it has read its file already, so no conf rewrite and no lock
@@ -2159,18 +2202,23 @@ impl Bitcoind {
                 // Reconcile here too: this vault may be attaching to a node another
                 // vault swapped the flavour of, so this is a start path like any
                 // other. `running_flavor` is read from the node's own subversion.
-                crate::node::revalidate::reconcile_after_start(
-                    coincube_datadir,
-                    &identity,
-                    crate::chain::ChainId::from(network),
-                    ObservedBuild {
-                        flavor: *running_flavor,
-                    },
-                );
+                if !chain.is_blake2b() {
+                    crate::node::revalidate::reconcile_after_start(
+                        coincube_datadir,
+                        &identity,
+                        crate::chain::ChainId::from(network),
+                        ObservedBuild {
+                            flavor: *running_flavor,
+                        },
+                    );
+                }
                 return Ok(Bitcoind {
                     config,
-                    lock: LockFile::create(coincube_datadir.bitcoind_directory(), network)
-                        .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
+                    lock: LockFile::create(
+                        coincube_datadir.bitcoind_directory_for(family),
+                        network,
+                    )
+                    .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
                 });
             }
         }
@@ -2188,11 +2236,9 @@ impl Bitcoind {
         // It runs before the first irreversible step below — stopping a
         // mismatched running node — so a refusal leaves that node running
         // rather than stopped with no replacement started.
-        crate::node::managed_conf::update_managed_conf(
-            coincube_datadir,
-            NodeChainFamily::Bitcoin,
-            |txn| Ok(((), txn.conf.clone())),
-        )
+        crate::node::managed_conf::update_managed_conf(coincube_datadir, family, |txn| {
+            Ok(((), txn.conf.clone()))
+        })
         .map(|outcome| outcome.logged("rewriting the managed bitcoin.conf before the spawn"))
         .map_err(|e| StartInternalBitcoindError::ConfigUnavailable(e.to_string()))?;
         if let Some((running, running_flavor)) = running {
@@ -2235,6 +2281,13 @@ impl Bitcoind {
             format!("-chain={}", network.to_core_arg()),
             format!("-datadir={}", datadir_path_str),
         ];
+        if chain.is_blake2b() {
+            args.extend([
+                "-listen=0".into(),
+                "-listenonion=0".into(),
+                "-discover=0".into(),
+            ]);
+        }
         args.extend(
             exe_flavor
                 .managed_spawn_args()
@@ -2304,16 +2357,29 @@ impl Bitcoind {
                         .subversion()
                         .map(|sv| ObservedBuild::from_subversion(&sv))
                         .unwrap_or_else(|| ObservedBuild::assumed(configured_flavor));
-                    crate::node::revalidate::reconcile_after_start(
-                        coincube_datadir,
-                        &identity,
-                        crate::chain::ChainId::from(network),
-                        observed,
-                    );
+                    if chain.is_blake2b() {
+                        if let Err(e) = started.check_local_fork_chain(chain, false) {
+                            // We own this freshly spawned process. A wrong-chain
+                            // binary must not be orphaned on a refused start.
+                            let _ = process.kill();
+                            let _ = process.wait();
+                            return Err(StartInternalBitcoindError::BitcoinDError(e.to_string()));
+                        }
+                    } else {
+                        crate::node::revalidate::reconcile_after_start(
+                            coincube_datadir,
+                            &identity,
+                            chain,
+                            observed,
+                        );
+                    }
                     return Ok(Self {
                         config,
-                        lock: LockFile::create(coincube_datadir.bitcoind_directory(), network)
-                            .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
+                        lock: LockFile::create(
+                            coincube_datadir.bitcoind_directory_for(family),
+                            network,
+                        )
+                        .map_err(|e| StartInternalBitcoindError::Lock(format!("{:?}", e)))?,
                     });
                 }
                 Err(coincubed::BitcoindError::CookieFile(_)) => {
@@ -4169,8 +4235,8 @@ mod tests {
     // identity marker, migrates the conf or resolves a binary — and the
     // chain-aware entry refuses a dormant chain before it even reads the ledger.
     #[test]
-    fn start_refuses_mismatch_and_dormant_chains_before_touching_the_datadir() {
-        use crate::chain::{ChainId, BTCB2_DORMANT_REASON};
+    fn start_refuses_provider_and_family_mismatch_before_touching_the_datadir() {
+        use crate::chain::ChainId;
         use crate::node::revalidate::ManagedNodeState;
         let (base, root) = a_temp_coincube_datadir("start");
         let bitcoin_datadir = internal_bitcoind_datadir(&root);
@@ -4196,10 +4262,8 @@ mod tests {
             .copied()
         {
             match Bitcoind::maybe_start_for_chain(chain, config.clone(), &root) {
-                Err(StartInternalBitcoindError::ChainUnavailable(reason)) => {
-                    assert_eq!(reason, BTCB2_DORMANT_REASON)
-                }
-                other => panic!("expected ChainUnavailable, got {:?}", other.map(|_| ())),
+                Err(StartInternalBitcoindError::ConfigUnavailable(_)) => {}
+                other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
             }
             untouched(&root);
         }
@@ -4899,5 +4963,107 @@ mod tests {
             Ok((46001, 46002))
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod local_fork_smoke {
+    use super::*;
+    #[test]
+    #[ignore = "requires COINCUBE_BLAKE2B_SMOKE_EXE pointing to the verified pinned release"]
+    fn blake2b_real_managed_node_starts_without_touching_bitcoin() {
+        use std::os::unix::fs::PermissionsExt;
+        let binary = std::env::var("COINCUBE_BLAKE2B_SMOKE_EXE").expect("verified release path");
+        let base =
+            std::env::temp_dir().join(format!("blake2b-managed-smoke-{}", std::process::id()));
+        let root = CoincubeDirectory::new(base.clone());
+        let family = NodeChainFamily::BitcoinBlake2b;
+        let datadir = internal_bitcoind_datadir_for(&root, family);
+        std::fs::create_dir_all(&datadir).unwrap();
+        let bitcoin = internal_bitcoind_datadir(&root);
+        std::fs::create_dir_all(&bitcoin).unwrap();
+        std::fs::write(bitcoin.join("bitcoin.conf"), b"Bitcoin sentinel").unwrap();
+        let mut conf = InternalBitcoindConfig::for_flavor(NodeFlavor::KnotsBlake2b);
+        let rpc_port = crate::installer::step::node::bitcoind::get_available_port().unwrap();
+        let p2p_port = crate::installer::step::node::bitcoind::get_available_port().unwrap();
+        conf.networks.insert(
+            Network::Testnet4,
+            InternalBitcoindNetworkConfig {
+                rpc_port,
+                p2p_port,
+                prune: 550,
+                rpc_auth: None,
+            },
+        );
+        conf.to_ini()
+            .write_to_file(internal_bitcoind_config_path(&datadir))
+            .unwrap();
+        crate::node::revalidate::ManagedNodeState::record_configured(
+            &root,
+            NodeFlavor::KnotsBlake2b,
+        );
+        let exe = internal_bitcoind_exe_path_for(&root, family, NodeFlavor::KnotsBlake2b.version());
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        // Exercise the production spawn path while disabling peer discovery and
+        // connections in this disposable test. Never use a live node datadir.
+        assert!(!binary.contains('\''));
+        std::fs::write(
+            &exe,
+            format!(
+                "#!/bin/sh\nexec '{}' -connect=0 -dnsseed=0 \"$@\"\n",
+                binary
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let cfg = BitcoindConfig {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], rpc_port)),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                internal_bitcoind_cookie_path(&datadir, &Network::Testnet4),
+            ),
+        };
+        crate::node::tor::prepare_inbound_tor_for_chain(
+            &root,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        )
+        .unwrap();
+        let node = Bitcoind::maybe_start_for_chain(
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+            cfg.clone(),
+            &root,
+        )
+        .unwrap();
+        let rpc = coincubed::BitcoinD::new(&cfg, "smoke".into()).unwrap();
+        assert!(rpc
+            .check_local_fork_chain(crate::chain::ChainId::BitcoinBlake2bTestnet4, false)
+            .is_ok());
+        assert!(rpc
+            .check_local_fork_chain(crate::chain::ChainId::BitcoinBlake2bTestnet4, true)
+            .is_err());
+        assert_eq!(
+            std::fs::read(bitcoin.join("bitcoin.conf")).unwrap(),
+            b"Bitcoin sentinel"
+        );
+        assert!(!crate::node::revalidate::ManagedNodeState::path(&root).exists());
+        node.stop();
+        // The cookie disappears before chainstate is flushed. Wait for Knots'
+        // final shutdown message before deleting any files from its datadir.
+        let log = datadir
+            .join(bitcoind_network_dir(&Network::Testnet4).unwrap())
+            .join("debug.log");
+        let mut stopped = false;
+        for _ in 0..200 {
+            if std::fs::read_to_string(&log)
+                .unwrap_or_default()
+                .contains("Shutdown: done")
+            {
+                stopped = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        assert!(stopped, "disposable node did not finish shutdown");
+        assert!(!internal_bitcoind_cookie_path(&datadir, &Network::Testnet4).exists());
+        std::fs::remove_dir_all(base).unwrap();
     }
 }

@@ -103,6 +103,11 @@ fn rust_values() -> Vec<(&'static str, i64)> {
         ("CC_ERR_UNKNOWN_NETWORK", CC_ERR_UNKNOWN_NETWORK as i64),
         ("CC_ERR_PANIC", CC_ERR_PANIC as i64),
         (
+            "CC_ERR_INVALID_DERIVATION_PATH",
+            CC_ERR_INVALID_DERIVATION_PATH as i64,
+        ),
+        ("CC_ERR_INVALID_XPUB", CC_ERR_INVALID_XPUB as i64),
+        (
             "CC_ERR_MISSING_UNIFIED_FLAG",
             CC_ERR_MISSING_UNIFIED_FLAG as i64,
         ),

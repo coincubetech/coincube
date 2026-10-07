@@ -98,7 +98,17 @@ impl ManagedNodeState {
     /// error, so the writers below can leave an unreadable sidecar where it is
     /// rather than overwrite it with a default.
     pub fn try_load(coincube_datadir: &CoincubeDirectory) -> io::Result<Self> {
-        let path = Self::path(coincube_datadir);
+        Self::try_load_for(
+            coincube_datadir,
+            crate::node::bitcoind::NodeChainFamily::Bitcoin,
+        )
+    }
+
+    pub fn try_load_for(
+        coincube_datadir: &CoincubeDirectory,
+        family: crate::node::bitcoind::NodeChainFamily,
+    ) -> io::Result<Self> {
+        let path = Self::path_for(coincube_datadir, family);
         let contents = match std::fs::read_to_string(&path) {
             Ok(contents) => contents,
             Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Self::default()),
@@ -122,7 +132,18 @@ impl ManagedNodeState {
     /// (The `inbound_tor.json` precedent writes in place; this one is on the
     /// startup path of every vault, so it is worth the extra care.)
     pub fn save(&self, coincube_datadir: &CoincubeDirectory) -> io::Result<()> {
-        let path = Self::path(coincube_datadir);
+        self.save_for(
+            coincube_datadir,
+            crate::node::bitcoind::NodeChainFamily::Bitcoin,
+        )
+    }
+
+    pub fn save_for(
+        &self,
+        coincube_datadir: &CoincubeDirectory,
+        family: crate::node::bitcoind::NodeChainFamily,
+    ) -> io::Result<()> {
+        let path = Self::path_for(coincube_datadir, family);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
@@ -157,7 +178,7 @@ impl ManagedNodeState {
     /// [`Self::record_run`]: a sidecar we cannot read is left alone rather than
     /// overwritten with a default.
     pub fn record_configured(coincube_datadir: &CoincubeDirectory, flavor: NodeFlavor) {
-        let mut state = match Self::try_load(coincube_datadir) {
+        let mut state = match Self::try_load_for(coincube_datadir, flavor.chain_family()) {
             Ok(state) => state,
             Err(e) => {
                 warn!("not recording the configured managed-node flavour: state unreadable ({e})");
@@ -168,7 +189,7 @@ impl ManagedNodeState {
             return;
         }
         state.configured_flavor = Some(flavor);
-        if let Err(e) = state.save(coincube_datadir) {
+        if let Err(e) = state.save_for(coincube_datadir, flavor.chain_family()) {
             warn!("could not record the configured managed-node flavour: {e}");
         }
     }
@@ -484,5 +505,31 @@ mod tests {
             .exists());
 
         let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+#[cfg(test)]
+mod family_ledger_tests {
+    use super::*;
+    use crate::node::bitcoind::NodeChainFamily;
+    #[test]
+    fn configured_blake2b_ledger_preserves_bitcoin_ledger_bytes() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("blake2b-ledger-{}", std::process::id())),
+        );
+        ManagedNodeState::record_configured(&root, NodeFlavor::Core);
+        let bitcoin = std::fs::read(ManagedNodeState::path(&root)).unwrap();
+        ManagedNodeState::record_configured(&root, NodeFlavor::KnotsBlake2b);
+        assert_eq!(
+            std::fs::read(ManagedNodeState::path(&root)).unwrap(),
+            bitcoin
+        );
+        assert_eq!(
+            ManagedNodeState::try_load_for(&root, NodeChainFamily::BitcoinBlake2b)
+                .unwrap()
+                .configured_flavor,
+            Some(NodeFlavor::KnotsBlake2b)
+        );
+        std::fs::remove_dir_all(root.path()).unwrap();
     }
 }

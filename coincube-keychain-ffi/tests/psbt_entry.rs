@@ -39,12 +39,14 @@ fn signer(byte: u8) -> MasterSigner {
 
 fn descriptor_key(
     signer: &MasterSigner,
-    branch: u32,
+    account: u32,
     secp: &secp256k1::Secp256k1<secp256k1::All>,
 ) -> DescriptorPublicKey {
     let origin = DerivationPath::from(vec![
         bip32::ChildNumber::from_hardened_idx(48).unwrap(),
-        bip32::ChildNumber::from_hardened_idx(branch).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(2).unwrap(),
     ]);
     DescriptorPublicKey::MultiXPub(DescriptorMultiXKey {
         origin: Some((signer.fingerprint(secp), origin.clone())),
@@ -140,6 +142,51 @@ fn fixture(input_count: usize) -> Fixture {
     }
 }
 
+fn retarget_signer_key(
+    fixture: &mut Fixture,
+    signer_index: usize,
+    path: DerivationPath,
+    secp: &secp256k1::Secp256k1<secp256k1::All>,
+) {
+    let fingerprint = fixture.signers[signer_index].fingerprint(secp);
+    let old_public_key = fixture.psbt.psbt().inputs[0]
+        .bip32_derivation
+        .iter()
+        .find(|(_, source)| source.0 == fingerprint)
+        .map(|(public_key, _)| *public_key)
+        .unwrap();
+    let new_public_key = fixture.signers[signer_index]
+        .xpriv_at(&path, secp)
+        .to_priv()
+        .public_key(secp)
+        .inner;
+
+    let input = &mut fixture.psbt.psbt_mut().inputs[0];
+    input.bip32_derivation.remove(&old_public_key);
+    input
+        .bip32_derivation
+        .insert(new_public_key, (fingerprint, path));
+    let mut witness_script = input.witness_script.take().unwrap().into_bytes();
+    let position = witness_script
+        .windows(old_public_key.serialize().len())
+        .position(|window| window == old_public_key.serialize())
+        .unwrap();
+    witness_script[position..position + new_public_key.serialize().len()]
+        .copy_from_slice(&new_public_key.serialize());
+    let witness_script = ScriptBuf::from_bytes(witness_script);
+    input.witness_script = Some(witness_script.clone());
+    let output = TxOut {
+        value: input.witness_utxo.as_ref().unwrap().value,
+        script_pubkey: ScriptBuf::new_p2wsh(&witness_script.wscript_hash()),
+    };
+    input.witness_utxo = Some(output.clone());
+    input.non_witness_utxo.as_mut().unwrap().output[0] = output;
+    let txid = input.non_witness_utxo.as_ref().unwrap().compute_txid();
+    fixture.psbt.psbt_mut().unsigned_tx.input[0]
+        .previous_output
+        .txid = txid;
+}
+
 /// The digest core produces for one input, computed without going near the ABI.
 fn core_digest(psbt: &UnifiedPsbt, index: usize) -> [u8; 32] {
     let spent_outputs: Vec<TxOut> = psbt
@@ -223,8 +270,20 @@ fn verify_through_ffi(bytes: &[u8]) -> (FfiResult, usize) {
 }
 
 /// Sign through the ABI using the two-call length protocol.
-fn sign_through_ffi(bytes: &[u8], mnemonic: &str) -> (FfiResult, Vec<u8>) {
-    let phrase = mnemonic.as_bytes();
+fn sign_through_ffi(bytes: &[u8], signer: &MasterSigner, account: u32) -> (FfiResult, Vec<u8>) {
+    let secp = secp256k1::Secp256k1::new();
+    let target_path = DerivationPath::from(vec![
+        bip32::ChildNumber::from_hardened_idx(48).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(0).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(account).unwrap(),
+        bip32::ChildNumber::from_hardened_idx(2).unwrap(),
+    ]);
+    let target_xpub = signer.xpub_at(&target_path, &secp).to_string();
+    let phrase = signer.mnemonic_str();
+    let phrase = phrase.as_bytes();
+    let target_path = target_path.to_string();
+    let target_path = target_path.as_bytes();
+    let target_xpub = target_xpub.as_bytes();
     let mut required = 0usize;
     let mut detail = CcErrorDetail::default();
     let mut message = [0u8; 512];
@@ -238,6 +297,10 @@ fn sign_through_ffi(bytes: &[u8], mnemonic: &str) -> (FfiResult, Vec<u8>) {
             bytes.len(),
             phrase.as_ptr(),
             phrase.len(),
+            target_path.as_ptr(),
+            target_path.len(),
+            target_xpub.as_ptr(),
+            target_xpub.len(),
             CC_NETWORK_BITCOIN,
             std::ptr::null_mut(),
             0,
@@ -275,6 +338,10 @@ fn sign_through_ffi(bytes: &[u8], mnemonic: &str) -> (FfiResult, Vec<u8>) {
             bytes.len(),
             phrase.as_ptr(),
             phrase.len(),
+            target_path.as_ptr(),
+            target_path.len(),
+            target_xpub.as_ptr(),
+            target_xpub.len(),
             CC_NETWORK_BITCOIN,
             out.as_mut_ptr(),
             out.len(),
@@ -395,8 +462,7 @@ fn sign_then_verify_through_the_ffi() {
          being finalizable"
     );
 
-    let phrase = fixture.signers[0].mnemonic_str();
-    let (result, signed) = sign_through_ffi(&bytes, &phrase);
+    let (result, signed) = sign_through_ffi(&bytes, &fixture.signers[0], 0);
     assert_eq!(result.code, CC_OK, "{}", result.message);
     assert!(!signed.is_empty(), "signed PSBT should not be empty");
     assert_ne!(signed, bytes, "signing should change the PSBT it was given");
@@ -416,14 +482,56 @@ fn second_signer_accumulates() {
     let fixture = fixture(1);
     let bytes = export_standard(&fixture.psbt).unwrap();
 
-    let (result, once) = sign_through_ffi(&bytes, &fixture.signers[0].mnemonic_str());
+    let (result, once) = sign_through_ffi(&bytes, &fixture.signers[0], 0);
     assert_eq!(result.code, CC_OK, "{}", result.message);
-    let (result, twice) = sign_through_ffi(&once, &fixture.signers[1].mnemonic_str());
+    let (result, twice) = sign_through_ffi(&once, &fixture.signers[1], 0);
     assert_eq!(result.code, CC_OK, "{}", result.message);
 
     let (result, verified) = verify_through_ffi(&twice);
     assert_eq!(result.code, CC_OK, "{}", result.message);
     assert_eq!(verified, 2, "both signers' records should be present");
+}
+
+#[test]
+fn ffi_signing_is_confined_to_the_authenticated_account_target() {
+    let fixture = fixture(1);
+    let bytes = export_standard(&fixture.psbt).unwrap();
+
+    // Signer 2 appears in both the primary account (branch 0) and the recovery
+    // account (branch 1). Each authenticated target signs exactly one key.
+    let (result, primary) = sign_through_ffi(&bytes, &fixture.signers[2], 0);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    let (result, verified) = verify_through_ffi(&primary);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!(verified, 1);
+
+    let (result, recovery) = sign_through_ffi(&bytes, &fixture.signers[2], 1);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    let (result, verified) = verify_through_ffi(&recovery);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!(verified, 1);
+}
+
+#[test]
+fn ffi_refuses_account_node_and_hardened_descendant_derivations() {
+    let secp = secp256k1::Secp256k1::new();
+    let signer = signer(1);
+    let account_path = DerivationPath::from_str("m/48'/0'/0'/2'").unwrap();
+    let hardened_child = account_path
+        .clone()
+        .child(bip32::ChildNumber::from_hardened_idx(7).unwrap());
+
+    for path in [account_path, hardened_child] {
+        let mut fixture = fixture(1);
+        retarget_signer_key(&mut fixture, 0, path, &secp);
+        let bytes = export_standard(&fixture.psbt).unwrap();
+        let (result, signed) = sign_through_ffi(&bytes, &signer, 0);
+        assert_eq!(result.code, CC_OK, "{}", result.message);
+        assert_eq!(signed, bytes);
+        let (result, verified) = verify_through_ffi(&signed);
+        assert_eq!(result.code, CC_OK, "{}", result.message);
+        assert_eq!(verified, 0);
+    }
 }
 
 /// A PSBT carrying only `non_witness_utxo` still produces a digest.
@@ -465,29 +573,53 @@ fn witness_utxo_is_not_required_when_the_previous_transaction_is_present() {
     }
 }
 
-/// Dropping the previous transaction *is* refused, because core needs it to
-/// authenticate the prevout at all.
+/// A native-P2WSH input may use `witness_utxo` without the full previous
+/// transaction on the Keychain boundary.
 #[test]
-fn missing_previous_transaction_is_refused() {
+fn witness_only_p2wsh_input_digests_signs_and_verifies() {
+    let fixture = fixture(1);
+    let mut witness_only = fixture.psbt.clone();
+    witness_only.psbt_mut().inputs[0].non_witness_utxo = None;
+    let bytes = export_standard(&witness_only).unwrap();
+
+    let (result, digest) = psbt_digest_through_ffi(&bytes, 0);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!(digest, core_digest(&fixture.psbt, 0));
+
+    let (result, signed) = sign_through_ffi(&bytes, &fixture.signers[0], 0);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    let (result, verified) = verify_through_ffi(&signed);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!(verified, 1);
+}
+
+#[test]
+fn missing_both_prevout_forms_is_refused() {
     let fixture = fixture(1);
     let mut broken = fixture.psbt.clone();
     broken.psbt_mut().inputs[0].non_witness_utxo = None;
+    broken.psbt_mut().inputs[0].witness_utxo = None;
     let bytes = export_standard(&broken).unwrap();
 
     let (result, _) = psbt_digest_through_ffi(&bytes, 0);
-    assert_eq!(
-        result.code, CC_ERR_PSBT_VALIDATION,
-        "expected a validation refusal, got {} ({})",
-        result.code, result.message
-    );
-    // Pinned so this test and the P2WSH-gate one above cannot quietly swap
-    // reasons: both return the same coarse code, and only the text tells them
-    // apart.
-    assert!(
-        result.message.contains("not authenticated"),
-        "expected a prevout-authentication refusal; got: {}",
-        result.message
-    );
+    assert_eq!(result.code, CC_ERR_PSBT_VALIDATION);
+    assert!(result.message.contains("not authenticated"));
+}
+
+#[test]
+fn inconsistent_witness_and_full_prevouts_are_refused() {
+    let fixture = fixture(1);
+    let mut broken = fixture.psbt.clone();
+    broken.psbt_mut().inputs[0]
+        .witness_utxo
+        .as_mut()
+        .unwrap()
+        .value = Amount::from_sat(1);
+    let bytes = export_standard(&broken).unwrap();
+
+    let (result, _) = psbt_digest_through_ffi(&bytes, 0);
+    assert_eq!(result.code, CC_ERR_PSBT_VALIDATION);
+    assert!(result.message.contains("witness_utxo conflicts"));
 }
 
 /// Core owns the refusal: an input missing its witness script is rejected by
@@ -625,6 +757,10 @@ fn unknown_network_is_rejected() {
             bytes.len(),
             phrase.as_bytes().as_ptr(),
             phrase.len(),
+            b"m/48'/0'/0'/2'".as_ptr(),
+            b"m/48'/0'/0'/2'".len(),
+            b"xpub-invalid".as_ptr(),
+            b"xpub-invalid".len(),
             99,
             std::ptr::null_mut(),
             0,
@@ -638,10 +774,95 @@ fn unknown_network_is_rejected() {
     assert_eq!(detail.detail_a, 99);
 }
 
+#[test]
+fn invalid_target_path_and_xpub_are_typed_boundary_refusals() {
+    let fixture = fixture(1);
+    let bytes = export_standard(&fixture.psbt).unwrap();
+    let phrase = fixture.signers[0].mnemonic_str();
+
+    for (path, xpub, expected) in [
+        ("not-a-path", "not-an-xpub", CC_ERR_INVALID_DERIVATION_PATH),
+        ("m/48'/0'/0'/2'", "not-an-xpub", CC_ERR_INVALID_XPUB),
+    ] {
+        let mut detail = CcErrorDetail::default();
+        let mut written = 0usize;
+        let code = unsafe {
+            coincube_unified_psbt_sign(
+                bytes.as_ptr(),
+                bytes.len(),
+                phrase.as_bytes().as_ptr(),
+                phrase.len(),
+                path.as_bytes().as_ptr(),
+                path.len(),
+                xpub.as_bytes().as_ptr(),
+                xpub.len(),
+                CC_NETWORK_BITCOIN,
+                std::ptr::null_mut(),
+                0,
+                &mut written,
+                &mut detail,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        assert_eq!(code, expected, "path={path} xpub={xpub}");
+    }
+}
+
+#[test]
+fn malformed_or_authority_expanding_targets_are_refused_before_signing() {
+    let fixture = fixture(1);
+    let bytes = export_standard(&fixture.psbt).unwrap();
+    let signer = &fixture.signers[2];
+    let phrase = signer.mnemonic_str();
+    let secp = secp256k1::Secp256k1::new();
+
+    for path in [
+        "m",
+        "m/48'",
+        "m/48'/0'",
+        "m/48'/0'/0'",
+        "m/47'/0'/0'/2'",
+        "m/48'/1'/0'/2'",
+        "m/48'/0'/0'/1'",
+        "m/48/0'/0'/2'",
+        "m/48'/0/0'/2'",
+        "m/48'/0'/0/2'",
+        "m/48'/0'/0'/2",
+    ] {
+        let derivation = DerivationPath::from_str(path).unwrap();
+        let xpub = signer.xpub_at(&derivation, &secp).to_string();
+        let mut detail = CcErrorDetail::default();
+        let mut written = 0usize;
+        let mut message = [0u8; 512];
+        let code = unsafe {
+            coincube_unified_psbt_sign(
+                bytes.as_ptr(),
+                bytes.len(),
+                phrase.as_bytes().as_ptr(),
+                phrase.len(),
+                path.as_bytes().as_ptr(),
+                path.len(),
+                xpub.as_bytes().as_ptr(),
+                xpub.len(),
+                CC_NETWORK_BITCOIN,
+                std::ptr::null_mut(),
+                0,
+                &mut written,
+                &mut detail,
+                message.as_mut_ptr(),
+                message.len(),
+            )
+        };
+        assert_eq!(code, CC_ERR_SIGNING, "path={path}");
+        assert_eq!(written, 0, "path={path}");
+    }
+}
+
 /// The ABI reports its own revision and digest length.
 #[test]
 fn abi_metadata_is_exported() {
-    assert_eq!(coincube_keychain_ffi_abi_version(), 1);
+    assert_eq!(coincube_keychain_ffi_abi_version(), 2);
     assert_eq!(coincube_keychain_ffi_digest_len(), 32);
     assert_eq!(CC_DIGEST_LEN, 32);
 }

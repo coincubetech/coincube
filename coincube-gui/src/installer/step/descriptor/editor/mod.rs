@@ -324,12 +324,6 @@ impl Step for DefineDescriptor {
             Message::DefineDescriptor(message::DefineDescriptor::OpenBorderWalletWizard(
                 coordinates,
             )) => {
-                if self.chain.is_blake2b() {
-                    self.error = Some(
-                        "Border Wallet creation is unavailable for Bitcoin Blake2b".to_string(),
-                    );
-                    return Task::none();
-                }
                 let modal = border_wallet_wizard::BorderWalletWizard::new(
                     self.network,
                     coordinates,
@@ -1044,8 +1038,12 @@ mod tests {
                     (0, 0),
                 ])),
             );
+            // HW-1 Amendment A: the Border Wallet wizard opens on Bitcoin
+            // Blake2b as it does on Bitcoin.
             assert!(into_stream(task).is_none());
-            assert!(step.modal.is_none());
+            assert!(step.error.is_none());
+            assert!(step.modal.is_some());
+            step.modal = None;
             step.use_taproot = true;
             assert!(!step.apply(&mut ctx));
             assert!(ctx.descriptor.is_none());
@@ -1071,6 +1069,189 @@ mod tests {
             assert!(ctx.descriptor.is_none());
             assert!(KeySource::Manual.available_for_creation(chain));
             assert!(KeySource::MasterSigner.available_for_creation(chain));
+        }
+    }
+
+    /// Every key source the creation gate knows, one of each.
+    fn every_key_source() -> Vec<KeySource> {
+        use crate::app::settings::{GridSeedSource, Provider, ProviderKey};
+        use crate::services::keys::api::KeyKind;
+        let provider_key = ProviderKey {
+            uuid: "uuid".to_string(),
+            token: "token".to_string(),
+            provider: Provider {
+                uuid: "provider".to_string(),
+                name: "Provider".to_string(),
+            },
+        };
+        vec![
+            KeySource::MasterSigner,
+            KeySource::Manual,
+            KeySource::Device(async_hwi::DeviceKind::Ledger, None),
+            KeySource::Device(async_hwi::DeviceKind::Specter, None),
+            KeySource::KeychainKey {
+                owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                    primary_owner_id: 1,
+                },
+                key_id: 1,
+                name: "phone".to_string(),
+            },
+            KeySource::Token(KeyKind::SafetyNet, provider_key.clone()),
+            KeySource::Token(KeyKind::Cosigner, provider_key),
+            KeySource::BorderWallet {
+                grid_seed_source: GridSeedSource::Independent,
+            },
+        ]
+    }
+
+    /// HW-1 and its Amendment A (Robert, 2026-10-06): on both Bitcoin
+    /// Blake2b chains the Cube key, xpubs, hardware devices and Border
+    /// Wallet keys may build a Vault; Keychain keys and provider tokens may
+    /// not. Every source stays
+    /// available on every Bitcoin-family chain.
+    #[test]
+    fn creation_gate_on_bitcoin_blake2b_refuses_only_keychain_and_token_sources() {
+        use crate::chain::ChainId;
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            for source in every_key_source() {
+                let expected = matches!(
+                    source,
+                    KeySource::MasterSigner
+                        | KeySource::Manual
+                        | KeySource::Device(..)
+                        | KeySource::BorderWallet { .. }
+                );
+                assert_eq!(
+                    source.available_for_creation(chain),
+                    expected,
+                    "{:?} {:?}",
+                    chain,
+                    source
+                );
+            }
+        }
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ] {
+            for source in every_key_source() {
+                assert!(
+                    source.available_for_creation(chain),
+                    "{:?} {:?}",
+                    chain,
+                    source
+                );
+            }
+        }
+    }
+
+    /// HW-1: a Bitcoin Blake2b descriptor with a hardware device key on its
+    /// primary path applies, and records that a device is used so the
+    /// registration step runs. The same descriptor with a Keychain key in
+    /// the device's place is still refused.
+    #[test]
+    fn fork_descriptor_applies_with_a_device_key_and_refuses_a_keychain_key() {
+        use crate::installer::context::RemoteBackend;
+        use coincube_core::miniscript::bitcoin::bip32::DerivationPath;
+        for chain in [
+            crate::chain::ChainId::BitcoinBlake2b,
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+        ] {
+            let network = chain.bitcoin_network();
+            let coin = if network == Network::Bitcoin { 0 } else { 1 };
+            let key_from = |signer: &Signer, source: KeySource, name: &str| {
+                let path = DerivationPath::from_str(&format!("m/48'/{coin}'/0'/2'")).unwrap();
+                Key {
+                    source,
+                    name: name.to_string(),
+                    fingerprint: signer.fingerprint(),
+                    key: DescriptorPublicKey::from_str(&format!(
+                        "[{}/48'/{coin}'/0'/2']{}",
+                        signer.fingerprint(),
+                        signer.get_extended_pubkey(&path)
+                    ))
+                    .unwrap(),
+                    account: None,
+                }
+            };
+            let device_signer = Signer::generate(network).unwrap();
+            let backup_signer = Signer::generate(network).unwrap();
+            let device = key_from(
+                &device_signer,
+                KeySource::Device(async_hwi::DeviceKind::Ledger, None),
+                "Ledger",
+            );
+            let backup = key_from(&backup_signer, KeySource::Manual, "Backup");
+
+            let dir = CoincubeDirectory::new(PathBuf::new());
+            let mut ctx = Context::new_for_chain(chain, dir, RemoteBackend::None, None, None);
+            let mut step = DefineDescriptor::new(
+                network,
+                Arc::new(Mutex::new(Signer::generate(network).unwrap())),
+            );
+            step.load_context(&ctx);
+            step.keys.insert(device.fingerprint, device.clone());
+            step.keys.insert(backup.fingerprint, backup.clone());
+            step.paths[0].keys = vec![Some(device.clone())];
+            step.paths[0].threshold = 1;
+            step.paths[1].keys = vec![Some(backup.clone())];
+            step.paths[1].threshold = 1;
+            assert!(step.apply(&mut ctx), "{chain:?}: {:?}", step.error);
+            assert!(step.error.is_none());
+            assert!(ctx.descriptor.is_some());
+            assert!(
+                ctx.hw_is_used,
+                "{:?}: the registration step must run",
+                chain
+            );
+            assert_eq!(ctx.bitcoin_config.chain, chain);
+
+            // A Keychain key in the device's place is still refused.
+            let mut ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(PathBuf::new()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut phone = device.clone();
+            phone.source = KeySource::KeychainKey {
+                owner: crate::installer::descriptor::KeychainKeyOwner::SelfUser {
+                    primary_owner_id: 1,
+                },
+                key_id: 1,
+                name: "phone".to_string(),
+            };
+            step.keys.insert(phone.fingerprint, phone.clone());
+            step.paths[0].keys = vec![Some(phone)];
+            assert!(!step.apply(&mut ctx), "{:?}", chain);
+            assert_eq!(
+                step.error.as_deref(),
+                Some("This key source is not available for Bitcoin Blake2b yet")
+            );
+            assert!(ctx.descriptor.is_none());
+
+            // Amendment A: a Border Wallet key in the device's place applies.
+            let mut ctx = Context::new_for_chain(
+                chain,
+                CoincubeDirectory::new(PathBuf::new()),
+                RemoteBackend::None,
+                None,
+                None,
+            );
+            let mut border = device.clone();
+            border.source = KeySource::BorderWallet {
+                grid_seed_source: crate::app::settings::GridSeedSource::Independent,
+            };
+            step.keys.insert(border.fingerprint, border.clone());
+            step.paths[0].keys = vec![Some(border)];
+            assert!(step.apply(&mut ctx), "{chain:?}: {:?}", step.error);
+            assert!(ctx.descriptor.is_some());
+            assert!(ctx.keys[&device_signer.fingerprint()].is_border_wallet);
+            assert!(!ctx.hw_is_used);
         }
     }
 
@@ -1547,6 +1728,20 @@ mod tests {
                 step.paths[1].warning,
                 Some(PathWarning::NoReplayCapableSigner)
             );
+
+            // A Border Wallet key can sign protected on its own, so a path
+            // holding only one gets no notice (HW-1 Amendment A).
+            let border = Key {
+                source: KeySource::BorderWallet {
+                    grid_seed_source: crate::app::settings::GridSeedSource::Independent,
+                },
+                ..device.clone()
+            };
+            step.paths[0].keys = vec![Some(border)];
+            step.check_for_warning();
+            assert_eq!(step.paths[0].warning, None);
+            step.paths[0].keys = vec![Some(hot.clone()), Some(device.clone())];
+            step.check_for_warning();
 
             // Blocking warnings still win over the notice.
             step.paths[1].sequence = crate::installer::descriptor::PathSequence::Recovery(10);

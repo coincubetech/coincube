@@ -21,12 +21,13 @@
 //!
 //! # What this boundary deliberately does not do
 //!
-//! It applies no spend policy. In particular it does **not** refuse
+//! The raw-fields digest entry applies no spend policy. In particular it does
+//! **not** refuse
 //! `SIGHASH_ANYONECANPAY` at the digest layer: 70 of the 142 supported upstream
 //! vectors set `0x80` and core computes them, so a refusal here would make
 //! those 70 unreachable while leaving the test suite green on the remaining 72.
-//! Keychain's ANYONECANPAY refusal is a policy gate on the *signing* path
-//! (Lane B3.2), not a property of the message.
+//! Keychain's ANYONECANPAY refusal is a policy gate on the *signing* path, not
+//! a property of the message.
 //!
 //! Nor does it decide which chain it is on. `network` selects key and address
 //! encodings only; Bitcoin and Bitcoin Blake2b share those. Selecting unified
@@ -59,32 +60,29 @@
 //! `String::from_utf8_lossy`, Dart's `utf8.decode(..., allowMalformed: true)`) or
 //! resize to `message_len` and call again for the whole message.
 
-use std::{panic, slice};
+use std::{panic, slice, str::FromStr};
 
 use coincube_core::{
     bip39,
-    miniscript::bitcoin::{consensus::deserialize, secp256k1, Network, Script, Transaction, TxOut},
-    psbt_unified::{export_standard, import_standard, UnifiedPsbt},
-    signer::MasterSigner,
-    spend::authenticate_previous_output,
-    unified_sighash::{
-        unified_sighash, UnifiedSighashCache, UnifiedSighashError, SCRIPT_TYPE_WITNESS_V0,
+    miniscript::bitcoin::{
+        bip32::{DerivationPath, Xpub},
+        consensus::deserialize,
+        secp256k1, Network, Script, Transaction, TxOut,
     },
-    unified_signing::{sign_p2wsh_all_unified, verify_p2wsh_all_unified},
+    psbt_unified::{export_standard, import_standard},
+    signer::MasterSigner,
+    unified_sighash::{unified_sighash, UnifiedSighashError},
+    unified_signing::{
+        keychain_p2wsh_all_unified_digest, sign_p2wsh_all_unified_for_target,
+        verify_keychain_p2wsh_all_unified, UnifiedSignerTarget, UnifiedSigningError,
+    },
 };
-
-/// Hash type this crate's PSBT entries commit to: `SIGHASH_ALL | SIGHASH_UNIFIED`.
-///
-/// Mirrors `unified_signing`'s own private `UNIFIED_SIGHASH_ALL`. The PSBT
-/// signing path can express exactly this one value, which is the fourth and
-/// conceptually decisive reason the vector corpus cannot be driven through it.
-const UNIFIED_SIGHASH_ALL: u8 = 0x21;
 
 /// Length of a unified signature hash.
 pub const CC_DIGEST_LEN: usize = 32;
 
 /// ABI revision. Bump on any change to a signature or a code's meaning.
-const ABI_VERSION: i32 = 1;
+const ABI_VERSION: i32 = 2;
 
 // ---------------------------------------------------------------------------
 // Status codes
@@ -116,6 +114,10 @@ pub const CC_ERR_UNKNOWN_NETWORK: i32 = 15;
 /// should build this crate with unwind so a bug here is a failed signing
 /// attempt rather than a crashed app mid-flow (Lane B3.1b).
 pub const CC_ERR_PANIC: i32 = 16;
+/// The authenticated signer target's BIP32 account path was invalid.
+pub const CC_ERR_INVALID_DERIVATION_PATH: i32 = 17;
+/// The authenticated signer target's account xpub was invalid.
+pub const CC_ERR_INVALID_XPUB: i32 = 18;
 
 // `unified_sighash` refusals: 20-25. One code per `UnifiedSighashError`
 // variant, mapped by an exhaustive match, so adding a variant to core is a
@@ -291,7 +293,7 @@ pub unsafe extern "C" fn coincube_unified_sighash_digest(
 ///
 /// `psbt` is standard BIP174 bytes as they travel over Connect. The PSBT and
 /// every one of its inputs are validated by
-/// [`coincube_core::unified_signing::verify_p2wsh_all_unified`] first, so the
+/// [`coincube_core::unified_signing::keychain_p2wsh_all_unified_digest`] first, so the
 /// P2WSH gates and any unified signature already present are core's refusal,
 /// not a second copy of it here. The digest is then taken at
 /// `SIGHASH_ALL | SIGHASH_UNIFIED` over SegWit-v0, which is the only thing the
@@ -329,56 +331,27 @@ pub unsafe extern "C" fn coincube_unified_psbt_digest(
         let unified = import_standard(bytes)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_PSBT, err.to_string()))?;
 
-        // Core owns the refusal. This runs `validate_inputs` over every input —
-        // authenticated prevout, native P2WSH, no Taproot signature data,
-        // witness script present and committed to, sane Segwitv0 miniscript —
-        // and verifies any unified signature already carried.
         let secp = secp256k1::Secp256k1::verification_only();
-        verify_p2wsh_all_unified(&unified, &secp)
-            .map_err(|err| Failure::with_message(CC_ERR_PSBT_VALIDATION, err.to_string()))?;
-
         let index = input_index as usize;
-        let inputs = &unified.psbt().inputs;
-        let input = inputs.get(index).ok_or_else(|| {
-            Failure::detailed(
-                CC_ERR_INPUT_INDEX_OUT_OF_BOUNDS,
-                index as u64,
-                inputs.len() as u64,
-            )
-        })?;
-        // `verify_p2wsh_all_unified` above established both of these for every
-        // input; the `expect`-free unwraps keep that fact local and explicit.
-        let witness_script = input.witness_script.as_ref().ok_or_else(|| {
-            Failure::with_message(
-                CC_ERR_PSBT_VALIDATION,
-                format!("input {index} is missing its witness script"),
-            )
-        })?;
-        let spent_outputs = spent_outputs_of(&unified)?;
-
-        let digest = UnifiedSighashCache::new(&unified.psbt().unsigned_tx, &spent_outputs)
-            .and_then(|cache| {
-                cache.signature_hash(
-                    index,
-                    UNIFIED_SIGHASH_ALL,
-                    SCRIPT_TYPE_WITNESS_V0,
-                    witness_script,
-                )
-            })
-            .map_err(sighash_failure)?;
+        let digest =
+            keychain_p2wsh_all_unified_digest(&unified, index, &secp).map_err(|err| match err {
+                UnifiedSigningError::Sighash(err) => sighash_failure(err),
+                err => Failure::with_message(CC_ERR_PSBT_VALIDATION, err.to_string()),
+            })?;
 
         slice::from_raw_parts_mut(digest_out, CC_DIGEST_LEN).copy_from_slice(&digest);
         Ok(())
     })
 }
 
-/// Sign every input of a standard PSBT whose BIP32 derivation matches `mnemonic`.
+/// Sign the standard-PSBT inputs belonging to one authenticated Keychain target.
 ///
-/// This is [`coincube_core::unified_signing::sign_p2wsh_all_unified`] verbatim:
-/// core validates every input, derives each candidate key from the PSBT's own
-/// `bip32_derivation` and refuses when the derived key does not match the key
-/// the PSBT claims, signs at `0x21`, sets `PSBT_IN_SIGHASH_TYPE` on only the
-/// inputs it signed, and verifies the result before returning it.
+/// This delegates to
+/// [`coincube_core::unified_signing::sign_p2wsh_all_unified_for_target`]:
+/// `target_path` and `target_xpub` are the exact account path and xpub from the
+/// authenticated local signer record. Core derives that xpub from `mnemonic`
+/// and refuses a mismatch, then signs only PSBT derivations below that account.
+/// A sibling account sharing the mnemonic's master fingerprint is never signed.
 ///
 /// The signer arrives as a BIP39 phrase because that is what
 /// [`MasterSigner`] is rooted in and because per-input derivation is part of
@@ -402,6 +375,10 @@ pub unsafe extern "C" fn coincube_unified_psbt_sign(
     psbt_len: usize,
     mnemonic: *const u8,
     mnemonic_len: usize,
+    target_path: *const u8,
+    target_path_len: usize,
+    target_xpub: *const u8,
+    target_xpub_len: usize,
     network: u8,
     psbt_out: *mut u8,
     psbt_out_cap: usize,
@@ -419,9 +396,28 @@ pub unsafe extern "C" fn coincube_unified_psbt_sign(
             Some(bytes) => bytes,
             None => return Err(Failure::code(CC_ERR_NULL_ARGUMENT)),
         };
+        let target_path_bytes = match borrow(target_path, target_path_len) {
+            Some(bytes) => bytes,
+            None => return Err(Failure::code(CC_ERR_NULL_ARGUMENT)),
+        };
+        let target_xpub_bytes = match borrow(target_xpub, target_xpub_len) {
+            Some(bytes) => bytes,
+            None => return Err(Failure::code(CC_ERR_NULL_ARGUMENT)),
+        };
         let network = network_from_code(network)?;
         let phrase = std::str::from_utf8(phrase_bytes)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_UTF8, err.to_string()))?;
+        let target_path = std::str::from_utf8(target_path_bytes)
+            .map_err(|err| Failure::with_message(CC_ERR_INVALID_UTF8, err.to_string()))?;
+        let target_xpub = std::str::from_utf8(target_xpub_bytes)
+            .map_err(|err| Failure::with_message(CC_ERR_INVALID_UTF8, err.to_string()))?;
+        let target_path = DerivationPath::from_str(target_path).map_err(|err| {
+            Failure::with_message(CC_ERR_INVALID_DERIVATION_PATH, err.to_string())
+        })?;
+        let target_xpub = Xpub::from_str(target_xpub)
+            .map_err(|err| Failure::with_message(CC_ERR_INVALID_XPUB, err.to_string()))?;
+        let target = UnifiedSignerTarget::new(network, target_path, target_xpub)
+            .map_err(|err| Failure::with_message(CC_ERR_SIGNING, err.to_string()))?;
         let parsed = bip39::Mnemonic::parse_normalized(phrase)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_MNEMONIC, err.to_string()))?;
         let signer = MasterSigner::from_mnemonic(network, parsed)
@@ -430,7 +426,7 @@ pub unsafe extern "C" fn coincube_unified_psbt_sign(
         let unified = import_standard(bytes)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_PSBT, err.to_string()))?;
         let secp = secp256k1::Secp256k1::new();
-        let signed = sign_p2wsh_all_unified(&signer, &unified, &secp)
+        let signed = sign_p2wsh_all_unified_for_target(&signer, &target, &unified, &secp)
             .map_err(|err| Failure::with_message(CC_ERR_SIGNING, err.to_string()))?;
         let exported = export_standard(&signed)
             .map_err(|err| Failure::with_message(CC_ERR_EXPORT, err.to_string()))?;
@@ -455,7 +451,7 @@ pub unsafe extern "C" fn coincube_unified_psbt_sign(
 
 /// Verify every unified signature a standard PSBT carries.
 ///
-/// [`coincube_core::unified_signing::verify_p2wsh_all_unified`] verbatim.
+/// [`coincube_core::unified_signing::verify_keychain_p2wsh_all_unified`] verbatim.
 /// `verified_out` receives the number of signatures verified. Zero means the
 /// PSBT and its P2WSH inputs validated but carried no unified signature — it
 /// does **not** mean the PSBT is sufficiently signed or finalizable.
@@ -483,7 +479,7 @@ pub unsafe extern "C" fn coincube_unified_psbt_verify(
         let unified = import_standard(bytes)
             .map_err(|err| Failure::with_message(CC_ERR_INVALID_PSBT, err.to_string()))?;
         let secp = secp256k1::Secp256k1::verification_only();
-        let verified = verify_p2wsh_all_unified(&unified, &secp)
+        let verified = verify_keychain_p2wsh_all_unified(&unified, &secp)
             .map_err(|err| Failure::with_message(CC_ERR_PSBT_VALIDATION, err.to_string()))?;
         if !verified_out.is_null() {
             *verified_out = verified;
@@ -584,40 +580,6 @@ fn network_from_code(code: u8) -> Result<Network, Failure> {
             0,
         )),
     }
-}
-
-/// The output spent by every input, in input order.
-///
-/// This calls core's own [`authenticate_previous_output`] rather than reading
-/// `witness_utxo` directly, because the two are not interchangeable and the
-/// difference is easy to get backwards: core **requires** the full
-/// `non_witness_utxo` (absent it, `InputAuthError::MissingPreviousTransaction`)
-/// and treats `witness_utxo` as an optional cross-check that must agree with it.
-/// Reading `witness_utxo` here would refuse a PSBT that `unified_signing` had
-/// just accepted, and would also skip the txid, vout and amount checks that make
-/// the prevout *authenticated* rather than merely asserted.
-fn spent_outputs_of(psbt: &UnifiedPsbt) -> Result<Vec<TxOut>, Failure> {
-    let inner = psbt.psbt();
-    inner
-        .unsigned_tx
-        .input
-        .iter()
-        .zip(&inner.inputs)
-        .enumerate()
-        .map(|(index, (txin, input))| {
-            authenticate_previous_output(
-                &txin.previous_output,
-                input.non_witness_utxo.as_ref(),
-                input.witness_utxo.as_ref(),
-            )
-            .map_err(|reason| {
-                Failure::with_message(
-                    CC_ERR_PSBT_VALIDATION,
-                    format!("input {index} previous output is not authenticated: {reason}"),
-                )
-            })
-        })
-        .collect()
 }
 
 /// Borrow `len` bytes at `ptr`.

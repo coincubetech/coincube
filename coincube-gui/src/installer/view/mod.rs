@@ -1364,6 +1364,12 @@ fn node_flavor_selector<'a>(
     existing: Option<crate::node::bitcoind::NodeFlavor>,
 ) -> Element<'a, Message> {
     use crate::node::bitcoind::NodeFlavor;
+    if selected == NodeFlavor::KnotsBlake2b {
+        return Column::new().spacing(10)
+            .push(text("Bitcoin Knots for Bitcoin Blake2b").bold())
+            .push(text("A pruned node, stored separately from your Bitcoin node. Vaults on this chain share it. Connections are outbound only; inbound Tor is unavailable."))
+            .into();
+    }
     let option = |flavor: NodeFlavor| {
         let label = flavor.display_name();
         let btn = if selected == flavor {
@@ -1445,14 +1451,13 @@ pub fn select_bitcoind_type<'a>(
                     "Your Vault will use our hosted Bitcoin Knots node for {chain_name} \
                  through Esplora. No local node setup is required."
                 )))
-                .push(checkbox(false).label("Also install a pruned Bitcoin node on my device"))
-                .push(text(format!(
-                    "Installing a pruned Bitcoin Knots node for {chain_name} on your device \
-                 is not available in this version of Tenshu."
-                )))
-                .push(text(format!(
-                    "Your Vault will use COINCUBE | Connect as its only {chain_name} backend."
-                )))
+                .push(checkbox(install_node).label("Also install a pruned Bitcoin node on my device")
+                    .on_toggle(|_| Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)))
+                .push(text(if install_node {
+                    format!("Tenshu will install a pruned Bitcoin Knots node for {chain_name} in its own data directory. Your Vault will switch to it once its blockchain sync finishes. The local node uses outbound peer connections; inbound Tor is unavailable for this chain.")
+                } else {
+                    format!("Your Vault will use COINCUBE | Connect as its only {chain_name} backend.")
+                }))
                 .push(
                     button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
                         message::SelectBitcoindTypeMsg::ContinueWithConnect,
@@ -1889,7 +1894,11 @@ pub fn start_internal_bitcoind<'a>(
         return layout(
             progress,
             None,
-            "Start Bitcoin full node",
+            if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
+                "Start a pruned Bitcoin Blake2b node"
+            } else {
+                "Start Bitcoin full node"
+            },
             col,
             true,
             Some(message::Message::InternalBitcoind(
@@ -1901,7 +1910,11 @@ pub fn start_internal_bitcoind<'a>(
     layout(
         progress,
         None,
-        "Start Bitcoin full node",
+        if flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b {
+            "Start a pruned Bitcoin Blake2b node"
+        } else {
+            "Start Bitcoin full node"
+        },
         Column::new()
             .push(download_state.map(|s| {
                 match s {
@@ -3374,7 +3387,7 @@ mod node_management_chain_tests {
             let mut element = select_bitcoind_type(
                 (0, 2),
                 chain,
-                false,
+                true,
                 true,
                 15000,
                 true,
@@ -3405,8 +3418,9 @@ mod node_management_chain_tests {
                 assert!(labels
                     .0
                     .iter()
-                    .any(|s| s.contains("Installing a pruned Bitcoin Knots node")
-                        && s.contains("not available in this version")));
+                    .any(|s| s.contains("install a pruned Bitcoin Knots node")
+                        && s.contains(chain.label())
+                        && s.contains("once its blockchain sync finishes")));
                 assert!(!labels.0.iter().any(|s| s.contains("Advanced options")
                     || s == "Install a node only"
                     || s == "I already have a node"));

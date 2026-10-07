@@ -78,9 +78,21 @@ pub enum KeySource {
 
 impl KeySource {
     /// Creation capability, not proof that funds are replay-protected.
-    /// Fork external signers remain gated until their full signing contract is verified.
+    ///
+    /// On Bitcoin Blake2b a Vault may be built from the Cube key, an
+    /// imported or pasted xpub, and (since Robert's HW-1 decision of
+    /// 2026-10-06) a hardware device or a Border Wallet key. A device signs
+    /// the standard Bitcoin way, so its signatures stay replayable
+    /// ([`Self::replay_capable`] is false and the path advice says so); a
+    /// Border Wallet key signs in-process with the unified signer. Keychain
+    /// keys and provider tokens stay gated until their own fork signing
+    /// contract is verified.
     pub fn available_for_creation(&self, chain: crate::chain::ChainId) -> bool {
-        !chain.is_blake2b() || matches!(self, Self::MasterSigner | Self::Manual)
+        !chain.is_blake2b()
+            || matches!(
+                self,
+                Self::MasterSigner | Self::Manual | Self::Device(..) | Self::BorderWallet { .. }
+            )
     }
 
     /// Whether a key from this source can produce a Bitcoin Blake2b unified
