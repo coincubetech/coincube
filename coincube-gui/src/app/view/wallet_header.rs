@@ -47,9 +47,9 @@ pub enum HeaderVariant {
     Overview,
 }
 
-/// Balance sync / catch-up state. Only `Synced` produces a static
-/// render; other variants pulse the secondary (SATS) number and add a
-/// progress row, matching Vault Overview's existing treatment.
+/// Balance sync / catch-up state. `Synced` and `Stale` render the amount
+/// statically; `Syncing` and `Checking` pulse the secondary (SATS) number and
+/// add a progress row, matching Vault Overview's existing treatment.
 pub enum SyncState {
     Synced,
     Syncing {
@@ -57,7 +57,24 @@ pub enum SyncState {
         label: String,
     },
     Checking,
+    /// The wallet cannot yet say what its balance is — its history has not
+    /// loaded — so a placeholder stands in for the amount. Showing the empty
+    /// database's "0" here reads as a fact, and it is not one.
+    Unknown {
+        progress: Option<f64>,
+        label: String,
+        /// The history is not loading because syncing is failing, rather than
+        /// still under way.
+        failing: bool,
+    },
+    /// The amount is the last one known; syncing has been failing since.
+    Stale {
+        message: String,
+    },
 }
+
+/// Stands in for an amount the wallet cannot state yet.
+const UNKNOWN_AMOUNT: &str = "—";
 
 /// Unconfirmed-balance overlay ("+X unconfirmed Y fiat"). Only rendered
 /// when sync is `Synced` and the amount is non-zero.
@@ -143,8 +160,11 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
     // Build fiat / bitcoin sub-elements once each, then assemble in the
     // order the display_mode requests. Falling back to bitcoin if no
     // fiat data is available keeps the header from going blank.
+    let amount_unknown = matches!(sync, SyncState::Unknown { .. });
     let bitcoin_primary: Element<'a, M> = if balance_masked {
         text("********").size(primary_size).bold().into()
+    } else if amount_unknown {
+        text(UNKNOWN_AMOUNT).size(primary_size).bold().into()
     } else {
         amount_with_size_and_unit::<M>(&sats, primary_size, bitcoin_unit).into()
     };
@@ -155,9 +175,13 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
             .into()
     } else {
         match &sync {
-            SyncState::Synced => {
+            SyncState::Synced | SyncState::Stale { .. } => {
                 amount_with_size_and_unit::<M>(&sats, secondary_size, bitcoin_unit).into()
             }
+            SyncState::Unknown { .. } => text(UNKNOWN_AMOUNT)
+                .size(secondary_size)
+                .style(theme::text::secondary)
+                .into(),
             SyncState::Syncing { .. } | SyncState::Checking => Row::<'a, M>::new()
                 .push(spinner::Carousel::new(
                     Duration::from_millis(1000),
@@ -177,6 +201,8 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
     };
     let fiat_primary: Option<Element<'a, M>> = if balance_masked {
         Some(text("********").size(primary_size).bold().into())
+    } else if amount_unknown {
+        Some(text(UNKNOWN_AMOUNT).size(primary_size).bold().into())
     } else {
         fiat.as_ref()
             .map(|f| fiat_amount_row::<M>(f, primary_size, FiatStyle::Primary).into())
@@ -184,6 +210,13 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
     let fiat_secondary: Option<Element<'a, M>> = if balance_masked {
         Some(
             text("********")
+                .size(secondary_size)
+                .style(theme::text::secondary)
+                .into(),
+        )
+    } else if amount_unknown {
+        Some(
+            text(UNKNOWN_AMOUNT)
                 .size(secondary_size)
                 .style(theme::text::secondary)
                 .into(),
@@ -255,6 +288,33 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
                 ))
                 .into(),
         ),
+        SyncState::Unknown {
+            progress,
+            label,
+            failing: false,
+        } => {
+            let line = match progress {
+                Some(p) => format!("{} ({:.1}%)", label, 100.0 * p),
+                None => label.clone(),
+            };
+            Some(
+                Row::<'a, M>::new()
+                    .push(text(line).size(P2_SIZE).style(theme::text::secondary))
+                    .push(spinner::typing_text_carousel(
+                        "...",
+                        true,
+                        Duration::from_millis(2000),
+                        |content| text(content).style(theme::text::secondary),
+                    ))
+                    .into(),
+            )
+        }
+        SyncState::Unknown {
+            label,
+            failing: true,
+            ..
+        } => Some(warning_row(label.clone())),
+        SyncState::Stale { message } => Some(warning_row(message.clone())),
     };
 
     let unconfirmed_row: Option<Element<'a, M>> = match (&sync, unconfirmed.as_ref()) {
@@ -348,6 +408,17 @@ fn fiat_amount_row<'a, M: 'a>(fiat: &FiatAmount, value_size: u32, style: FiatSty
                 .color(color::GREY_3),
         ),
     }
+}
+
+/// A warning icon and message, for a balance that may be wrong.
+fn warning_row<'a, M: 'a>(message: String) -> Element<'a, M> {
+    Row::<'a, M>::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(warning_icon().size(P2_SIZE).style(theme::text::warning))
+        .push(text(message).size(P2_SIZE).style(theme::text::warning))
+        .wrap()
+        .into()
 }
 
 fn pending_row<'a, M: 'a>(

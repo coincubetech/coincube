@@ -119,6 +119,9 @@ pub struct Esplora {
     /// the "user opened Receive / app regained focus / new receive
     /// address" UX hooks.
     eager_sync_requested: bool,
+    /// Where a full scan reports how far it has got. See
+    /// [`crate::bitcoin::HistorySyncCache`].
+    history_sync: Option<std::sync::Arc<crate::bitcoin::HistorySyncCache>>,
 }
 
 impl Esplora {
@@ -135,7 +138,23 @@ impl Esplora {
             last_synced_tip: None,
             polls_since_full_sync: 0,
             eager_sync_requested: false,
+            history_sync: None,
         })
+    }
+
+    /// Report full-scan progress into `cache` from now on.
+    pub fn install_history_sync_cache(
+        &mut self,
+        cache: std::sync::Arc<crate::bitcoin::HistorySyncCache>,
+    ) {
+        self.history_sync = Some(cache);
+    }
+
+    /// Progress of the full scan under way, if one is.
+    pub fn full_scan_progress(&self) -> Option<f64> {
+        self.history_sync
+            .as_ref()
+            .and_then(|cache| cache.snapshot().full_scan_progress())
     }
 
     /// Bypass the smart-poll tip-guard on the next sync. See
@@ -345,13 +364,33 @@ impl Esplora {
             log::info!("Performing full scan.");
             let bdk_wallet = &self.bdk_wallet;
             let local_chain_tip = local_chain_tip.clone();
+            let history_sync = self.history_sync.clone();
+            let expected_addresses = crate::bitcoin::expected_full_scan_addresses(
+                bdk_wallet.index().all_unbounded_spk_iters().len(),
+                bdk_wallet.index().last_revealed_indices().into_values(),
+                STOP_GAP,
+            );
             let scan_result = self
                 .client
                 .full_scan(
                     || {
                         let mut request = FullScanRequest::from_chain_tip(local_chain_tip.clone());
+                        // Rebuilt for every server the client tries, so the count
+                        // restarts with each attempt.
+                        if let Some(cache) = &history_sync {
+                            cache.begin_full_scan(expected_addresses);
+                        }
                         for (k, spks) in bdk_wallet.index().all_unbounded_spk_iters() {
-                            request = request.set_spks_for_keychain(k, spks);
+                            request = match &history_sync {
+                                Some(cache) => {
+                                    let cache = cache.clone();
+                                    request.set_spks_for_keychain(
+                                        k,
+                                        spks.inspect(move |_| cache.address_checked()),
+                                    )
+                                }
+                                None => request.set_spks_for_keychain(k, spks),
+                            };
                         }
                         request
                     },
@@ -363,6 +402,9 @@ impl Esplora {
             // as the same full scan.
             check_update_height(&scan_result.chain_update, &scan_result.graph_update)?;
             self.full_scan = false;
+            if let Some(cache) = &self.history_sync {
+                cache.full_scan_fetched();
+            }
             log::info!("Full scan complete.");
             (
                 scan_result.chain_update,

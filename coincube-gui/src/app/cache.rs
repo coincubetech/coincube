@@ -551,6 +551,10 @@ impl Cache {
     pub fn last_poll_timestamp(&self) -> Option<u32> {
         self.daemon_cache.last_poll_timestamp
     }
+
+    pub fn history_sync(&self) -> &coincubed::commands::HistorySync {
+        &self.daemon_cache.history_sync
+    }
 }
 
 /// The cache for dynamic daemon data.
@@ -562,6 +566,8 @@ pub struct DaemonCache {
     pub sync_progress: f64,
     /// The most recent `last_poll_timestamp`.
     pub last_poll_timestamp: Option<u32>,
+    /// The daemon's latest report of its full scans and failed polls.
+    pub history_sync: coincubed::commands::HistorySync,
     pub last_tick: std::time::Instant,
 }
 
@@ -574,6 +580,7 @@ impl std::default::Default for DaemonCache {
             rescan_progress: None,
             sync_progress: 1.0,
             last_poll_timestamp: None,
+            history_sync: Default::default(),
             last_tick: Instant::now(),
         }
     }

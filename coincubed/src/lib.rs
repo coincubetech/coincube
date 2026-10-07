@@ -757,9 +757,13 @@ pub struct DaemonControl {
     // Lock-free mirror of the poller's "refused an implausibly deep reorg" alert,
     // read by `get_info` for the same reason as `sync_progress_cache`.
     reorg_alert_cache: sync::Arc<crate::bitcoin::ReorgAlertCache>,
+    // Lock-free record of full-scan progress and poll outcomes, read by `get_info` for
+    // the same reason as `sync_progress_cache`.
+    history_sync_cache: sync::Arc<crate::bitcoin::HistorySyncCache>,
 }
 
 impl DaemonControl {
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn new(
         config: Config,
         bitcoin: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
@@ -768,6 +772,7 @@ impl DaemonControl {
         secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
         sync_progress_cache: sync::Arc<crate::bitcoin::SyncProgressCache>,
         reorg_alert_cache: sync::Arc<crate::bitcoin::ReorgAlertCache>,
+        history_sync_cache: sync::Arc<crate::bitcoin::HistorySyncCache>,
     ) -> DaemonControl {
         DaemonControl {
             config,
@@ -777,6 +782,7 @@ impl DaemonControl {
             secp,
             sync_progress_cache,
             reorg_alert_cache,
+            history_sync_cache,
         }
     }
 
@@ -1050,6 +1056,10 @@ impl DaemonHandle {
         bit.lock()
             .expect("new backend lock is not poisoned")
             .set_poll_abort(scan_abort.clone());
+        let history_sync_cache = sync::Arc::new(crate::bitcoin::HistorySyncCache::default());
+        bit.lock()
+            .expect("new backend lock is not poisoned")
+            .set_history_sync_cache(history_sync_cache.clone());
 
         // Shared, lock-free sync-progress mirror: the poller publishes into it,
         // `get_info` reads from it — so `get_info` (and the GUI's startup gate
@@ -1065,6 +1075,7 @@ impl DaemonHandle {
             config.main_descriptor.clone(),
             sync_progress_cache.clone(),
             reorg_alert_cache.clone(),
+            history_sync_cache.clone(),
         )?;
         let (poller_sender, poller_receiver) = mpsc::sync_channel(1);
         let poller_handle = thread::Builder::new()
@@ -1089,6 +1100,7 @@ impl DaemonHandle {
             secp,
             sync_progress_cache,
             reorg_alert_cache,
+            history_sync_cache,
         );
 
         if with_rpc_server {

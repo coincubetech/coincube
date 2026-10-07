@@ -51,6 +51,9 @@ pub struct DummyBitcoind {
     /// backend. Set to `false` to model Electrum/Esplora, which report reorgs from
     /// `sync_wallet` and cannot be asked for a fork point afterwards.
     pub walks_ancestors: bool,
+    /// The history-sync record the daemon installed, shared so a test can check
+    /// which one it was after handing this backend over.
+    pub history_sync: sync::Arc<sync::Mutex<Option<sync::Arc<crate::bitcoin::HistorySyncCache>>>>,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -89,11 +92,16 @@ impl DummyBitcoind {
             also_in_chain: Vec::new(),
             backend_id: Some(dummy_backend_id(DUMMY_RPC_ADDR, DUMMY_CREDENTIALS)),
             walks_ancestors: true,
+            history_sync: Default::default(),
         }
     }
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn set_history_sync_cache(&mut self, cache: sync::Arc<crate::bitcoin::HistorySyncCache>) {
+        *self.history_sync.lock().unwrap() = Some(cache);
+    }
+
     fn try_received_coins(
         &self,
         _: &BlockChainTip,

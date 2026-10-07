@@ -721,6 +721,7 @@ impl Step for DefineSpend {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 );
 
                 // Recalculate balance from currency cache

@@ -898,6 +898,7 @@ pub async fn load_application(
             coins,
             sync_progress: config.info.sync,
             last_poll_timestamp: config.info.last_poll_timestamp,
+            history_sync: config.info.history_sync.clone(),
             ..Default::default()
         },
         fiat_price: None,

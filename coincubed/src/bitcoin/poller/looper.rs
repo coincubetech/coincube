@@ -1,6 +1,7 @@
 use crate::{
     bitcoin::{
-        AncestorSearch, BitcoinInterface, BlockChainTip, ReorgAlertCache, UTxO, UTxOAddress,
+        AncestorSearch, BitcoinInterface, BlockChainTip, HistorySyncCache, PollFailure,
+        ReorgAlertCache, UTxO, UTxOAddress,
     },
     database::{Coin, DatabaseConnection, DatabaseInterface},
 };
@@ -642,6 +643,7 @@ pub fn poll(
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     descs: &[descriptors::SinglePathCoincubeDesc],
     reorg_alert: &ReorgAlertCache,
+    history_sync: &HistorySyncCache,
 ) {
     let mut db_conn = db.connection();
     let result = observe_rescan(&mut db_conn, bit).and_then(|rescan| {
@@ -659,21 +661,52 @@ pub fn poll(
         }
         updates(&mut db_conn, bit, descs, secp, reorg_alert)
     });
-    if let Err(error) = result {
-        log::debug!(
-            "Poll deferred without updating successful-poll time: {}",
-            error
-        );
-        return;
-    }
     let now: u32 = time::SystemTime::now()
         .duration_since(time::UNIX_EPOCH)
         .expect("current system time must be later than epoch")
         .as_secs()
         .try_into()
         .expect("system clock year is earlier than 2106");
+    if let Err(error) = result {
+        let (failure, changed) = history_sync.poll_failed(&error, now);
+        if failure_is_worth_a_warning(&failure, changed) {
+            log::warn!(
+                "Poll failed ({} in a row): {}. The wallet keeps its last known state \
+                 and the next poll retries.",
+                failure.consecutive,
+                error
+            );
+        } else {
+            log::debug!(
+                "Poll deferred without updating successful-poll time: {}",
+                error
+            );
+        }
+        return;
+    }
+    history_sync.poll_succeeded(now);
     db_conn.set_last_poll(now);
 }
+
+/// Whether a failed poll should be logged as a warning rather than at debug level.
+///
+/// Failures used to be debug-only, which made a wallet that could not sync for hours
+/// look healthy in the logs. Logging every one at warning level would instead flood
+/// them — the poller retries every few seconds — and a single failure is routine (the
+/// tip moved mid-poll, a server hiccupped) and recovers on the next poll. So warn once
+/// failures repeat, whenever a repeating failure changes, and every
+/// [`REPEATED_FAILURE_WARN_INTERVAL`] repeats after that.
+fn failure_is_worth_a_warning(failure: &PollFailure, changed: bool) -> bool {
+    failure.consecutive >= 2
+        && (changed
+            || failure.consecutive == 2
+            || failure
+                .consecutive
+                .is_multiple_of(REPEATED_FAILURE_WARN_INTERVAL))
+}
+
+/// See [`failure_is_worth_a_warning`].
+const REPEATED_FAILURE_WARN_INTERVAL: u32 = 10;
 
 #[cfg(test)]
 mod tests {
@@ -1288,7 +1321,14 @@ mod failure_tests {
             let database: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
                 sync::Arc::new(sync::Mutex::new(db));
             let alert = ReorgAlertCache::default();
-            poll(&mut backend, &database, &secp, &descs, &alert);
+            poll(
+                &mut backend,
+                &database,
+                &secp,
+                &descs,
+                &alert,
+                &HistorySyncCache::default(),
+            );
             assert_eq!(conn.chain_tip(), Some(tip));
             assert_eq!(conn.last_poll_timestamp(), Some(123));
             assert!(conn.coins(&[], &[]).is_empty());
@@ -1319,14 +1359,161 @@ mod rescan_completion_tests {
         let secp = secp256k1::Secp256k1::verification_only();
         let descs = super::tests::test_descs();
         let alert = ReorgAlertCache::default();
-        poll(&mut backend, &database, &secp, &descs, &alert);
+        poll(
+            &mut backend,
+            &database,
+            &secp,
+            &descs,
+            &alert,
+            &HistorySyncCache::default(),
+        );
         assert_eq!(conn.rescan_timestamp(), Some(1000));
         assert_eq!(conn.last_poll_timestamp(), Some(123));
         assert_eq!(conn.chain_tip().unwrap().height, 90);
         bit.lock().unwrap().poll_failure = None;
-        poll(&mut backend, &database, &secp, &descs, &alert);
+        poll(
+            &mut backend,
+            &database,
+            &secp,
+            &descs,
+            &alert,
+            &HistorySyncCache::default(),
+        );
         assert_eq!(conn.rescan_timestamp(), None);
         assert_eq!(conn.chain_tip(), Some(tip));
         assert_ne!(conn.last_poll_timestamp(), Some(123));
+    }
+}
+
+#[cfg(test)]
+mod history_sync_tests {
+    use super::*;
+    use crate::testutils::{DummyBitcoind, DummyDatabase};
+
+    struct Harness {
+        bit: sync::Arc<sync::Mutex<DummyBitcoind>>,
+        backend: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
+        database: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
+        descs: Vec<descriptors::SinglePathCoincubeDesc>,
+        secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        alert: ReorgAlertCache,
+        history: HistorySyncCache,
+    }
+
+    impl Harness {
+        fn new() -> Self {
+            let bit = DummyBitcoind::new();
+            let db = DummyDatabase::new();
+            db.connection().update_tip(&bit.tip);
+            let bit = sync::Arc::new(sync::Mutex::new(bit));
+            Harness {
+                backend: bit.clone(),
+                bit,
+                database: sync::Arc::new(sync::Mutex::new(db)),
+                descs: super::tests::test_descs().to_vec(),
+                secp: secp256k1::Secp256k1::verification_only(),
+                alert: ReorgAlertCache::default(),
+                history: HistorySyncCache::default(),
+            }
+        }
+
+        fn fail_polls(&self, failure: Option<&'static str>) {
+            self.bit.lock().unwrap().poll_failure = failure;
+        }
+
+        fn poll(&mut self) {
+            poll(
+                &mut self.backend,
+                &self.database,
+                &self.secp,
+                &self.descs,
+                &self.alert,
+                &self.history,
+            );
+        }
+    }
+
+    /// Failed polls used to be logged at debug level and recorded nowhere, so a Vault
+    /// that could not sync for hours looked healthy to the app. Each one now extends a
+    /// failure run `get_info` reports, and the first successful poll ends it.
+    #[test]
+    fn failed_polls_are_recorded_until_a_poll_succeeds() {
+        let mut h = Harness::new();
+        h.fail_polls(Some("confirmed"));
+        h.poll();
+        let failure = h
+            .history
+            .snapshot()
+            .last_failure
+            .expect("first failure recorded");
+        assert_eq!(failure.consecutive, 1);
+        assert_eq!(failure.since, failure.last_at);
+        h.poll();
+        let failure = h.history.snapshot().last_failure.expect("run continues");
+        assert_eq!(failure.consecutive, 2);
+
+        h.fail_polls(None);
+        h.poll();
+        assert_eq!(h.history.snapshot().last_failure, None);
+        assert!(h.database.connection().last_poll_timestamp().is_some());
+    }
+
+    /// A full scan is only complete once the poll carrying it has written it to the
+    /// database. A scan the backend fetched, followed by a poll that failed further
+    /// on, is still owed its commit — and the next successful poll delivers it.
+    #[test]
+    fn a_fetched_full_scan_completes_with_the_first_successful_poll() {
+        let mut h = Harness::new();
+        h.history.begin_full_scan(402);
+        h.history.address_checked();
+        h.history.full_scan_fetched();
+        h.fail_polls(Some("confirmed"));
+        h.poll();
+        let snapshot = h.history.snapshot();
+        assert!(!snapshot.full_scan_in_progress);
+        assert_eq!(snapshot.full_scan_completed_at, None);
+
+        h.fail_polls(None);
+        h.poll();
+        let snapshot = h.history.snapshot();
+        assert!(snapshot.full_scan_completed_at.is_some());
+        assert_eq!(snapshot.last_failure, None);
+    }
+
+    /// A poll that fails mid-scan loses that scan: the backend starts over next time.
+    /// The record must not go on reporting it as running.
+    #[test]
+    fn a_failed_poll_ends_the_scan_it_was_running() {
+        let mut h = Harness::new();
+        h.history.begin_full_scan(402);
+        for _ in 0..50 {
+            h.history.address_checked();
+        }
+        h.fail_polls(Some("confirmed"));
+        h.poll();
+        let snapshot = h.history.snapshot();
+        assert!(!snapshot.full_scan_in_progress);
+        assert_eq!(snapshot.full_scan_progress(), None);
+        assert_eq!(snapshot.full_scan_completed_at, None);
+    }
+
+    #[test]
+    fn repeated_failures_warn_once_they_repeat_on_changes_and_periodically() {
+        let failure = |consecutive| PollFailure {
+            message: "Esplora client error".into(),
+            since: 1,
+            last_at: 2,
+            consecutive,
+        };
+        // One failure is routine and recovers on the next poll.
+        assert!(!failure_is_worth_a_warning(&failure(1), true));
+        assert!(failure_is_worth_a_warning(&failure(2), false));
+        assert!(!failure_is_worth_a_warning(&failure(3), false));
+        assert!(failure_is_worth_a_warning(&failure(7), true));
+        assert!(!failure_is_worth_a_warning(&failure(9), false));
+        assert!(failure_is_worth_a_warning(
+            &failure(REPEATED_FAILURE_WARN_INTERVAL),
+            false
+        ));
     }
 }

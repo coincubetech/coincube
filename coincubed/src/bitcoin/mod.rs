@@ -192,6 +192,212 @@ impl ReorgAlertCache {
     }
 }
 
+/// The poller could not complete a poll. Kept until the next poll that does.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PollFailure {
+    /// The latest failure's message.
+    pub message: String,
+    /// When the current run of consecutive failures began.
+    pub since: u32,
+    /// When the latest failure happened.
+    pub last_at: u32,
+    /// Polls that have failed in a row, the latest included.
+    pub consecutive: u32,
+}
+
+/// A snapshot of how far the wallet's view of its own history has got, as reported by
+/// `get_info`. Absent from older daemons, so every field defaults.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct HistorySync {
+    /// A full scan of the wallet's addresses is under way. On Electrum and Esplora
+    /// this is how a wallet learns its history; until it finishes, the database
+    /// holds none of the transactions it is looking for.
+    pub full_scan_in_progress: bool,
+    /// Addresses the running full scan has looked up so far.
+    pub addresses_checked: u64,
+    /// Addresses the running full scan is expected to look up. An estimate: the scan
+    /// stops after a gap of unused addresses, which it can only know by looking.
+    pub addresses_expected: u64,
+    /// When a full scan last finished and its result reached the database, during this
+    /// run of the daemon. `None` until then, including while a first scan runs.
+    pub full_scan_completed_at: Option<u32>,
+    /// The poller's current run of failed polls, if the latest poll failed.
+    pub last_failure: Option<PollFailure>,
+}
+
+impl HistorySync {
+    /// Progress of the running full scan, between 0 and 1. Capped below 1, since
+    /// `addresses_expected` is an estimate and only the scan finishing means it is done.
+    pub fn full_scan_progress(&self) -> Option<f64> {
+        if !self.full_scan_in_progress {
+            return None;
+        }
+        if self.addresses_expected == 0 {
+            return Some(0.0);
+        }
+        Some((self.addresses_checked as f64 / self.addresses_expected as f64).min(0.99))
+    }
+}
+
+/// Live record of the wallet's history synchronisation, read by `get_info` WITHOUT
+/// taking the `BitcoinInterface` mutex, for the same reason as [`SyncProgressCache`]:
+/// the poller holds that mutex for an entire full scan, which over a slow Esplora
+/// server can take most of an hour.
+///
+/// The backend publishes full-scan progress into it as each address is looked up; the
+/// poller publishes the outcome of every poll. A full scan only counts as completed once
+/// the poll carrying it succeeds — that is when its transactions reach the database.
+#[derive(Debug, Default)]
+pub struct HistorySyncCache {
+    scanning: sync::atomic::AtomicBool,
+    checked: sync::atomic::AtomicU64,
+    expected: sync::atomic::AtomicU64,
+    /// A full scan finished in the backend; the poll that writes it to the database
+    /// has not succeeded yet.
+    awaiting_commit: sync::atomic::AtomicBool,
+    /// Unix time of the last committed full scan; 0 for none.
+    completed_at: sync::atomic::AtomicU32,
+    failure: sync::Mutex<Option<PollFailure>>,
+}
+
+impl HistorySyncCache {
+    /// A full scan expected to look up `expected` addresses is starting. Restarts the
+    /// count, so a scan that is retried against another server counts from zero.
+    pub fn begin_full_scan(&self, expected: u64) {
+        use sync::atomic::Ordering::{Relaxed, Release};
+        self.checked.store(0, Relaxed);
+        self.expected.store(expected, Relaxed);
+        // Release, paired with the Acquire in `snapshot`: a reader that sees this
+        // scan running also sees its reset count and estimate, never the previous
+        // scan's.
+        self.scanning.store(true, Release);
+    }
+
+    /// The running full scan looked up one more address.
+    pub fn address_checked(&self) {
+        self.checked.fetch_add(1, sync::atomic::Ordering::Relaxed);
+    }
+
+    /// The full scan returned a result for the backend to apply.
+    pub fn full_scan_fetched(&self) {
+        use sync::atomic::Ordering::Relaxed;
+        self.scanning.store(false, Relaxed);
+        self.awaiting_commit.store(true, Relaxed);
+    }
+
+    /// A poll completed: its result, including any full scan it carried, is in the
+    /// database. Clears the failure run.
+    pub fn poll_succeeded(&self, now: u32) {
+        use sync::atomic::Ordering::Relaxed;
+        self.scanning.store(false, Relaxed);
+        if self.awaiting_commit.swap(false, Relaxed) {
+            self.completed_at.store(now, Relaxed);
+        }
+        *self.failure.lock().expect("never held across a panic") = None;
+    }
+
+    /// A poll failed with `message`. Any full scan it was running is lost — the next
+    /// one starts over — but a scan that already returned stays awaiting its commit:
+    /// the backend applied it and the next successful poll writes it out.
+    ///
+    /// Returns the updated failure run and whether `message` differs from the previous
+    /// failure's, so the caller can log a new problem loudly and a repeat quietly.
+    pub fn poll_failed(&self, message: &str, now: u32) -> (PollFailure, bool) {
+        self.scanning.store(false, sync::atomic::Ordering::Relaxed);
+        let mut failure = self.failure.lock().expect("never held across a panic");
+        let (updated, changed) = match failure.take() {
+            Some(previous) => {
+                let changed = error_kind(&previous.message) != error_kind(message);
+                (
+                    PollFailure {
+                        message: message.to_string(),
+                        since: previous.since,
+                        last_at: now,
+                        consecutive: previous.consecutive.saturating_add(1),
+                    },
+                    changed,
+                )
+            }
+            None => (
+                PollFailure {
+                    message: message.to_string(),
+                    since: now,
+                    last_at: now,
+                    consecutive: 1,
+                },
+                true,
+            ),
+        };
+        *failure = Some(updated.clone());
+        (updated, changed)
+    }
+
+    /// The current state, for `get_info`.
+    pub fn snapshot(&self) -> HistorySync {
+        use sync::atomic::Ordering::{Acquire, Relaxed};
+        let full_scan_in_progress = self.scanning.load(Acquire);
+        HistorySync {
+            full_scan_in_progress,
+            addresses_checked: if full_scan_in_progress {
+                self.checked.load(Relaxed)
+            } else {
+                0
+            },
+            addresses_expected: if full_scan_in_progress {
+                self.expected.load(Relaxed)
+            } else {
+                0
+            },
+            full_scan_completed_at: match self.completed_at.load(Relaxed) {
+                0 => None,
+                at => Some(at),
+            },
+            last_failure: self
+                .failure
+                .lock()
+                .expect("never held across a panic")
+                .clone(),
+        }
+    }
+}
+
+/// A failure message with its long numbers removed, so request ids, timestamps and
+/// byte counts in a server's error text do not make every repeat of the same failure
+/// look like a new one. Runs of fewer than four digits are kept: an HTTP status is
+/// the difference between a rate limit (429) and an outage (503).
+fn error_kind(message: &str) -> String {
+    const MIN_VOLATILE_DIGITS: usize = 4;
+    let mut kind = String::with_capacity(message.len());
+    let mut digits = String::new();
+    for c in message.chars().chain(std::iter::once('\0')) {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        if digits.len() < MIN_VOLATILE_DIGITS {
+            kind.push_str(&digits);
+        }
+        digits.clear();
+        if c != '\0' {
+            kind.push(c);
+        }
+    }
+    kind
+}
+
+/// How many addresses a full scan with this `stop_gap` is expected to look up: each
+/// keychain's revealed addresses plus a gap's worth past them. `last_revealed` holds the
+/// last revealed index of each keychain that has one.
+pub(crate) fn expected_full_scan_addresses(
+    keychains: usize,
+    last_revealed: impl IntoIterator<Item = u32>,
+    stop_gap: usize,
+) -> u64 {
+    let revealed: u64 = last_revealed.into_iter().map(|i| u64::from(i) + 1).sum();
+    revealed + (keychains as u64) * (stop_gap as u64)
+}
+
 /// Set while the shared managed node is being deliberately rewound, so pollers
 /// know to stand down instead of reacting to a chain they are being shown
 /// mid-surgery.
@@ -286,6 +492,10 @@ pub type ConfirmedCoins = (Vec<(bitcoin::OutPoint, i32, u32)>, Vec<bitcoin::OutP
 pub trait BitcoinInterface: Send {
     /// Install the daemon shutdown signal for bounded polling reads.
     fn set_poll_abort(&mut self, _abort: sync::Arc<sync::atomic::AtomicBool>) {}
+
+    /// Install the record a full scan reports its progress into. Only backends that
+    /// learn a wallet's history by scanning its addresses (Electrum, Esplora) use it.
+    fn set_history_sync_cache(&mut self, _cache: sync::Arc<HistorySyncCache>) {}
 
     /// Whether this backend talks to a `bitcoind`.
     ///
@@ -1255,9 +1465,15 @@ impl BitcoinInterface for electrum::Electrum {
         Ok(())
     }
 
+    fn set_history_sync_cache(&mut self, cache: sync::Arc<HistorySyncCache>) {
+        self.install_history_sync_cache(cache);
+    }
+
     fn rescan_progress(&self) -> Option<f64> {
-        // Until we sync we're at 0%. After the sync, we're at 100%.
-        self.is_rescanning().then_some(0.0)
+        // The share of addresses the running full scan has looked up, until its
+        // result is applied. 0% before the scan starts.
+        self.is_rescanning()
+            .then(|| self.full_scan_progress().unwrap_or(0.0))
     }
 
     fn block_before_date(&self, _timestamp: u32) -> Option<BlockChainTip> {
@@ -1386,8 +1602,13 @@ impl BitcoinInterface for esplora::Esplora {
         Ok(())
     }
 
+    fn set_history_sync_cache(&mut self, cache: sync::Arc<HistorySyncCache>) {
+        self.install_history_sync_cache(cache);
+    }
+
     fn rescan_progress(&self) -> Option<f64> {
-        self.is_rescanning().then_some(0.0)
+        self.is_rescanning()
+            .then(|| self.full_scan_progress().unwrap_or(0.0))
     }
 
     fn block_before_date(&self, _timestamp: u32) -> Option<BlockChainTip> {
@@ -1668,5 +1889,107 @@ mod genesis_tests {
             matches!(error, GenesisError::Esplora(error) if matches!(*error, esplora::client::Error::AllCooling))
         );
         assert_eq!(backend.block_before_date(0), None);
+    }
+}
+
+#[cfg(test)]
+mod history_sync_cache_tests {
+    use super::*;
+
+    #[test]
+    fn progress_counts_addresses_and_stays_below_complete() {
+        let cache = HistorySyncCache::default();
+        assert_eq!(cache.snapshot().full_scan_progress(), None);
+        cache.begin_full_scan(4);
+        assert_eq!(cache.snapshot().full_scan_progress(), Some(0.0));
+        cache.address_checked();
+        assert_eq!(cache.snapshot().full_scan_progress(), Some(0.25));
+        // The expected count is an estimate; a scan that looks further must not
+        // claim to be done before it is.
+        for _ in 0..10 {
+            cache.address_checked();
+        }
+        assert_eq!(cache.snapshot().full_scan_progress(), Some(0.99));
+        // An unknown total still reads as a scan under way.
+        cache.begin_full_scan(0);
+        assert_eq!(cache.snapshot().full_scan_progress(), Some(0.0));
+    }
+
+    /// A scan retried against the next server starts counting again.
+    #[test]
+    fn a_restarted_scan_counts_from_zero() {
+        let cache = HistorySyncCache::default();
+        cache.begin_full_scan(10);
+        for _ in 0..5 {
+            cache.address_checked();
+        }
+        cache.begin_full_scan(10);
+        assert_eq!(cache.snapshot().addresses_checked, 0);
+    }
+
+    #[test]
+    fn completion_waits_for_the_poll_that_commits_the_scan() {
+        let cache = HistorySyncCache::default();
+        cache.begin_full_scan(10);
+        cache.full_scan_fetched();
+        let snapshot = cache.snapshot();
+        assert!(!snapshot.full_scan_in_progress);
+        assert_eq!(snapshot.full_scan_completed_at, None);
+        cache.poll_failed("db write", 5);
+        assert_eq!(cache.snapshot().full_scan_completed_at, None);
+        cache.poll_succeeded(7);
+        assert_eq!(cache.snapshot().full_scan_completed_at, Some(7));
+        // A later ordinary poll does not move the completion time.
+        cache.poll_succeeded(9);
+        assert_eq!(cache.snapshot().full_scan_completed_at, Some(7));
+    }
+
+    #[test]
+    fn failure_runs_count_up_and_flag_a_changed_error() {
+        let cache = HistorySyncCache::default();
+        let (failure, changed) = cache.poll_failed("timeout", 10);
+        assert!(changed);
+        assert_eq!(
+            (failure.since, failure.last_at, failure.consecutive),
+            (10, 10, 1)
+        );
+        let (failure, changed) = cache.poll_failed("timeout", 20);
+        assert!(!changed);
+        assert_eq!(
+            (failure.since, failure.last_at, failure.consecutive),
+            (10, 20, 2)
+        );
+        let (failure, changed) = cache.poll_failed("429 Too Many Requests", 30);
+        assert!(changed);
+        assert_eq!((failure.since, failure.consecutive), (10, 3));
+        cache.poll_succeeded(40);
+        assert_eq!(cache.snapshot().last_failure, None);
+        let (failure, _) = cache.poll_failed("timeout", 50);
+        assert_eq!((failure.since, failure.consecutive), (50, 1));
+    }
+
+    /// Server error text often carries request ids or timestamps; a repeat of the same
+    /// failure must not count as a new error and log a warning on every poll.
+    #[test]
+    fn a_failure_differing_only_in_numbers_is_the_same_error() {
+        let cache = HistorySyncCache::default();
+        cache.poll_failed("upstream error (request id 1234, at 1791329974)", 10);
+        let (_, changed) = cache.poll_failed("upstream error (request id 9876, at 1791330004)", 20);
+        assert!(!changed);
+        let (_, changed) = cache.poll_failed("connection refused", 30);
+        assert!(changed);
+        // A status code is not noise: a rate limit turning into an outage is news.
+        cache.poll_failed("HttpResponse { status: 429, message: \"slow down\" }", 40);
+        let (_, changed) =
+            cache.poll_failed("HttpResponse { status: 503, message: \"slow down\" }", 50);
+        assert!(changed);
+    }
+
+    #[test]
+    fn expected_addresses_cover_revealed_indices_plus_a_gap_per_keychain() {
+        // A restored Vault that has revealed nothing yet: a gap on each keychain.
+        assert_eq!(expected_full_scan_addresses(2, [], 200), 400);
+        // Receive index 2 and change index 0 revealed.
+        assert_eq!(expected_full_scan_addresses(2, [2, 0], 200), 404);
     }
 }

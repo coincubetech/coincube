@@ -640,3 +640,43 @@ fn electrum_mempool_walks_give_up_when_the_tip_keeps_changing() {
     let calls = subscribes.load(Ordering::SeqCst);
     assert!(calls <= 2 * MAX_READS, "{} tip reads", calls);
 }
+
+/// A full scan run by the real backend reports into the history record: it shows as
+/// running, with addresses counted, while the server is answering its lookups; and
+/// once it returns it is held for the poll that commits it, not shown as complete.
+#[test]
+fn electrum_full_scan_reports_its_progress_into_the_history_record() {
+    let cache = Arc::new(crate::bitcoin::HistorySyncCache::default());
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let answer = {
+        let base = tip_at(Arc::new(AtomicU64::new(20)));
+        let cache = cache.clone();
+        let seen = seen.clone();
+        move |method: &str, params: &Json| {
+            if method == "blockchain.scripthash.get_history" {
+                seen.lock().unwrap().push(cache.snapshot());
+            }
+            base(method, params)
+        }
+    };
+    let sync = against_server(answer, |mut backend| {
+        BitcoinInterface::set_history_sync_cache(&mut backend, cache.clone());
+        backend.sync_wallet(0.into(), 0.into())
+    });
+    assert!(matches!(sync, Ok(None)), "{:?}", sync);
+
+    let seen = seen.lock().unwrap();
+    assert!(!seen.is_empty(), "the scan looked up no address");
+    assert!(seen.iter().all(|s| s.full_scan_in_progress));
+    // Two keychains with index 0 revealed, as on a fresh restore: one address
+    // plus a stop gap's worth on each.
+    assert!(seen.iter().all(|s| s.addresses_expected == 402));
+    let last = seen.iter().map(|s| s.addresses_checked).max().unwrap();
+    assert!(last >= 200, "only {} addresses counted", last);
+
+    let after = cache.snapshot();
+    assert!(!after.full_scan_in_progress);
+    assert_eq!(after.full_scan_completed_at, None);
+    cache.poll_succeeded(42);
+    assert_eq!(cache.snapshot().full_scan_completed_at, Some(42));
+}

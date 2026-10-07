@@ -75,6 +75,111 @@ fn rescan_date_prompt<'a>() -> Element<'a, Message> {
     .into()
 }
 
+/// How the balance header should present the Vault's balance.
+///
+/// An empty balance is only shown as an amount when the Vault knows its history.
+/// While a full scan is still loading it, or syncing keeps failing before it has
+/// loaded, or a restore is waiting on a rescan date, the empty database says nothing
+/// about the funds — and a confident "$0.00" is exactly what led a user with a
+/// funded, restored Vault to believe the funds were gone.
+pub(crate) fn balance_sync_state(
+    sync_status: &SyncStatus,
+    total_balance: bitcoin::Amount,
+    awaiting_rescan_date: bool,
+) -> SyncState {
+    let empty = total_balance == bitcoin::Amount::ZERO;
+    let awaiting_label = "Balance unknown until this Vault's history is scanned. \
+                          Pick the date it was created to start.";
+    match sync_status {
+        // However far the node or the wallet has synced, a restore awaiting its
+        // rescan date has no history: its zero is not a balance.
+        SyncStatus::Synced | SyncStatus::LatestWalletSync if empty && awaiting_rescan_date => {
+            SyncState::Unknown {
+                progress: None,
+                label: awaiting_label.to_string(),
+                failing: true,
+            }
+        }
+        SyncStatus::BlockchainSync(progress) if empty && awaiting_rescan_date => {
+            SyncState::Unknown {
+                progress: Some(*progress),
+                label: "Syncing blockchain; the balance stays unknown until this Vault's \
+                        history is scanned"
+                    .to_string(),
+                failing: false,
+            }
+        }
+        SyncStatus::Synced => SyncState::Synced,
+        SyncStatus::BlockchainSync(progress) => SyncState::Syncing {
+            progress: Some(*progress),
+            label: "Syncing blockchain".to_string(),
+        },
+        SyncStatus::WalletFullScan { progress } if empty => SyncState::Unknown {
+            progress: *progress,
+            label: "Loading Vault history".to_string(),
+            failing: false,
+        },
+        SyncStatus::WalletFullScan { progress } => SyncState::Syncing {
+            progress: *progress,
+            label: "Syncing".to_string(),
+        },
+        SyncStatus::LatestWalletSync => SyncState::Checking,
+        SyncStatus::SyncFailing {
+            message,
+            since,
+            retry_progress,
+        } if empty => SyncState::Unknown {
+            progress: None,
+            label: format!(
+                "Balance unavailable: syncing has failed since {}{}. {}",
+                format_failure_time(*since),
+                retry_note(*retry_progress),
+                failure_detail(message),
+            ),
+            failing: true,
+        },
+        SyncStatus::SyncFailing {
+            message,
+            since,
+            retry_progress,
+        } => SyncState::Stale {
+            message: format!(
+                "Last known balance: syncing has failed since {}{}. {}",
+                format_failure_time(*since),
+                retry_note(*retry_progress),
+                failure_detail(message),
+            ),
+        },
+    }
+}
+
+/// ", retrying (x%)" while a full scan is retrying after failures, so a retry that
+/// is getting somewhere does not read as failed throughout.
+fn retry_note(retry_progress: Option<f64>) -> String {
+    retry_progress
+        .map(|p| format!(", retrying ({:.1}%)", 100.0 * p))
+        .unwrap_or_default()
+}
+
+/// When a run of failed polls began, in local time.
+fn format_failure_time(since: u32) -> String {
+    DateTime::<Utc>::from_timestamp(i64::from(since), 0)
+        .map(|at| at.with_timezone(&Local).format("%b %-d, %H:%M").to_string())
+        .unwrap_or_else(|| "recently".to_string())
+}
+
+/// The daemon's failure message, trimmed to fit under the balance. The daemon log
+/// keeps the full text.
+fn failure_detail(message: &str) -> String {
+    const MAX_CHARS: usize = 160;
+    let message = message.trim();
+    if message.chars().count() <= MAX_CHARS {
+        return message.to_string();
+    }
+    let truncated: String = message.chars().take(MAX_CHARS).collect();
+    format!("{}…", truncated.trim_end())
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn vault_overview_view<'a>(
     balance: &'a bitcoin::Amount,
@@ -88,6 +193,7 @@ pub fn vault_overview_view<'a>(
     loading: bool,
     sync_status: &SyncStatus,
     show_rescan_prompt: bool,
+    awaiting_rescan_date: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     node_bitcoind_sync_progress: Option<f64>,
     node_bitcoind_ibd: Option<bool>,
@@ -103,18 +209,8 @@ pub fn vault_overview_view<'a>(
     // headline.
     let total_balance = *balance + *unconfirmed_balance;
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(total_balance));
-    let sync = match sync_status {
-        SyncStatus::Synced => SyncState::Synced,
-        SyncStatus::BlockchainSync(progress) => SyncState::Syncing {
-            progress: Some(*progress),
-            label: "Syncing blockchain".to_string(),
-        },
-        SyncStatus::WalletFullScan => SyncState::Syncing {
-            progress: None,
-            label: "Syncing".to_string(),
-        },
-        SyncStatus::LatestWalletSync => SyncState::Checking,
-    };
+    let sync = balance_sync_state(sync_status, total_balance, awaiting_rescan_date);
+    let history_unknown = matches!(sync, SyncState::Unknown { .. });
     let btc_fiat_str = fiat_balance
         .as_ref()
         .map(|f| format!("{} {}", f.to_formatted_string(), f.currency()))
@@ -126,16 +222,24 @@ pub fn vault_overview_view<'a>(
             "btc", "bitcoin", 40.0,
         ))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(amount_with_size_and_unit(
-            &total_balance,
-            P1_SIZE,
-            bitcoin_unit,
-        ))
+        .push(if history_unknown {
+            Row::new().push(text("—").size(P1_SIZE).style(theme::text::secondary))
+        } else {
+            Row::new().push(amount_with_size_and_unit(
+                &total_balance,
+                P1_SIZE,
+                bitcoin_unit,
+            ))
+        })
         .push(
-            text(btc_fiat_str)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
+            text(if history_unknown {
+                String::new()
+            } else {
+                btc_fiat_str
+            })
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .width(Length::Fill),
         )
         .push(
             button::primary(None, "Send")
@@ -252,7 +356,17 @@ pub fn vault_overview_view<'a>(
                 .spacing(10)
                 .push(h4_bold("Last transactions"))
                 .push_maybe(loading.then(|| {
-                    loading_placeholder(icon::receipt_icon().size(48), "Loading transactions")
+                    loading_placeholder(
+                        icon::receipt_icon().size(48),
+                        if history_unknown {
+                            // Nothing is loading yet: the list is read once the
+                            // history is in, and saying "Loading" until then is
+                            // what made an unfinished scan look like a slow page.
+                            "Transactions appear once the Vault's history has loaded"
+                        } else {
+                            "Loading transactions"
+                        },
+                    )
                 }))
                 .push(events.iter().fold(Column::new().spacing(10), |col, event| {
                     // Change outputs are skipped — their transaction is already
@@ -542,4 +656,132 @@ pub fn received_celebration_page<'a>(
         "has arrived.",
         Message::DismissReceivedCelebration,
     )
+}
+
+#[cfg(test)]
+mod balance_state_tests {
+    use super::{balance_sync_state, failure_detail};
+    use crate::app::{view::wallet_header::SyncState, wallet::SyncStatus};
+    use coincube_core::miniscript::bitcoin::Amount;
+
+    /// The incident: a restored Vault's history was still loading and the header said
+    /// "$0.00" as though that were its balance. An empty balance during a full scan is
+    /// now shown as unknown.
+    #[test]
+    fn an_empty_balance_is_unknown_while_the_history_loads() {
+        let state = balance_sync_state(
+            &SyncStatus::WalletFullScan {
+                progress: Some(0.25),
+            },
+            Amount::ZERO,
+            false,
+        );
+        assert!(matches!(
+            state,
+            SyncState::Unknown {
+                progress: Some(p),
+                failing: false,
+                ..
+            } if p == 0.25
+        ));
+    }
+
+    /// A Vault that already holds coins keeps showing them, pulsing, while it rescans.
+    #[test]
+    fn a_known_balance_stays_visible_while_rescanning() {
+        let state = balance_sync_state(
+            &SyncStatus::WalletFullScan { progress: None },
+            Amount::from_sat(1),
+            false,
+        );
+        assert!(matches!(state, SyncState::Syncing { .. }));
+    }
+
+    #[test]
+    fn failing_sync_hides_an_empty_balance_and_flags_a_known_one() {
+        let failing = SyncStatus::SyncFailing {
+            message: "Esplora client error".into(),
+            since: 0,
+            retry_progress: None,
+        };
+        match balance_sync_state(&failing, Amount::ZERO, false) {
+            SyncState::Unknown {
+                failing: true,
+                label,
+                ..
+            } => assert!(label.contains("Esplora client error"), "{}", label),
+            _ => panic!("an empty balance must not be shown while syncing fails"),
+        }
+        match balance_sync_state(&failing, Amount::from_sat(5), false) {
+            SyncState::Stale { message } => {
+                assert!(message.starts_with("Last known balance"), "{}", message)
+            }
+            _ => panic!("a known balance must be flagged as possibly stale"),
+        }
+    }
+
+    /// A restore still waiting for a rescan date has no history at all: its "0" is
+    /// not a balance either.
+    #[test]
+    fn a_vault_awaiting_its_rescan_date_has_no_balance_to_show() {
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::Synced, Amount::ZERO, true),
+            SyncState::Unknown { failing: true, .. }
+        ));
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::Synced, Amount::from_sat(5), true),
+            SyncState::Synced
+        ));
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::Synced, Amount::ZERO, false),
+            SyncState::Synced
+        ));
+        // Nor while the node or the wallet is still syncing: the blockchain's
+        // progress is kept, but no zero is shown.
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::BlockchainSync(0.4), Amount::ZERO, true),
+            SyncState::Unknown {
+                progress: Some(p),
+                failing: false,
+                ..
+            } if p == 0.4
+        ));
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::LatestWalletSync, Amount::ZERO, true),
+            SyncState::Unknown { failing: true, .. }
+        ));
+        // A funded Vault keeps showing its coins while syncing.
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::BlockchainSync(0.4), Amount::from_sat(5), true),
+            SyncState::Syncing { .. }
+        ));
+        assert!(matches!(
+            balance_sync_state(&SyncStatus::LatestWalletSync, Amount::from_sat(5), true),
+            SyncState::Checking
+        ));
+    }
+
+    #[test]
+    fn a_retrying_scan_shows_its_progress_alongside_the_failure() {
+        let retrying = SyncStatus::SyncFailing {
+            message: "Esplora client error".into(),
+            since: 0,
+            retry_progress: Some(0.5),
+        };
+        match balance_sync_state(&retrying, Amount::ZERO, false) {
+            SyncState::Unknown { label, .. } => {
+                assert!(label.contains("retrying (50.0%)"), "{}", label)
+            }
+            _ => panic!("an empty balance must not be shown while syncing fails"),
+        }
+    }
+
+    #[test]
+    fn long_failure_messages_are_trimmed() {
+        let long = "x".repeat(500);
+        let detail = failure_detail(&long);
+        assert_eq!(detail.chars().count(), 161);
+        assert!(detail.ends_with('…'));
+        assert_eq!(failure_detail("  short  "), "short");
+    }
 }

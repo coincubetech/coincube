@@ -332,6 +332,7 @@ impl Panels {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 ),
                 cache.blockheight(),
                 needs_rescan_date,
@@ -379,6 +380,7 @@ impl Panels {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 ),
             )),
             receive: Some(VaultReceivePanel::new(data_dir.clone(), wallet.clone())),
@@ -401,6 +403,7 @@ impl Panels {
                         cache.sync_progress(),
                         cache.last_poll_timestamp(),
                         cache.last_poll_at_startup,
+                        cache.history_sync(),
                     ),
                     cache.bitcoin_unit,
                 )
@@ -496,6 +499,7 @@ impl Panels {
                 cache.sync_progress(),
                 cache.last_poll_timestamp(),
                 cache.last_poll_at_startup,
+                cache.history_sync(),
             ),
             cache.blockheight(),
             needs_rescan_date(&data_dir, cache.chain(), &wallet, &daemon_backend),
@@ -516,6 +520,7 @@ impl Panels {
                 cache.sync_progress(),
                 cache.last_poll_timestamp(),
                 cache.last_poll_at_startup,
+                cache.history_sync(),
             ),
         ));
         self.receive = Some(VaultReceivePanel::new(data_dir.clone(), wallet.clone()));
@@ -538,6 +543,7 @@ impl Panels {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 ),
                 cache.bitcoin_unit,
             )
@@ -875,6 +881,14 @@ pub struct App {
     /// every tick — spawning concurrent daemon starts that race to load the same
     /// watchonly wallet and corrupt it. Cleared by `Message::DaemonRestarted`.
     daemon_switch_in_progress: bool,
+    /// Whether a completed full scan has retired this Vault's rescan obligation
+    /// this session: set only once the settings write succeeded. See
+    /// [`full_scan_settles_rescan_obligation`].
+    rescan_obligation_retired_by_scan: bool,
+    /// A settings write retiring the obligation is under way, so a refresh does
+    /// not start a second one. Cleared when it reports back; a failed write
+    /// leaves the obligation to be retried on a later refresh.
+    rescan_obligation_retire_in_flight: bool,
     /// Set when an auto-promotion to the pending local node fails and the
     /// previous daemon is recovered. The recovered daemon still carries
     /// `auto_switch_to_pending = true` + `pending_bitcoind`, so without this the
@@ -2197,21 +2211,12 @@ pub struct LocalNodeSync {
 /// wallet catching up, its first address scan through an Esplora/Electrum
 /// backend, or a pending rescan.
 ///
-/// `sync_status` alone misses a Connect Vault's *first-ever* full scan: the
-/// database has no tip yet, so `blockheight` is 0, and its `blockheight <= 0`
-/// arm (which does not list Esplora) returns before the "no poll this
-/// session" arm can run — it reports `Synced`. So for an embedded
-/// Esplora/Electrum backend, no completed poll this session counts as a scan
-/// whatever the height. (`sync_status` itself is left alone here; sibling
-/// PR #670 reworks it.)
-///
-/// Known gap: a full scan started *mid-session* — a user rescan whose
-/// `getinfo` blocks on the backend lock, or the forced full scan after a
-/// `CannotConnect` with no rescan timestamp — is seen only if a poll result
-/// happens to show it. Sibling PR #670 (`fix/vault-history-sync-state`) adds a
-/// lock-free `history_sync` report to `getinfo` and makes `sync_status` return
-/// `WalletFullScan` while a full scan runs; this predicate picks that up
-/// through `wallet_is_syncing()` once both have merged.
+/// A running full scan, including one started mid-session (a user rescan, or
+/// the forced full scan after a `CannotConnect`), is read from the daemon's
+/// lock-free `history_sync` report: `sync_status` returns `WalletFullScan`
+/// while one runs. An embedded Esplora/Electrum backend with no completed poll
+/// this session also counts as scanning whatever the height, which covers a
+/// daemon too old to send that report.
 pub(crate) fn running_vault_scan(
     daemon_backend: DaemonBackend,
     cache: &Cache,
@@ -2227,6 +2232,7 @@ pub(crate) fn running_vault_scan(
         cache.sync_progress(),
         cache.last_poll_timestamp(),
         cache.last_poll_at_startup,
+        cache.history_sync(),
     );
     local_switch::running_scan(
         status.wallet_is_syncing()
@@ -2709,6 +2715,33 @@ fn needs_rescan_date(
             .map(|nt| nt == NodeType::Bitcoind)
             // We don't know the node type for external coincubed so assume it's bitcoind.
             .unwrap_or(true)
+}
+
+/// Whether the daemon has just finished the full scan a restored Vault was owed.
+///
+/// On Electrum and Esplora a full scan looks up every address the Vault has used,
+/// from the start of the chain: once one has completed and reached the database,
+/// the history is in, whatever it contains. That retires the obligation even for a
+/// Vault that is genuinely empty, which [`settle_rescan_obligation`]'s
+/// "a confirmed coin is proof" rule never could — leaving the marker behind to
+/// misreport the Vault as unscanned the moment it is moved to a local node.
+///
+/// Acted on once per session, from the first refresh that shows a completed scan,
+/// so the settings file is not rewritten on every refresh. That includes a scan
+/// that had already completed by the app's first snapshot: the daemon's poller
+/// starts before the loader takes it, and a fast scan can win that race. A local
+/// `bitcoind` is excluded: it rescans from a date, and only coins prove that date
+/// was early enough.
+fn full_scan_settles_rescan_obligation(
+    backend: &DaemonBackend,
+    already_retired: bool,
+    history: &coincubed::commands::HistorySync,
+) -> bool {
+    matches!(
+        backend,
+        DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum | NodeType::Esplora))
+    ) && !already_retired
+        && history.full_scan_completed_at.is_some()
 }
 
 /// `settings` with this Vault's pending-rescan marker cleared, and everything
@@ -3326,6 +3359,8 @@ impl App {
             claim_session_invalidated: false,
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
+            rescan_obligation_retired_by_scan: false,
+            rescan_obligation_retire_in_flight: false,
             auto_switch_suppressed: false,
             local_switch_hold: None,
             entangled_in_flight: HashSet::new(),
@@ -3536,6 +3571,8 @@ impl App {
                 claim_session_invalidated: false,
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
+                rescan_obligation_retired_by_scan: false,
+                rescan_obligation_retire_in_flight: false,
                 auto_switch_suppressed: false,
                 local_switch_hold: None,
                 entangled_in_flight: HashSet::new(),
@@ -4711,6 +4748,27 @@ impl App {
         &self.config
     }
 
+    /// Clear this Vault's recorded rescan obligation. See
+    /// [`full_scan_settles_rescan_obligation`] for when that is right.
+    fn retire_rescan_obligation_task(&self) -> Option<Task<Message>> {
+        let wallet = self.wallet.as_ref()?;
+        let network_dir = self
+            .cache
+            .datadir_path
+            .network_directory(self.cache.chain());
+        let descriptor_checksum = wallet.descriptor_checksum.clone();
+        Some(Task::perform(
+            async move {
+                settings::update_settings_file(&network_dir, |settings| {
+                    Some(cleared_pending_rescan(settings, &descriptor_checksum))
+                })
+                .await
+                .map_err(|e| e.to_string())
+            },
+            Message::RescanObligationRetired,
+        ))
+    }
+
     fn daemon_backend(&self) -> DaemonBackend {
         self.daemon
             .as_ref()
@@ -4908,6 +4966,7 @@ impl App {
                                     self.cache.sync_progress(),
                                     self.cache.last_poll_timestamp(),
                                     self.cache.last_poll_at_startup,
+                                    self.cache.history_sync(),
                                 ),
                                 self.cache.bitcoin_unit,
                             ));
@@ -4949,6 +5008,7 @@ impl App {
                                             self.cache.sync_progress(),
                                             self.cache.last_poll_timestamp(),
                                             self.cache.last_poll_at_startup,
+                                            self.cache.history_sync(),
                                         ),
                                         self.cache.bitcoin_unit,
                                     )
@@ -4971,6 +5031,7 @@ impl App {
                                     self.cache.sync_progress(),
                                     self.cache.last_poll_timestamp(),
                                     self.cache.last_poll_at_startup,
+                                    self.cache.history_sync(),
                                 ),
                             ));
                         }
@@ -5030,14 +5091,17 @@ impl App {
                         self.cache.sync_progress(),
                         self.cache.last_poll_timestamp(),
                         self.cache.last_poll_at_startup,
+                        self.cache.history_sync(),
                     ) {
                         SyncStatus::BlockchainSync(_) => 5, // Only applies to local backends
-                        SyncStatus::WalletFullScan
+                        SyncStatus::WalletFullScan { .. }
                             if self.daemon_backend() == DaemonBackend::RemoteBackend =>
                         {
                             10
                         } // If remote backend, don't ping too often
-                        SyncStatus::WalletFullScan | SyncStatus::LatestWalletSync => 3,
+                        SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync => 3,
+                        // Polls are being retried; refresh often enough to notice recovery.
+                        SyncStatus::SyncFailing { .. } => 5,
                         SyncStatus::Synced => {
                             if self.daemon_backend() == DaemonBackend::RemoteBackend {
                                 // Remote backend has no rescan feature. For a synced wallet,
@@ -5281,14 +5345,17 @@ impl App {
                 self.cache.sync_progress(),
                 self.cache.last_poll_timestamp(),
                 self.cache.last_poll_at_startup,
+                self.cache.history_sync(),
             ) {
                 SyncStatus::BlockchainSync(_) => 5, // Only applies to local backends
-                SyncStatus::WalletFullScan
+                SyncStatus::WalletFullScan { .. }
                     if self.daemon_backend() == DaemonBackend::RemoteBackend =>
                 {
                     10
                 } // If remote backend, don't ping too often
-                SyncStatus::WalletFullScan | SyncStatus::LatestWalletSync => 3,
+                SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync => 3,
+                // Polls are being retried; refresh often enough to notice recovery.
+                SyncStatus::SyncFailing { .. } => 5,
                 SyncStatus::Synced => {
                     if self.daemon_backend() == DaemonBackend::RemoteBackend {
                         // Remote backend has no rescan feature. For a synced wallet,
@@ -5325,6 +5392,7 @@ impl App {
                             rescan_progress: info.rescan_progress,
                             sync_progress: info.sync,
                             last_poll_timestamp: info.last_poll_timestamp,
+                            history_sync: info.history_sync,
                             last_tick: tick,
                         })
                     },
@@ -6648,6 +6716,18 @@ impl App {
                             wallet.reconcile_with_coins(&daemon_cache.coins);
                             wallet.apply_coin_overrides(&mut daemon_cache.coins);
                         }
+                        let retire_obligation = if full_scan_settles_rescan_obligation(
+                            &self.daemon_backend(),
+                            self.rescan_obligation_retired_by_scan
+                                || self.rescan_obligation_retire_in_flight,
+                            &daemon_cache.history_sync,
+                        ) {
+                            let task = self.retire_rescan_obligation_task();
+                            self.rescan_obligation_retire_in_flight = task.is_some();
+                            task
+                        } else {
+                            None
+                        };
                         self.cache.daemon_cache = daemon_cache;
                         // Fire-and-forget recovery heartbeat after the sync's
                         // fresh tip lands (Estate Notifications — PR 2). Batched
@@ -6662,6 +6742,7 @@ impl App {
                             heartbeat,
                             entangled,
                             unswept,
+                            retire_obligation.unwrap_or_else(Task::none),
                             Task::done(Message::CacheUpdated),
                         ]);
                     }
@@ -6836,6 +6917,19 @@ impl App {
                         )));
                     }
                 }
+            }
+            Message::RescanObligationRetired(result) => {
+                self.rescan_obligation_retire_in_flight = false;
+                match result {
+                    Ok(()) => self.rescan_obligation_retired_by_scan = true,
+                    // Left unretired: the next refresh showing the completed
+                    // scan writes it again.
+                    Err(e) => tracing::warn!(
+                        "Could not retire the pending rescan marker: {}. Retrying on the next refresh.",
+                        e
+                    ),
+                }
+                return Task::none();
             }
             Message::CacheUpdated => {
                 // Cube (Home) Settings lives on every cube, vault or not,
@@ -9136,6 +9230,7 @@ mod tests {
                     chain_divergence: false,
                     timestamp: 0,
                     last_poll_timestamp,
+                    history_sync: Default::default(),
                     receive_index,
                     change_index: 0,
                 })
@@ -11035,6 +11130,46 @@ mod tests {
     /// writer could have rewritten the file, between the task starting and
     /// finishing. It must be a no-op, not a wipe.
     #[test]
+    fn a_completed_full_scan_retires_the_obligation_once_and_only_on_scanning_backends() {
+        use coincubed::commands::HistorySync;
+        let scanning = HistorySync {
+            full_scan_in_progress: true,
+            ..Default::default()
+        };
+        let completed = HistorySync {
+            full_scan_completed_at: Some(1_791_329_974),
+            ..Default::default()
+        };
+        let esplora = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora));
+        let electrum = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum));
+        assert!(full_scan_settles_rescan_obligation(
+            &esplora, false, &completed
+        ));
+        assert!(full_scan_settles_rescan_obligation(
+            &electrum, false, &completed
+        ));
+        // Once per session, not on every refresh after it.
+        assert!(!full_scan_settles_rescan_obligation(
+            &esplora, true, &completed
+        ));
+        // Still scanning: nothing proven yet.
+        assert!(!full_scan_settles_rescan_obligation(
+            &esplora, false, &scanning
+        ));
+        // A local node rescans from a date, which only coins can vouch for.
+        for backend in [
+            DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind)),
+            DaemonBackend::EmbeddedCoincubed(None),
+            DaemonBackend::ExternalCoincubed,
+            DaemonBackend::RemoteBackend,
+        ] {
+            assert!(!full_scan_settles_rescan_obligation(
+                &backend, false, &completed
+            ));
+        }
+    }
+
+    #[test]
     fn clearing_a_pending_rescan_for_an_unknown_vault_changes_nothing() {
         use crate::app::settings::{PendingRescan, WalletSettings};
 
@@ -12338,6 +12473,241 @@ pub(crate) mod claim_step1_tests {
         (app, wallet)
     }
 
+    /// The App acts on a completed full scan: the refresh that first reports it
+    /// rewrites the settings file without the restored Vault's rescan marker, and a
+    /// refresh while the scan is still running leaves the marker alone.
+    #[test]
+    fn a_completed_full_scan_retires_the_restored_vaults_rescan_marker() {
+        use crate::app::settings::{PendingRescan, WalletSettings};
+        use coincubed::commands::HistorySync;
+
+        let root = std::env::temp_dir().join(format!("retire-marker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut app, wallet) = bitcoin_app(&root);
+        // The fixture's cache has an empty data directory, which resolves relative
+        // to the crate under `cargo test`: point it at the temp root so neither the
+        // test nor the task it drives writes into the source tree.
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        assert_eq!(
+            app.daemon_backend(),
+            DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
+        );
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.chain());
+        assert!(network_dir.path().starts_with(&root));
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let marked = settings::Settings {
+            wallets: vec![WalletSettings {
+                name: format!("Coincube-{}", wallet.descriptor_checksum),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: None,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: Some(PendingRescan::DateUnknown),
+                keychain_keys_recorded: false,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            network_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&marked).unwrap(),
+        )
+        .unwrap();
+        let marker = || {
+            let read: settings::Settings = serde_json::from_slice(
+                &std::fs::read(network_dir.path().join(settings::SETTINGS_FILE_NAME)).unwrap(),
+            )
+            .unwrap();
+            read.wallets[0].pending_rescan
+        };
+        let refresh = |history_sync: HistorySync| {
+            Message::UpdateDaemonCache(Ok(cache::DaemonCache {
+                blockheight: 970_247,
+                history_sync,
+                ..Default::default()
+            }))
+        };
+
+        settle(&mut app, |app| {
+            app.update(refresh(HistorySync {
+                full_scan_in_progress: true,
+                ..Default::default()
+            }))
+        });
+        assert_eq!(marker(), Some(PendingRescan::DateUnknown));
+
+        settle(&mut app, |app| {
+            app.update(refresh(HistorySync {
+                full_scan_completed_at: Some(1_791_329_974),
+                ..Default::default()
+            }))
+        });
+        assert_eq!(marker(), None, "the completed scan retires the marker");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// A full scan can complete before the app's first daemon snapshot: the poller
+    /// starts before the loader takes it. Completion already present at startup still
+    /// retires the marker on the first refresh, and only once per session.
+    #[test]
+    fn a_full_scan_completed_before_startup_still_retires_the_marker_once() {
+        use crate::app::settings::{PendingRescan, WalletSettings};
+        use coincubed::commands::HistorySync;
+
+        let root = std::env::temp_dir().join(format!("retire-early-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut app, wallet) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let completed = HistorySync {
+            full_scan_completed_at: Some(1_791_329_974),
+            ..Default::default()
+        };
+        // As seeded by the loader's first snapshot.
+        app.cache.daemon_cache.history_sync = completed.clone();
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.chain());
+        assert!(network_dir.path().starts_with(&root));
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let settings_file = network_dir.path().join(settings::SETTINGS_FILE_NAME);
+        let write_marker = || {
+            let marked = settings::Settings {
+                wallets: vec![WalletSettings {
+                    name: format!("Coincube-{}", wallet.descriptor_checksum),
+                    alias: None,
+                    descriptor_checksum: wallet.descriptor_checksum.clone(),
+                    pinned_at: None,
+                    keys: Vec::new(),
+                    hardware_wallets: Vec::new(),
+                    remote_backend_auth: None,
+                    start_internal_bitcoind: None,
+                    pending_rescan: Some(PendingRescan::DateUnknown),
+                    keychain_keys_recorded: false,
+                }],
+                ..Default::default()
+            };
+            std::fs::write(&settings_file, serde_json::to_vec(&marked).unwrap()).unwrap();
+        };
+        let marker = || {
+            let read: settings::Settings =
+                serde_json::from_slice(&std::fs::read(&settings_file).unwrap()).unwrap();
+            read.wallets[0].pending_rescan
+        };
+        let refresh = |history_sync: HistorySync| {
+            Message::UpdateDaemonCache(Ok(cache::DaemonCache {
+                blockheight: 970_247,
+                history_sync,
+                ..Default::default()
+            }))
+        };
+
+        write_marker();
+        settle(&mut app, |app| app.update(refresh(completed.clone())));
+        assert_eq!(marker(), None, "completion seen at startup retires it");
+
+        // Once per session: a later refresh does not rewrite the file again.
+        write_marker();
+        settle(&mut app, |app| app.update(refresh(completed)));
+        assert_eq!(marker(), Some(PendingRescan::DateUnknown));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Run the task `update` returns to completion, and hand the App back the
+    /// rescan-marker write's outcome, as the runtime would. Only for tasks that
+    /// make no network call.
+    fn settle(app: &mut App, update: impl FnOnce(&mut App) -> Task<Message>) {
+        use iced::futures::StreamExt;
+        let task = update(app);
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return;
+        };
+        let outputs: Vec<Message> = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            );
+        for message in outputs {
+            if matches!(message, Message::RescanObligationRetired(_)) {
+                let _ = app.update(message);
+            }
+        }
+    }
+
+    /// A settings write that fails leaves the obligation unretired, and the next
+    /// refresh showing the completed scan writes it again; while a write is in
+    /// flight, a refresh does not start another.
+    #[test]
+    fn a_failed_marker_write_is_retried_on_a_later_refresh() {
+        use crate::app::settings::{PendingRescan, WalletSettings};
+        use coincubed::commands::HistorySync;
+
+        let root = std::env::temp_dir().join(format!("retire-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut app, wallet) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.chain());
+        assert!(network_dir.path().starts_with(&root));
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let settings_file = network_dir.path().join(settings::SETTINGS_FILE_NAME);
+        let completed = HistorySync {
+            full_scan_completed_at: Some(1_791_329_974),
+            ..Default::default()
+        };
+        let refresh = |history_sync: HistorySync| {
+            Message::UpdateDaemonCache(Ok(cache::DaemonCache {
+                blockheight: 970_247,
+                history_sync,
+                ..Default::default()
+            }))
+        };
+
+        // A settings file that cannot be parsed: the write is refused.
+        std::fs::write(&settings_file, b"{ not json").unwrap();
+        settle(&mut app, |app| app.update(refresh(completed.clone())));
+        assert!(!app.rescan_obligation_retired_by_scan, "the write failed");
+        assert!(!app.rescan_obligation_retire_in_flight);
+
+        // A refresh while a write is pending starts no second one.
+        app.rescan_obligation_retire_in_flight = true;
+        let task = app.update(refresh(completed.clone()));
+        drop(task);
+        assert!(app.rescan_obligation_retire_in_flight);
+        app.rescan_obligation_retire_in_flight = false;
+
+        // With the file readable again, the next refresh retires the marker.
+        let marked = settings::Settings {
+            wallets: vec![WalletSettings {
+                name: format!("Coincube-{}", wallet.descriptor_checksum),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: None,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: Some(PendingRescan::DateUnknown),
+                keychain_keys_recorded: false,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(&settings_file, serde_json::to_vec(&marked).unwrap()).unwrap();
+        settle(&mut app, |app| app.update(refresh(completed)));
+        let read: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_file).unwrap()).unwrap();
+        assert_eq!(read.wallets[0].pending_rescan, None);
+        assert!(app.rescan_obligation_retired_by_scan);
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Put a claim target for `wallet` on the fork chain's settings file,
     /// as another App instance would.
     fn write_claim_target(root: &CoincubeDirectory, wallet: &Wallet) {
@@ -12787,6 +13157,34 @@ pub(crate) mod claim_step1_tests {
 mod local_node_sync_tests {
     use super::*;
     use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+
+    /// A full scan started mid-session — a user rescan, or the forced full scan
+    /// after a `CannotConnect` — after the Vault has already polled: the "no poll
+    /// this session" rule no longer applies, so only the daemon's `history_sync`
+    /// report shows the scan. The local-node switch must wait for it.
+    #[test]
+    fn a_full_scan_started_mid_session_counts_as_running() {
+        use coincubed::commands::HistorySync;
+        let esplora = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora));
+        let mut cache = Cache {
+            last_poll_at_startup: Some(1_000),
+            ..Cache::default()
+        };
+        cache.daemon_cache.blockheight = 970_500;
+        cache.daemon_cache.last_poll_timestamp = Some(2_000);
+        assert_eq!(running_vault_scan(esplora.clone(), &cache), None);
+
+        cache.daemon_cache.history_sync = HistorySync {
+            full_scan_in_progress: true,
+            addresses_checked: 10,
+            addresses_expected: 402,
+            ..Default::default()
+        };
+        assert_eq!(
+            running_vault_scan(esplora, &cache),
+            Some(local_switch::RunningScan::WalletSync)
+        );
+    }
 
     fn node(port: u16) -> BitcoindConfig {
         BitcoindConfig {

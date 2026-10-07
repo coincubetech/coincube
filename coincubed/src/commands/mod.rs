@@ -4,6 +4,8 @@
 
 mod utils;
 
+pub use crate::bitcoin::{HistorySync, PollFailure};
+
 use crate::{
     bitcoin::BitcoinInterface,
     database::{Coin, DatabaseConnection, DatabaseInterface, ReservationError},
@@ -761,8 +763,16 @@ impl DaemonControl {
         let wallet = db_conn.wallet();
         let receive_index: u32 = db_conn.receive_index().into();
         let change_index: u32 = db_conn.change_index().into();
+        let history_sync = self.history_sync_cache.snapshot();
         let rescan_progress = wallet.rescan_timestamp.map(|_| {
-            match self.bitcoin.rescan_progress_result() {
+            // A running full scan holds the backend lock until it finishes, which over a
+            // slow server is most of an hour. Report its progress from the lock-free
+            // record instead of waiting for it.
+            let backend_progress = match history_sync.full_scan_progress() {
+                Some(progress) => Ok(Some(progress)),
+                None => self.bitcoin.rescan_progress_result(),
+            };
+            match backend_progress {
                 Ok(progress) => progress.unwrap_or(1.0),
                 // The rescan is still recorded as pending. An unreachable node
                 // is neither completion (1.0) nor a reason to panic (#589).
@@ -797,6 +807,7 @@ impl DaemonControl {
             chain_divergence,
             timestamp: wallet.timestamp,
             last_poll_timestamp: wallet.last_poll_timestamp,
+            history_sync,
             receive_index,
             change_index,
         }
@@ -1858,6 +1869,11 @@ pub struct GetInfoResult {
     pub timestamp: u32,
     /// Timestamp of last poll, if any.
     pub last_poll_timestamp: Option<u32>,
+    /// How far the wallet's view of its own history has got: whether a full scan is
+    /// running and how far along, whether one has completed, and whether polls are
+    /// failing. Absent from older daemons, which report none of it.
+    #[serde(default)]
+    pub history_sync: crate::bitcoin::HistorySync,
     /// Last index used to generate a receive address
     pub receive_index: u32,
     /// Last index used to generate a change address
@@ -4383,6 +4399,86 @@ mod tests {
     // rust-miniscript's finaliser and the Blake2b arm against the core one. The
     // daemon itself still refuses to start on a Blake2b chain (dormant), which is
     // why the two helpers are exercised directly with both chain identities.
+    /// A full scan holds the backend lock until it finishes, which over a slow Esplora
+    /// server took most of an hour. `get_info` used to read a pending rescan's progress
+    /// through that lock, so the app's rescan card sat at "0.00%" while the call waited.
+    /// It now answers from the lock-free record, with the scan's real progress.
+    #[test]
+    fn get_info_reports_a_running_full_scan_without_waiting_for_the_backend() {
+        let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let config = dummy.control().config.clone();
+        let backend: std::sync::Arc<std::sync::Mutex<dyn BitcoinInterface>> =
+            std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let db = DummyDatabase::new();
+        db.connection().set_rescan(1_000);
+        let history = std::sync::Arc::new(crate::bitcoin::HistorySyncCache::default());
+        history.begin_full_scan(400);
+        for _ in 0..100 {
+            history.address_checked();
+        }
+        let (poller_sender, _poller_receiver) = std::sync::mpsc::sync_channel(1);
+        let control = DaemonControl::new(
+            config,
+            backend.clone(),
+            poller_sender,
+            std::sync::Arc::new(std::sync::Mutex::new(db)),
+            bitcoin::secp256k1::Secp256k1::verification_only(),
+            Default::default(),
+            Default::default(),
+            history,
+        );
+
+        // The poller, mid-scan.
+        let _scanning = backend.lock().unwrap();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(control.get_info()).unwrap());
+        let info = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("get_info must not wait for the backend lock");
+        assert_eq!(info.rescan_progress, Some(0.25));
+        assert!(info.history_sync.full_scan_in_progress);
+        assert_eq!(info.history_sync.addresses_checked, 100);
+        assert_eq!(info.history_sync.addresses_expected, 400);
+        assert_eq!(info.history_sync.full_scan_completed_at, None);
+    }
+
+    /// The daemon must hand its backend the very record `get_info` reports from:
+    /// otherwise a scan's progress is counted somewhere nobody reads.
+    #[test]
+    fn the_daemon_installs_the_history_record_get_info_reports() {
+        let bitcoind = DummyBitcoind::new();
+        let installed = bitcoind.history_sync.clone();
+        let dummy = DummyCoincube::new(bitcoind, DummyDatabase::new());
+        let cache = installed
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the daemon installs a history record in its backend");
+        assert!(
+            !dummy
+                .control()
+                .get_info()
+                .history_sync
+                .full_scan_in_progress
+        );
+        cache.begin_full_scan(10);
+        cache.address_checked();
+        let reported = dummy.control().get_info().history_sync;
+        assert!(reported.full_scan_in_progress);
+        assert_eq!(reported.addresses_checked, 1);
+        assert_eq!(reported.addresses_expected, 10);
+    }
+
+    /// Older daemons send no `history_sync`; the app must still parse their `get_info`.
+    #[test]
+    fn get_info_result_without_history_sync_still_parses() {
+        let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let mut value = serde_json::to_value(dummy.control().get_info()).unwrap();
+        value.as_object_mut().unwrap().remove("history_sync");
+        let info: GetInfoResult = serde_json::from_value(value).unwrap();
+        assert_eq!(info.history_sync, crate::bitcoin::HistorySync::default());
+    }
+
     mod chain_keyed_spend {
         use super::*;
         use coincube_core::{
@@ -4458,6 +4554,7 @@ mod tests {
                 poller_sender,
                 std::sync::Arc::new(std::sync::Mutex::new(DummyDatabase::new())),
                 secp256k1::Secp256k1::verification_only(),
+                Default::default(),
                 Default::default(),
                 Default::default(),
             )
