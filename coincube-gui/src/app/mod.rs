@@ -13158,6 +13158,34 @@ mod local_node_sync_tests {
     use super::*;
     use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
 
+    /// A full scan started mid-session — a user rescan, or the forced full scan
+    /// after a `CannotConnect` — after the Vault has already polled: the "no poll
+    /// this session" rule no longer applies, so only the daemon's `history_sync`
+    /// report shows the scan. The local-node switch must wait for it.
+    #[test]
+    fn a_full_scan_started_mid_session_counts_as_running() {
+        use coincubed::commands::HistorySync;
+        let esplora = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora));
+        let mut cache = Cache {
+            last_poll_at_startup: Some(1_000),
+            ..Cache::default()
+        };
+        cache.daemon_cache.blockheight = 970_500;
+        cache.daemon_cache.last_poll_timestamp = Some(2_000);
+        assert_eq!(running_vault_scan(esplora.clone(), &cache), None);
+
+        cache.daemon_cache.history_sync = HistorySync {
+            full_scan_in_progress: true,
+            addresses_checked: 10,
+            addresses_expected: 402,
+            ..Default::default()
+        };
+        assert_eq!(
+            running_vault_scan(esplora, &cache),
+            Some(local_switch::RunningScan::WalletSync)
+        );
+    }
+
     fn node(port: u16) -> BitcoindConfig {
         BitcoindConfig {
             addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
