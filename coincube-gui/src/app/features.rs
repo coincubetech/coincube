@@ -377,6 +377,11 @@ pub struct BitcoinBlake2bServerFlag {
     pub server_enabled: bool,
 }
 
+/// The local beta preference never grants a server capability on its own.
+pub(crate) fn bitcoin_blake2b_enabled(server_enabled: bool, opted_in: bool) -> bool {
+    server_enabled && opted_in
+}
+
 impl BitcoinBlake2bServerFlag {
     /// The value before `/connect/features` has answered, and when it can't.
     pub const OFF: Self = Self {

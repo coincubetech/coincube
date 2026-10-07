@@ -27,6 +27,7 @@ pub enum ViewMessage {
     SplitTab(usize),
     AddTab,
     ToggleTheme,
+    GlobalSettingsChanged,
     /// Bubbled from a Cube tab whose Connect-requiring feature page
     /// emitted [`crate::app::view::Message::OpenConnectSignIn`]. The
     /// handler focuses an existing Home tab and routes it to its
@@ -190,6 +191,9 @@ impl Pane {
                     .map(|t| {
                         t.update(msg).then(move |msg| match msg {
                             // Bubble ToggleTheme up to pane level as a ViewMessage
+                            tab::Message::GlobalSettingsChanged => {
+                                Task::done(Message::View(ViewMessage::GlobalSettingsChanged))
+                            }
                             tab::Message::ToggleTheme => {
                                 Task::done(Message::View(ViewMessage::ToggleTheme))
                             }
@@ -232,7 +236,7 @@ impl Pane {
             // handle by the pane grid update.
             Message::View(ViewMessage::SplitTab(_)) => {}
             // handled at the GUI level
-            Message::View(ViewMessage::ToggleTheme) => {}
+            Message::View(ViewMessage::ToggleTheme | ViewMessage::GlobalSettingsChanged) => {}
             Message::View(ViewMessage::ConnectSignedIn) => {
                 // Re-init the ConnectAccountPanel on every open Cube
                 // tab so each one pulls the just-saved session out of

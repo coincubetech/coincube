@@ -229,7 +229,12 @@ impl PinEntry {
                                 "Sign in to Connect before unlocking this Bitcoin Blake2b Cube"
                                     .to_string()
                             })?;
-                            crate::chain::require_connect_feature(cube.network, client).await?;
+                            crate::chain::require_connect_feature(
+                                cube.network,
+                                client,
+                                &crate::dir::CoincubeDirectory::new(root.clone()),
+                            )
+                            .await?;
                         }
                         tokio::task::spawn_blocking(move || {
                             let loc = unlock::CubeLocation::new(&root, &cube);

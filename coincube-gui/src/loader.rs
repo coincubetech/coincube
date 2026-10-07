@@ -1187,11 +1187,9 @@ pub(crate) async fn start_connect_daemon(
             ))
         }
     };
-    if !matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))) {
-        crate::chain::require_connect_feature(chain, &client)
-            .await
-            .map_err(Error::Unexpected)?;
-    }
+    crate::chain::require_connect_feature(chain, &client, &root)
+        .await
+        .map_err(Error::Unexpected)?;
     let internal = if let Some(node) = local {
         let root = root.clone();
         Some(

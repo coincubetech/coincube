@@ -486,6 +486,7 @@ pub enum Message {
     },
     /// Bubbles up to GUI level to toggle the theme
     ToggleTheme,
+    GlobalSettingsChanged,
     /// Bubbles up to the pane so it can focus the Home tab on its
     /// Connect section — fired when the user clicks "Sign In" on the
     /// inline prompt rendered by a Connect-requiring feature page
@@ -666,6 +667,30 @@ impl Tab {
                 app::view::Message::ShowToast(log::Level::Warn, msg),
             )))
         }))
+    }
+
+    pub(crate) fn reload_global_settings(&mut self, root: &CoincubeDirectory) -> Task<Message> {
+        let enabled = crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(
+            &crate::app::settings::global::GlobalSettings::path(root),
+        );
+        let fork = match &self.state {
+            State::App(app) => app.cube_settings().network.is_blake2b(),
+            State::Loader(loader) => loader.cube_settings.network.is_blake2b(),
+            State::PinEntry(pin) => pin.cube().network.is_blake2b(),
+            State::Installer(installer) => installer.context.bitcoin_config.chain.is_blake2b(),
+            _ => false,
+        };
+        let revoke = if fork && !enabled {
+            self.invalidate_fork_session(AuthChange::LogOut, true)
+        } else {
+            Task::none()
+        };
+        let refresh = match &mut self.state {
+            State::Home(home) => home.reload_global_settings().map(Message::Launch),
+            State::App(app) => app.reload_global_settings().map(Message::Run),
+            _ => Task::none(),
+        };
+        Task::batch([revoke, refresh])
     }
 
     pub fn on_tick(&mut self) -> Task<Message> {
@@ -1147,6 +1172,7 @@ impl Tab {
                 home::Message::View(home::ViewMessage::ToggleTheme) => {
                     Task::done(Message::ToggleTheme)
                 }
+                home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
                 _ => l.update(msg).map(Message::Launch),
             },
@@ -5464,6 +5490,33 @@ mod unlock_routing_tests {
             None,
         );
         super::State::Loader(loader)
+    }
+
+    #[test]
+    fn global_beta_off_invalidates_a_fork_loader_and_rejects_late_results() {
+        let _guard = crate::app::session::test_guard();
+        let root_path =
+            std::env::temp_dir().join(format!("coincube-beta-tab-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root_path).unwrap();
+        let root = crate::dir::CoincubeDirectory::new(root_path.clone());
+        let mut tab = super::Tab::new(1, blake2b_error_loader());
+        let before = tab.fork_session_generation;
+        drop(tab.reload_global_settings(&root));
+        assert_ne!(tab.fork_session_generation, before);
+        assert!(!tab.accepts_fork_generation(before));
+        assert_eq!(
+            tab.update(super::Message::ForkAsync(
+                before,
+                Box::new(super::Message::LockCube)
+            ))
+            .units(),
+            0
+        );
+        assert!(
+            matches!(tab.state, super::State::Loader(_)),
+            "stale results must not replace the refused loader"
+        );
+        std::fs::remove_dir_all(root_path).unwrap();
     }
 
     /// #578 review R1: Back from the loader error screen abandons the open

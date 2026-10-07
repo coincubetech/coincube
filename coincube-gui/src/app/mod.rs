@@ -3248,6 +3248,10 @@ impl App {
         );
         // Connect blinding (PR D2): hand the panel the seed-derived encryption
         // pubkey persisted at unlock, so the registration wave can publish it.
+        panels.connect.account.bitcoin_blake2b_opt_in =
+            settings::global::GlobalSettings::load_bitcoin_blake2b_beta(
+                &settings::global::GlobalSettings::path(&data_dir),
+            );
         panels
             .connect
             .set_cube_encryption_pubkey(cube_settings.connect_encryption_pubkey.clone());
@@ -3508,6 +3512,10 @@ impl App {
             settings::network_to_api_string(network),
         );
         // See the sibling assignments in `App::new` (PRs D2/D3).
+        panels.connect.account.bitcoin_blake2b_opt_in =
+            settings::global::GlobalSettings::load_bitcoin_blake2b_beta(
+                &settings::global::GlobalSettings::path(&datadir),
+            );
         panels
             .connect
             .set_cube_encryption_pubkey(cube_settings.connect_encryption_pubkey.clone());
@@ -4094,6 +4102,31 @@ impl App {
         self.wallet.is_some()
     }
 
+    pub(crate) fn reload_global_settings(&mut self) -> Task<Message> {
+        self.panels.connect.account.bitcoin_blake2b_opt_in =
+            settings::global::GlobalSettings::load_bitcoin_blake2b_beta(
+                &settings::global::GlobalSettings::path(&self.datadir),
+            );
+        self.cache.btcb2_server_enabled = self.panels.connect.account.bitcoin_blake2b_enabled();
+        if !self.cache.btcb2_server_enabled {
+            // A backend refresh can recover a revoked journal. Withdraw its
+            // account session as well, so it cannot rebind while beta is off.
+            if let Some(panel) = &mut self.panels.claim {
+                panel.set_connect(None);
+            }
+            if let Some(panel) = &mut self.split_panel {
+                panel.set_connect(None);
+            }
+            self.revoke_claim();
+            self.revoke_split_handoff();
+            self.pending_claim = false;
+            if matches!(self.panels.current, Menu::Vault(menu::VaultSubMenu::Claim)) {
+                return self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Overview));
+            }
+        }
+        Task::none()
+    }
+
     pub fn datadir(&self) -> &CoincubeDirectory {
         &self.datadir
     }
@@ -4260,7 +4293,7 @@ impl App {
         {
             return Task::none();
         }
-        if !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+        if !self.panels.connect.account.bitcoin_blake2b_enabled()
             || !self.split_context_valid(intent)
         {
             self.revoke_split_handoff();
@@ -4309,7 +4342,7 @@ impl App {
         let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {
             return Task::none();
         };
-        let refusal = if !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+        let refusal = if !self.panels.connect.account.bitcoin_blake2b_enabled()
             || !self.split_context_valid(intent)
         {
             Some(SPLIT_START_CANCELLED.to_string())
@@ -4637,7 +4670,8 @@ impl App {
     /// authenticated client and its id. `None` until the account is signed
     /// in and known.
     fn claim_connect_session(&self) -> Option<state::vault::claim::ConnectSession> {
-        if self.claim_session_invalidated {
+        if self.claim_session_invalidated || !self.panels.connect.account.bitcoin_blake2b_enabled()
+        {
             return None;
         }
         let client = self.authenticated_coincube_client()?;
@@ -5718,7 +5752,7 @@ impl App {
                 let Some(SplitHandoff::Reserving(intent)) = self.split_handoff.take() else {
                     return Task::none();
                 };
-                if !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+                if !self.panels.connect.account.bitcoin_blake2b_enabled()
                     || !self.split_context_valid(&intent)
                 {
                     self.revoke_split_handoff();
@@ -7365,6 +7399,12 @@ impl App {
                     )) => Some(*epoch),
                     _ => None,
                 };
+                let current_features_result = matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::FeaturesLoaded(_, generation)
+                    )) if *generation == self.panels.connect.account.session_generation()
+                );
                 let previous_claim_session = self.claim_connect_session();
                 let task = self
                     .panels
@@ -7391,7 +7431,14 @@ impl App {
                 // answer "can this Cube start a claim?" without reaching into
                 // the Connect panel from the view layer.
                 self.cache.btcb2_server_enabled =
-                    self.panels.connect.account.bitcoin_blake2b_server_enabled();
+                    self.panels.connect.account.bitcoin_blake2b_enabled();
+                if self.cache.chain().is_blake2b()
+                    && current_features_result
+                    && !self.cache.btcb2_server_enabled
+                {
+                    self.invalidate_fork_session();
+                    return Task::none();
+                }
                 // Claim step 1 works under the account's session. A sign-out,
                 // or a different account or client identity, revokes its
                 // coordinator here, synchronously, before anything else acts
@@ -7402,7 +7449,7 @@ impl App {
                     self.claim_session_invalidated = false;
                 }
                 let claim_signed_in =
-                    !explicit_logout && self.panels.connect.account.is_authenticated();
+                    !explicit_logout && self.panels.connect.account.bitcoin_blake2b_enabled();
                 let claim_session = if claim_signed_in {
                     self.claim_connect_session()
                 } else {
@@ -7432,6 +7479,14 @@ impl App {
                 if !claim_signed_in || claim_replaced || fork_replaced || notice_replaced {
                     self.revoke_claim();
                 }
+                let hidden_claim = if !self.cache.btcb2_server_enabled
+                    && matches!(self.panels.current, Menu::Vault(menu::VaultSubMenu::Claim))
+                {
+                    self.pending_claim = false;
+                    self.set_current_panel(Menu::Cube(menu::CubeSubMenu::Overview))
+                } else {
+                    Task::none()
+                };
                 let claim_daemon = self.daemon.clone();
                 let claim_task = self
                     .panels
@@ -7442,7 +7497,7 @@ impl App {
                 if self.split_handoff.is_some()
                     && self.panels.connect.account.is_authenticated()
                     && self.panels.connect.account.features.is_some()
-                    && !self.panels.connect.account.bitcoin_blake2b_server_enabled()
+                    && !self.panels.connect.account.bitcoin_blake2b_enabled()
                 {
                     self.revoke_split_handoff();
                 }
@@ -7556,6 +7611,7 @@ impl App {
                         pending_claim,
                         pending_split,
                         claim_task,
+                        hidden_claim,
                         nav,
                         switch,
                     ]);
@@ -7566,6 +7622,7 @@ impl App {
                     pending_claim,
                     pending_split,
                     claim_task,
+                    hidden_claim,
                 ]);
             }
             Message::View(view::Message::DismissReceivedCelebration) => {
@@ -9788,6 +9845,13 @@ mod tests {
             None,
         );
         drop(startup);
+        app.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        app.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
         // Discovery runs in a task (#625 F3a): nothing on construction.
         assert!(app.split_panel.is_none());
         for message in task_messages(app.split_discovery_task()) {
@@ -10019,6 +10083,7 @@ mod tests {
             .clone()
             .with_vault(settings::VaultIdentity::new(wallet.id(), Some(&descriptor)));
         app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        app.panels.connect.account.bitcoin_blake2b_opt_in = true;
         let features = match grant {
             Some(grant) => format!("{{\"plans\":[],\"bitcoin_blake2b_enabled\":{}}}", grant),
             None => "{\"plans\":[]}".to_string(),
@@ -10026,10 +10091,56 @@ mod tests {
         app.panels.connect.account.features = Some(serde_json::from_str(&features).unwrap());
         assert!(app.panels.connect.account.is_authenticated());
         assert_eq!(
-            app.panels.connect.account.bitcoin_blake2b_server_enabled(),
+            app.panels.connect.account.bitcoin_blake2b_enabled(),
             grant == Some(true)
         );
         app
+    }
+
+    #[test]
+    fn global_beta_gate_closes_a_fork_when_the_current_server_grant_is_removed() {
+        let root =
+            std::env::temp_dir().join(format!("coincube-beta-revoke-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = start_split_app(&root, Some(true));
+        assert!(app.authenticated_coincube_client().is_some());
+        let generation = app.panels.connect.account.session_generation();
+        let denied =
+            serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":false}))
+                .unwrap();
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(denied), generation.wrapping_add(1)),
+        ))));
+        assert!(
+            app.authenticated_coincube_client().is_some(),
+            "a stale denial must be ignored"
+        );
+        let denied =
+            serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":false}))
+                .unwrap();
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(denied), generation),
+        ))));
+        assert!(app.authenticated_coincube_client().is_none());
+        assert!(!app.cache.btcb2_server_enabled);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn global_beta_off_revokes_an_open_claim_and_its_session() {
+        let root = std::env::temp_dir().join(format!("coincube-beta-app-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let mut app = start_split_app(&root, Some(true));
+        assert!(app.claim_connect_session().is_some());
+        app.cache.btcb2_server_enabled = true;
+        app.panels.current = Menu::Vault(menu::VaultSubMenu::Claim);
+        app.pending_claim = true;
+        drop(app.reload_global_settings());
+        assert!(!app.cache.btcb2_server_enabled);
+        assert!(!app.pending_claim);
+        assert!(app.claim_connect_session().is_none());
+        assert_eq!(app.panels.current, Menu::Cube(menu::CubeSubMenu::Overview));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// A fresh scan intent for `app`'s Cube under its bound session, of the
@@ -12470,6 +12581,13 @@ pub(crate) mod claim_step1_tests {
         );
         drop(startup);
         app.cache.btcb2_server_enabled = true;
+        app.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        app.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
         (app, wallet)
     }
 
@@ -13031,6 +13149,103 @@ pub(crate) mod claim_step1_tests {
             before, after,
             "global auth invalidation left the Bitcoin claim generation unchanged"
         );
+    }
+
+    #[test]
+    fn global_beta_off_withdraws_a_bitcoin_claim_session_before_backend_recovery() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("claim-beta-local-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example.invalid");
+        client.set_token("fixture-token");
+        app.panels.connect.account.client = client;
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "fixture@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::PlanLoaded(None, 0),
+        ))));
+        assert!(app
+            .panels
+            .claim
+            .as_ref()
+            .unwrap()
+            .connect_account()
+            .is_some());
+        drop(app.reload_global_settings());
+        assert!(app
+            .panels
+            .claim
+            .as_ref()
+            .unwrap()
+            .connect_account()
+            .is_none());
+        let daemon = app.daemon.clone();
+        drop(app.panels.claim.as_mut().unwrap().recover(daemon));
+        assert!(app
+            .panels
+            .claim
+            .as_ref()
+            .unwrap()
+            .connect_account()
+            .is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn global_beta_gate_revokes_a_bitcoin_source_claim_when_the_server_flag_turns_off() {
+        let _guard = crate::app::session::test_guard();
+        let root = std::env::temp_dir().join(format!("claim-beta-server-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = bitcoin_app(&root);
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example.invalid");
+        client.set_token("fixture-token");
+        app.panels.connect.account.client = client;
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "fixture@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::PlanLoaded(None, 0),
+        ))));
+        assert!(app
+            .panels
+            .claim
+            .as_ref()
+            .unwrap()
+            .connect_account()
+            .is_some());
+        app.panels.current = Menu::Vault(menu::VaultSubMenu::Claim);
+        let generation = *app.panels.claim_generation.borrow();
+        let denied = serde_json::from_value(
+            serde_json::json!({"plans": [], "bitcoinBlake2bEnabled": false}),
+        )
+        .unwrap();
+        let session_generation = app.panels.connect.account.session_generation();
+        drop(app.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(Some(denied), session_generation),
+        ))));
+        assert!(app
+            .panels
+            .claim
+            .as_ref()
+            .unwrap()
+            .connect_account()
+            .is_none());
+        assert!(app.claim_connect_session().is_none());
+        assert_ne!(*app.panels.claim_generation.borrow(), generation);
+        assert_eq!(app.panels.current, Menu::Cube(menu::CubeSubMenu::Overview));
+        assert!(
+            app.authenticated_coincube_client().is_some(),
+            "the Bitcoin Cube keeps its Connect session"
+        );
+        let _ = std::fs::remove_dir_all(root);
     }
 
     /// Finding 2's Some→Some half through the App's own hook: a replacement

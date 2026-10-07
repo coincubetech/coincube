@@ -1573,7 +1573,7 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     let constructed = at("SplitPanel::start(");
     let checks = [
         "let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {\n            return Task::none();\n        };",
-        "if !self.panels.connect.account.bitcoin_blake2b_server_enabled()\n            || !self.split_context_valid(intent)\n        {\n            Some(SPLIT_START_CANCELLED.to_string())",
+        "if !self.panels.connect.account.bitcoin_blake2b_enabled()\n            || !self.split_context_valid(intent)\n        {\n            Some(SPLIT_START_CANCELLED.to_string())",
         "} else if self.split_panel.is_some() {\n            Some(SPLIT_START_PANEL_OPEN.to_string())",
         "step1::source_digest(intent)",
         "step1::second_split_refusal(",

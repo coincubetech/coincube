@@ -798,6 +798,8 @@ impl PanelError {
 }
 
 pub struct ConnectAccountPanel {
+    /// Saved installation preference, supplied by Home/App and refreshed across tabs.
+    pub(crate) bitcoin_blake2b_opt_in: bool,
     // An admitted fork startup carries its exact client instead of restoring
     // potentially unrelated saved credentials from the global keyring.
     admitted_client: bool,
@@ -900,6 +902,7 @@ pub struct ConnectAccountPanel {
 impl ConnectAccountPanel {
     pub fn new() -> Self {
         ConnectAccountPanel {
+            bitcoin_blake2b_opt_in: false,
             admitted_client: false,
             admitted_user_loading: false,
             admitted_reopen_required: false,
@@ -4521,6 +4524,13 @@ impl ConnectAccountPanel {
     /// Fails closed while features are unloaded, exactly like
     /// [`Self::marketplace_server_flags`], and reverts on logout because
     /// `clear_session` drops `features`.
+    pub fn bitcoin_blake2b_enabled(&self) -> bool {
+        crate::app::features::bitcoin_blake2b_enabled(
+            self.bitcoin_blake2b_server_enabled(),
+            self.bitcoin_blake2b_opt_in,
+        )
+    }
+
     pub fn bitcoin_blake2b_server_enabled(&self) -> bool {
         self.is_authenticated()
             && self

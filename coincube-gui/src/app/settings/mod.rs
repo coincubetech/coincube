@@ -1831,6 +1831,9 @@ pub mod global {
         pub window_config: Option<WindowConfig>,
         #[serde(default)]
         pub developer_mode: bool,
+        /// Installation-wide opt-in; the Connect feature flag must also be on.
+        #[serde(default)]
+        pub bitcoin_blake2b_beta: bool,
         #[serde(default)]
         pub account_tier: AccountTier,
         #[serde(default)]
@@ -1862,6 +1865,7 @@ pub mod global {
                 bitbox: None,
                 window_config: None,
                 developer_mode: false,
+                bitcoin_blake2b_beta: false,
                 account_tier: AccountTier::default(),
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
                 // Preserve the pre-existing Rust Default for this unrelated field.
@@ -1911,6 +1915,21 @@ pub mod global {
                 tracing::error!("Failed to load developer mode setting: {e}");
             }
             ret
+        }
+
+        pub fn load_bitcoin_blake2b_beta(path: &PathBuf) -> bool {
+            let mut enabled = false;
+            if let Err(e) = Self::update(path, |s| enabled = s.bitcoin_blake2b_beta, false) {
+                tracing::error!("Failed to load Bitcoin Blake2b beta setting: {e}");
+            }
+            enabled
+        }
+
+        pub fn update_bitcoin_blake2b_beta(
+            path: &PathBuf,
+            enabled: bool,
+        ) -> Result<(), super::SettingsError> {
+            Self::update(path, |s| s.bitcoin_blake2b_beta = enabled, true)
         }
 
         pub fn load_account_tier(path: &PathBuf) -> AccountTier {
@@ -2095,6 +2114,7 @@ pub mod global {
                 && global_settings.bitbox.is_none()
                 && global_settings.window_config.is_none()
                 && !global_settings.developer_mode
+                && !global_settings.bitcoin_blake2b_beta
                 && global_settings.account_tier == AccountTier::Free
                 && global_settings.theme_mode == coincube_ui::theme::palette::ThemeMode::default()
                 && global_settings.dismissed_hw_advisories.is_empty()
@@ -2339,6 +2359,25 @@ mod test {
             "height": 688.0
           }
         }"#;
+
+    #[test]
+    fn bitcoin_blake2b_beta_defaults_off_and_preserves_other_preferences() {
+        assert!(!GlobalSettings::default().bitcoin_blake2b_beta);
+        let old: GlobalSettings = serde_json::from_str(RAW_GLOBAL_SETTINGS).unwrap();
+        assert!(!old.bitcoin_blake2b_beta);
+        let dir = env::temp_dir().join(format!("coincube-global-beta-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        assert!(!GlobalSettings::load_bitcoin_blake2b_beta(&path));
+        GlobalSettings::update_bitcoin_blake2b_beta(&path, true).unwrap();
+        assert!(path.is_file(), "first preference write must be persisted");
+        assert!(GlobalSettings::load_bitcoin_blake2b_beta(&path));
+        GlobalSettings::update_developer_mode(&path, true).unwrap();
+        GlobalSettings::update_bitcoin_blake2b_beta(&path, false).unwrap();
+        assert!(!GlobalSettings::load_bitcoin_blake2b_beta(&path));
+        assert!(GlobalSettings::load_developer_mode(&path));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
 
     #[test]
     fn recipient_identity_checks_default_on_for_new_and_older_settings() {

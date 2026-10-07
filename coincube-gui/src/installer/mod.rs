@@ -1163,6 +1163,7 @@ pub fn daemon_check(cfg: coincubed::config::Config) -> Result<(), Error> {
 async fn daemon_check_authenticated(
     cfg: coincubed::config::Config,
     client: Option<crate::services::coincube::CoincubeClient>,
+    root: &CoincubeDirectory,
 ) -> Result<(), Error> {
     if !cfg.bitcoin_config.chain.is_blake2b() {
         return daemon_check(cfg);
@@ -1171,7 +1172,7 @@ async fn daemon_check_authenticated(
     let client = client.ok_or_else(|| {
         Error::Unexpected("Connect authentication is required for Bitcoin Blake2b".into())
     })?;
-    crate::chain::require_connect_feature(cfg.bitcoin_config.chain, &client)
+    crate::chain::require_connect_feature(cfg.bitcoin_config.chain, &client, root)
         .await
         .map_err(Error::Unexpected)?;
     let daemon = crate::daemon::embedded::EmbeddedDaemon::start_authenticated(cfg, client)
@@ -1426,7 +1427,12 @@ pub async fn install_local_wallet(
 
     let cfg: coincubed::config::Config = extract_daemon_config(&ctx, &wallet_settings)?;
 
-    daemon_check_authenticated(cfg.clone(), ctx.coincube_client.clone()).await?;
+    daemon_check_authenticated(
+        cfg.clone(),
+        ctx.coincube_client.clone(),
+        &ctx.coincube_directory,
+    )
+    .await?;
     if ctx.bitcoin_config.chain.is_blake2b() {
         network_datadir
             .init()
@@ -2350,7 +2356,13 @@ mod pending_rescan_tests {
             staged_with_descriptor(None).descriptor.unwrap(),
             coincubed::datadir::DataDirectory::new(path.clone()),
         );
-        let err = daemon_check_authenticated(cfg, None).await.unwrap_err();
+        let err = daemon_check_authenticated(
+            cfg,
+            None,
+            &CoincubeDirectory::new(std::path::PathBuf::new()),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, Error::Unexpected(reason) if reason.contains("authentication is required"))
         );

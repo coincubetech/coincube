@@ -63,15 +63,23 @@ pub(crate) fn authenticated_connect_support(chain: ChainId) -> RuntimeSupport {
 pub(crate) async fn require_connect_feature(
     chain: ChainId,
     client: &crate::services::coincube::CoincubeClient,
+    root: &crate::dir::CoincubeDirectory,
 ) -> Result<(), String> {
     if !chain.is_blake2b() || client.token().is_none() {
         return Err("An authenticated Bitcoin Blake2b Connect session is required".into());
+    }
+    let settings_path = crate::app::settings::global::GlobalSettings::path(root);
+    if !crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(&settings_path) {
+        return Err("Enable Bitcoin Blake2b - Beta in Global Settings to open this Cube".into());
     }
     let features = client
         .get_connect_features()
         .await
         .map_err(|_| "Bitcoin Blake2b availability could not be verified".to_string())?;
-    if features.bitcoin_blake2b_enabled != Some(true) {
+    if !crate::app::features::bitcoin_blake2b_enabled(
+        features.bitcoin_blake2b_enabled == Some(true),
+        crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(&settings_path),
+    ) {
         return Err("Bitcoin Blake2b isn't enabled for this account".into());
     }
     Ok(())
@@ -242,5 +250,25 @@ mod tests {
         ] {
             assert!(ChainId::from(network).runtime_support().is_supported());
         }
+    }
+}
+
+#[cfg(test)]
+mod global_beta_tests {
+    #[tokio::test]
+    async fn local_beta_off_refuses_admission_before_an_api_request() {
+        let dir =
+            std::env::temp_dir().join(format!("coincube-beta-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = crate::dir::CoincubeDirectory::new(dir.clone());
+        let mut client = crate::services::coincube::CoincubeClient::new();
+        client.base_url = "http://127.0.0.1:1".into();
+        client.set_token("synthetic-beta-token");
+        let error = super::require_connect_feature(super::ChainId::BitcoinBlake2b, &client, &root)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Global Settings"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 }
