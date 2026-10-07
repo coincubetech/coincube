@@ -4442,6 +4442,33 @@ mod tests {
         assert_eq!(info.history_sync.full_scan_completed_at, None);
     }
 
+    /// The daemon must hand its backend the very record `get_info` reports from:
+    /// otherwise a scan's progress is counted somewhere nobody reads.
+    #[test]
+    fn the_daemon_installs_the_history_record_get_info_reports() {
+        let bitcoind = DummyBitcoind::new();
+        let installed = bitcoind.history_sync.clone();
+        let dummy = DummyCoincube::new(bitcoind, DummyDatabase::new());
+        let cache = installed
+            .lock()
+            .unwrap()
+            .clone()
+            .expect("the daemon installs a history record in its backend");
+        assert!(
+            !dummy
+                .control()
+                .get_info()
+                .history_sync
+                .full_scan_in_progress
+        );
+        cache.begin_full_scan(10);
+        cache.address_checked();
+        let reported = dummy.control().get_info().history_sync;
+        assert!(reported.full_scan_in_progress);
+        assert_eq!(reported.addresses_checked, 1);
+        assert_eq!(reported.addresses_expected, 10);
+    }
+
     /// Older daemons send no `history_sync`; the app must still parse their `get_info`.
     #[test]
     fn get_info_result_without_history_sync_still_parses() {

@@ -265,10 +265,13 @@ impl HistorySyncCache {
     /// A full scan expected to look up `expected` addresses is starting. Restarts the
     /// count, so a scan that is retried against another server counts from zero.
     pub fn begin_full_scan(&self, expected: u64) {
-        use sync::atomic::Ordering::Relaxed;
+        use sync::atomic::Ordering::{Relaxed, Release};
         self.checked.store(0, Relaxed);
         self.expected.store(expected, Relaxed);
-        self.scanning.store(true, Relaxed);
+        // Release, paired with the Acquire in `snapshot`: a reader that sees this
+        // scan running also sees its reset count and estimate, never the previous
+        // scan's.
+        self.scanning.store(true, Release);
     }
 
     /// The running full scan looked up one more address.
@@ -305,7 +308,7 @@ impl HistorySyncCache {
         let mut failure = self.failure.lock().expect("never held across a panic");
         let (updated, changed) = match failure.take() {
             Some(previous) => {
-                let changed = previous.message != message;
+                let changed = error_kind(&previous.message) != error_kind(message);
                 (
                     PollFailure {
                         message: message.to_string(),
@@ -332,8 +335,8 @@ impl HistorySyncCache {
 
     /// The current state, for `get_info`.
     pub fn snapshot(&self) -> HistorySync {
-        use sync::atomic::Ordering::Relaxed;
-        let full_scan_in_progress = self.scanning.load(Relaxed);
+        use sync::atomic::Ordering::{Acquire, Relaxed};
+        let full_scan_in_progress = self.scanning.load(Acquire);
         HistorySync {
             full_scan_in_progress,
             addresses_checked: if full_scan_in_progress {
@@ -357,6 +360,13 @@ impl HistorySyncCache {
                 .clone(),
         }
     }
+}
+
+/// A failure message with its digits removed, so request ids, timestamps and byte
+/// counts in a server's error text do not make every repeat of the same failure
+/// look like a new one.
+fn error_kind(message: &str) -> String {
+    message.chars().filter(|c| !c.is_ascii_digit()).collect()
 }
 
 /// How many addresses a full scan with this `stop_gap` is expected to look up: each
@@ -1932,13 +1942,25 @@ mod history_sync_cache_tests {
             (failure.since, failure.last_at, failure.consecutive),
             (10, 20, 2)
         );
-        let (failure, changed) = cache.poll_failed("429", 30);
+        let (failure, changed) = cache.poll_failed("429 Too Many Requests", 30);
         assert!(changed);
         assert_eq!((failure.since, failure.consecutive), (10, 3));
         cache.poll_succeeded(40);
         assert_eq!(cache.snapshot().last_failure, None);
         let (failure, _) = cache.poll_failed("timeout", 50);
         assert_eq!((failure.since, failure.consecutive), (50, 1));
+    }
+
+    /// Server error text often carries request ids or timestamps; a repeat of the same
+    /// failure must not count as a new error and log a warning on every poll.
+    #[test]
+    fn a_failure_differing_only_in_numbers_is_the_same_error() {
+        let cache = HistorySyncCache::default();
+        cache.poll_failed("upstream error (request id 1234, at 1791329974)", 10);
+        let (_, changed) = cache.poll_failed("upstream error (request id 9876, at 1791330004)", 20);
+        assert!(!changed);
+        let (_, changed) = cache.poll_failed("connection refused", 30);
+        assert!(changed);
     }
 
     #[test]
