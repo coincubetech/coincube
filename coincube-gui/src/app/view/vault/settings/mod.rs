@@ -644,6 +644,75 @@ pub fn flavor_switch_confirm<'a>(target: NodeFlavor) -> Element<'a, NodeSettings
     .into()
 }
 
+/// Confirmation shown when the user asks to switch to the local node while
+/// the Vault is still scanning. The switch stops the Connect backend, and with
+/// it the scan, so the user decides whether that is worth it.
+pub fn switch_discards_scan_confirm<'a>(
+    scan: crate::app::local_switch::RunningScan,
+) -> Element<'a, NodeSettingsMessage> {
+    use crate::app::local_switch::RunningScan;
+    let (title, body) = match scan {
+        RunningScan::WalletSync => (
+            "Your Vault is still scanning",
+            "COINCUBE | Connect is still looking for this Vault's transactions. \
+             Switching to your local node now stops that scan and discards what it has \
+             found so far; the local node then has to scan again from the start, which \
+             can take a long time.",
+        ),
+        RunningScan::Rescan => (
+            "A rescan is still running",
+            "This Vault is still rescanning the blockchain. Switching to your local node \
+             now stops the rescan and discards its progress; it will have to start again \
+             on the local node.",
+        ),
+    };
+    card::modal(
+        Column::new()
+            .spacing(20)
+            .push(text(title).bold().size(20))
+            .push(text(body).size(14).style(theme::text::secondary))
+            .push(
+                text("If you wait, Tenshu can switch for you once the scan has finished.")
+                    .size(14)
+                    .style(theme::text::secondary),
+            )
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(
+                        button::secondary(None, "Keep scanning")
+                            .width(Length::FillPortion(1))
+                            .on_press(NodeSettingsMessage::CancelSwitchDiscardingScan),
+                    )
+                    .push(
+                        button::primary(None, "Switch anyway")
+                            .width(Length::FillPortion(1))
+                            .on_press(NodeSettingsMessage::ConfirmSwitchDiscardingScan),
+                    ),
+            ),
+    )
+    .width(Length::Fixed(500.0))
+    .into()
+}
+
+/// Standing notice on the Node settings when the pending local node is pruned
+/// past this Vault's history: neither the manual nor the automatic switch will
+/// happen, and this says why.
+pub fn pruned_node_notice<'a, M: 'a>(
+    why: crate::app::local_switch::PrunedHistory,
+) -> Element<'a, M> {
+    Container::new(
+        Column::new()
+            .spacing(8)
+            .push(caption("Local node can't show this Vault"))
+            .push(p2_regular(why.to_string()).style(theme::text::warning)),
+    )
+    .padding(15)
+    .width(Length::Fill)
+    .style(theme::card::border)
+    .into()
+}
+
 /// What switching *to* `target` actually changes.
 ///
 /// Policy only. Neither build we ship enforces consensus rules the other does
@@ -2771,6 +2840,22 @@ mod tests {
         ] {
             assert!(!note.contains("RDTS") && !note.contains("BIP-110"));
         }
+    }
+
+    #[test]
+    fn local_switch_confirmation_and_pruned_notice_build() {
+        use crate::app::local_switch::{PrunedHistory, RunningScan};
+        let _ = switch_discards_scan_confirm(RunningScan::WalletSync);
+        let _ = switch_discards_scan_confirm(RunningScan::Rescan);
+        let _: Element<'_, NodeSettingsMessage> =
+            pruned_node_notice(PrunedHistory::CoinsBelowPrune {
+                prune_height: 969_938,
+                earliest: 958_601,
+            });
+        let _: Element<'_, NodeSettingsMessage> =
+            pruned_node_notice(PrunedHistory::HistoryUnknown {
+                prune_height: 969_938,
+            });
     }
 
     #[test]

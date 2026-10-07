@@ -101,6 +101,14 @@ pub struct Cache {
     /// than guessing one. Kept raw so both the flavour and the version can be
     /// derived from the one source.
     pub node_bitcoind_subversion: Option<String>,
+    /// Pruning of the pending or active local Bitcoind, read on the same poll.
+    /// `None` until a node answers, or when it would not say.
+    pub node_bitcoind_pruning: Option<super::local_switch::NodePruning>,
+    /// How far back the Vault's history reaches, read on that poll only while
+    /// a synced, pruned pending node is a switch target. `None` otherwise, or
+    /// when the daemon could not say. Lets the Node settings explain a refused
+    /// switch (see [`super::local_switch`]).
+    pub local_switch_history: Option<super::local_switch::VaultHistory>,
     /// Mirror of `App::daemon_switch_in_progress` so the stateless Node
     /// settings view can reflect an in-flight backend switch (disable the
     /// switch buttons and show a "switching…" status) instead of offering a
@@ -356,6 +364,8 @@ impl std::default::Default for Cache {
             node_bitcoind_sync_heights: None,
             node_bitcoind_ibd: None,
             node_bitcoind_subversion: None,
+            node_bitcoind_pruning: None,
+            local_switch_history: None,
             daemon_switch_in_progress: false,
             node_bitcoind_last_log: None,
             node_net_stats: None,
