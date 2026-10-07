@@ -4756,6 +4756,7 @@ fn advisory_notice_modal(
         .style(theme::card::modal),
     )
     .padding(16)
+    .center_x(Length::Fill)
     .into()
 }
 
@@ -4958,20 +4959,6 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
     // Bottom-pinned utilities: Split, Settings and theme.
     let mut bottom_col = Column::new().spacing(0).width(Length::Fill);
 
-    if !is_authenticated {
-        bottom_col = bottom_col.push(
-            Container::new(
-                btn::primary(None, "Sign In")
-                    .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
-                        app::menu::ConnectSubMenu::Overview,
-                    ))))
-                    .width(Length::Fill),
-            )
-            .padding(10)
-            .width(Length::Fill),
-        );
-    }
-
     // PR 8 entry: account flag and runtime support must both be live. The
     // panel itself requires a destination BTCB2 Vault before it will scan.
     if home.network == ChainId::Bitcoin
@@ -5012,6 +4999,20 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             })
             .center_x(Length::Fill),
     );
+
+    if !is_authenticated {
+        bottom_col = bottom_col.push(
+            Container::new(
+                btn::primary(None, "Sign In")
+                    .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
+                        app::menu::ConnectSubMenu::Overview,
+                    ))))
+                    .width(Length::Fill),
+            )
+            .padding(10)
+            .width(Length::Fill),
+        );
+    }
 
     // Outer layout: scrollable menu fills, bottom section pinned
     Column::new()
@@ -10431,6 +10432,8 @@ mod chain_identity_open_tests {
     fn global_settings_network_reset_scrubs_staged_creation_and_recovery() {
         let dir = tmp_datadir("global-settings-creation");
         let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Signet)).0;
+        home.network = ChainId::Signet;
+        home.developer_mode = true;
         home.creation_backup_words = Some(zeroize::Zeroizing::new(vec!["synthetic".into()]));
         home.recovery_words[0] = "synthetic".into();
         home.state = State::CreationBackup(CreationBackupStep::Choice);

@@ -9877,6 +9877,7 @@ mod tests {
                 email: "synthetic@example.invalid".into(),
                 email_verified: Some(true),
             });
+            app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
             app.fork_connect_client = Some(client);
             app.panels.connect.account.features = Some(
                 serde_json::from_value(serde_json::json!({
