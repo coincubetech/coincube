@@ -32,11 +32,11 @@
  *   - Truncation is by bytes, so a short read can end mid-UTF-8-sequence.
  *     Decode leniently, or resize to message_len and call again.
  *
- * What this boundary does NOT do: it applies no spend policy. It does not
- * refuse SIGHASH_ANYONECANPAY — 70 of the 142 supported upstream vectors set
- * 0x80 and core computes them; Keychain's refusal is a policy gate on the
- * signing path (Lane B3.2), not a property of the message. It also does not
- * decide which chain it is on; `network` selects key encodings only.
+ * The raw-fields digest entry applies no spend policy. It does not refuse
+ * SIGHASH_ANYONECANPAY — 70 of the 142 supported upstream vectors set 0x80 and
+ * core computes them. The production signing entry does refuse it. This
+ * boundary does not decide which chain it is on; `network` selects key
+ * encodings only.
  */
 
 #ifndef COINCUBE_KEYCHAIN_FFI_H
@@ -63,6 +63,8 @@ extern "C" {
 #define CC_ERR_INVALID_UTF8         14
 #define CC_ERR_UNKNOWN_NETWORK      15  /* detail_a = the value supplied */
 #define CC_ERR_PANIC                16
+#define CC_ERR_INVALID_DERIVATION_PATH 17
+#define CC_ERR_INVALID_XPUB         18
 
 /* unified_sighash refusals (20-25): one per UnifiedSighashError variant. */
 #define CC_ERR_MISSING_UNIFIED_FLAG      20  /* detail_a = hash type */
@@ -133,7 +135,7 @@ int32_t coincube_unified_sighash_digest(
  * SegWit v0, which is the only hash type the unified signing path expresses.
  *
  * The PSBT and all of its inputs are validated by core's
- * verify_p2wsh_all_unified first, so the P2WSH gates are core's refusal rather
+ * keychain_p2wsh_all_unified_digest first, so the P2WSH gates are core's refusal rather
  * than a second copy of them here.
  */
 int32_t coincube_unified_psbt_digest(
@@ -144,11 +146,13 @@ int32_t coincube_unified_psbt_digest(
     uint8_t *message_out, size_t message_cap);
 
 /*
- * Entry 2b — sign. coincube_core::unified_signing::sign_p2wsh_all_unified
- * verbatim: core validates every input, derives each candidate key from the
- * PSBT's own bip32_derivation and refuses when the derived key does not match
- * the key the PSBT claims, signs at 0x21, sets PSBT_IN_SIGHASH_TYPE on only the
- * inputs it signed, and verifies the result before returning it.
+ * Entry 2b — sign one authenticated Keychain account target. target_path and
+ * target_xpub are the exact BIP32 account path and xpub from the local signer
+ * record. target_path must be m/48'/<coin>'/<account>'/2', with every component
+ * hardened and the coin type and xpub network matching network. Core derives
+ * the xpub from the mnemonic and refuses a mismatch, then signs only PSBT
+ * derivations below that path. Sibling accounts sharing the master fingerprint
+ * are left untouched.
  *
  * The signer arrives as a BIP39 phrase (UTF-8, not NUL-terminated) because that
  * is what core's MasterSigner is rooted in and because per-input derivation is
@@ -161,13 +165,15 @@ int32_t coincube_unified_psbt_digest(
 int32_t coincube_unified_psbt_sign(
     const uint8_t *psbt, size_t psbt_len,
     const uint8_t *mnemonic, size_t mnemonic_len,
+    const uint8_t *target_path, size_t target_path_len,
+    const uint8_t *target_xpub, size_t target_xpub_len,
     uint8_t network,
     uint8_t *psbt_out, size_t psbt_out_cap, size_t *psbt_out_len,
     CcErrorDetail *error_out,
     uint8_t *message_out, size_t message_cap);
 
 /*
- * Entry 2c — verify. coincube_core::unified_signing::verify_p2wsh_all_unified
+ * Entry 2c — verify. coincube_core::unified_signing::verify_keychain_p2wsh_all_unified
  * verbatim. verified_out receives the number of unified signatures verified.
  * Zero means the PSBT and its P2WSH inputs validated but carried no unified
  * signature; it does NOT mean the PSBT is sufficiently signed or finalizable.
