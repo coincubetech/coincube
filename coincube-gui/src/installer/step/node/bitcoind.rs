@@ -1504,7 +1504,13 @@ impl Step for InternalBitcoindStep {
                             &self.coincube_datadir,
                             self.chain,
                         ) {
-                            self.error = Some(e.to_string());
+                            // Record it as the start's outcome, like the other
+                            // refusals here: with `started` left unset, `load`
+                            // dispatched `Start` again on every reload and the
+                            // view never showed the start as failed.
+                            self.started = Some(Err(
+                                StartInternalBitcoindError::ConfigUnavailable(e.to_string()),
+                            ));
                             return Task::none();
                         }
                     }
@@ -1639,6 +1645,49 @@ impl Step for InternalBitcoindStep {
 mod tests {
     use super::*;
     use bitcoin_hashes::sha256;
+
+    /// A Blake2b start whose managed conf cannot be prepared is refused, and the
+    /// refusal is the start's recorded outcome. Left unrecorded, `load` dispatched
+    /// `Start` again on every reload and the step never showed the start as failed.
+    #[test]
+    fn a_refused_conf_preparation_is_recorded_as_the_start_outcome() {
+        let dir = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("conf-refused-{}", uuid::Uuid::new_v4())),
+        );
+        let mut step = InternalBitcoindStep::new(&dir);
+        step.chain = crate::chain::ChainId::BitcoinBlake2b;
+        std::fs::create_dir_all(&step.bitcoind_datadir).unwrap();
+        step.bitcoind_config = Some(BitcoindConfig {
+            rpc_auth: BitcoindRpcAuth::CookieFile(step.bitcoind_datadir.join(".cookie")),
+            addr: internal_bitcoind_address(8332),
+        });
+        // A conf that cannot be read: a directory where the file belongs.
+        let conf =
+            bitcoind::internal_bitcoind_config_path(&bitcoind::internal_bitcoind_datadir_for(
+                &dir,
+                bitcoind::NodeChainFamily::BitcoinBlake2b,
+            ));
+        std::fs::create_dir_all(&conf).unwrap();
+
+        let mut hws = HardwareWallets::new(dir.clone(), Network::Bitcoin);
+        let _ = step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::Start),
+        );
+        assert!(
+            matches!(
+                step.started,
+                Some(Err(StartInternalBitcoindError::ConfigUnavailable(_)))
+            ),
+            "{:?}",
+            step.started
+        );
+        assert!(
+            step.error.is_none(),
+            "reported once, as the start's outcome"
+        );
+        std::fs::remove_dir_all(dir.path()).ok();
+    }
 
     #[test]
     fn fork_connect_selection_keeps_auth_chain_and_has_no_bitcoin_fallback() {
