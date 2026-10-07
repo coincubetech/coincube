@@ -5214,17 +5214,17 @@ fn cubes_list_item<'a>(
                     .padding(10)
                     .on_press(ViewMessage::RenameCube(i)),
             )
-            .push_maybe(claim.map(|label| {
-                Button::new(p1_regular(label))
-                    .style(theme::button::secondary)
-                    .padding(10)
-                    .on_press(ViewMessage::ClaimBlake2b(i))
-            }))
             .push_maybe((!cube.network.is_blake2b()).then(|| {
                 Button::new(icon::trash_icon())
                     .style(theme::button::secondary)
                     .padding(10)
                     .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i)))
+            }))
+            .push_maybe(claim.map(|label| {
+                Button::new(p1_regular(label))
+                    .style(theme::button::secondary)
+                    .padding(10)
+                    .on_press(ViewMessage::ClaimBlake2b(i))
             })),
     )
     .into()
