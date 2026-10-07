@@ -331,6 +331,7 @@ impl Panels {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 ),
                 cache.blockheight(),
                 needs_rescan_date,
@@ -378,6 +379,7 @@ impl Panels {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 ),
             )),
             receive: Some(VaultReceivePanel::new(data_dir.clone(), wallet.clone())),
@@ -400,6 +402,7 @@ impl Panels {
                         cache.sync_progress(),
                         cache.last_poll_timestamp(),
                         cache.last_poll_at_startup,
+                        cache.history_sync(),
                     ),
                     cache.bitcoin_unit,
                 )
@@ -495,6 +498,7 @@ impl Panels {
                 cache.sync_progress(),
                 cache.last_poll_timestamp(),
                 cache.last_poll_at_startup,
+                cache.history_sync(),
             ),
             cache.blockheight(),
             needs_rescan_date(&data_dir, cache.chain(), &wallet, &daemon_backend),
@@ -515,6 +519,7 @@ impl Panels {
                 cache.sync_progress(),
                 cache.last_poll_timestamp(),
                 cache.last_poll_at_startup,
+                cache.history_sync(),
             ),
         ));
         self.receive = Some(VaultReceivePanel::new(data_dir.clone(), wallet.clone()));
@@ -537,6 +542,7 @@ impl Panels {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 ),
                 cache.bitcoin_unit,
             )
@@ -2558,6 +2564,30 @@ fn needs_rescan_date(
             .unwrap_or(true)
 }
 
+/// Whether the daemon has just finished the full scan a restored Vault was owed.
+///
+/// On Electrum and Esplora a full scan looks up every address the Vault has used,
+/// from the start of the chain: once one has completed and reached the database,
+/// the history is in, whatever it contains. That retires the obligation even for a
+/// Vault that is genuinely empty, which [`settle_rescan_obligation`]'s
+/// "a confirmed coin is proof" rule never could — leaving the marker behind to
+/// misreport the Vault as unscanned the moment it is moved to a local node.
+///
+/// Only the transition counts, so the settings file is rewritten once per completed
+/// scan rather than on every cache refresh. A local `bitcoind` is excluded: it
+/// rescans from a date, and only coins prove that date was early enough.
+fn full_scan_settles_rescan_obligation(
+    backend: &DaemonBackend,
+    before: &coincubed::commands::HistorySync,
+    after: &coincubed::commands::HistorySync,
+) -> bool {
+    matches!(
+        backend,
+        DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum | NodeType::Esplora))
+    ) && before.full_scan_completed_at.is_none()
+        && after.full_scan_completed_at.is_some()
+}
+
 /// `settings` with this Vault's pending-rescan marker cleared, and everything
 /// else untouched.
 ///
@@ -4510,6 +4540,30 @@ impl App {
         &self.config
     }
 
+    /// Clear this Vault's recorded rescan obligation. See
+    /// [`full_scan_settles_rescan_obligation`] for when that is right.
+    fn retire_rescan_obligation_task(&self) -> Option<Task<Message>> {
+        let wallet = self.wallet.as_ref()?;
+        let network_dir = self
+            .cache
+            .datadir_path
+            .network_directory(self.cache.chain());
+        let descriptor_checksum = wallet.descriptor_checksum.clone();
+        Some(Task::perform(
+            async move {
+                if let Err(e) = settings::update_settings_file(&network_dir, |settings| {
+                    Some(cleared_pending_rescan(settings, &descriptor_checksum))
+                })
+                .await
+                {
+                    // Harmless: the next completed full scan retires it again.
+                    tracing::warn!("Could not retire the pending rescan marker: {}", e);
+                }
+            },
+            |_| Message::CacheUpdated,
+        ))
+    }
+
     fn daemon_backend(&self) -> DaemonBackend {
         self.daemon
             .as_ref()
@@ -4702,6 +4756,7 @@ impl App {
                                     self.cache.sync_progress(),
                                     self.cache.last_poll_timestamp(),
                                     self.cache.last_poll_at_startup,
+                                    self.cache.history_sync(),
                                 ),
                                 self.cache.bitcoin_unit,
                             ));
@@ -4743,6 +4798,7 @@ impl App {
                                             self.cache.sync_progress(),
                                             self.cache.last_poll_timestamp(),
                                             self.cache.last_poll_at_startup,
+                                            self.cache.history_sync(),
                                         ),
                                         self.cache.bitcoin_unit,
                                     )
@@ -4765,6 +4821,7 @@ impl App {
                                     self.cache.sync_progress(),
                                     self.cache.last_poll_timestamp(),
                                     self.cache.last_poll_at_startup,
+                                    self.cache.history_sync(),
                                 ),
                             ));
                         }
@@ -4824,14 +4881,17 @@ impl App {
                         self.cache.sync_progress(),
                         self.cache.last_poll_timestamp(),
                         self.cache.last_poll_at_startup,
+                        self.cache.history_sync(),
                     ) {
                         SyncStatus::BlockchainSync(_) => 5, // Only applies to local backends
-                        SyncStatus::WalletFullScan
+                        SyncStatus::WalletFullScan { .. }
                             if self.daemon_backend() == DaemonBackend::RemoteBackend =>
                         {
                             10
                         } // If remote backend, don't ping too often
-                        SyncStatus::WalletFullScan | SyncStatus::LatestWalletSync => 3,
+                        SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync => 3,
+                        // Polls are being retried; refresh often enough to notice recovery.
+                        SyncStatus::SyncFailing { .. } => 5,
                         SyncStatus::Synced => {
                             if self.daemon_backend() == DaemonBackend::RemoteBackend {
                                 // Remote backend has no rescan feature. For a synced wallet,
@@ -5075,14 +5135,17 @@ impl App {
                 self.cache.sync_progress(),
                 self.cache.last_poll_timestamp(),
                 self.cache.last_poll_at_startup,
+                self.cache.history_sync(),
             ) {
                 SyncStatus::BlockchainSync(_) => 5, // Only applies to local backends
-                SyncStatus::WalletFullScan
+                SyncStatus::WalletFullScan { .. }
                     if self.daemon_backend() == DaemonBackend::RemoteBackend =>
                 {
                     10
                 } // If remote backend, don't ping too often
-                SyncStatus::WalletFullScan | SyncStatus::LatestWalletSync => 3,
+                SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync => 3,
+                // Polls are being retried; refresh often enough to notice recovery.
+                SyncStatus::SyncFailing { .. } => 5,
                 SyncStatus::Synced => {
                     if self.daemon_backend() == DaemonBackend::RemoteBackend {
                         // Remote backend has no rescan feature. For a synced wallet,
@@ -5119,6 +5182,7 @@ impl App {
                             rescan_progress: info.rescan_progress,
                             sync_progress: info.sync,
                             last_poll_timestamp: info.last_poll_timestamp,
+                            history_sync: info.history_sync,
                             last_tick: tick,
                         })
                     },
@@ -6358,6 +6422,13 @@ impl App {
                             wallet.reconcile_with_coins(&daemon_cache.coins);
                             wallet.apply_coin_overrides(&mut daemon_cache.coins);
                         }
+                        let retire_obligation = full_scan_settles_rescan_obligation(
+                            &self.daemon_backend(),
+                            &self.cache.daemon_cache.history_sync,
+                            &daemon_cache.history_sync,
+                        )
+                        .then(|| self.retire_rescan_obligation_task())
+                        .flatten();
                         self.cache.daemon_cache = daemon_cache;
                         // Fire-and-forget recovery heartbeat after the sync's
                         // fresh tip lands (Estate Notifications — PR 2). Batched
@@ -6372,6 +6443,7 @@ impl App {
                             heartbeat,
                             entangled,
                             unswept,
+                            retire_obligation.unwrap_or_else(Task::none),
                             Task::done(Message::CacheUpdated),
                         ]);
                     }
@@ -10721,6 +10793,46 @@ mod tests {
     /// miss is entirely reachable: the Vault could have been removed, or another
     /// writer could have rewritten the file, between the task starting and
     /// finishing. It must be a no-op, not a wipe.
+    #[test]
+    fn a_completed_full_scan_retires_the_obligation_once_and_only_on_scanning_backends() {
+        use coincubed::commands::HistorySync;
+        let scanning = HistorySync {
+            full_scan_in_progress: true,
+            ..Default::default()
+        };
+        let completed = HistorySync {
+            full_scan_completed_at: Some(1_791_329_974),
+            ..Default::default()
+        };
+        let esplora = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora));
+        let electrum = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum));
+        assert!(full_scan_settles_rescan_obligation(
+            &esplora, &scanning, &completed
+        ));
+        assert!(full_scan_settles_rescan_obligation(
+            &electrum, &scanning, &completed
+        ));
+        // Once per completion, not on every refresh after it.
+        assert!(!full_scan_settles_rescan_obligation(
+            &esplora, &completed, &completed
+        ));
+        // Still scanning: nothing proven yet.
+        assert!(!full_scan_settles_rescan_obligation(
+            &esplora, &scanning, &scanning
+        ));
+        // A local node rescans from a date, which only coins can vouch for.
+        for backend in [
+            DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind)),
+            DaemonBackend::EmbeddedCoincubed(None),
+            DaemonBackend::ExternalCoincubed,
+            DaemonBackend::RemoteBackend,
+        ] {
+            assert!(!full_scan_settles_rescan_obligation(
+                &backend, &scanning, &completed
+            ));
+        }
+    }
+
     #[test]
     fn clearing_a_pending_rescan_for_an_unknown_vault_changes_nothing() {
         use crate::app::settings::{PendingRescan, WalletSettings};

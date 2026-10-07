@@ -3983,6 +3983,7 @@ pub fn create_app_with_remote_backend(
                 blockheight: wallet.tip_height.unwrap_or(0),
                 // We ignore last poll fields for remote backend.
                 last_poll_timestamp: None,
+                history_sync: Default::default(),
                 last_tick: Instant::now(),
             },
             fiat_price: None,

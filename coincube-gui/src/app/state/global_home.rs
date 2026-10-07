@@ -94,6 +94,20 @@ struct BalanceReadiness {
     vault_pending: bool,
 }
 
+/// Whether the Vault's balance is still loading rather than known.
+///
+/// Before the daemon's first poll there is no tip. After it, an empty Vault whose
+/// full scan is still running has not loaded its history yet: its zero is a
+/// placeholder, not a balance, and counting it would put a restored Vault's funds
+/// into the Total Balance as nothing.
+fn vault_balance_pending(
+    blockheight: i32,
+    history: &coincubed::commands::HistorySync,
+    vault_balance: Amount,
+) -> bool {
+    blockheight <= 0 || (history.full_scan_in_progress && vault_balance == Amount::ZERO)
+}
+
 /// Whether the Total Balance placeholder should still be spinning.
 ///
 /// Extracted from `view` so the rule can be tested, because getting it wrong is
@@ -574,7 +588,8 @@ impl State for GlobalHome {
         // would be a wallet the user can't actually use.
         let has_liquid =
             crate::app::features::liquid_wallet_usable(cache.chain(), cache.liquid_gate);
-        let vault_pending = cache.has_vault && cache.blockheight() <= 0;
+        let vault_pending = cache.has_vault
+            && vault_balance_pending(cache.blockheight(), cache.history_sync(), vault_balance);
         let total_balance_loading = total_balance_pending(BalanceReadiness {
             has_spark,
             spark_loaded: self.spark_balance_loaded,
@@ -3412,6 +3427,34 @@ mod tests {
             vault_pending: true,
             ..all_present
         }));
+    }
+
+    /// A restored Vault mid-scan has a tip but no history yet: its empty balance is
+    /// still loading, and must not enter the Total Balance as zero.
+    #[test]
+    fn an_empty_vault_mid_scan_is_still_loading() {
+        use coincubed::commands::HistorySync;
+        let scanning = HistorySync {
+            full_scan_in_progress: true,
+            ..Default::default()
+        };
+        assert!(vault_balance_pending(
+            0,
+            &HistorySync::default(),
+            Amount::ZERO
+        ));
+        assert!(vault_balance_pending(970_247, &scanning, Amount::ZERO));
+        // Coins already known stay on show while it rescans.
+        assert!(!vault_balance_pending(
+            970_247,
+            &scanning,
+            Amount::from_sat(1)
+        ));
+        assert!(!vault_balance_pending(
+            970_247,
+            &HistorySync::default(),
+            Amount::ZERO
+        ));
     }
 
     #[test]

@@ -776,12 +776,21 @@ impl From<settings::SettingsError> for WalletError {
 pub enum SyncStatus {
     /// Wallet and blockchain are fully synced.
     Synced,
-    /// Wallet is performing a full scan of the blockchain.
-    WalletFullScan,
+    /// Wallet is performing a full scan of its addresses, which is how an Electrum or
+    /// Esplora wallet learns its history. `progress` (between 0 and 1) is the share of
+    /// addresses looked up so far, when the daemon reports it.
+    WalletFullScan { progress: Option<f64> },
     /// Wallet is syncing with latest transactions.
     LatestWalletSync,
     /// Blockchain is syncing with given progress between 0.0 and 1.0.
     BlockchainSync(f64),
+    /// The daemon's recent polls have failed, so the wallet shows its last known
+    /// state, which may be out of date. `message` is the latest failure's.
+    SyncFailing {
+        message: String,
+        /// Unix time the run of failures began.
+        since: u32,
+    },
 }
 
 impl SyncStatus {
@@ -791,9 +800,17 @@ impl SyncStatus {
 
     /// Whether the wallet itself, and not the blockchain, is syncing.
     pub fn wallet_is_syncing(&self) -> bool {
-        self == &SyncStatus::WalletFullScan || self == &SyncStatus::LatestWalletSync
+        matches!(
+            self,
+            SyncStatus::WalletFullScan { .. } | SyncStatus::LatestWalletSync
+        )
     }
 }
+
+/// Consecutive failed polls before the wallet is reported as failing to sync. One
+/// failure is routine — a server hiccup the next poll recovers from — and is not worth
+/// alarming the user over.
+pub const FAILED_POLLS_BEFORE_REPORTING: u32 = 2;
 
 /// Get the [`SyncStatus`].
 ///
@@ -803,16 +820,39 @@ impl SyncStatus {
 ///
 /// `sync_progress` is the blockchain synchronization progress as
 /// a number between `0.0` and `1.0`.
+///
+/// `history` is the daemon's report of its full scans and poll failures. Daemons that
+/// predate it report the default, which leaves this function deciding as it used to.
 pub fn sync_status(
     daemon_backend: DaemonBackend,
     blockheight: i32,
     sync_progress: f64,
     last_poll: Option<u32>,
     last_poll_at_startup: Option<u32>,
+    history: &coincubed::commands::HistorySync,
 ) -> SyncStatus {
     if sync_progress < 1.0 {
         return SyncStatus::BlockchainSync(sync_progress);
-    } else if blockheight <= 0 {
+    }
+    // Checked before the scan below: a failed poll ends its scan and the next poll
+    // starts another, so a scan that keeps failing would otherwise read as one long
+    // scan in progress — the state a restored Vault sat in, showing $0.00, for hours.
+    if let Some(failure) = history
+        .last_failure
+        .as_ref()
+        .filter(|failure| failure.consecutive >= FAILED_POLLS_BEFORE_REPORTING)
+    {
+        return SyncStatus::SyncFailing {
+            message: failure.message.clone(),
+            since: failure.since,
+        };
+    }
+    if history.full_scan_in_progress {
+        return SyncStatus::WalletFullScan {
+            progress: history.full_scan_progress(),
+        };
+    }
+    if blockheight <= 0 {
         // If blockheight <= 0, then this is a newly created wallet.
         // If user imported descriptor and is using a local bitcoind, a rescan
         // will need to be performed in order to see past transactions and so the
@@ -822,8 +862,9 @@ pub fn sync_status(
         // treat it the same as bitcoind to be sure we don't mislead the user.
         if daemon_backend == DaemonBackend::RemoteBackend
             || daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Electrum))
+            || daemon_backend == DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
         {
-            return SyncStatus::WalletFullScan;
+            return SyncStatus::WalletFullScan { progress: None };
         }
     }
     // For an existing wallet with any local node type, if the first poll has
@@ -1320,6 +1361,122 @@ mod tests {
             "vault id {} collided with a signer key fingerprint in {:?}",
             id,
             keys,
+        );
+    }
+}
+
+#[cfg(test)]
+mod sync_status_tests {
+    use super::*;
+    use coincubed::commands::{HistorySync, PollFailure};
+
+    const ESPLORA: DaemonBackend = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora));
+
+    fn failing(consecutive: u32) -> HistorySync {
+        HistorySync {
+            last_failure: Some(PollFailure {
+                message: "Esplora client error".into(),
+                since: 100,
+                last_at: 200,
+                consecutive,
+            }),
+            ..Default::default()
+        }
+    }
+
+    /// The restored Vault in the incident: tip known, a poll on record, an Esplora full
+    /// scan running. It used to read as `LatestWalletSync` — "checking for new
+    /// transactions" — with no sign that its whole history was still loading.
+    #[test]
+    fn a_running_full_scan_is_reported_with_its_progress() {
+        let history = HistorySync {
+            full_scan_in_progress: true,
+            addresses_checked: 101,
+            addresses_expected: 404,
+            ..Default::default()
+        };
+        assert_eq!(
+            sync_status(ESPLORA, 970_247, 1.0, Some(5), Some(5), &history),
+            SyncStatus::WalletFullScan {
+                progress: Some(101.0 / 404.0)
+            }
+        );
+    }
+
+    #[test]
+    fn a_fresh_esplora_vault_is_scanning_not_synced() {
+        assert_eq!(
+            sync_status(ESPLORA, 0, 1.0, None, None, &HistorySync::default()),
+            SyncStatus::WalletFullScan { progress: None }
+        );
+    }
+
+    /// One failed poll is a hiccup; a run of them is something the user should see.
+    #[test]
+    fn repeated_poll_failures_are_reported_and_one_is_not() {
+        assert_eq!(
+            sync_status(ESPLORA, 10, 1.0, Some(5), Some(1), &failing(1)),
+            SyncStatus::Synced
+        );
+        assert_eq!(
+            sync_status(
+                ESPLORA,
+                10,
+                1.0,
+                Some(5),
+                Some(1),
+                &failing(FAILED_POLLS_BEFORE_REPORTING)
+            ),
+            SyncStatus::SyncFailing {
+                message: "Esplora client error".into(),
+                since: 100,
+            }
+        );
+    }
+
+    /// Each failed poll ends its scan and the next one starts another, so a scan that
+    /// keeps failing must read as failing, not as one scan forever in progress.
+    #[test]
+    fn failures_take_precedence_over_a_restarted_scan() {
+        let history = HistorySync {
+            full_scan_in_progress: true,
+            ..failing(3)
+        };
+        assert!(matches!(
+            sync_status(ESPLORA, 10, 1.0, Some(5), Some(1), &history),
+            SyncStatus::SyncFailing { .. }
+        ));
+    }
+
+    #[test]
+    fn blockchain_sync_still_comes_first() {
+        assert_eq!(
+            sync_status(ESPLORA, 10, 0.5, None, None, &failing(5)),
+            SyncStatus::BlockchainSync(0.5)
+        );
+    }
+
+    /// A daemon that predates `history_sync` reports the default, and must be judged
+    /// exactly as before.
+    #[test]
+    fn an_older_daemon_is_judged_as_before() {
+        // A fresh bitcoind Vault reads as synced, as on master: an imported descriptor
+        // there needs a rescan, which "syncing" would wrongly suggest is under way.
+        let bitcoind = DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind));
+        assert_eq!(
+            sync_status(
+                bitcoind.clone(),
+                0,
+                1.0,
+                None,
+                None,
+                &HistorySync::default()
+            ),
+            SyncStatus::Synced
+        );
+        assert_eq!(
+            sync_status(bitcoind, 10, 1.0, Some(9), Some(5), &HistorySync::default()),
+            SyncStatus::Synced
         );
     }
 }

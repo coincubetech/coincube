@@ -277,6 +277,7 @@ impl State for VaultOverview {
                     cache.sync_progress(),
                     cache.last_poll_timestamp(),
                     cache.last_poll_at_startup,
+                    cache.history_sync(),
                 );
                 // If this is the current panel, reload it if wallet is no longer syncing.
                 if is_current && wallet_was_syncing && self.sync_status.is_synced() {

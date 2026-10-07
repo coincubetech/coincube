@@ -279,7 +279,10 @@ pub fn create_spend_tx<'a>(
                                             "Syncing blockchain ({:.2}%)",
                                             100.0 * *progress
                                         )),
-                                        SyncStatus::WalletFullScan => text("Syncing"),
+                                        SyncStatus::WalletFullScan { .. } => text("Syncing"),
+                                        SyncStatus::SyncFailing { .. } => text(
+                                            "Wallet sync is failing; the balance may be out of date",
+                                        ),
                                         _ => text("Checking for new transactions"),
                                     }
                                     .style(theme::text::secondary),
