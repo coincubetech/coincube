@@ -644,6 +644,75 @@ pub fn flavor_switch_confirm<'a>(target: NodeFlavor) -> Element<'a, NodeSettings
     .into()
 }
 
+/// Confirmation shown when the user asks to switch to the local node while
+/// the Vault is still scanning. The switch stops the Connect backend, and with
+/// it the scan, so the user decides whether that is worth it.
+pub fn switch_discards_scan_confirm<'a>(
+    scan: crate::app::local_switch::RunningScan,
+) -> Element<'a, NodeSettingsMessage> {
+    use crate::app::local_switch::RunningScan;
+    let (title, body) = match scan {
+        RunningScan::WalletSync => (
+            "Your Vault is still scanning",
+            "COINCUBE | Connect is still looking for this Vault's transactions. \
+             Switching to your local node now stops that scan and discards what it has \
+             found so far; the local node then has to scan again from the start, which \
+             can take a long time.",
+        ),
+        RunningScan::Rescan => (
+            "A rescan is still running",
+            "This Vault is still rescanning the blockchain. Switching to your local node \
+             now stops the rescan and discards its progress; it will have to start again \
+             on the local node.",
+        ),
+    };
+    card::modal(
+        Column::new()
+            .spacing(20)
+            .push(text(title).bold().size(20))
+            .push(text(body).size(14).style(theme::text::secondary))
+            .push(
+                text("If you wait, Tenshu can switch for you once the scan has finished.")
+                    .size(14)
+                    .style(theme::text::secondary),
+            )
+            .push(
+                Row::new()
+                    .spacing(10)
+                    .push(
+                        button::secondary(None, "Keep scanning")
+                            .width(Length::FillPortion(1))
+                            .on_press(NodeSettingsMessage::CancelSwitchDiscardingScan),
+                    )
+                    .push(
+                        button::primary(None, "Switch anyway")
+                            .width(Length::FillPortion(1))
+                            .on_press(NodeSettingsMessage::ConfirmSwitchDiscardingScan),
+                    ),
+            ),
+    )
+    .width(Length::Fixed(500.0))
+    .into()
+}
+
+/// Standing notice on the Node settings when the pending local node is pruned
+/// past this Vault's history: neither the manual nor the automatic switch will
+/// happen, and this says why.
+pub fn pruned_node_notice<'a, M: 'a>(
+    why: crate::app::local_switch::PrunedHistory,
+) -> Element<'a, M> {
+    Container::new(
+        Column::new()
+            .spacing(8)
+            .push(caption("Local node can't show this Vault"))
+            .push(p2_regular(why.to_string()).style(theme::text::warning)),
+    )
+    .padding(15)
+    .width(Length::Fill)
+    .style(theme::card::border)
+    .into()
+}
+
 /// What switching *to* `target` actually changes.
 ///
 /// Policy only. Neither build we ship enforces consensus rules the other does
@@ -1370,6 +1439,7 @@ pub fn node_backend_status<'a>(
     active_backend: &'static str,
     active_icon: coincube_ui::widget::Text<'static>,
     pending_progress: Option<f64>,
+    local_heights: Option<(u64, u64)>,
     pending_ibd: Option<bool>,
     // `getnetworkinfo.subversion` of the syncing node, when it has told us.
     // `None` leaves the build unnamed rather than asserting one.
@@ -1378,6 +1448,7 @@ pub fn node_backend_status<'a>(
     can_switch_to_connect: bool,
     can_switch_to_bitcoind: bool,
     can_setup_local_node: bool,
+    auto_switch_to_pending: bool,
     processing: bool,
     switch_in_progress: bool,
     warning: Option<String>,
@@ -1389,7 +1460,12 @@ pub fn node_backend_status<'a>(
     // Once the node reports it has left initial block download, treat it as
     // ready even if `verificationprogress` still pins at 1.0 — otherwise the
     // syncing copy/button label keep saying "syncing" at 100%.
-    let still_syncing = pending_ibd != Some(false);
+    let initial_syncing = pending_ibd != Some(false);
+    // Leaving IBD does not mean a previously synced node has caught up after
+    // an outage. Keep its known header gap visible without changing admission.
+    let catching_up =
+        !initial_syncing && local_heights.is_some_and(|(blocks, headers)| blocks < headers);
+    let still_syncing = initial_syncing || catching_up;
     let mut col = Column::new().spacing(15);
 
     col = col.push(
@@ -1411,8 +1487,8 @@ pub fn node_backend_status<'a>(
 
     // Surface an in-flight backend switch so the disabled buttons read as
     // "busy" rather than broken. This covers the promotion/rescan window
-    // after the pending node reports synced, where `pending_progress` is
-    // already cleared but the switch itself is still loading the wallet.
+    // after the pending node reports synced. Keep blockchain progress visible
+    // separately from the wallet switch so neither status obscures the other.
     if switch_in_progress {
         col = col.push(
             Container::new(
@@ -1422,9 +1498,9 @@ pub fn node_backend_status<'a>(
                     .push(text("Applying your node change…"))
                     .push(
                         p2_regular(
-                            "This may take a moment. If a local node is still scanning the \
-                             blockchain it can take a while. Tenshu will finish the switch \
-                             automatically — no need to do anything.",
+                            "Tenshu is stopping the previous wallet backend and loading the new one. \
+                             This can take a while if a wallet scan is still running. \
+                             Local blockchain progress is shown separately below.",
                         )
                         .style(theme::text::secondary),
                     ),
@@ -1435,7 +1511,7 @@ pub fn node_backend_status<'a>(
         );
     }
 
-    if let Some(progress) = pending_progress.filter(|_| still_syncing) {
+    if let Some(progress) = pending_progress {
         let pace = if progress > 0.98 {
             "This may take a few minutes, depending on the last time it was done, your internet connection, and your computer performance."
         } else if progress > 0.9 {
@@ -1463,18 +1539,49 @@ pub fn node_backend_status<'a>(
                 })
             })
             .unwrap_or_else(|| "Your local node".to_string());
-        let desc = format!(
-            "{} is running and syncing in the background. \
-             Tenshu will automatically switch to this node once syncing is complete. {}",
-            name, pace,
-        );
+        let pending = can_switch_to_bitcoind;
+        let desc = if catching_up {
+            format!("{name} has finished initial blockchain sync and is catching up with known headers.")
+        } else if initial_syncing {
+            let next = if pending && auto_switch_to_pending {
+                "Tenshu will automatically switch to this node once syncing is complete. "
+            } else {
+                ""
+            };
+            format!("{name} is syncing the blockchain. {next}{pace}")
+        } else if switch_in_progress {
+            format!("{name} has finished initial blockchain sync. The wallet backend switch is still in progress.")
+        } else if pending {
+            format!("{name} has finished initial blockchain sync and is ready to use.")
+        } else {
+            format!("{name} has finished initial blockchain sync.")
+        };
 
         let mut sync_col = Column::new()
             .spacing(8)
-            .push(caption("Local node syncing in background"))
-            .push(text(format!("Progress {:.1}%", 100.0 * progress)))
-            .push(ProgressBar::new(0.0..=1.0, progress as f32).length(Length::Fill))
-            .push(p2_regular(desc).style(theme::text::secondary));
+            .push(caption(if catching_up {
+                "Local node catching up"
+            } else if initial_syncing {
+                "Local node syncing"
+            } else {
+                "Local blockchain status"
+            }))
+            .push(text(if still_syncing {
+                format!("Progress {:.1}%", 100.0 * progress)
+            } else {
+                "Initial blockchain sync complete".to_string()
+            }));
+        if still_syncing {
+            sync_col =
+                sync_col.push(ProgressBar::new(0.0..=1.0, progress as f32).length(Length::Fill));
+        }
+        if let Some((blocks, headers)) = local_heights {
+            sync_col = sync_col.push(p2_regular(format!(
+                "Verified blocks: {blocks} / {headers} known headers · {} blocks remaining",
+                headers.saturating_sub(blocks),
+            )));
+        }
+        sync_col = sync_col.push(p2_regular(desc).style(theme::text::secondary));
 
         if let Some(log) = pending_bitcoind_log {
             sync_col = sync_col.push(p2_regular(log).style(theme::text::secondary));
@@ -1485,6 +1592,23 @@ pub fn node_backend_status<'a>(
                 .padding(15)
                 .width(Length::Fill)
                 .style(theme::card::border),
+        );
+    }
+
+    if pending_progress.is_none() && (can_switch_to_bitcoind || active_backend == "Local Node") {
+        col = col.push(
+            Container::new(
+                Column::new()
+                    .spacing(8)
+                    .push(caption("Local blockchain status"))
+                    .push(
+                        p2_regular("Waiting for the local node to report sync progress…")
+                            .style(theme::text::secondary),
+                    ),
+            )
+            .padding(15)
+            .width(Length::Fill)
+            .style(theme::card::border),
         );
     }
 
@@ -2511,9 +2635,11 @@ mod tests {
             "COINCUBE | Connect",
             icon::network_icon(),
             Some(0.91),
+            Some((850_000, 900_000)),
             Some(true),
             Some("/Satoshi:29.3.0/Knots:20260507/"),
             Some("UpdateTip: headers progress"),
+            true,
             true,
             true,
             true,
@@ -2525,6 +2651,7 @@ mod tests {
             "Local node",
             icon::bitcoin_icon(),
             Some(0.995),
+            Some((900_000, 900_000)),
             Some(false),
             // Flavour unknown: the copy must fall back rather than name a build.
             None,
@@ -2532,6 +2659,7 @@ mod tests {
             false,
             true,
             false,
+            true,
             false,
             true,
             None,
@@ -2539,6 +2667,136 @@ mod tests {
         let _ = inbound_tor_section(false, true, true, false, false, false, None);
         let _ = inbound_tor_section(true, true, true, true, true, true, Some(&stats));
         let _ = inbound_tor_section(true, false, false, true, false, true, Some(&stats));
+    }
+
+    #[tokio::test]
+    async fn local_node_sync_status_stays_visible_during_backend_switch() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        for (progress, ibd, switching, pending, blocks, expected) in [
+            (
+                Some(0.975),
+                Some(true),
+                false,
+                true,
+                890000,
+                "Progress 97.5%",
+            ),
+            (
+                Some(0.999),
+                Some(false),
+                true,
+                true,
+                900000,
+                "Initial blockchain sync complete",
+            ),
+            (
+                Some(0.975),
+                Some(true),
+                false,
+                false,
+                890000,
+                "Progress 97.5%",
+            ),
+            (
+                Some(0.999),
+                Some(false),
+                false,
+                false,
+                899990,
+                "Local node catching up",
+            ),
+            (
+                None,
+                None,
+                true,
+                true,
+                0,
+                "Waiting for the local node to report sync progress…",
+            ),
+        ] {
+            let mut element = node_backend_status(
+                if pending {
+                    "COINCUBE | Connect"
+                } else {
+                    "Local Node"
+                },
+                icon::bitcoin_icon(),
+                progress,
+                progress.map(|_| (blocks, 900000)),
+                ibd,
+                None,
+                None,
+                false,
+                pending,
+                false,
+                true,
+                false,
+                switching,
+                None,
+            );
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 1600.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            assert!(
+                labels.0.iter().any(|text| text == expected),
+                "missing {expected}: {:?}",
+                labels.0
+            );
+            if progress.is_some() {
+                let expected_blocks = format!(
+                    "Verified blocks: {blocks} / 900000 known headers · {} blocks remaining",
+                    900000 - blocks
+                );
+                assert!(labels.0.iter().any(|text| text == &expected_blocks));
+            }
+            if ibd == Some(false) && blocks < 900000 && progress.is_some() {
+                assert!(!labels
+                    .0
+                    .iter()
+                    .any(|text| text == "Initial blockchain sync complete"));
+            }
+            if switching {
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|text| text == "Applying your node change…"));
+            }
+            if !pending {
+                assert!(!labels
+                    .0
+                    .iter()
+                    .any(|text| text.contains("automatically switch")));
+            }
+        }
     }
 
     // The copy names what actually differs — relay policy — and, in both
@@ -2582,6 +2840,22 @@ mod tests {
         ] {
             assert!(!note.contains("RDTS") && !note.contains("BIP-110"));
         }
+    }
+
+    #[test]
+    fn local_switch_confirmation_and_pruned_notice_build() {
+        use crate::app::local_switch::{PrunedHistory, RunningScan};
+        let _ = switch_discards_scan_confirm(RunningScan::WalletSync);
+        let _ = switch_discards_scan_confirm(RunningScan::Rescan);
+        let _: Element<'_, NodeSettingsMessage> =
+            pruned_node_notice(PrunedHistory::CoinsBelowPrune {
+                prune_height: 969_938,
+                earliest: 958_601,
+            });
+        let _: Element<'_, NodeSettingsMessage> =
+            pruned_node_notice(PrunedHistory::HistoryUnknown {
+                prune_height: 969_938,
+            });
     }
 
     #[test]

@@ -549,30 +549,50 @@ fn heal_scan_window(
     }
 }
 
+/// The watch-only wallet's path as bitcoind must be given it.
+///
+/// Every `BitcoinD` this daemon builds must use this, the local-fork admission's
+/// included: `setup_bitcoind` reuses an admitted `BitcoinD` as is, so a path that
+/// skipped this would reach bitcoind unnormalized.
+fn bitcoind_watchonly_wallet_path(data_dir: &DataDirectory) -> String {
+    let wo_path = data_dir.coincubed_watchonly_wallet_path();
+    let wo_path_str = wo_path.to_str().expect("Must be valid unicode").to_string();
+    #[cfg(target_os = "windows")]
+    let wo_path_str = strip_windows_verbatim_prefix(&wo_path_str);
+    wo_path_str
+}
+
+/// NOTE: On Windows, paths are canonicalized with a "\\?\" prefix to tell Windows to interpret
+/// the string "as is" and to ignore the maximum size of a path. HOWEVER this is not properly
+/// handled by most implementations of the C++ STL's std::filesystem. Therefore bitcoind would
+/// fail to find the wallet if we didn't strip this prefix. It's not ideal, but a lesser evil
+/// than other workarounds i could think about.
+/// See https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#win32-file-namespaces
+/// about the prefix.
+/// See https://stackoverflow.com/questions/71590689/how-to-properly-handle-windows-paths-with-the-long-path-prefix-with-stdfilesys
+/// for a discussion of how one C++ STL implementation handles this.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn strip_windows_verbatim_prefix(path: &str) -> String {
+    path.replace("\\\\?\\", "").replace("\\\\?", "")
+}
+
 fn setup_bitcoind(
     config: &Config,
     data_dir: &DataDirectory,
     fresh_data_dir: bool,
+    admitted: Option<BitcoinD>,
 ) -> Result<BitcoinD, StartupError> {
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
-    let wo_path_str = wo_path.to_str().expect("Must be valid unicode").to_string();
-    // NOTE: On Windows, paths are canonicalized with a "\\?\" prefix to tell Windows to interpret
-    // the string "as is" and to ignore the maximum size of a path. HOWEVER this is not properly
-    // handled by most implementations of the C++ STL's std::filesystem. Therefore bitcoind would
-    // fail to find the wallet if we didn't strip this prefix. It's not ideal, but a lesser evil
-    // than other workarounds i could think about.
-    // See https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file#win32-file-namespaces
-    // about the prefix.
-    // See https://stackoverflow.com/questions/71590689/how-to-properly-handle-windows-paths-with-the-long-path-prefix-with-stdfilesys
-    // for a discussion of how one C++ STL implementation handles this.
-    #[cfg(target_os = "windows")]
-    let wo_path_str = wo_path_str.replace("\\\\?\\", "").replace("\\\\?", "");
+    let wo_path_str = bitcoind_watchonly_wallet_path(data_dir);
 
     let bitcoind_config = match config.bitcoin_backend.as_ref() {
         Some(config::BitcoinBackend::Bitcoind(bitcoind_config)) => bitcoind_config,
         _ => Err(StartupError::MissingBitcoindConfig)?,
     };
-    let bitcoind = BitcoinD::new(bitcoind_config, wo_path_str)?;
+    let bitcoind = match admitted {
+        Some(bitcoind) => bitcoind,
+        None => BitcoinD::new(bitcoind_config, wo_path_str)?,
+    };
     bitcoind.node_sanity_checks(
         config.bitcoin_config.network,
         config.main_descriptor.is_taproot(),
@@ -819,6 +839,7 @@ impl DaemonHandle {
             db,
             with_rpc_server,
             None,
+            false,
             chain_runtime_gate,
         )
     }
@@ -849,18 +870,51 @@ impl DaemonHandle {
             Option::<SqliteDb>::None,
             false,
             Some(backend),
+            false,
             // Only this authenticated, embedded, native-P2WSH entry point opens
             // the fork runtime. start/start_default retain chain_runtime_gate.
             |_| Ok(()),
         )
     }
 
+    /// Embedded local fork wallet. The local validating node must prove a
+    /// coherent post-fork chain tip before any wallet/database write. This does
+    /// not enable generic fork startup, external sockets, Electrum or Taproot.
+    pub fn start_with_local_node(config: Config) -> Result<Self, StartupError> {
+        if !config.bitcoin_config.chain.is_blake2b()
+            || config.pending_bitcoind.is_some()
+            || !matches!(
+                &config.bitcoin_backend,
+                Some(config::BitcoinBackend::Bitcoind(node)) if node.addr.ip().is_loopback()
+            )
+            || !matches!(
+                config.main_descriptor.descriptor(),
+                miniscript::Descriptor::Wsh(_)
+            )
+        {
+            return Err(StartupError::ConnectAdmission(
+                connect::AdmissionError::InvalidBackend,
+            ));
+        }
+        Self::start_inner(
+            config,
+            Option::<BitcoinD>::None,
+            Option::<SqliteDb>::None,
+            false,
+            None,
+            true,
+            |_| Ok(()),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn start_inner(
         config: Config,
         bitcoin: Option<impl BitcoinInterface + 'static>,
         db: Option<impl DatabaseInterface + 'static>,
         with_rpc_server: bool,
         connect: Option<connect::ConnectBackend>,
+        local_fork: bool,
         // Generic startup refuses forks. Authenticated embedded startup has its
         // own narrow capability checks before entering this shared sequence.
         runtime_gate: fn(ChainId) -> Result<(), StartupError>,
@@ -897,7 +951,7 @@ impl DaemonHandle {
                 )
                 .map_err(connect_startup_error)?,
             ),
-            None if config.bitcoin_config.chain.is_blake2b() => {
+            None if config.bitcoin_config.chain.is_blake2b() && !local_fork => {
                 return Err(StartupError::ConnectAdmission(
                     connect::AdmissionError::MissingAuth,
                 ))
@@ -910,6 +964,16 @@ impl DaemonHandle {
         let data_dir = config
             .data_directory()
             .ok_or(StartupError::DefaultDataDirNotFound)?;
+        let admitted_local = if local_fork {
+            let node = match &config.bitcoin_backend {
+                Some(config::BitcoinBackend::Bitcoind(node)) => node,
+                _ => return Err(StartupError::MissingBitcoindConfig),
+            };
+            let wo_path = bitcoind_watchonly_wallet_path(&data_dir);
+            Some(BitcoinD::new(node, wo_path)?.admit_local_fork(config.bitcoin_config.chain)?)
+        } else {
+            None
+        };
         let fresh_data_dir = !data_dir.exists() || !data_dir.sqlite_db_file_path().exists();
         if !fresh_data_dir {
             preflight_existing_database(&config, &data_dir.sqlite_db_file_path())?;
@@ -933,7 +997,12 @@ impl DaemonHandle {
         // migration when setting up SQLite below.
         let mut bitcoind = if bitcoin.is_none() {
             if let Some(config::BitcoinBackend::Bitcoind(_)) = &config.bitcoin_backend {
-                Some(setup_bitcoind(&config, &data_dir, fresh_data_dir)?)
+                Some(setup_bitcoind(
+                    &config,
+                    &data_dir,
+                    fresh_data_dir,
+                    admitted_local,
+                )?)
             } else {
                 None
             }
@@ -1230,6 +1299,25 @@ mod cleanup_tests {
             scan_abort: sync::Arc::new(sync::atomic::AtomicBool::new(false)),
         };
         assert!(handle.stop_for_cleanup().is_ok());
+    }
+}
+
+#[cfg(test)]
+mod watchonly_path_tests {
+    use super::strip_windows_verbatim_prefix;
+
+    /// bitcoind's C++ filesystem cannot resolve a verbatim (`\\?\`) path, so the
+    /// watch-only wallet path loses the prefix wherever a `BitcoinD` is built.
+    #[test]
+    fn the_verbatim_prefix_is_stripped_from_a_windows_wallet_path() {
+        assert_eq!(
+            strip_windows_verbatim_prefix(r"\\?\C:\Users\u\Coincube\coincubed_watchonly_wallet"),
+            r"C:\Users\u\Coincube\coincubed_watchonly_wallet"
+        );
+        assert_eq!(
+            strip_windows_verbatim_prefix("/home/u/.coincube/coincubed_watchonly_wallet"),
+            "/home/u/.coincube/coincubed_watchonly_wallet"
+        );
     }
 }
 
@@ -2118,6 +2206,10 @@ mod tests {
                 secondary_fallback_addr: None,
                 secondary_fallback_token: Some("synthetic-second".into()),
             }));
+            config.fallback_esplora = match &config.bitcoin_backend {
+                Some(config::BitcoinBackend::Esplora(backend)) => Some(backend.clone()),
+                _ => None,
+            };
             let encoded = toml::to_string(&config.for_persistence()).unwrap();
             assert!(!encoded.contains("synthetic-"));
             assert!(encoded.contains("fixture.invalid"));
@@ -2167,6 +2259,7 @@ mod tests {
                 Option::<SqliteDb>::None,
                 false,
                 None,
+                false,
                 |_| Ok(()),
             );
             assert!(matches!(

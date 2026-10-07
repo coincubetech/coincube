@@ -156,6 +156,9 @@ pub struct BitcoindSettingsState {
     /// Last probe outcome: `Ok(tip_height)` or the reason it failed. Cleared
     /// when the field is edited.
     custom_esplora_status: Option<Result<u32, String>>,
+    /// A manual "Switch to local node" waiting on the user's confirmation
+    /// because the Vault is still scanning; while `Some`, a confirmation is shown.
+    pending_scan_discard: Option<crate::app::local_switch::RunningScan>,
 }
 
 impl BitcoindSettingsState {
@@ -183,7 +186,10 @@ impl BitcoindSettingsState {
         // an external/Connect backend) falls back to the defaults; the section is
         // only shown for the internal managed node anyway.
         let managed_conf = InternalBitcoindConfig::from_file(&internal_bitcoind_config_path(
-            &internal_bitcoind_datadir(&cache.datadir_path),
+            &crate::node::bitcoind::internal_bitcoind_datadir_for(
+                &cache.datadir_path,
+                crate::node::bitcoind::NodeChainFamily::from_chain(cache.chain()),
+            ),
         ))
         .ok();
         let managed_prune_mb = managed_conf
@@ -253,7 +259,46 @@ impl BitcoindSettingsState {
             },
             custom_esplora_probing: false,
             custom_esplora_status: None,
+            pending_scan_discard: None,
         }
+    }
+
+    /// Make the pending local node the Vault's backend, keeping the current
+    /// Connect config as the fallback. The checks that guard this live in the
+    /// `SwitchToBitcoind` handler.
+    fn switch_to_pending_bitcoind(
+        &mut self,
+        daemon: &Arc<dyn Daemon + Sync + Send>,
+    ) -> Task<Message> {
+        let Some(cfg) = daemon.config() else {
+            return Task::none();
+        };
+        let Some(pending) = cfg.pending_bitcoind.clone() else {
+            return Task::none();
+        };
+        let old_esplora = match &cfg.bitcoin_backend {
+            Some(BitcoinBackend::Esplora(e)) => Some(e.clone()),
+            _ => None,
+        };
+        let mut new_cfg = cfg.clone();
+        new_cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(pending));
+        new_cfg.pending_bitcoind = None;
+        // The pending node is now the active backend, so
+        // clear the auto-switch flag too — keeping it set
+        // with no pending target violates the invariant.
+        new_cfg.auto_switch_to_pending = Some(false);
+        new_cfg.fallback_esplora = old_esplora;
+        // Drop the poll cadence back to the
+        // snappy local-node interval. The
+        // Esplora-safe 10-min value made
+        // sense for HTTPS-per-poll against
+        // a rate-limited public provider;
+        // bitcoind is a free localhost RPC.
+        new_cfg.bitcoin_config.poll_interval_secs =
+            std::time::Duration::from_secs(coincubed::config::LOCAL_BACKEND_POLL_INTERVAL_SECS);
+        self.node_switch_processing = true;
+        self.warning = None;
+        Task::done(Message::LoadDaemonConfig(Box::new(new_cfg)))
     }
 
     /// Persist the current inbound-over-Tor preference to its sidecar.
@@ -305,7 +350,7 @@ impl BitcoindSettingsState {
         // (keeps addresses off public providers); every other network keeps a
         // public-primary chain (mempool.space → blockstream.info → Connect).
         // See `connect_esplora_config` for the assembled chain.
-        let esplora = crate::installer::connect_esplora_config(cache.network, &jwt);
+        let esplora = crate::installer::connect_esplora_config(cache.chain(), &jwt);
         info!(
             "Switching to Connect: primary={} fallback={:?} secondary_fallback={:?} token_len={}",
             esplora.addr,
@@ -405,6 +450,31 @@ impl State for BitcoindSettingsState {
             tracing::warn!("BitcoindSettingsState::update called without daemon");
             return Task::none();
         };
+        if cache.chain().is_blake2b() {
+            match &message {
+                Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+                    msg,
+                ))) => {
+                    // The scan-discard confirmation belongs to the switch: without
+                    // it a mid-scan "Switch to local node" is a dead click here.
+                    if !matches!(
+                        msg,
+                        view::NodeSettingsMessage::SwitchToConnect
+                            | view::NodeSettingsMessage::SwitchToConnectFastPath(_)
+                            | view::NodeSettingsMessage::SwitchToBitcoind
+                            | view::NodeSettingsMessage::ConfirmSwitchDiscardingScan
+                            | view::NodeSettingsMessage::CancelSwitchDiscardingScan
+                    ) {
+                        return Task::none();
+                    }
+                }
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::BitcoindSettings(_)
+                    | view::SettingsMessage::EditBitcoindSettings,
+                )) => return Task::none(),
+                _ => {}
+            }
+        }
         match message {
             Message::DaemonConfigLoaded(res) => match res {
                 Ok(()) => {
@@ -774,35 +844,28 @@ impl State for BitcoindSettingsState {
                             }
                             Some(false) => {}
                         }
-                        if let Some(cfg) = daemon.config() {
-                            if let Some(pending) = cfg.pending_bitcoind.clone() {
-                                let old_esplora = match &cfg.bitcoin_backend {
-                                    Some(BitcoinBackend::Esplora(e)) => Some(e.clone()),
-                                    _ => None,
-                                };
-                                let mut new_cfg = cfg.clone();
-                                new_cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(pending));
-                                new_cfg.pending_bitcoind = None;
-                                // The pending node is now the active backend, so
-                                // clear the auto-switch flag too — keeping it set
-                                // with no pending target violates the invariant.
-                                new_cfg.auto_switch_to_pending = Some(false);
-                                new_cfg.fallback_esplora = old_esplora;
-                                // Drop the poll cadence back to the
-                                // snappy local-node interval. The
-                                // Esplora-safe 10-min value made
-                                // sense for HTTPS-per-poll against
-                                // a rate-limited public provider;
-                                // bitcoind is a free localhost RPC.
-                                new_cfg.bitcoin_config.poll_interval_secs =
-                                    std::time::Duration::from_secs(
-                                        coincubed::config::LOCAL_BACKEND_POLL_INTERVAL_SECS,
-                                    );
-                                self.node_switch_processing = true;
-                                self.warning = None;
-                                return Task::done(Message::LoadDaemonConfig(Box::new(new_cfg)));
-                            }
+                        // A pruned node that cannot reach back to this Vault's
+                        // coins would show it empty, with no way to rescan.
+                        if let Err(reason) = local_node_serves_vault(cache) {
+                            self.warning = Some(Error::Unexpected(reason));
+                            return Task::none();
                         }
+                        // Switching stops the Connect backend, which throws a
+                        // running scan away: say so and let the user choose.
+                        if let Some(scan) = crate::app::running_vault_scan(daemon.backend(), cache)
+                        {
+                            self.pending_scan_discard = Some(scan);
+                            return Task::none();
+                        }
+                        return self.switch_to_pending_bitcoind(&daemon);
+                    }
+                    NodeSettingsMessage::ConfirmSwitchDiscardingScan => {
+                        if self.pending_scan_discard.take().is_some() {
+                            return self.switch_to_pending_bitcoind(&daemon);
+                        }
+                    }
+                    NodeSettingsMessage::CancelSwitchDiscardingScan => {
+                        self.pending_scan_discard = None;
                     }
                     // "Inbound connections": persist the preference sidecar.
                     // The change takes effect the next time the managed node
@@ -1067,6 +1130,42 @@ impl State for BitcoindSettingsState {
     }
 
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        if cache.chain().is_blake2b() {
+            let cfg = self.full_config.as_ref();
+            let local = cfg.is_some_and(|cfg| {
+                matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)))
+            });
+            let pending = cfg.is_some_and(|cfg| cfg.pending_bitcoind.is_some());
+            let active = if local {
+                "Bitcoin Knots (Bitcoin Blake2b)"
+            } else {
+                "COINCUBE | Connect"
+            };
+            let mut panels = vec![
+                view::vault::settings::node_backend_status(
+                    active, if local { icon::bitcoin_icon() } else { icon::network_icon() },
+                    cache.node_bitcoind_sync_progress, cache.node_bitcoind_sync_heights,
+                    cache.node_bitcoind_ibd, cache.node_bitcoind_subversion.as_deref(),
+                    cache.node_bitcoind_last_log.as_deref(),
+                    local && cfg.is_some_and(|cfg| cfg.fallback_esplora.is_some()),
+                    !local && pending, false,
+                    cfg.is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
+                    self.node_switch_processing, cache.daemon_switch_in_progress,
+                    self.warning.as_ref().map(|e| e.to_string()),
+                ).map(|msg| view::Message::Settings(view::SettingsMessage::NodeSettings(msg))),
+                coincube_ui::component::text::text("The pruned Bitcoin Knots node uses outbound peer connections. Inbound Tor and node resource editing are unavailable for Bitcoin Blake2b.").into(),
+            ];
+            // This chain's node is always pruned: explain a refused switch here
+            // too, as the Bitcoin view does.
+            if !local && pending {
+                if let Some(why) = pruned_switch_refusal(cache) {
+                    panels.push(view::vault::settings::pruned_node_notice(why));
+                }
+            }
+            return self.with_scan_discard_modal(view::vault::settings::bitcoind_settings(
+                menu, cache, panels,
+            ));
+        }
         let can_edit_bitcoind_settings =
             self.bitcoind_settings.is_some() && !self.rescan_settings.processing;
         let can_edit_electrum_settings =
@@ -1190,18 +1289,30 @@ impl State for BitcoindSettingsState {
                         active_backend,
                         active_icon,
                         cache.node_bitcoind_sync_progress,
+                        cache.node_bitcoind_sync_heights,
                         cache.node_bitcoind_ibd,
                         cache.node_bitcoind_subversion.as_deref(),
                         cache.node_bitcoind_last_log.as_deref(),
                         can_switch_to_connect,
                         can_switch_to_bitcoind,
                         can_setup_local_node,
+                        self.full_config
+                            .as_ref()
+                            .is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
                         self.node_switch_processing,
                         cache.daemon_switch_in_progress,
                         warning_str,
                     )
                     .map(map_node_msg),
                 );
+                // Standing notice, not just a click-time warning: the
+                // automatic switch is refused too, and the "will switch
+                // once synced" copy above would otherwise go unexplained.
+                if can_switch_to_bitcoind {
+                    if let Some(why) = pruned_switch_refusal(cache) {
+                        setting_panels.push(view::vault::settings::pruned_node_notice(why));
+                    }
+                }
             }
 
             if self.bitcoind_settings.is_some() || self.electrum_settings.is_some() {
@@ -1307,7 +1418,9 @@ impl State for BitcoindSettingsState {
 
         // A pending Core↔Knots switch pops a confirmation modal over the page;
         // clicking the backdrop cancels it.
-        if let Some(flavor) = self.pending_flavor_switch {
+        if self.pending_scan_discard.is_some() {
+            self.with_scan_discard_modal(content)
+        } else if let Some(flavor) = self.pending_flavor_switch {
             modal::Modal::new(
                 content,
                 view::vault::settings::flavor_switch_confirm(flavor)
@@ -1323,10 +1436,65 @@ impl State for BitcoindSettingsState {
     }
 }
 
+impl BitcoindSettingsState {
+    /// `content` under the "switching discards the running scan" confirmation, when
+    /// one is pending; clicking the backdrop cancels it. Shared by the Bitcoin and
+    /// Bitcoin Blake2b views, so neither can lose the confirmation its switch waits on.
+    fn with_scan_discard_modal<'a>(
+        &self,
+        content: Element<'a, view::Message>,
+    ) -> Element<'a, view::Message> {
+        let Some(scan) = self.pending_scan_discard else {
+            return content;
+        };
+        modal::Modal::new(
+            content,
+            view::vault::settings::switch_discards_scan_confirm(scan)
+                .map(|m| view::Message::Settings(view::SettingsMessage::NodeSettings(m))),
+        )
+        .on_blur(Some(view::Message::Settings(
+            view::SettingsMessage::NodeSettings(
+                view::NodeSettingsMessage::CancelSwitchDiscardingScan,
+            ),
+        )))
+        .into()
+    }
+}
+
 impl From<BitcoindSettingsState> for Box<dyn State> {
     fn from(s: BitcoindSettingsState) -> Box<dyn State> {
         Box::new(s)
     }
+}
+
+/// Whether the pending local node can show this Vault's coins, judged from
+/// what the node probe last read into the cache. `Err` carries the copy to
+/// show; an unknown answer refuses for now rather than guessing.
+fn local_node_serves_vault(cache: &Cache) -> Result<(), String> {
+    use crate::app::local_switch::{pruned_node_serves, NodePruning};
+    match cache.node_bitcoind_pruning {
+        None => Err("Couldn't read your local node's pruning settings yet. \
+                     Please wait a moment and try again."
+            .to_string()),
+        Some(NodePruning::Unpruned) => Ok(()),
+        Some(pruned) => match cache.local_switch_history {
+            None => Err("Still checking whether your local node has this Vault's \
+                         history. Please wait a moment and try again."
+                .to_string()),
+            Some(history) => pruned_node_serves(pruned, history).map_err(|why| why.to_string()),
+        },
+    }
+}
+
+/// The reason a switch to the pending local node would hide this Vault's
+/// coins, for a standing notice on the Node settings. `None` when the node is
+/// unpruned, still unknown, or keeps every block the Vault needs.
+fn pruned_switch_refusal(cache: &Cache) -> Option<crate::app::local_switch::PrunedHistory> {
+    crate::app::local_switch::pruned_node_serves(
+        cache.node_bitcoind_pruning?,
+        cache.local_switch_history?,
+    )
+    .err()
 }
 
 /// Refuse a managed-node provider that cannot serve this Vault's chain.
@@ -2062,8 +2230,15 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Daemon for TestDaemon {
+        // Mirrors `EmbeddedDaemon::backend`: the node type follows the config.
         fn backend(&self) -> DaemonBackend {
-            DaemonBackend::EmbeddedCoincubed(Some(NodeType::Bitcoind))
+            DaemonBackend::EmbeddedCoincubed(
+                self.config
+                    .as_ref()
+                    .and_then(|c| c.bitcoin_backend.as_ref())
+                    .map(NodeType::from)
+                    .or(Some(NodeType::Bitcoind)),
+            )
         }
 
         fn config(&self) -> Option<&Config> {
@@ -3445,5 +3620,229 @@ mod tests {
             Some(NodeFlavor::Knots)
         );
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// The manual "Switch to local node" path: a node pruned past the Vault's
+    /// coins is refused with the reason, an unknown answer waits, and a
+    /// running scan asks before it is thrown away.
+    #[test]
+    fn manual_switch_to_local_node_guards_history_and_running_scans() {
+        use crate::app::local_switch::{NodePruning, RunningScan, VaultHistory};
+
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+            "/tmp/bitcoin/.cookie",
+        ))));
+        cfg.auto_switch_to_pending = Some(true);
+        let daemon = daemon(Some(cfg.clone()));
+        let switch = || node_message(view::NodeSettingsMessage::SwitchToBitcoind);
+
+        // A synced node and a wallet that has finished its first poll.
+        let mut cache = Cache {
+            node_bitcoind_ibd: Some(false),
+            last_poll_at_startup: Some(100),
+            daemon_cache: crate::app::cache::DaemonCache {
+                blockheight: 970_500,
+                last_poll_timestamp: Some(200),
+                ..Default::default()
+            },
+            ..Cache::default()
+        };
+
+        let fresh =
+            |cache: &Cache| BitcoindSettingsState::new(Some(cfg.clone()), cache, false, false);
+
+        // Pruned past the Vault's earliest coin: refused, with both heights.
+        cache.node_bitcoind_pruning = Some(NodePruning::Pruned {
+            prune_height: 969_938,
+        });
+        cache.local_switch_history = Some(VaultHistory::From(958_601));
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        let warning = state.warning.as_ref().map(|e| e.to_string()).unwrap();
+        assert!(
+            warning.contains("969938") && warning.contains("958601"),
+            "{}",
+            warning
+        );
+        assert!(!state.node_switch_processing);
+        assert_eq!(state.pending_scan_discard, None);
+        // ... and the standing notice agrees.
+        assert!(pruned_switch_refusal(&cache).is_some());
+
+        // Pruned, history not read yet: wait rather than guess.
+        cache.local_switch_history = None;
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert!(state.warning.is_some());
+        assert!(!state.node_switch_processing);
+        assert!(pruned_switch_refusal(&cache).is_none());
+
+        // Pruning unknown: same.
+        cache.node_bitcoind_pruning = None;
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert!(state.warning.is_some());
+        assert!(!state.node_switch_processing);
+
+        // Pruned but every coin above the prune height: allowed.
+        cache.node_bitcoind_pruning = Some(NodePruning::Pruned {
+            prune_height: 969_938,
+        });
+        cache.local_switch_history = Some(VaultHistory::From(971_000));
+        assert!(pruned_switch_refusal(&cache).is_none());
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert!(state.warning.is_none());
+        assert!(state.node_switch_processing, "switch dispatched");
+
+        // Unpruned, but the wallet has not finished its first poll of the
+        // session (a Connect Vault's startup scan): ask first.
+        cache.node_bitcoind_pruning = Some(NodePruning::Unpruned);
+        cache.local_switch_history = None;
+        cache.daemon_cache.last_poll_timestamp = Some(100);
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert_eq!(state.pending_scan_discard, Some(RunningScan::WalletSync));
+        assert!(!state.node_switch_processing);
+        // Cancel keeps the backend.
+        let _ = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::CancelSwitchDiscardingScan),
+        );
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(!state.node_switch_processing);
+        // A stray confirm without a pending question does nothing.
+        let _ = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::ConfirmSwitchDiscardingScan),
+        );
+        assert!(!state.node_switch_processing);
+        // Asked again and confirmed: switches.
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        let _ = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::ConfirmSwitchDiscardingScan),
+        );
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(state.node_switch_processing, "switch dispatched");
+
+        // A pending rescan is a running scan too.
+        cache.daemon_cache.last_poll_timestamp = Some(200);
+        cache.daemon_cache.rescan_progress = Some(0.4);
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert_eq!(state.pending_scan_discard, Some(RunningScan::Rescan));
+
+        // Nothing running, unpruned: switches straight away.
+        cache.daemon_cache.rescan_progress = None;
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(state.node_switch_processing, "switch dispatched");
+    }
+
+    /// A Connect Vault's first-ever full scan: the database has no tip yet
+    /// (`blockheight` 0) and no poll has completed this session. `sync_status`
+    /// reads that as `Synced` for an Esplora backend, so the scan must be
+    /// recognised from the missing poll instead.
+    /// Bitcoin Blake2b's settings only pass the switch messages through. The
+    /// scan-discard confirmation must pass too, or a mid-scan switch on that chain
+    /// is a dead click: the guard holds it and nothing can confirm or cancel.
+    #[test]
+    fn blake2b_manual_switch_mid_scan_can_be_confirmed_or_cancelled() {
+        use crate::app::local_switch::{NodePruning, RunningScan};
+
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+            "/tmp/bitcoin/.cookie",
+        ))));
+        cfg.auto_switch_to_pending = Some(true);
+        let cache = Cache {
+            fiat_chain: crate::chain::ChainId::BitcoinBlake2b,
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(NodePruning::Unpruned),
+            last_poll_at_startup: None,
+            daemon_cache: crate::app::cache::DaemonCache {
+                blockheight: 0,
+                last_poll_timestamp: None,
+                rescan_progress: None,
+                ..Default::default()
+            },
+            ..Cache::default()
+        };
+        assert!(cache.chain().is_blake2b());
+
+        // "Keep scanning" clears the held switch.
+        let mut state = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+        let _ = state.update(
+            Some(daemon(Some(cfg.clone()))),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        assert_eq!(state.pending_scan_discard, Some(RunningScan::WalletSync));
+        let _ = state.view(
+            &Menu::Vault(crate::app::menu::VaultSubMenu::Overview),
+            &cache,
+        );
+        let _ = state.update(
+            Some(daemon(Some(cfg.clone()))),
+            &cache,
+            node_message(view::NodeSettingsMessage::CancelSwitchDiscardingScan),
+        );
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(!state.node_switch_processing);
+
+        // "Switch anyway" switches.
+        let _ = state.update(
+            Some(daemon(Some(cfg.clone()))),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        let _ = state.update(
+            Some(daemon(Some(cfg))),
+            &cache,
+            node_message(view::NodeSettingsMessage::ConfirmSwitchDiscardingScan),
+        );
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(
+            state.node_switch_processing,
+            "the confirmed switch was dropped"
+        );
+    }
+
+    #[test]
+    fn manual_switch_confirms_during_a_connect_vaults_first_scan() {
+        use crate::app::local_switch::{NodePruning, RunningScan};
+
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+            "/tmp/bitcoin/.cookie",
+        ))));
+        cfg.auto_switch_to_pending = Some(true);
+        let daemon = daemon(Some(cfg.clone()));
+        let cache = Cache {
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(NodePruning::Unpruned),
+            last_poll_at_startup: None,
+            daemon_cache: crate::app::cache::DaemonCache {
+                blockheight: 0,
+                last_poll_timestamp: None,
+                rescan_progress: None,
+                ..Default::default()
+            },
+            ..Cache::default()
+        };
+        let mut state = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+        let _ = state.update(
+            Some(daemon),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        assert_eq!(state.pending_scan_discard, Some(RunningScan::WalletSync));
+        assert!(!state.node_switch_processing, "switched mid first scan");
     }
 }

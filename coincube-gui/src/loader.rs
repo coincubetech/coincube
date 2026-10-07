@@ -269,8 +269,20 @@ impl Loader {
             crate::chain::RuntimeSupport::Supported
                 if cube_settings.network.is_blake2b()
                     && (connect_client.as_ref().and_then(|c| c.token()).is_none()
+                        || internal_bitcoind.as_ref().is_some_and(|node| {
+                            !node.config.addr.ip().is_loopback()
+                                || node.config.rpc_auth
+                                    != coincubed::config::BitcoindRpcAuth::CookieFile(
+                                        crate::node::bitcoind::internal_bitcoind_cookie_path(
+                                            &internal_bitcoind_datadir_for(
+                                                &datadir_path,
+                                                NodeChainFamily::BitcoinBlake2b,
+                                            ),
+                                            &network,
+                                        ),
+                                    )
+                        })
                         || cube_encryption_key.is_none()
-                        || internal_bitcoind.is_some()
                         || breez_client.is_some()
                         || spark_backend.is_some()
                         || backup.is_some()
@@ -893,8 +905,11 @@ pub async fn load_application(
         bitcoin_unit,
         display_mode,
         node_bitcoind_sync_progress: None,
+        node_bitcoind_sync_heights: None,
         node_bitcoind_ibd: None,
         node_bitcoind_subversion: None,
+        node_bitcoind_pruning: None,
+        local_switch_history: None,
         daemon_switch_in_progress: false,
         node_bitcoind_last_log: None,
         node_net_stats: None,
@@ -1126,8 +1141,8 @@ fn backend_is_internal_bitcoind(config_path: &Path, internal_datadir: &Path) -> 
     }
 }
 
-/// Dedicated authenticated fork restart path: no external socket, config
-/// migration, managed node, or fallback backend is attempted.
+/// Dedicated fork restart path, preserving exact-chain managed companions.
+/// Generic external sockets and config migration remain unavailable.
 pub(crate) async fn start_connect_daemon(
     root: CoincubeDirectory,
     chain: crate::chain::ChainId,
@@ -1144,9 +1159,7 @@ pub(crate) async fn start_connect_daemon(
             "Authenticated Connect fork Vault required".into(),
         ));
     }
-    crate::chain::require_connect_feature(chain, &client)
-        .await
-        .map_err(Error::Unexpected)?;
+
     let expected_dir = root
         .network_directory(chain)
         .coincubed_data_directory(&settings.wallet_id());
@@ -1165,13 +1178,56 @@ pub(crate) async fn start_connect_daemon(
             "Connect daemon datadir differs from this Cube".into(),
         ));
     }
-    let daemon = Arc::new(
-        EmbeddedDaemon::start_authenticated(cfg, client)
+    let local = match &cfg.bitcoin_backend {
+        Some(BitcoinBackend::Bitcoind(node)) => Some(node.clone()),
+        Some(BitcoinBackend::Esplora(_)) => cfg.pending_bitcoind.clone(),
+        _ => {
+            return Err(Error::Unexpected(
+                "Unsupported Bitcoin Blake2b backend".into(),
+            ))
+        }
+    };
+    if !matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))) {
+        crate::chain::require_connect_feature(chain, &client)
             .await
-            .map_err(Error::Daemon)?,
-    );
+            .map_err(Error::Unexpected)?;
+    }
+    let internal = if let Some(node) = local {
+        let root = root.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                Bitcoind::preflight_for_chain(chain, &root)?;
+                crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    )
+                })?;
+                Bitcoind::maybe_start_for_chain(chain, node, &root)
+            })
+            .await
+            .map_err(|e| Error::Unexpected(e.to_string()))?
+            .map_err(Error::Bitcoind)?,
+        )
+    } else {
+        None
+    };
+    let daemon: Arc<dyn Daemon + Sync + Send> =
+        if matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))) {
+            Arc::new(
+                tokio::task::spawn_blocking(move || EmbeddedDaemon::start_local_fork(cfg))
+                    .await
+                    .map_err(|e| Error::Unexpected(e.to_string()))?
+                    .map_err(Error::Daemon)?,
+            )
+        } else {
+            Arc::new(
+                EmbeddedDaemon::start_authenticated(cfg, client)
+                    .await
+                    .map_err(Error::Daemon)?,
+            )
+        };
     let info = daemon.get_info().await.map_err(Error::Daemon)?;
-    Ok((daemon, None, info))
+    Ok((daemon, internal, info))
 }
 
 pub async fn start_bitcoind_and_daemon(

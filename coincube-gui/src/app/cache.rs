@@ -87,18 +87,28 @@ pub struct Cache {
     pub app_generation: AppGeneration,
     pub unswept_notice: Option<super::unswept_notice::Notice>,
     pub datadir_path: CoincubeDirectory,
-    /// IBD progress (0.0–1.0) of the pending local Bitcoind, polled via its
-    /// RPC.  `None` when no local node is pending.
+    /// IBD progress (0.0–1.0) of the pending or active local Bitcoind,
+    /// polled directly via RPC, independently of the wallet backend.
     pub node_bitcoind_sync_progress: Option<f64>,
-    /// Whether the pending local Bitcoind is currently in initial block download.
-    /// `None` when no local node is pending.
+    /// Verified blocks and known headers reported by the same local RPC probe.
+    pub node_bitcoind_sync_heights: Option<(u64, u64)>,
+    /// Whether the pending or active local Bitcoind is currently in initial block download.
+    /// `None` until a local node answers.
     pub node_bitcoind_ibd: Option<bool>,
-    /// `getnetworkinfo.subversion` of the pending local Bitcoind, read on the same
+    /// `getnetworkinfo.subversion` of the pending or active local Bitcoind, read on the same
     /// poll that reports progress. `None` until the first poll, or when the node
     /// would not say what it is — the syncing copy then names no build rather
     /// than guessing one. Kept raw so both the flavour and the version can be
     /// derived from the one source.
     pub node_bitcoind_subversion: Option<String>,
+    /// Pruning of the pending or active local Bitcoind, read on the same poll.
+    /// `None` until a node answers, or when it would not say.
+    pub node_bitcoind_pruning: Option<super::local_switch::NodePruning>,
+    /// How far back the Vault's history reaches, read on that poll only while
+    /// a synced, pruned pending node is a switch target. `None` otherwise, or
+    /// when the daemon could not say. Lets the Node settings explain a refused
+    /// switch (see [`super::local_switch`]).
+    pub local_switch_history: Option<super::local_switch::VaultHistory>,
     /// Mirror of `App::daemon_switch_in_progress` so the stateless Node
     /// settings view can reflect an in-flight backend switch (disable the
     /// switch buttons and show a "switching…" status) instead of offering a
@@ -351,8 +361,11 @@ impl std::default::Default for Cache {
             cube_encryption_key: None,
             datadir_path: CoincubeDirectory::new(std::path::PathBuf::new()),
             node_bitcoind_sync_progress: None,
+            node_bitcoind_sync_heights: None,
             node_bitcoind_ibd: None,
             node_bitcoind_subversion: None,
+            node_bitcoind_pruning: None,
+            local_switch_history: None,
             daemon_switch_in_progress: false,
             node_bitcoind_last_log: None,
             node_net_stats: None,

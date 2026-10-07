@@ -22,8 +22,12 @@ first. Four entries:
 |---|---|
 | `coincube_unified_sighash_digest` | Raw fields. Mirrors `unified_sighash::unified_sighash` field for field. |
 | `coincube_unified_psbt_digest` | The production digest: one native-P2WSH input of a standard PSBT, at `SIGHASH_ALL\|SIGHASH_UNIFIED`. |
-| `coincube_unified_psbt_sign` | `unified_signing::sign_p2wsh_all_unified` verbatim. |
-| `coincube_unified_psbt_verify` | `unified_signing::verify_p2wsh_all_unified` verbatim. |
+| `coincube_unified_psbt_sign` | Signs only the authenticated account path+xpub target; native P2WSH accepts either PSBT prevout form. |
+| `coincube_unified_psbt_verify` | Verifies the Keychain native-P2WSH contract, including witness-only inputs. |
+
+The signing target must be the exact hardened native-P2WSH account path
+`m/48'/<coin>'/<account>'/2'`. Its coin type and xpub network must match the
+supplied network before the signer is allowed to inspect PSBT derivations.
 
 ## Why there are two digest entries
 
@@ -145,7 +149,7 @@ is Lane B3.1b. All three crate types export the same symbols, so the tests in
 ## Tests
 
 ```sh
-cargo test -p coincube-keychain-ffi         # 34 tests across five binaries
+cargo test -p coincube-keychain-ffi         # 38 tests across five binaries
 cargo fmt -- --check
 cargo clippy -p coincube-keychain-ffi --all-targets -- -D warnings
 ```
