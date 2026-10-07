@@ -12159,11 +12159,16 @@ pub(crate) mod claim_step1_tests {
         let root = std::env::temp_dir().join(format!("retire-marker-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (mut app, wallet) = bitcoin_app(&root);
+        // The fixture's cache has an empty data directory, which resolves relative
+        // to the crate under `cargo test`: point it at the temp root so neither the
+        // test nor the task it drives writes into the source tree.
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
         assert_eq!(
             app.daemon_backend(),
             DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
         );
         let network_dir = app.cache.datadir_path.network_directory(app.cache.chain());
+        assert!(network_dir.path().starts_with(&root));
         std::fs::create_dir_all(network_dir.path()).unwrap();
         let marked = settings::Settings {
             wallets: vec![WalletSettings {
