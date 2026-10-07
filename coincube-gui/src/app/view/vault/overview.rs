@@ -180,6 +180,7 @@ pub fn vault_overview_view<'a>(
     loading: bool,
     sync_status: &SyncStatus,
     show_rescan_prompt: bool,
+    awaiting_rescan_date: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     node_bitcoind_sync_progress: Option<f64>,
     node_bitcoind_ibd: Option<bool>,
@@ -195,7 +196,7 @@ pub fn vault_overview_view<'a>(
     // headline.
     let total_balance = *balance + *unconfirmed_balance;
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(total_balance));
-    let sync = balance_sync_state(sync_status, total_balance, show_rescan_prompt);
+    let sync = balance_sync_state(sync_status, total_balance, awaiting_rescan_date);
     let history_unknown = matches!(sync, SyncState::Unknown { .. });
     let btc_fiat_str = fiat_balance
         .as_ref()

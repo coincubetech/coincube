@@ -55,6 +55,13 @@ pub struct VaultOverview {
     /// Set when the restore recorded a rescan it has no date for; the only
     /// case the user has to act on (see `App::needs_rescan_date`).
     show_rescan_prompt: bool,
+    /// Whether that restore is still waiting for its history to be scanned. The
+    /// balance header reads this, not the prompt: dismissing the prompt hides a
+    /// reminder, it does not load any history, so the empty balance stays unknown.
+    awaiting_rescan_date: bool,
+    /// A rescan has been seen running since the panel was built. Once it is no
+    /// longer running, the history it was owed has been scanned.
+    rescan_seen_running: bool,
     show_received_celebration: bool,
     received_amount_display: String,
     received_quote: coincube_ui::component::quote_display::Quote,
@@ -88,6 +95,8 @@ impl VaultOverview {
             warning: None,
             processing: false,
             show_rescan_prompt,
+            awaiting_rescan_date: show_rescan_prompt,
+            rescan_seen_running: false,
             last_reload: Instant::now(),
             show_received_celebration: false,
             received_amount_display: String::new(),
@@ -143,6 +152,7 @@ impl State for VaultOverview {
                         && self.warning.is_none(),
                     &self.sync_status,
                     self.show_rescan_prompt,
+                    self.awaiting_rescan_date,
                     cache.bitcoin_unit,
                     cache.node_bitcoind_sync_progress,
                     cache.node_bitcoind_ibd,
@@ -270,6 +280,13 @@ impl State for VaultOverview {
                 }
             },
             Message::UpdatePanelCache(is_current) => {
+                if cache.rescan_progress().is_some() {
+                    self.rescan_seen_running = true;
+                } else if self.rescan_seen_running {
+                    // The rescan the restore was owed has run to completion.
+                    self.rescan_seen_running = false;
+                    self.awaiting_rescan_date = false;
+                }
                 let wallet_was_syncing = !self.sync_status.is_synced();
                 self.sync_status = sync_status(
                     daemon.backend(),
@@ -471,6 +488,63 @@ mod tests {
     use coincube_core::miniscript::bitcoin;
     use coincubed::commands::LCSpendInfo;
     use std::str::FromStr;
+
+    /// A Vault restored without a date, on a local node, is empty until it is
+    /// rescanned. Dismissing the prompt asking for that date must not turn its
+    /// unknown balance into a confident zero; only a rescan that runs to the end does.
+    #[test]
+    fn dismissing_the_rescan_prompt_keeps_an_unscanned_balance_unknown() {
+        use crate::app::{
+            view::vault::overview::balance_sync_state, view::wallet_header::SyncState,
+        };
+        const DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+        let root = std::env::temp_dir().join(format!("rescan-prompt-{}", uuid::Uuid::new_v4()));
+        let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
+        let cfg: coincubed::config::Config = toml::from_str(&format!(
+            "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[bitcoind_config]\naddr = '127.0.0.1:8332'\ncookie_path = '{}'\n",
+            descriptor,
+            root.display(),
+            root.join(".cookie").display()
+        ))
+        .unwrap();
+        let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+            crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(cfg, None),
+        );
+        let wallet = Arc::new(Wallet::new(descriptor));
+        let mut overview = VaultOverview::new(wallet, &[], SyncStatus::Synced, 970_247, true);
+        let mut cache = Cache::default();
+        let shown = |overview: &VaultOverview| {
+            balance_sync_state(
+                &SyncStatus::Synced,
+                Amount::ZERO,
+                overview.awaiting_rescan_date,
+            )
+        };
+        assert!(matches!(shown(&overview), SyncState::Unknown { .. }));
+
+        let _ = overview.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::View(view::Message::HideRescanPrompt),
+        );
+        assert!(!overview.show_rescan_prompt, "the prompt is dismissed");
+        assert!(
+            matches!(shown(&overview), SyncState::Unknown { .. }),
+            "but the history is still unscanned"
+        );
+
+        // The user picks a date elsewhere; the rescan runs, then finishes.
+        cache.daemon_cache.rescan_progress = Some(0.5);
+        let _ = overview.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::UpdatePanelCache(false),
+        );
+        assert!(matches!(shown(&overview), SyncState::Unknown { .. }));
+        cache.daemon_cache.rescan_progress = None;
+        let _ = overview.update(Some(daemon), &cache, Message::UpdatePanelCache(false));
+        assert!(matches!(shown(&overview), SyncState::Synced));
+    }
     #[tokio::test]
     async fn test_coins_summary() {
         // Will use the same address for all coins.
