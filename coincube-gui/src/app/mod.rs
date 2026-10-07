@@ -5,6 +5,7 @@ pub mod claim_intent;
 pub mod config;
 pub mod error;
 pub mod features;
+pub mod local_switch;
 pub mod menu;
 pub mod message;
 pub mod seed_source;
@@ -881,6 +882,9 @@ pub struct App {
     /// churning the daemon. Suppresses auto-switch until the next *successful*
     /// switch (a fresh adopt / manual switch re-arms it by clearing this).
     auto_switch_suppressed: bool,
+    /// Why the last probe of a synced pending node did not promote it, if it
+    /// did not. Kept only so each reason is logged once rather than every probe.
+    local_switch_hold: Option<local_switch::SwitchHold>,
     /// Deposit txids a sync-driven entangled lookup batch has claimed and not
     /// yet answered (`#276` I13). Single-flight: two syncs inside one
     /// in-flight window would otherwise queue the same txids twice. Released
@@ -2185,6 +2189,49 @@ pub struct LocalNodeSync {
     blocks: u64,
     headers: u64,
     subversion: Option<String>,
+    /// `None` when the node did not say (see [`local_switch::NodePruning::from_blockchain_info`]).
+    pruning: Option<local_switch::NodePruning>,
+}
+
+/// The Vault scan a backend switch would discard, if one is running: the
+/// wallet catching up (for a Connect Vault this includes its startup address
+/// scan, until the session's first poll succeeds) or a pending rescan.
+pub(crate) fn running_vault_scan(
+    daemon_backend: DaemonBackend,
+    cache: &Cache,
+) -> Option<local_switch::RunningScan> {
+    let status = sync_status(
+        daemon_backend,
+        cache.blockheight(),
+        cache.sync_progress(),
+        cache.last_poll_timestamp(),
+        cache.last_poll_at_startup,
+    );
+    local_switch::running_scan(
+        status.wallet_is_syncing(),
+        cache.rescan_progress().is_some(),
+    )
+}
+
+/// Log why the auto-switch to the local node is held, once per change.
+fn log_local_switch_hold(hold: Option<local_switch::SwitchHold>) {
+    use local_switch::{RunningScan, SwitchHold};
+    match hold {
+        None => {}
+        Some(SwitchHold::Scanning(RunningScan::WalletSync)) => info!(
+            "Local node is synced; waiting for the Vault to finish scanning before switching \
+             to it, so the scan isn't thrown away."
+        ),
+        Some(SwitchHold::Scanning(RunningScan::Rescan)) => info!(
+            "Local node is synced; waiting for the Vault's rescan to finish before switching \
+             to it, so the rescan isn't thrown away."
+        ),
+        Some(SwitchHold::Unknown) => info!(
+            "Local node is synced; not switching until its pruning and this Vault's history \
+             can be read."
+        ),
+        Some(SwitchHold::Pruned(why)) => warn!("Not switching to the local node: {why}"),
+    }
 }
 
 /// Prefer the pending node; keep observing the active local node after promotion.
@@ -2258,13 +2305,63 @@ async fn check_bitcoind_sync_progress(
     let headers = result["headers"]
         .as_u64()
         .ok_or_else(|| "Missing headers in bitcoind response".to_string())?;
+    // Best-effort like `subversion`: an unreadable answer only means a switch
+    // to this node waits, not that its progress goes unreported.
+    let pruning = local_switch::NodePruning::from_blockchain_info(result);
     Ok(LocalNodeSync {
         progress,
         ibd,
         blocks,
         headers,
         subversion,
+        pruning,
     })
+}
+
+/// What the Vault needs read alongside a pending-node probe, to judge whether
+/// that node could serve it (see [`local_switch`]).
+struct VaultHistoryProbe {
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    data_dir: CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    wallet: Arc<Wallet>,
+}
+
+impl VaultHistoryProbe {
+    /// How far back this Vault's history reaches, or `None` if the daemon
+    /// could not say.
+    ///
+    /// Asked of the daemon over all four coin statuses rather than read from
+    /// the cache, which holds only unspent coins — the same reason
+    /// [`settle_rescan_obligation`] does: a Vault whose history is all spent
+    /// would otherwise look like one with none.
+    async fn read(self) -> Option<local_switch::VaultHistory> {
+        use coincubed::commands::CoinStatus;
+        let coins = match self
+            .daemon
+            .list_coins(
+                &[
+                    CoinStatus::Unconfirmed,
+                    CoinStatus::Confirmed,
+                    CoinStatus::Spending,
+                    CoinStatus::Spent,
+                ],
+                &[],
+            )
+            .await
+        {
+            Ok(res) => res.coins,
+            Err(e) => {
+                tracing::debug!("Could not list the Vault's coins for the local-node check: {e}");
+                return None;
+            }
+        };
+        let rescan_owed = pending_rescan(&self.data_dir, self.chain, &self.wallet).is_some();
+        Some(local_switch::VaultHistory::from_coin_heights(
+            coins.iter().map(|c| c.block_height),
+            rescan_owed,
+        ))
+    }
 }
 
 /// A node's `getnetworkinfo.subversion`, or `None` if it cannot be read.
@@ -3158,6 +3255,7 @@ impl App {
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
             auto_switch_suppressed: false,
+            local_switch_hold: None,
             entangled_in_flight: HashSet::new(),
             unswept_in_flight: None,
             unswept_session: None,
@@ -3367,6 +3465,7 @@ impl App {
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
                 auto_switch_suppressed: false,
+                local_switch_hold: None,
                 entangled_in_flight: HashSet::new(),
                 unswept_in_flight: None,
                 unswept_session: None,
@@ -4545,6 +4644,11 @@ impl App {
             .as_ref()
             .map(|d| d.backend())
             .unwrap_or(DaemonBackend::RemoteBackend)
+    }
+
+    /// The Vault scan a backend switch would discard, if one is running.
+    fn running_vault_scan(&self) -> Option<local_switch::RunningScan> {
+        running_vault_scan(self.daemon_backend(), &self.cache)
     }
 
     /// Write the account's latest `liquidEnabled` grant to this cube's settings
@@ -6068,13 +6172,44 @@ impl App {
                         .cloned()
                     {
                         self.bitcoind_sync_probe_in_progress = true;
+                        // Only a *pending* node is a switch target, so only then
+                        // is the Vault's history worth reading.
+                        let history_probe = match (&self.daemon, &self.wallet) {
+                            (Some(daemon), Some(wallet))
+                                if daemon
+                                    .config()
+                                    .is_some_and(|c| c.pending_bitcoind.is_some()) =>
+                            {
+                                Some(VaultHistoryProbe {
+                                    daemon: daemon.clone(),
+                                    data_dir: self.cache.datadir_path.clone(),
+                                    chain: self.cache.chain(),
+                                    wallet: wallet.clone(),
+                                })
+                            }
+                            _ => None,
+                        };
                         return Task::perform(
                             async move {
                                 let result =
                                     check_bitcoind_sync_progress(pending_cfg.clone()).await;
+                                // Only a synced, pruned node needs it; an
+                                // unpruned one serves any history.
+                                let needs_history = result.as_ref().is_ok_and(|s| {
+                                    !s.ibd
+                                        && matches!(
+                                            s.pruning,
+                                            Some(local_switch::NodePruning::Pruned { .. })
+                                        )
+                                });
+                                let vault_history = match history_probe {
+                                    Some(probe) if needs_history => probe.read().await,
+                                    _ => None,
+                                };
                                 Message::BitcoindSyncProgress {
                                     config: pending_cfg,
                                     result,
+                                    vault_history,
                                 }
                             },
                             |message| message,
@@ -6181,7 +6316,11 @@ impl App {
                     Err(e) => tracing::debug!("node net-stats poll failed: {e}"),
                 }
             }
-            Message::BitcoindSyncProgress { config, result } => {
+            Message::BitcoindSyncProgress {
+                config,
+                result,
+                vault_history,
+            } => {
                 self.bitcoind_sync_probe_in_progress = false;
                 // A result from the previous node must not update or promote a new one.
                 if self
@@ -6201,8 +6340,11 @@ impl App {
                         blocks,
                         headers,
                         subversion,
+                        pruning,
                     }) => {
                         self.cache.node_bitcoind_sync_progress = Some(progress);
+                        self.cache.node_bitcoind_pruning = pruning;
+                        self.cache.local_switch_history = vault_history;
                         self.cache.node_bitcoind_sync_heights = Some((blocks, headers));
                         self.cache.node_bitcoind_ibd = Some(ibd);
                         // Keep the last good answer if this poll couldn't read it.
@@ -6245,8 +6387,23 @@ impl App {
                                     Some(new_cfg)
                                 });
                             if let Some(new_cfg) = switch {
-                                info!("Switching to local Bitcoind — node synced");
-                                return self.spawn_daemon_switch(new_cfg);
+                                // Not while the Vault is scanning (the switch
+                                // would throw the scan away), and never to a
+                                // node pruned past the Vault's history.
+                                // Deferred, not dropped: every probe re-asks.
+                                let hold = local_switch::auto_switch_hold(
+                                    self.running_vault_scan(),
+                                    pruning,
+                                    vault_history,
+                                );
+                                if hold != self.local_switch_hold {
+                                    log_local_switch_hold(hold);
+                                }
+                                self.local_switch_hold = hold;
+                                if hold.is_none() {
+                                    info!("Switching to local Bitcoind — node synced");
+                                    return self.spawn_daemon_switch(new_cfg);
+                                }
                             }
                         }
                     }
@@ -6800,7 +6957,10 @@ impl App {
                     self.cache.node_bitcoind_sync_heights = None;
                     self.cache.node_bitcoind_ibd = None;
                     self.cache.node_bitcoind_subversion = None;
+                    self.cache.node_bitcoind_pruning = None;
+                    self.cache.local_switch_history = None;
                     self.cache.node_bitcoind_last_log = None;
+                    self.local_switch_hold = None;
                 }
                 let cfg_task = self.update_dispatch(Message::DaemonConfigLoaded(result));
                 return Task::batch([
@@ -12597,10 +12757,12 @@ mod local_node_sync_tests {
             blocks: 900000,
             headers: 900000,
             subversion: None,
+            pruning: Some(local_switch::NodePruning::Unpruned),
         };
         drop(app.update(Message::BitcoindSyncProgress {
             config: pending.clone(),
             result: Ok(observation()),
+            vault_history: None,
         }));
         assert_eq!(app.cache.node_bitcoind_sync_heights, Some((900000, 900000)));
         assert_eq!(app.cache.node_bitcoind_ibd, Some(false));
@@ -12613,12 +12775,98 @@ mod local_node_sync_tests {
         drop(app.update(Message::BitcoindSyncProgress {
             config: active,
             result: Ok(observation()),
+            vault_history: None,
         }));
         assert_eq!(app.cache.node_bitcoind_sync_heights, None);
         drop(app.update(Message::BitcoindSyncProgress {
             config: pending,
             result: Ok(observation()),
+            vault_history: None,
         }));
         assert_eq!(app.cache.node_bitcoind_sync_heights, Some((900000, 900000)));
+    }
+
+    /// The automatic promotion of a synced pending node waits for a running
+    /// Vault scan instead of discarding it, refuses a node pruned past the
+    /// Vault's coins, and goes ahead once neither applies.
+    #[test]
+    fn auto_switch_defers_for_scans_and_refuses_pruned_history() {
+        use local_switch::{NodePruning, PrunedHistory, RunningScan, SwitchHold, VaultHistory};
+
+        let root = std::env::temp_dir().join(format!("local-switch-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        let pending = node(8333);
+        cfg.pending_bitcoind = Some(pending.clone());
+        cfg.auto_switch_to_pending = Some(true);
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
+        let synced = |pruning| LocalNodeSync {
+            progress: 1.0,
+            ibd: false,
+            blocks: 970_500,
+            headers: 970_500,
+            subversion: None,
+            pruning: Some(pruning),
+        };
+        let pruned = NodePruning::Pruned {
+            prune_height: 969_938,
+        };
+
+        // The Connect Vault has not finished its first poll of the session —
+        // its startup scan is still running.
+        app.cache.daemon_cache.blockheight = 970_500;
+        app.cache.last_poll_at_startup = Some(100);
+        app.cache.daemon_cache.last_poll_timestamp = Some(100);
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending.clone(),
+            result: Ok(synced(NodePruning::Unpruned)),
+            vault_history: None,
+        }));
+        assert!(!app.daemon_switch_in_progress, "switched mid-scan");
+        assert_eq!(
+            app.local_switch_hold,
+            Some(SwitchHold::Scanning(RunningScan::WalletSync))
+        );
+
+        // Scan done, but the node is pruned past the Vault's earliest coin.
+        app.cache.daemon_cache.last_poll_timestamp = Some(200);
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending.clone(),
+            result: Ok(synced(pruned)),
+            vault_history: Some(VaultHistory::From(958_601)),
+        }));
+        assert!(!app.daemon_switch_in_progress, "switched to a pruned node");
+        assert_eq!(
+            app.local_switch_hold,
+            Some(SwitchHold::Pruned(PrunedHistory::CoinsBelowPrune {
+                prune_height: 969_938,
+                earliest: 958_601,
+            }))
+        );
+        assert_eq!(app.cache.node_bitcoind_pruning, Some(pruned));
+        assert_eq!(
+            app.cache.local_switch_history,
+            Some(VaultHistory::From(958_601))
+        );
+
+        // History not readable this probe: wait, don't guess.
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending.clone(),
+            result: Ok(synced(pruned)),
+            vault_history: None,
+        }));
+        assert!(!app.daemon_switch_in_progress);
+        assert_eq!(app.local_switch_hold, Some(SwitchHold::Unknown));
+
+        // A pruned node that still has every block the Vault needs is fine.
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending,
+            result: Ok(synced(pruned)),
+            vault_history: Some(VaultHistory::From(970_000)),
+        }));
+        assert!(app.daemon_switch_in_progress, "deferred switch never fired");
+        assert_eq!(app.local_switch_hold, None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

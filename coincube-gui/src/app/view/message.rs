@@ -625,6 +625,11 @@ pub enum NodeSettingsMessage {
     /// rather than printing it verbatim.
     SwitchToConnectFastPath(ConnectJwt),
     SwitchToBitcoind,
+    /// Switch to the local node even though the Vault is still scanning, after
+    /// the user has been told the scan will be discarded.
+    ConfirmSwitchDiscardingScan,
+    /// Dismiss that confirmation and keep the current backend.
+    CancelSwitchDiscardingScan,
     // "Set up local node while on Connect" sub-flow
     SetupLocalNode,
     SetupLocalNodeCancel,
