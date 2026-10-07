@@ -4790,7 +4790,7 @@ fn global_settings_view(home: &Home) -> Element<Message> {
         ))
         .push(setting(
             "Bitcoin Blake2b - Beta",
-            "Show Bitcoin Blake2b features when enabled for your Connect account.",
+            "Show Bitcoin Blake2b beta features in the app.",
             home.connect_account.bitcoin_blake2b_opt_in,
             ViewMessage::ToggleBitcoinBlake2bBeta,
         ));
