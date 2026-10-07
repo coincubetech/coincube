@@ -670,6 +670,7 @@ mod flow {
                 chain_divergence: false,
                 timestamp: 0,
                 last_poll_timestamp: None,
+                history_sync: Default::default(),
                 receive_index: 1,
                 change_index: 0,
             })

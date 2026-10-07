@@ -40,6 +40,9 @@ pub struct Poller {
     // Published when a poll declines an implausibly deep reorg, so `get_info` can
     // report it without taking the `BitcoinInterface` mutex.
     reorg_alert: sync::Arc<crate::bitcoin::ReorgAlertCache>,
+    // Where each poll's outcome is recorded, so `get_info` can tell a wallet whose
+    // history is still loading, or failing to load, from one that is up to date.
+    history_sync: sync::Arc<crate::bitcoin::HistorySyncCache>,
 }
 
 impl Poller {
@@ -49,6 +52,7 @@ impl Poller {
         desc: descriptors::CoincubeDescriptor,
         sync_cache: sync::Arc<crate::bitcoin::SyncProgressCache>,
         reorg_alert: sync::Arc<crate::bitcoin::ReorgAlertCache>,
+        history_sync: sync::Arc<crate::bitcoin::HistorySyncCache>,
     ) -> Result<Poller, crate::bitcoin::GenesisError> {
         let secp = secp256k1::Secp256k1::verification_only();
         let descs = [
@@ -73,6 +77,7 @@ impl Poller {
             descs,
             sync_cache,
             reorg_alert,
+            history_sync,
         })
     }
 
@@ -123,6 +128,7 @@ impl Poller {
                 &self.secp,
                 &self.descs,
                 &self.reorg_alert,
+                &self.history_sync,
             );
         } else {
             log::warn!("Skipped poll as block chain is still synchronizing.");
@@ -226,6 +232,7 @@ impl Poller {
                 &self.secp,
                 &self.descs,
                 &self.reorg_alert,
+                &self.history_sync,
             );
         }
     }

@@ -156,6 +156,7 @@ fn control(
         bitcoin::secp256k1::Secp256k1::verification_only(),
         Default::default(),
         Default::default(),
+        Default::default(),
     )
 }
 
@@ -565,6 +566,7 @@ fn node_control(descriptor: CoincubeDescriptor, address: std::net::SocketAddr) -
         sender,
         Arc::new(Mutex::new(DummyDatabase::new())),
         bitcoin::secp256k1::Secp256k1::verification_only(),
+        Default::default(),
         Default::default(),
         Default::default(),
     )

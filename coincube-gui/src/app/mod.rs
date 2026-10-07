@@ -8822,6 +8822,7 @@ mod tests {
                     chain_divergence: false,
                     timestamp: 0,
                     last_poll_timestamp,
+                    history_sync: Default::default(),
                     receive_index,
                     change_index: 0,
                 })

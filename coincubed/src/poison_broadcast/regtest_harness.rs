@@ -122,6 +122,7 @@ impl RegtestTransport {
             secp,
             Default::default(),
             Default::default(),
+            Default::default(),
         );
         let worker = std::thread::spawn(move || {
             while let Ok(message) = receiver.recv() {

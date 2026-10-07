@@ -143,6 +143,7 @@ fn control(
         secp256k1::Secp256k1::verification_only(),
         Default::default(),
         Default::default(),
+        Default::default(),
     )
 }
 #[test]

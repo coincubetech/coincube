@@ -67,6 +67,9 @@ pub struct Electrum {
     /// Set to `true` to force a full scan from the genesis block regardless of
     /// the wallet's local chain height.
     full_scan: bool,
+    /// Where a full scan reports how far it has got. See
+    /// [`crate::bitcoin::HistorySyncCache`].
+    history_sync: Option<std::sync::Arc<crate::bitcoin::HistorySyncCache>>,
 }
 
 impl Electrum {
@@ -80,7 +83,23 @@ impl Electrum {
             bdk_wallet,
             sync_count: 0,
             full_scan,
+            history_sync: None,
         })
+    }
+
+    /// Report full-scan progress into `cache` from now on.
+    pub fn install_history_sync_cache(
+        &mut self,
+        cache: std::sync::Arc<crate::bitcoin::HistorySyncCache>,
+    ) {
+        self.history_sync = Some(cache);
+    }
+
+    /// Progress of the full scan under way, if one is.
+    pub fn full_scan_progress(&self) -> Option<f64> {
+        self.history_sync
+            .as_ref()
+            .and_then(|cache| cache.snapshot().full_scan_progress())
     }
 
     pub fn sanity_checks(&self, expected_hash: &bitcoin::BlockHash) -> Result<(), ElectrumError> {
@@ -186,8 +205,28 @@ impl Electrum {
             // Either local_chain has height 0 or we want to trigger a full scan.
             let mut request = FullScanRequest::from_chain_tip(local_chain_tip.clone());
 
-            for (k, spks) in self.bdk_wallet.index().all_unbounded_spk_iters() {
-                request = request.set_spks_for_keychain(k, spks);
+            let spk_iters = self.bdk_wallet.index().all_unbounded_spk_iters();
+            if let Some(cache) = &self.history_sync {
+                cache.begin_full_scan(crate::bitcoin::expected_full_scan_addresses(
+                    spk_iters.len(),
+                    self.bdk_wallet
+                        .index()
+                        .last_revealed_indices()
+                        .into_values(),
+                    STOP_GAP,
+                ));
+            }
+            for (k, spks) in spk_iters {
+                request = match &self.history_sync {
+                    Some(cache) => {
+                        let cache = cache.clone();
+                        request.set_spks_for_keychain(
+                            k,
+                            spks.inspect(move |_| cache.address_checked()),
+                        )
+                    }
+                    None => request.set_spks_for_keychain(k, spks),
+                };
             }
             let scan_result = self
                 .client
@@ -203,6 +242,9 @@ impl Electrum {
             // A full scan only makes sense to do once, in most cases. Don't do it again unless
             // explicitly asked to by a user.
             self.full_scan = false;
+            if let Some(cache) = &self.history_sync {
+                cache.full_scan_fetched();
+            }
             log::info!("Full scan complete.");
             (
                 scan_result.chain_update,

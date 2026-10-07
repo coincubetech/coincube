@@ -816,6 +816,7 @@ mod tests {
                 chain_divergence: false,
                 timestamp: 0,
                 last_poll_timestamp: Some(RESERVED_AT + 1),
+                history_sync: Default::default(),
                 receive_index: index,
                 change_index: 0,
             },
