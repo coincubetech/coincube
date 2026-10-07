@@ -881,9 +881,14 @@ pub struct App {
     /// every tick — spawning concurrent daemon starts that race to load the same
     /// watchonly wallet and corrupt it. Cleared by `Message::DaemonRestarted`.
     daemon_switch_in_progress: bool,
-    /// Whether a completed full scan has already retired this Vault's rescan
-    /// obligation this session. See [`full_scan_settles_rescan_obligation`].
+    /// Whether a completed full scan has retired this Vault's rescan obligation
+    /// this session: set only once the settings write succeeded. See
+    /// [`full_scan_settles_rescan_obligation`].
     rescan_obligation_retired_by_scan: bool,
+    /// A settings write retiring the obligation is under way, so a refresh does
+    /// not start a second one. Cleared when it reports back; a failed write
+    /// leaves the obligation to be retried on a later refresh.
+    rescan_obligation_retire_in_flight: bool,
     /// Set when an auto-promotion to the pending local node fails and the
     /// previous daemon is recovered. The recovered daemon still carries
     /// `auto_switch_to_pending = true` + `pending_bitcoind`, so without this the
@@ -3355,6 +3360,7 @@ impl App {
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
             rescan_obligation_retired_by_scan: false,
+            rescan_obligation_retire_in_flight: false,
             auto_switch_suppressed: false,
             local_switch_hold: None,
             entangled_in_flight: HashSet::new(),
@@ -3566,6 +3572,7 @@ impl App {
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
                 rescan_obligation_retired_by_scan: false,
+                rescan_obligation_retire_in_flight: false,
                 auto_switch_suppressed: false,
                 local_switch_hold: None,
                 entangled_in_flight: HashSet::new(),
@@ -4752,16 +4759,13 @@ impl App {
         let descriptor_checksum = wallet.descriptor_checksum.clone();
         Some(Task::perform(
             async move {
-                if let Err(e) = settings::update_settings_file(&network_dir, |settings| {
+                settings::update_settings_file(&network_dir, |settings| {
                     Some(cleared_pending_rescan(settings, &descriptor_checksum))
                 })
                 .await
-                {
-                    // Harmless: the next completed full scan retires it again.
-                    tracing::warn!("Could not retire the pending rescan marker: {}", e);
-                }
+                .map_err(|e| e.to_string())
             },
-            |_| Message::CacheUpdated,
+            Message::RescanObligationRetired,
         ))
     }
 
@@ -6714,11 +6718,13 @@ impl App {
                         }
                         let retire_obligation = if full_scan_settles_rescan_obligation(
                             &self.daemon_backend(),
-                            self.rescan_obligation_retired_by_scan,
+                            self.rescan_obligation_retired_by_scan
+                                || self.rescan_obligation_retire_in_flight,
                             &daemon_cache.history_sync,
                         ) {
-                            self.rescan_obligation_retired_by_scan = true;
-                            self.retire_rescan_obligation_task()
+                            let task = self.retire_rescan_obligation_task();
+                            self.rescan_obligation_retire_in_flight = task.is_some();
+                            task
                         } else {
                             None
                         };
@@ -6911,6 +6917,19 @@ impl App {
                         )));
                     }
                 }
+            }
+            Message::RescanObligationRetired(result) => {
+                self.rescan_obligation_retire_in_flight = false;
+                match result {
+                    Ok(()) => self.rescan_obligation_retired_by_scan = true,
+                    // Left unretired: the next refresh showing the completed
+                    // scan writes it again.
+                    Err(e) => tracing::warn!(
+                        "Could not retire the pending rescan marker: {}. Retrying on the next refresh.",
+                        e
+                    ),
+                }
+                return Task::none();
             }
             Message::CacheUpdated => {
                 // Cube (Home) Settings lives on every cube, vault or not,
@@ -12462,17 +12481,6 @@ pub(crate) mod claim_step1_tests {
         use crate::app::settings::{PendingRescan, WalletSettings};
         use coincubed::commands::HistorySync;
 
-        fn drain(task: Task<Message>) {
-            use iced::futures::StreamExt;
-            if let Some(stream) = iced_runtime::task::into_stream(task) {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(stream.for_each(|_| async {}));
-            }
-        }
-
         let root = std::env::temp_dir().join(format!("retire-marker-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let (mut app, wallet) = bitcoin_app(&root);
@@ -12522,16 +12530,20 @@ pub(crate) mod claim_step1_tests {
             }))
         };
 
-        drain(app.update(refresh(HistorySync {
-            full_scan_in_progress: true,
-            ..Default::default()
-        })));
+        settle(&mut app, |app| {
+            app.update(refresh(HistorySync {
+                full_scan_in_progress: true,
+                ..Default::default()
+            }))
+        });
         assert_eq!(marker(), Some(PendingRescan::DateUnknown));
 
-        drain(app.update(refresh(HistorySync {
-            full_scan_completed_at: Some(1_791_329_974),
-            ..Default::default()
-        })));
+        settle(&mut app, |app| {
+            app.update(refresh(HistorySync {
+                full_scan_completed_at: Some(1_791_329_974),
+                ..Default::default()
+            }))
+        });
         assert_eq!(marker(), None, "the completed scan retires the marker");
         std::fs::remove_dir_all(&root).ok();
     }
@@ -12543,17 +12555,6 @@ pub(crate) mod claim_step1_tests {
     fn a_full_scan_completed_before_startup_still_retires_the_marker_once() {
         use crate::app::settings::{PendingRescan, WalletSettings};
         use coincubed::commands::HistorySync;
-
-        fn drain(task: Task<Message>) {
-            use iced::futures::StreamExt;
-            if let Some(stream) = iced_runtime::task::into_stream(task) {
-                tokio::runtime::Builder::new_current_thread()
-                    .enable_all()
-                    .build()
-                    .unwrap()
-                    .block_on(stream.for_each(|_| async {}));
-            }
-        }
 
         let root = std::env::temp_dir().join(format!("retire-early-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
@@ -12601,13 +12602,109 @@ pub(crate) mod claim_step1_tests {
         };
 
         write_marker();
-        drain(app.update(refresh(completed.clone())));
+        settle(&mut app, |app| app.update(refresh(completed.clone())));
         assert_eq!(marker(), None, "completion seen at startup retires it");
 
         // Once per session: a later refresh does not rewrite the file again.
         write_marker();
-        drain(app.update(refresh(completed)));
+        settle(&mut app, |app| app.update(refresh(completed)));
         assert_eq!(marker(), Some(PendingRescan::DateUnknown));
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Run the task `update` returns to completion, and hand the App back the
+    /// rescan-marker write's outcome, as the runtime would. Only for tasks that
+    /// make no network call.
+    fn settle(app: &mut App, update: impl FnOnce(&mut App) -> Task<Message>) {
+        use iced::futures::StreamExt;
+        let task = update(app);
+        let Some(stream) = iced_runtime::task::into_stream(task) else {
+            return;
+        };
+        let outputs: Vec<Message> = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect(),
+            );
+        for message in outputs {
+            if matches!(message, Message::RescanObligationRetired(_)) {
+                let _ = app.update(message);
+            }
+        }
+    }
+
+    /// A settings write that fails leaves the obligation unretired, and the next
+    /// refresh showing the completed scan writes it again; while a write is in
+    /// flight, a refresh does not start another.
+    #[test]
+    fn a_failed_marker_write_is_retried_on_a_later_refresh() {
+        use crate::app::settings::{PendingRescan, WalletSettings};
+        use coincubed::commands::HistorySync;
+
+        let root = std::env::temp_dir().join(format!("retire-retry-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut app, wallet) = bitcoin_app(&root);
+        app.cache.datadir_path = CoincubeDirectory::new(root.clone());
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.chain());
+        assert!(network_dir.path().starts_with(&root));
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let settings_file = network_dir.path().join(settings::SETTINGS_FILE_NAME);
+        let completed = HistorySync {
+            full_scan_completed_at: Some(1_791_329_974),
+            ..Default::default()
+        };
+        let refresh = |history_sync: HistorySync| {
+            Message::UpdateDaemonCache(Ok(cache::DaemonCache {
+                blockheight: 970_247,
+                history_sync,
+                ..Default::default()
+            }))
+        };
+
+        // A settings file that cannot be parsed: the write is refused.
+        std::fs::write(&settings_file, b"{ not json").unwrap();
+        settle(&mut app, |app| app.update(refresh(completed.clone())));
+        assert!(!app.rescan_obligation_retired_by_scan, "the write failed");
+        assert!(!app.rescan_obligation_retire_in_flight);
+
+        // A refresh while a write is pending starts no second one.
+        app.rescan_obligation_retire_in_flight = true;
+        let task = app.update(refresh(completed.clone()));
+        drop(task);
+        assert!(app.rescan_obligation_retire_in_flight);
+        app.rescan_obligation_retire_in_flight = false;
+
+        // With the file readable again, the next refresh retires the marker.
+        let marked = settings::Settings {
+            wallets: vec![WalletSettings {
+                name: format!("Coincube-{}", wallet.descriptor_checksum),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: None,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: Some(PendingRescan::DateUnknown),
+                keychain_keys_recorded: false,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(&settings_file, serde_json::to_vec(&marked).unwrap()).unwrap();
+        settle(&mut app, |app| app.update(refresh(completed)));
+        let read: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_file).unwrap()).unwrap();
+        assert_eq!(read.wallets[0].pending_rescan, None);
+        assert!(app.rescan_obligation_retired_by_scan);
         std::fs::remove_dir_all(&root).ok();
     }
 

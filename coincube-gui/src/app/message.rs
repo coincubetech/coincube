@@ -42,6 +42,10 @@ pub enum Message {
     Tick,
     UpdateDaemonCache(Result<DaemonCache, Error>),
     CacheUpdated,
+    /// Outcome of clearing a restored Vault's pending-rescan marker after a
+    /// completed full scan: `Err` carries why the settings write failed, and the
+    /// next refresh tries again.
+    RescanObligationRetired(Result<(), String>),
     /// Terminal no-op for the fire-and-forget vault recovery heartbeat
     /// (Estate Notifications — PR 2). The heartbeat POST must never block
     /// or affect sync, so its result is discarded here. Carries the result
