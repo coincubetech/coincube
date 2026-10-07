@@ -362,11 +362,28 @@ impl HistorySyncCache {
     }
 }
 
-/// A failure message with its digits removed, so request ids, timestamps and byte
-/// counts in a server's error text do not make every repeat of the same failure
-/// look like a new one.
+/// A failure message with its long numbers removed, so request ids, timestamps and
+/// byte counts in a server's error text do not make every repeat of the same failure
+/// look like a new one. Runs of fewer than four digits are kept: an HTTP status is
+/// the difference between a rate limit (429) and an outage (503).
 fn error_kind(message: &str) -> String {
-    message.chars().filter(|c| !c.is_ascii_digit()).collect()
+    const MIN_VOLATILE_DIGITS: usize = 4;
+    let mut kind = String::with_capacity(message.len());
+    let mut digits = String::new();
+    for c in message.chars().chain(std::iter::once('\0')) {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        if digits.len() < MIN_VOLATILE_DIGITS {
+            kind.push_str(&digits);
+        }
+        digits.clear();
+        if c != '\0' {
+            kind.push(c);
+        }
+    }
+    kind
 }
 
 /// How many addresses a full scan with this `stop_gap` is expected to look up: each
@@ -1960,6 +1977,11 @@ mod history_sync_cache_tests {
         let (_, changed) = cache.poll_failed("upstream error (request id 9876, at 1791330004)", 20);
         assert!(!changed);
         let (_, changed) = cache.poll_failed("connection refused", 30);
+        assert!(changed);
+        // A status code is not noise: a rate limit turning into an outage is news.
+        cache.poll_failed("HttpResponse { status: 429, message: \"slow down\" }", 40);
+        let (_, changed) =
+            cache.poll_failed("HttpResponse { status: 503, message: \"slow down\" }", 50);
         assert!(changed);
     }
 
