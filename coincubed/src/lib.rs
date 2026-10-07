@@ -554,7 +554,7 @@ fn heal_scan_window(
 /// Every `BitcoinD` this daemon builds must use this, the local-fork admission's
 /// included: `setup_bitcoind` reuses an admitted `BitcoinD` as is, so a path that
 /// skipped this would reach bitcoind unnormalized.
-fn bitcoind_watchonly_wallet_path(data_dir: &DataDirectory) -> String {
+pub fn bitcoind_watchonly_wallet_path(data_dir: &DataDirectory) -> String {
     let wo_path = data_dir.coincubed_watchonly_wallet_path();
     let wo_path_str = wo_path.to_str().expect("Must be valid unicode").to_string();
     #[cfg(target_os = "windows")]

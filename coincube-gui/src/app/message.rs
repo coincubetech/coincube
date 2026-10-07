@@ -247,8 +247,10 @@ pub enum Message {
     SetInternalBitcoind(Bitcoind),
     /// Fired by the bitcoind-sync subscription to trigger a progress probe.
     PollBitcoindSync,
-    /// A direct local-node observation, scoped to the RPC configuration probed.
+    /// A direct local-node observation, scoped to its App and RPC configuration.
     BitcoindSyncProgress {
+        app: crate::app::cache::AppGeneration,
+        wallet: Option<crate::app::settings::WalletId>,
         config: coincubed::config::BitcoindConfig,
         result: Result<super::LocalNodeSync, String>,
         /// How far back the Vault's history reaches, read only when a switch

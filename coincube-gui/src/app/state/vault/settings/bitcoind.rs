@@ -844,8 +844,8 @@ impl State for BitcoindSettingsState {
                             }
                             Some(false) => {}
                         }
-                        // A pruned node that cannot reach back to this Vault's
-                        // coins would show it empty, with no way to rescan.
+                        // Check whether the local wallet already tracks the history
+                        // or can recover it from the node's retained blocks.
                         if let Err(reason) = local_node_serves_vault(cache) {
                             self.warning = Some(Error::Unexpected(reason));
                             return Task::none();
@@ -3695,6 +3695,14 @@ mod tests {
         let _ = state.update(Some(daemon.clone()), &cache, switch());
         assert!(state.warning.is_none());
         assert!(state.node_switch_processing, "switch dispatched");
+
+        // An existing local wallet retains records after the blocks were pruned.
+        cache.local_switch_history = Some(VaultHistory::TrackedLocally);
+        assert!(pruned_switch_refusal(&cache).is_none());
+        let mut state = fresh(&cache);
+        let _ = state.update(Some(daemon.clone()), &cache, switch());
+        assert!(state.warning.is_none());
+        assert!(state.node_switch_processing, "recorded history can switch");
 
         // Unpruned, but the wallet has not finished its first poll of the
         // session (a Connect Vault's startup scan): ask first.

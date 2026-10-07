@@ -6,12 +6,12 @@
 //!   address scan (`coincubed`'s Esplora full scan is all-or-nothing), and the
 //!   restarted backend starts over. An automatic switch is therefore deferred
 //!   until the scan has finished, and a manual one asks first.
-//! * **A pruned node.** A pruned node only keeps blocks from its prune height
-//!   on, and cannot rescan below it. Switching a Vault whose coins are older
-//!   than that would show it empty, with no way for the node to recover them.
+//! * **Missing local wallet history.** Pruning does not erase transactions
+//!   already recorded in Core's wallet. A newly created watch-only wallet,
+//!   however, cannot discover transactions in blocks the node has deleted.
+//!   Check the wallet's records before deciding whether it needs those blocks.
 //!
-//! Everything here is a pure decision over values the app already has, so it
-//! is testable without a daemon or a node.
+//! Decisions are pure; the wallet probe reads the records needed to make them.
 
 use std::convert::TryFrom;
 use std::fmt;
@@ -48,6 +48,9 @@ pub enum VaultHistory {
     /// The lowest block height of any coin the Vault has ever had, spent coins
     /// included.
     From(u32),
+    /// Core's watch-only wallet already records all known funding and spending
+    /// transactions. It needs no historical block rescan to recover them.
+    TrackedLocally,
     /// No coin with a block height. `rescan_owed` is whether the Vault still
     /// carries a recorded rescan obligation (`WalletSettings::pending_rescan`):
     /// a restored Vault whose history has not been found yet, so how far back
@@ -83,7 +86,7 @@ impl VaultHistory {
 /// (`prune=550` is a size target). One day of blocks covers both with room.
 pub const PRUNE_MARGIN_BLOCKS: u64 = 144;
 
-/// Why a pruned node cannot serve this Vault.
+/// Why the local wallet cannot recover missing history from retained blocks.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrunedHistory {
     /// The Vault has coins from `earliest`, below the node's prune height or
@@ -103,8 +106,9 @@ impl fmt::Display for PrunedHistory {
             } if u64::from(*earliest) < *prune_height => write!(
                 f,
                 "Your local node keeps blocks only from height {prune_height}, but this Vault \
-                 has coins from block {earliest}. Switching would hide them. Keep using \
-                 COINCUBE | Connect, or re-sync the node without pruning."
+                 has history from block {earliest}. Tenshu could not confirm all of it in the \
+                 local wallet. A recovery scan would need blocks the node no longer keeps. \
+                 Keep using COINCUBE | Connect for this Vault."
             ),
             Self::CoinsBelowPrune {
                 prune_height,
@@ -112,25 +116,25 @@ impl fmt::Display for PrunedHistory {
             } => write!(
                 f,
                 "Your local node keeps blocks only from height {prune_height}, and this Vault \
-                 has coins from block {earliest}, too close to that height for the node to \
-                 rescan them reliably. Switching could hide them. Keep using \
-                 COINCUBE | Connect, or re-sync the node without pruning."
+                 has history from block {earliest}. Tenshu could not confirm all of it in the \
+                 local wallet, and its history is too close to that height to rescan reliably. Keep using \
+                 COINCUBE | Connect for this Vault."
             ),
             Self::HistoryUnknown { prune_height } => write!(
                 f,
                 "Your local node keeps blocks only from height {prune_height}, and this \
                  restored Vault's history hasn't been found yet, so it may be older than \
-                 that. Switching could hide it. Keep using COINCUBE | Connect until the \
-                 Vault shows its coins, or re-sync the node without pruning."
+                 that. Keep using COINCUBE | Connect while Tenshu recovers this Vault's history."
             ),
         }
     }
 }
 
-/// Whether a node with `pruning` can show this Vault's coins.
+/// Whether the local wallet already tracks this Vault or can rescan its history.
 ///
 /// `Ok(())` for an unpruned node whatever the history, and for a pruned one
-/// that keeps at least [`PRUNE_MARGIN_BLOCKS`] blocks below the Vault's earliest
+/// whose wallet already tracks the history, or one that keeps at least
+/// [`PRUNE_MARGIN_BLOCKS`] blocks below the Vault's earliest
 /// coin (`prune_height + PRUNE_MARGIN_BLOCKS <= earliest`). A pruned node short
 /// of that, or a pruned node and a Vault whose history is unknown, cannot.
 pub fn pruned_node_serves(
@@ -149,7 +153,7 @@ pub fn pruned_node_serves(
                 earliest,
             })
         }
-        VaultHistory::From(_) => Ok(()),
+        VaultHistory::From(_) | VaultHistory::TrackedLocally => Ok(()),
         VaultHistory::NoConfirmedCoins { rescan_owed: true } => {
             Err(PrunedHistory::HistoryUnknown { prune_height })
         }
@@ -230,6 +234,137 @@ pub fn auto_switch_hold(
     }
 }
 
+/// The same authentication used for the node sync probe and its wallet probe.
+pub(super) async fn rpc_credentials(
+    cfg: &coincubed::config::BitcoindConfig,
+) -> Result<(String, String), String> {
+    use coincubed::config::BitcoindRpcAuth;
+    match &cfg.rpc_auth {
+        BitcoindRpcAuth::CookieFile(path) => {
+            let cookie = tokio::fs::read_to_string(path)
+                .await
+                .map_err(|e| format!("Cannot read bitcoind cookie: {e}"))?;
+            let (user, pass) = cookie
+                .trim()
+                .split_once(':')
+                .ok_or_else(|| "Invalid cookie file format".to_string())?;
+            Ok((user.to_string(), pass.to_string()))
+        }
+        BitcoindRpcAuth::UserPass(user, pass) => Ok((user.clone(), pass.clone())),
+    }
+}
+
+/// Ask Core's wallet, rather than its block store, about known history.
+/// Loads an existing watch-only wallet as daemon startup would; never creates
+/// one or imports descriptors. RPC failures remain unknown, never absence.
+pub(super) async fn local_wallet_tracks(
+    cfg: &coincubed::config::BitcoindConfig,
+    wallet_path: &str,
+    chain: crate::chain::ChainId,
+    txids: &[coincube_core::miniscript::bitcoin::Txid],
+) -> Result<bool, String> {
+    // Fork wallet RPCs require exact-chain admission through BitcoinD. This
+    // Bitcoin-only probe must not bypass that boundary.
+    if chain.is_blake2b() {
+        return Err("Fork wallet history requires exact-chain admission".into());
+    }
+    if txids.is_empty() {
+        return Err("No transactions to check".into());
+    }
+    let (user, pass) = rpc_credentials(cfg).await?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let node_url = format!("http://{}/", cfg.addr);
+    let wallets: serde_json::Value = client
+        .post(&node_url)
+        .basic_auth(&user, Some(&pass))
+        .json(&serde_json::json!({"jsonrpc":"2.0", "id":0, "method":"listwallets", "params":[]}))
+        .send()
+        .await
+        .map_err(|e| e.to_string())?
+        .json()
+        .await
+        .map_err(|e| e.to_string())?;
+    let loaded = wallets["result"]
+        .as_array()
+        .ok_or("Cannot read loaded wallets")?;
+    if !loaded.iter().any(|name| name.as_str() == Some(wallet_path)) {
+        // Managed local wallets use the same absolute path as daemon startup.
+        // No wallet file means switching would create an empty one at "now".
+        if !std::path::Path::new(wallet_path).exists() {
+            return Ok(false);
+        }
+        let loaded: serde_json::Value = client.post(&node_url)
+            .basic_auth(&user, Some(&pass))
+            .json(&serde_json::json!({"jsonrpc":"2.0", "id":0, "method":"loadwallet", "params":[wallet_path]}))
+            .send().await.map_err(|e| e.to_string())?
+            .json().await.map_err(|e| e.to_string())?;
+        if loaded["result"]["name"].as_str() != Some(wallet_path) || !loaded["error"].is_null() {
+            return Err("Cannot load existing local wallet to check its history".into());
+        }
+    }
+    let mut wallet_url = reqwest::Url::parse(&node_url).map_err(|e| e.to_string())?;
+    wallet_url
+        .path_segments_mut()
+        .map_err(|_| "Invalid node URL")?
+        .clear()
+        .push("wallet")
+        .push(wallet_path);
+    // Bound each batch, and match IDs rather than relying on response order.
+    for chunk in txids.chunks(100) {
+        let requests: Vec<_> = chunk.iter().enumerate().map(|(id, txid)|
+            serde_json::json!({"jsonrpc":"2.0", "id":id, "method":"gettransaction", "params":[txid.to_string()]})).collect();
+        let response: serde_json::Value = client
+            .post(wallet_url.clone())
+            .basic_auth(&user, Some(&pass))
+            .json(&requests)
+            .send()
+            .await
+            .map_err(|e| e.to_string())?
+            .json()
+            .await
+            .map_err(|e| e.to_string())?;
+        match wallet_records(&response, chunk) {
+            Some(true) => {}
+            Some(false) => return Ok(false),
+            None => return Err("Cannot read local wallet transactions".into()),
+        }
+    }
+    Ok(true)
+}
+
+fn wallet_records(
+    response: &serde_json::Value,
+    txids: &[coincube_core::miniscript::bitcoin::Txid],
+) -> Option<bool> {
+    let entries = response.as_array()?;
+    if entries.len() != txids.len() {
+        return None;
+    }
+    let mut missing = false;
+    for (id, txid) in txids.iter().enumerate() {
+        let mut matching = entries
+            .iter()
+            .filter(|entry| entry["id"].as_u64() == Some(id as u64));
+        let entry = matching.next()?;
+        if matching.next().is_some() {
+            return None;
+        }
+        if !entry["error"].is_null() {
+            // Only Core's "transaction not in this wallet" is actual absence.
+            if entry["error"]["code"].as_i64() != Some(-5) {
+                return None;
+            }
+            missing = true;
+        } else if entry["result"]["txid"].as_str() != Some(txid.to_string().as_str()) {
+            return None;
+        }
+    }
+    Some(!missing)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -238,6 +373,190 @@ mod tests {
     const PRUNED: NodePruning = NodePruning::Pruned {
         prune_height: PRUNE,
     };
+
+    #[test]
+    fn recorded_wallet_history_survives_block_pruning() {
+        assert_eq!(
+            pruned_node_serves(PRUNED, VaultHistory::TrackedLocally),
+            Ok(())
+        );
+        assert_eq!(
+            auto_switch_hold(None, Some(PRUNED), Some(VaultHistory::TrackedLocally)),
+            None
+        );
+        assert_eq!(
+            auto_switch_hold(
+                Some(RunningScan::Rescan),
+                Some(PRUNED),
+                Some(VaultHistory::TrackedLocally)
+            ),
+            Some(SwitchHold::Scanning(RunningScan::Rescan))
+        );
+    }
+
+    fn txids() -> Vec<coincube_core::miniscript::bitcoin::Txid> {
+        use coincube_core::miniscript::bitcoin::{hashes::Hash, Txid};
+        vec![
+            Txid::from_byte_array([1; 32]),
+            Txid::from_byte_array([2; 32]),
+        ]
+    }
+
+    fn recorded() -> serde_json::Value {
+        let ids = txids();
+        // Core may return batch responses in any order.
+        serde_json::json!([
+            {"id":1, "result":{"txid":ids[1].to_string()}},
+            {"id":0, "result":{"txid":ids[0].to_string()}}
+        ])
+    }
+
+    #[test]
+    fn wallet_records_requires_every_funding_and_spending_transaction() {
+        let ids = txids();
+        assert_eq!(wallet_records(&recorded(), &ids), Some(true));
+        let mut response = recorded();
+        response[0] = serde_json::json!({"id":1,"error":{"code":-5,"message":"Invalid or non-wallet transaction id"}});
+        assert_eq!(wallet_records(&response, &ids), Some(false));
+        for code in [-18, -19, -28, -32603] {
+            response[0]["error"]["code"] = serde_json::json!(code);
+            assert_eq!(wallet_records(&response, &ids), None);
+        }
+        assert_eq!(
+            wallet_records(&serde_json::json!([recorded()[0]]), &ids),
+            None
+        );
+        response = recorded();
+        response[0]["id"] = serde_json::json!(0);
+        assert_eq!(wallet_records(&response, &ids), None);
+        response = recorded();
+        response[0]["result"]["txid"] = serde_json::json!(ids[0].to_string());
+        assert_eq!(wallet_records(&response, &ids), None);
+    }
+
+    #[tokio::test]
+    async fn local_wallet_probe_reads_existing_records_instead_of_old_blocks() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let wallets = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"listwallets"}"#);
+                then.status(200)
+                    .json_body(serde_json::json!({"result":["existing-vault"]}));
+            })
+            .await;
+        let records=server.mock_async(|when,then| {
+            when.method(POST).path("/wallet/existing-vault").json_body(serde_json::json!([
+                {"jsonrpc":"2.0","id":0,"method":"gettransaction","params":[txids()[0].to_string()]},
+                {"jsonrpc":"2.0","id":1,"method":"gettransaction","params":[txids()[1].to_string()]}
+            ]));
+            then.status(200).json_body(recorded());
+        }).await;
+        let cfg = coincubed::config::BitcoindConfig {
+            addr: *server.address(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+        };
+        assert!(local_wallet_tracks(
+            &cfg,
+            "existing-vault",
+            crate::chain::ChainId::Bitcoin,
+            &txids()
+        )
+        .await
+        .unwrap());
+        wallets.assert_async().await;
+        records.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn local_wallet_probe_refuses_fork_rpc_before_any_request() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let rpc = server
+            .mock_async(|when, then| {
+                when.method(POST);
+                then.status(500);
+            })
+            .await;
+        let cfg = coincubed::config::BitcoindConfig {
+            addr: *server.address(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+        };
+        assert!(local_wallet_tracks(
+            &cfg,
+            "fork-wallet",
+            crate::chain::ChainId::BitcoinBlake2b,
+            &txids()
+        )
+        .await
+        .is_err());
+        rpc.assert_hits_async(0).await;
+    }
+
+    #[tokio::test]
+    async fn local_wallet_probe_loads_existing_wallet_without_creating_one() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let path =
+            std::env::temp_dir().join(format!("local-wallet-probe-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&path).unwrap();
+        let wallet = path.to_str().unwrap();
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"listwallets"}"#);
+                then.status(200).json_body(serde_json::json!({"result":[]}));
+            })
+            .await;
+        let load = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"loadwallet"}"#);
+                then.status(200)
+                    .json_body(serde_json::json!({"result":{"name":wallet}}));
+            })
+            .await;
+        let records=server.mock_async(|when,then| {
+            when.method(POST).json_body(serde_json::json!([
+                {"jsonrpc":"2.0","id":0,"method":"gettransaction","params":[txids()[0].to_string()]},
+                {"jsonrpc":"2.0","id":1,"method":"gettransaction","params":[txids()[1].to_string()]}
+            ]));
+            then.status(200).json_body(recorded());
+        }).await;
+        let cfg = coincubed::config::BitcoindConfig {
+            addr: *server.address(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+        };
+        assert!(
+            local_wallet_tracks(&cfg, wallet, crate::chain::ChainId::Bitcoin, &txids())
+                .await
+                .unwrap()
+        );
+        load.assert_async().await;
+        records.assert_async().await;
+        std::fs::remove_dir(&path).unwrap();
+        // Missing local wallet is actual unavailable history, with no create/import RPC.
+        assert!(
+            !local_wallet_tracks(&cfg, wallet, crate::chain::ChainId::Bitcoin, &txids())
+                .await
+                .unwrap()
+        );
+        load.assert_hits_async(1).await;
+        records.assert_hits_async(1).await;
+    }
 
     #[test]
     fn unpruned_node_serves_any_history() {
@@ -285,7 +604,7 @@ mod tests {
         }
         .to_string();
         assert!(copy.contains("too close"), "{}", copy);
-        assert!(!copy.contains("but this Vault"), "{}", copy);
+        assert!(!copy.contains("cannot rescan"), "{}", copy);
     }
 
     #[test]
@@ -428,6 +747,28 @@ mod tests {
             auto_switch_hold(None, Some(PRUNED), Some(VaultHistory::From(971_000))),
             None
         );
+    }
+
+    #[test]
+    fn refusal_copy_only_offers_supported_actions() {
+        for reason in [
+            PrunedHistory::CoinsBelowPrune {
+                prune_height: PRUNE,
+                earliest: 958_601,
+            },
+            PrunedHistory::CoinsBelowPrune {
+                prune_height: PRUNE,
+                earliest: PRUNE as u32 + 1,
+            },
+            PrunedHistory::HistoryUnknown {
+                prune_height: PRUNE,
+            },
+        ] {
+            let copy = reason.to_string();
+            assert!(copy.contains("COINCUBE | Connect"));
+            assert!(!copy.contains("re-sync"));
+            assert!(!copy.contains("hide"));
+        }
     }
 
     #[test]
