@@ -4861,8 +4861,9 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
                     )
                     .push(connect_chevron.style(coincube_ui::theme::text::secondary)),
             )
-            .center_x(Length::Fill)
-            .padding(10),
+            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .padding(15),
         )
         .width(Length::Fill)
         .style(coincube_ui::theme::button::menu)
@@ -4875,14 +4876,14 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
                     txt::caption(&user.email)
                         .style(theme::text::secondary)
                         .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                        .align_x(Alignment::Center)
+                        .align_x(Alignment::Start)
                         .width(Length::Fill),
                 )
                 .padding(iced::Padding {
                     top: 0.0,
                     right: 10.0,
                     bottom: 10.0,
-                    left: 10.0,
+                    left: 45.0,
                 })
                 .width(Length::Fill)
                 .style(theme::button::menu)
@@ -4997,7 +4998,8 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
                 bottom: 16.0,
                 left: 8.0,
             })
-            .center_x(Length::Fill),
+            .align_x(Alignment::Start)
+            .width(Length::Fill),
     );
 
     if !is_authenticated {

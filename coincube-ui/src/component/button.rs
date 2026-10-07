@@ -10,32 +10,28 @@ use iced::widget::{button, container, row};
 
 pub fn menu<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
     Button::new(content_menu(icon.map(|i| i.style(theme::text::secondary)), t).padding(10))
-        .width(iced::Length::Shrink)
         .style(theme::button::menu)
 }
 
 pub fn menu_active<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Button<'a, T> {
     Button::new(content_menu(icon.map(|i| i.style(theme::text::secondary)), t).padding(10))
-        .width(iced::Length::Shrink)
         .style(theme::button::menu_pressed)
 }
 
 pub fn menu_small<'a, T: 'a>(icon: Text<'a>) -> Button<'a, T> {
     Button::new(container(icon.style(theme::text::secondary)).padding(10))
-        .width(iced::Length::Shrink)
         .style(theme::button::menu)
 }
 
 pub fn menu_active_small<'a, T: 'a>(icon: Text<'a>) -> Button<'a, T> {
     Button::new(container(icon.style(theme::text::secondary)).padding(10))
-        .width(iced::Length::Shrink)
         .style(theme::button::menu_pressed)
 }
 
 fn content_menu<'a, T: 'a>(icon: Option<Text<'a>>, t: &'static str) -> Container<'a, T> {
     match icon {
-        None => content(None, text(t)),
-        Some(i) => content(Some(i), text(t)),
+        None => container(text(t)).padding(5),
+        Some(i) => container(row![i, text(t)].spacing(10).align_y(Vertical::Center)).padding(5),
     }
 }
 
