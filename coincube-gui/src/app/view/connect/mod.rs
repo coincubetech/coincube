@@ -938,8 +938,9 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
 
 // ── Plan selection view ─────────────────────────────────────────────────────
 
-/// Height of the tagline slot on each plan card: two lines of caption text,
-/// which is what the copy wraps to at normal window widths.
+/// Minimum height of the tagline slot on each plan card: two lines of caption
+/// text, which is what the copy wraps to at normal window widths. The slot
+/// grows past this if a tagline wraps further.
 const TAGLINE_HEIGHT: f32 = 40.0;
 
 fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
@@ -1233,16 +1234,23 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
             .push(price_row)
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-            // Fixed-height slot (room for two caption lines) so the CTA
-            // below sits on the same line in every card, however the
-            // taglines wrap.
+            // Tagline slot at least TAGLINE_HEIGHT tall, so the CTA below
+            // sits on the same line in every card at normal widths, but able
+            // to grow if the copy wraps further — never overlapping the CTA.
+            // iced's `Container` has no `min_height`; a `Row` is as tall as
+            // its tallest child, so a zero-width spacer sets the floor.
             .push(
-                container(
-                    text::caption(tagline)
-                        .style(theme::text::primary)
-                        .width(Length::Fill),
-                )
-                .height(Length::Fixed(TAGLINE_HEIGHT)),
+                Row::new()
+                    .push(
+                        iced::widget::Space::new()
+                            .width(Length::Fixed(0.0))
+                            .height(Length::Fixed(TAGLINE_HEIGHT)),
+                    )
+                    .push(
+                        text::caption(tagline)
+                            .style(theme::text::primary)
+                            .width(Length::Fill),
+                    ),
             )
             .push(cta)
             .push(iced::widget::Space::new().height(Length::Fixed(18.0)));
