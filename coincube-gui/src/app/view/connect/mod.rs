@@ -565,7 +565,7 @@ fn plan_tier_color(tier: &PlanTier) -> iced::Color {
     match tier {
         PlanTier::Free => color::GREY_3,
         PlanTier::Pro => color::ORANGE,
-        PlanTier::Estate => color::LIGHT_BLUE,
+        PlanTier::Estate => color::INFO_BLUE,
     }
 }
 
@@ -938,6 +938,10 @@ fn campaign_redeem_field<'a>(state: &'a ConnectAccountPanel) -> Element<'a, Conn
 
 // ── Plan selection view ─────────────────────────────────────────────────────
 
+/// Height of the tagline slot on each plan card: two lines of caption text,
+/// which is what the copy wraps to at normal window widths.
+const TAGLINE_HEIGHT: f32 = 40.0;
+
 fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let current_tier = state
         .plan
@@ -954,29 +958,36 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
     // them so we never route to a checkout the API would reject.
     let purchasing_enabled = state.purchasing_enabled();
 
-    // Billing cycle toggle
-    let monthly_btn = if cycle == BillingCycle::Monthly {
-        button::primary(None, "Monthly").width(Length::Fill)
-    } else {
-        button::secondary(None, "Monthly")
-            .on_press(ConnectAccountMessage::BillingCycleSelected(
-                BillingCycle::Monthly,
-            ))
+    // Billing cycle toggle. Both options share the secondary style; the
+    // selected one is marked by an orange border. It stays non-pressable, but
+    // is drawn in its Active state rather than iced's faded Disabled one, which
+    // left the selected label nearly invisible (worst in light mode).
+    let cycle_btn = |label: &'static str, option: BillingCycle| {
+        let selected = cycle == option;
+        let btn = button::secondary(None, label)
             .width(Length::Fill)
-    };
-    let annual_btn = if cycle == BillingCycle::Annual {
-        button::primary(None, "Annual").width(Length::Fill)
-    } else {
-        button::secondary(None, "Annual")
-            .on_press(ConnectAccountMessage::BillingCycleSelected(
-                BillingCycle::Annual,
-            ))
-            .width(Length::Fill)
+            .style(move |t, status| {
+                if !selected {
+                    return theme::button::secondary(t, status);
+                }
+                let mut style = theme::button::secondary(t, iced::widget::button::Status::Active);
+                style.border = iced::Border {
+                    color: color::ORANGE,
+                    width: 1.0,
+                    radius: 25.0.into(),
+                };
+                style
+            });
+        if selected {
+            btn
+        } else {
+            btn.on_press(ConnectAccountMessage::BillingCycleSelected(option))
+        }
     };
     let cycle_toggle = Row::new()
-        .push(monthly_btn)
+        .push(cycle_btn("Monthly", BillingCycle::Monthly))
         .push(iced::widget::Space::new().width(Length::Fixed(8.0)))
-        .push(annual_btn)
+        .push(cycle_btn("Annual", BillingCycle::Annual))
         .width(Length::Fill);
 
     // Determine upgrade order: Free < Pro < Estate
@@ -1151,17 +1162,17 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             .align_y(Alignment::Center);
         if is_estate {
             header = header.push(
-                container(text::caption("BEST VALUE").color(color::LIGHT_BLUE))
+                container(text::caption("BEST VALUE").color(color::INFO_BLUE))
                     .padding([3, 8])
                     .style(|_t| container::Style {
                         background: Some(iced::Background::Color(iced::Color {
                             a: 0.12,
-                            ..color::LIGHT_BLUE
+                            ..color::INFO_BLUE
                         })),
                         border: iced::Border {
                             color: iced::Color {
                                 a: 0.4,
-                                ..color::LIGHT_BLUE
+                                ..color::INFO_BLUE
                             },
                             width: 1.0,
                             radius: 6.0.into(),
@@ -1190,25 +1201,31 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             }
         }
 
+        // Every plan but the current one gets a CTA naming it. Billing hasn't
+        // shipped, so they're all disabled (no `on_press`).
         let cta = if is_current {
-            button::secondary(None, "Current plan").width(Length::Fill)
-        } else if is_upgrade && purchasing_enabled {
+            // Non-pressable, but drawn in its normal state rather than iced's
+            // faded Disabled one so the label stays readable.
+            button::secondary(None, "Current plan")
+                .width(Length::Fill)
+                .style(|t, _status| {
+                    theme::button::secondary(t, iced::widget::button::Status::Active)
+                })
+        } else if is_upgrade {
             let label = match &card.tier {
                 PlanTier::Pro => "Upgrade to Pro",
                 PlanTier::Estate => "Upgrade to Estate",
-                _ => "Upgrade",
+                PlanTier::Free => "Upgrade",
             };
-            button::primary(None, label)
-                .on_press(ConnectAccountMessage::StartCheckout(card.tier))
-                .width(Length::Fill)
-        } else if is_upgrade {
-            // Purchasing closed (promo window) — show the tier without a
-            // checkout CTA (PLAN-estate-promo PR2). Non-pressable, like
-            // the other informational buttons here.
-            button::secondary(None, "Unavailable").width(Length::Fill)
+            button::primary(None, label).width(Length::Fill)
         } else {
-            // Downgrade or Free — no action
-            button::secondary(None, "—").width(Length::Fill)
+            // A lower tier, or the current tier on the other billing cycle.
+            let label = match &card.tier {
+                PlanTier::Free => "Switch to Free",
+                PlanTier::Pro => "Switch to Pro",
+                PlanTier::Estate => "Switch to Estate",
+            };
+            button::secondary(None, label).width(Length::Fill)
         };
 
         let mut card_col = Column::new()
@@ -1216,12 +1233,17 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
             .push(iced::widget::Space::new().height(Length::Fixed(14.0)))
             .push(price_row)
             .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
+            // Fixed-height slot (room for two caption lines) so the CTA
+            // below sits on the same line in every card, however the
+            // taglines wrap.
             .push(
-                text::p2_regular(tagline)
-                    .color(color::GREY_2)
-                    .width(Length::Fill),
+                container(
+                    text::caption(tagline)
+                        .style(theme::text::primary)
+                        .width(Length::Fill),
+                )
+                .height(Length::Fixed(TAGLINE_HEIGHT)),
             )
-            .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
             .push(cta)
             .push(iced::widget::Space::new().height(Length::Fixed(18.0)));
 
@@ -1232,7 +1254,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                     .push(iced::widget::Space::new().width(Length::Fixed(6.0)))
                     .push(
                         text::p2_regular(feature)
-                            .color(color::GREY_2)
+                            .style(theme::text::primary)
                             .width(Length::Fill),
                     )
                     .align_y(Alignment::Start),
@@ -1265,7 +1287,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                         } else if is_estate {
                             iced::Color {
                                 a: 0.45,
-                                ..color::LIGHT_BLUE
+                                ..color::INFO_BLUE
                             }
                         } else {
                             t.colors.cards.simple.border.unwrap_or(color::GREY_5)
@@ -1493,13 +1515,15 @@ fn checkout_ux<'a>(
 fn billing_history_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
     let back_button = iced::widget::button(
         Row::new()
-            .push(previous_icon().color(color::GREY_2))
+            .push(previous_icon().style(theme::text::primary))
             .push(iced::widget::Space::new().width(Length::Fixed(5.0)))
             .push(text::p1_medium("Back").style(theme::text::secondary))
             .spacing(5)
             .align_y(Alignment::Center),
     )
     .style(theme::button::transparent)
+    // No horizontal padding, so the arrow lines up with the heading below.
+    .padding([5, 0])
     .on_press(ConnectAccountMessage::ToggleBillingHistory);
 
     let mut col = Column::new()
