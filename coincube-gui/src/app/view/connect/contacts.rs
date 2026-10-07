@@ -343,13 +343,15 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
 
     let back_button = iced::widget::button(
         Row::new()
-            .push(previous_icon().color(color::GREY_2))
+            .push(previous_icon().style(theme::text::primary))
             .push(iced::widget::Space::new().width(Length::Fixed(5.0)))
             .push(text::p1_medium("Back").style(theme::text::secondary))
             .spacing(5)
             .align_y(Alignment::Center),
     )
     .style(theme::button::transparent)
+    // No horizontal padding, so the arrow lines up with the heading below.
+    .padding([5, 0])
     .on_press(ConnectAccountMessage::Contacts(ContactsMessage::BackToList));
 
     let email = &cs.invite_email;
@@ -506,13 +508,15 @@ fn contact_detail_ux<'a>(
 
     let back_button = iced::widget::button(
         Row::new()
-            .push(previous_icon().color(color::GREY_2))
+            .push(previous_icon().style(theme::text::primary))
             .push(iced::widget::Space::new().width(Length::Fixed(5.0)))
             .push(text::p1_medium("Back").style(theme::text::secondary))
             .spacing(5)
             .align_y(Alignment::Center),
     )
     .style(theme::button::transparent)
+    // No horizontal padding, so the arrow lines up with the heading below.
+    .padding([5, 0])
     .on_press(ConnectAccountMessage::Contacts(ContactsMessage::BackToList));
 
     let contact = cs
