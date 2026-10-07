@@ -2177,12 +2177,30 @@ pub(crate) async fn reconcile_duress_orphan(datadir: CoincubeDirectory) -> Resul
     Ok(true)
 }
 
-/// Poll the local bitcoind's IBD progress via its JSON-RPC interface.
-/// Returns `(verificationprogress, initialblockdownload, subversion)` or an error
-/// string. The subversion is `None` when the node would not say what it is.
+/// Chain progress from the local node, independent of Connect or wallet scans.
+#[derive(Debug, Clone)]
+pub struct LocalNodeSync {
+    progress: f64,
+    ibd: bool,
+    blocks: u64,
+    headers: u64,
+    subversion: Option<String>,
+}
+
+/// Prefer the pending node; keep observing the active local node after promotion.
+fn local_node_sync_config(cfg: &DaemonConfig) -> Option<&coincubed::config::BitcoindConfig> {
+    cfg.pending_bitcoind
+        .as_ref()
+        .or(match &cfg.bitcoin_backend {
+            Some(coincubed::config::BitcoinBackend::Bitcoind(local)) => Some(local),
+            _ => None,
+        })
+}
+
+/// Poll the local bitcoind directly, including while the old wallet daemon stops.
 async fn check_bitcoind_sync_progress(
     cfg: coincubed::config::BitcoindConfig,
-) -> Result<(f64, bool, Option<String>), String> {
+) -> Result<LocalNodeSync, String> {
     use coincubed::config::BitcoindRpcAuth;
 
     let (user, pass) = match &cfg.rpc_auth {
@@ -2234,7 +2252,19 @@ async fn check_bitcoind_sync_progress(
     // other flavour decision uses — and best-effort: an unreadable answer costs a
     // less specific sentence, not the progress report the user is waiting on.
     let subversion = subversion(&client, &url, &user, &pass).await;
-    Ok((progress, ibd, subversion))
+    let blocks = result["blocks"]
+        .as_u64()
+        .ok_or_else(|| "Missing blocks in bitcoind response".to_string())?;
+    let headers = result["headers"]
+        .as_u64()
+        .ok_or_else(|| "Missing headers in bitcoind response".to_string())?;
+    Ok(LocalNodeSync {
+        progress,
+        ibd,
+        blocks,
+        headers,
+        subversion,
+    })
 }
 
 /// A node's `getnetworkinfo.subversion`, or `None` if it cannot be read.
@@ -2858,6 +2888,30 @@ impl App {
     /// Build an admitted fork Vault without constructing Liquid or Spark clients.
     #[allow(clippy::too_many_arguments)]
     pub fn new_for_chain(
+        cache: Cache,
+        wallet: Arc<Wallet>,
+        cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+        client: crate::services::coincube::CoincubeClient,
+        config: Config,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        data_dir: CoincubeDirectory,
+        cube_settings: settings::CubeSettings,
+    ) -> Result<(App, Task<Message>), Error> {
+        Self::new_for_chain_with_node(
+            cache,
+            wallet,
+            cube_encryption_key,
+            client,
+            config,
+            daemon,
+            data_dir,
+            cube_settings,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_chain_with_node(
         mut cache: Cache,
         wallet: Arc<Wallet>,
         cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
@@ -2866,6 +2920,7 @@ impl App {
         daemon: Arc<dyn Daemon + Sync + Send>,
         data_dir: CoincubeDirectory,
         cube_settings: settings::CubeSettings,
+        internal_bitcoind: Option<Bitcoind>,
     ) -> Result<(App, Task<Message>), Error> {
         let chain = cube_settings.network;
         // A refused fork open never reaches `new_inner`, which is what takes
@@ -2894,14 +2949,35 @@ impl App {
             client.base_url.trim_end_matches('/'),
             crate::installer::connect_esplora_path(chain)
         );
+        let managed_dir = crate::node::bitcoind::internal_bitcoind_datadir_for(
+            &data_dir,
+            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+        );
+        let managed = |node: &coincubed::config::BitcoindConfig| {
+            node.addr.ip().is_loopback()
+                && node.rpc_auth
+                    == coincubed::config::BitcoindRpcAuth::CookieFile(
+                        crate::node::bitcoind::internal_bitcoind_cookie_path(
+                            &managed_dir,
+                            &chain.bitcoin_network(),
+                        ),
+                    )
+        };
         let correct_backend = matches!(&backend_config.bitcoin_backend,
             Some(coincubed::config::BitcoinBackend::Esplora(esplora))
                 if esplora.addr == endpoint && esplora.fallback_addr.is_none()
-                    && esplora.secondary_fallback_addr.is_none());
+                    && esplora.secondary_fallback_addr.is_none())
+            || matches!(&backend_config.bitcoin_backend, Some(coincubed::config::BitcoinBackend::Bitcoind(node)) if managed(node));
         if backend_config.bitcoin_config.chain != chain
             || !daemon.backend().is_embedded()
             || !correct_backend
-            || backend_config.pending_bitcoind.is_some()
+            || internal_bitcoind
+                .as_ref()
+                .is_some_and(|node| !managed(&node.config))
+            || backend_config
+                .pending_bitcoind
+                .as_ref()
+                .is_some_and(|node| !managed(node))
         {
             return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
@@ -2916,7 +2992,7 @@ impl App {
             config,
             daemon,
             data_dir,
-            None,
+            internal_bitcoind,
             cube_settings,
             None,
         );
@@ -4849,13 +4925,13 @@ impl App {
             );
         }
 
-        // Poll pending local Bitcoind IBD progress on a fixed interval,
+        // Poll pending or active local Bitcoind progress on a fixed interval,
         // independent of the variable-rate tick subscription.
         if self
             .daemon
             .as_ref()
             .and_then(|d| d.config())
-            .and_then(|c| c.pending_bitcoind.as_ref())
+            .and_then(local_node_sync_config)
             .is_some()
         {
             subscriptions
@@ -6034,12 +6110,20 @@ impl App {
                         .daemon
                         .as_ref()
                         .and_then(|d| d.config())
-                        .and_then(|c| c.pending_bitcoind.clone())
+                        .and_then(local_node_sync_config)
+                        .cloned()
                     {
                         self.bitcoind_sync_probe_in_progress = true;
                         return Task::perform(
-                            check_bitcoind_sync_progress(pending_cfg),
-                            Message::BitcoindSyncProgress,
+                            async move {
+                                let result =
+                                    check_bitcoind_sync_progress(pending_cfg.clone()).await;
+                                Message::BitcoindSyncProgress {
+                                    config: pending_cfg,
+                                    result,
+                                }
+                            },
+                            |message| message,
                         );
                     }
                 }
@@ -6143,12 +6227,29 @@ impl App {
                     Err(e) => tracing::debug!("node net-stats poll failed: {e}"),
                 }
             }
-            Message::BitcoindSyncProgress(res) => {
+            Message::BitcoindSyncProgress { config, result } => {
                 self.bitcoind_sync_probe_in_progress = false;
-                match res {
+                // A result from the previous node must not update or promote a new one.
+                if self
+                    .daemon
+                    .as_ref()
+                    .and_then(|d| d.config())
+                    .and_then(local_node_sync_config)
+                    != Some(&config)
+                {
+                    return Task::none();
+                }
+                match result {
                     Err(e) => tracing::warn!("Bitcoind sync check failed: {}", e),
-                    Ok((progress, ibd, subversion)) => {
+                    Ok(LocalNodeSync {
+                        progress,
+                        ibd,
+                        blocks,
+                        headers,
+                        subversion,
+                    }) => {
                         self.cache.node_bitcoind_sync_progress = Some(progress);
+                        self.cache.node_bitcoind_sync_heights = Some((blocks, headers));
                         self.cache.node_bitcoind_ibd = Some(ibd);
                         // Keep the last good answer if this poll couldn't read it.
                         if subversion.is_some() {
@@ -6187,6 +6288,12 @@ impl App {
                                     new_cfg.pending_bitcoind = None;
                                     new_cfg.auto_switch_to_pending = Some(false);
                                     new_cfg.fallback_esplora = old_esplora;
+                                    if new_cfg.bitcoin_config.chain.is_blake2b() {
+                                        new_cfg.bitcoin_config.poll_interval_secs =
+                                            Duration::from_secs(
+                                                coincubed::config::LOCAL_BACKEND_POLL_INTERVAL_SECS,
+                                            );
+                                    }
                                     Some(new_cfg)
                                 });
                             if let Some(new_cfg) = switch {
@@ -6742,6 +6849,7 @@ impl App {
                 // A successful switch clears the pending local-node sync card.
                 if result.is_ok() {
                     self.cache.node_bitcoind_sync_progress = None;
+                    self.cache.node_bitcoind_sync_heights = None;
                     self.cache.node_bitcoind_ibd = None;
                     self.cache.node_bitcoind_subversion = None;
                     self.cache.node_bitcoind_last_log = None;
@@ -6753,6 +6861,7 @@ impl App {
                     Task::done(Message::CacheUpdated),
                     claim_task,
                     split_task,
+                    Task::done(Message::PollBitcoindSync),
                 ]);
             }
             Message::WalletUpdated(Ok(wallet)) => {
@@ -8112,7 +8221,9 @@ impl App {
     pub fn spawn_daemon_switch(&mut self, cfg: DaemonConfig) -> Task<Message> {
         // A generic backend switch cannot carry fresh authenticated admission.
         // Reopen the fork Cube through its authenticated startup route instead.
-        if self.cache.chain().is_blake2b() || cfg.bitcoin_config.chain.is_blake2b() {
+        if cfg.bitcoin_config.chain != self.cache.chain()
+            || (cfg.bitcoin_config.chain.is_blake2b() && self.fork_connect_client.is_none())
+        {
             return Task::done(Message::View(view::Message::ShowError(
                 "Reopen this Bitcoin Blake2b Cube to change its authenticated Connect backend."
                     .into(),
@@ -8135,12 +8246,13 @@ impl App {
         // Mirror into the cache so the Node settings view reflects it.
         self.cache.daemon_switch_in_progress = true;
         let old_daemon = self.daemon.clone();
-        let network = cfg.bitcoin_config.network;
+        let chain = cfg.bitcoin_config.chain;
+        let connect_client = self.fork_connect_client.clone();
         let wallet_id = self.wallet.as_ref().expect("wallet should exist").id();
         let mut daemon_config_path = self
             .cache
             .datadir_path
-            .network_directory(network)
+            .network_directory(chain)
             .coincubed_data_directory(&wallet_id)
             .path()
             .to_path_buf();
@@ -8148,7 +8260,7 @@ impl App {
         Task::perform(
             async move {
                 match tokio::task::spawn_blocking(move || {
-                    restart_daemon_blocking(old_daemon, cfg, daemon_config_path)
+                    restart_daemon_blocking(old_daemon, cfg, daemon_config_path, connect_client)
                 })
                 .await
                 {
@@ -8649,12 +8761,13 @@ fn restart_daemon_blocking(
     old_daemon: Option<Arc<dyn Daemon + Sync + Send>>,
     cfg: DaemonConfig,
     daemon_config_path: std::path::PathBuf,
+    connect_client: Option<crate::services::coincube::CoincubeClient>,
 ) -> DaemonRestart {
     let recovery_cfg = old_daemon.as_ref().and_then(|d| d.config().cloned());
-    if cfg.bitcoin_config.chain.is_blake2b()
-        || recovery_cfg
-            .as_ref()
-            .is_some_and(|cfg| cfg.bitcoin_config.chain.is_blake2b())
+    if recovery_cfg
+        .as_ref()
+        .is_some_and(|previous| previous.bitcoin_config.chain != cfg.bitcoin_config.chain)
+        || (cfg.bitcoin_config.chain.is_blake2b() && connect_client.is_none())
     {
         return DaemonRestart::Failed {
             error: Error::Daemon(DaemonError::ConnectAnchor(
@@ -8663,6 +8776,21 @@ fn restart_daemon_blocking(
             recovered: old_daemon,
         };
     }
+    let start = |config: DaemonConfig| {
+        if !config.bitcoin_config.chain.is_blake2b() {
+            EmbeddedDaemon::start(config)
+        } else if matches!(
+            config.bitcoin_backend,
+            Some(coincubed::config::BitcoinBackend::Bitcoind(_))
+        ) {
+            EmbeddedDaemon::start_local_fork(config)
+        } else {
+            Handle::current().block_on(EmbeddedDaemon::start_authenticated(
+                config,
+                connect_client.clone().expect("fork session checked"),
+            ))
+        }
+    };
 
     if let Some(daemon) = &old_daemon {
         if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
@@ -8674,12 +8802,12 @@ fn restart_daemon_blocking(
         }
     }
 
-    let daemon: Arc<dyn Daemon + Sync + Send> = match EmbeddedDaemon::start(cfg) {
+    let daemon: Arc<dyn Daemon + Sync + Send> = match start(cfg) {
         Ok(d) => Arc::new(d),
         Err(start_err) => {
             // New daemon failed to start. Bring the old one back so the app is
             // left usable rather than dead.
-            let recovered = recovery_cfg.and_then(|old_cfg| match EmbeddedDaemon::start(old_cfg) {
+            let recovered = recovery_cfg.and_then(|old_cfg| match start(old_cfg) {
                 Ok(old_daemon) => {
                     warn!(
                         "New daemon failed to start; recovered previous daemon. Start error: {}",
@@ -12466,5 +12594,102 @@ pub(crate) mod claim_step1_tests {
         assert_eq!(*generation.borrow(), before, "the refusal revokes nothing");
         assert!(!app.daemon_switch_in_progress);
         let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
+mod local_node_sync_tests {
+    use super::*;
+    use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+
+    fn node(port: u16) -> BitcoindConfig {
+        BitcoindConfig {
+            addr: std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            rpc_auth: BitcoindRpcAuth::UserPass("fixture".into(), "fixture".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn local_node_sync_reads_pruned_node_without_connect() {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        let chain = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"getblockchaininfo"}"#);
+                then.status(200).json_body(serde_json::json!({"result": {
+                    "verificationprogress": 0.975, "initialblockdownload": true,
+                    "blocks": 890000, "headers": 900000, "pruned": true
+                }}));
+            })
+            .await;
+        let build = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .path("/")
+                    .json_body_partial(r#"{"method":"getnetworkinfo"}"#);
+                then.status(200)
+                    .json_body(serde_json::json!({"result":{"subversion":"/Satoshi:29.3.0/"}}));
+            })
+            .await;
+        let observed = check_bitcoind_sync_progress(node(server.address().port()))
+            .await
+            .unwrap();
+        assert_eq!(observed.progress, 0.975);
+        assert!(observed.ibd);
+        assert_eq!((observed.blocks, observed.headers), (890000, 900000));
+        assert_eq!(observed.subversion.as_deref(), Some("/Satoshi:29.3.0/"));
+        chain.assert_async().await;
+        build.assert_async().await;
+    }
+
+    #[tokio::test]
+    async fn local_node_sync_survives_switch_and_rejects_previous_node() {
+        let root = std::env::temp_dir().join(format!("local-node-sync-{}", uuid::Uuid::new_v4()));
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        let active = node(8332);
+        let pending = node(8333);
+        cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(active.clone()));
+        assert_eq!(local_node_sync_config(&cfg), Some(&active));
+        cfg.pending_bitcoind = Some(pending.clone());
+        cfg.auto_switch_to_pending = Some(false);
+        assert_eq!(local_node_sync_config(&cfg), Some(&pending));
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(
+            cfg.clone(),
+            None,
+        )));
+        app.daemon_switch_in_progress = true;
+        app.cache.daemon_switch_in_progress = true;
+        let observation = || LocalNodeSync {
+            progress: 0.999,
+            ibd: false,
+            blocks: 900000,
+            headers: 900000,
+            subversion: None,
+        };
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending.clone(),
+            result: Ok(observation()),
+        }));
+        assert_eq!(app.cache.node_bitcoind_sync_heights, Some((900000, 900000)));
+        assert_eq!(app.cache.node_bitcoind_ibd, Some(false));
+        // Promotion removes pending, but the same RPC remains the active observer.
+        cfg.pending_bitcoind = None;
+        cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(pending.clone()));
+        assert_eq!(local_node_sync_config(&cfg), Some(&pending));
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
+        app.cache.node_bitcoind_sync_heights = None;
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: active,
+            result: Ok(observation()),
+        }));
+        assert_eq!(app.cache.node_bitcoind_sync_heights, None);
+        drop(app.update(Message::BitcoindSyncProgress {
+            config: pending,
+            result: Ok(observation()),
+        }));
+        assert_eq!(app.cache.node_bitcoind_sync_heights, Some((900000, 900000)));
     }
 }

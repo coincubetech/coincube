@@ -74,13 +74,12 @@ impl State for SettingsState {
             && matches!(
                 &message,
                 Message::View(view::Message::Settings(
-                    view::SettingsMessage::EditBitcoindSettings
-                        | view::SettingsMessage::EditRemoteBackendSettings
+                    view::SettingsMessage::EditRemoteBackendSettings
                 ))
             )
         {
             return Task::done(Message::View(view::Message::ShowError(
-                "Bitcoin Blake2b requires its authenticated Connect backend; switching backends is unavailable.".into(),
+                "Remote daemon backends are unavailable for Bitcoin Blake2b.".into(),
             )));
         }
         match &message {
@@ -456,35 +455,68 @@ mod chain_tests {
     use super::*;
 
     #[test]
-    fn fork_backend_settings_messages_refuse_before_side_effects() {
-        let wallet = Arc::new(
-            Wallet::new(crate::app::state::vault::test_support::unified::fixture().descriptor)
-                .with_chain(crate::chain::ChainId::BitcoinBlake2b),
-        );
-        let dir = CoincubeDirectory::new(
-            std::env::temp_dir().join(format!("coincube-backend-refusal-{}", uuid::Uuid::new_v4())),
-        );
-        let mut state = SettingsState::new(
-            dir.clone(),
-            wallet,
-            DaemonBackend::EmbeddedCoincubed(None),
-            false,
-            Arc::new(Config::new(false)),
-        );
-        let daemon = Arc::new(crate::daemon::client::Coincubed::new(
-            crate::utils::mock::Daemon::new(vec![]).run(),
-        ));
-        for message in [
-            view::SettingsMessage::EditBitcoindSettings,
-            view::SettingsMessage::EditRemoteBackendSettings,
-        ] {
-            let _task = state.update(
-                Some(daemon.clone()),
-                &Cache::default(),
-                Message::View(view::Message::Settings(message)),
+    fn fork_node_navigation_opens_the_guarded_page_and_remote_backend_stays_closed() {
+        use crate::chain::ChainId;
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let descriptor = crate::app::state::vault::test_support::unified::fixture().descriptor;
+            let wallet = Arc::new(Wallet::new(descriptor.clone()).with_chain(chain));
+            let dir = CoincubeDirectory::new(std::env::temp_dir().join(format!(
+                "coincube-fork-node-navigation-{}",
+                uuid::Uuid::new_v4()
+            )));
+            let config = coincubed::config::Config::new(
+                coincubed::config::BitcoinConfig::new(chain, std::time::Duration::from_secs(600)),
+                Some(coincubed::config::BitcoinBackend::Esplora(
+                    crate::installer::connect_esplora_config(chain, "synthetic-jwt"),
+                )),
+                log::LevelFilter::Info,
+                descriptor,
+                coincubed::datadir::DataDirectory::new(
+                    dir.path().join(chain.dir_name()).join("data/wallet"),
+                ),
             );
+            let daemon = Arc::new(crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(
+                config, None,
+            ));
+            let mut state = SettingsState::new(
+                dir.clone(),
+                wallet,
+                DaemonBackend::EmbeddedCoincubed(None),
+                false,
+                Arc::new(Config::new(false)),
+            );
+            let cache = Cache {
+                fiat_chain: chain,
+                network: chain.bitcoin_network(),
+                datadir_path: dir.clone(),
+                ..Cache::default()
+            };
+            drop(state.update(
+                Some(daemon.clone()),
+                &cache,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::EditRemoteBackendSettings,
+                )),
+            ));
             assert!(state.setting.is_none());
-            assert!(!dir.path().exists());
+            drop(state.update(
+                Some(daemon),
+                &cache,
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::EditBitcoindSettings,
+                )),
+            ));
+            assert!(state.setting.is_some(), "Node navigation was refused");
+            let _page = state.view(
+                &Menu::Vault(crate::app::menu::VaultSubMenu::Settings(Some(
+                    crate::app::menu::SettingsOption::Node,
+                ))),
+                &cache,
+            );
+            assert!(
+                !dir.path().exists(),
+                "navigation must not start a node or write config"
+            );
         }
     }
 }

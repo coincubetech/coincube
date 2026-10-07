@@ -1819,7 +1819,7 @@ impl Tab {
                                 ),
                             )));
                         };
-                        match App::new_for_chain(
+                        match App::new_for_chain_with_node(
                             cache,
                             wallet,
                             loader.cube_encryption_key.clone(),
@@ -1828,6 +1828,7 @@ impl Tab {
                             daemon,
                             loader.datadir_path.clone(),
                             cube_settings,
+                            bitcoind,
                         ) {
                             Ok((app, task)) => {
                                 self.state = State::App(app);
@@ -3994,6 +3995,7 @@ pub fn create_app_with_remote_backend(
             .map(|s| s.display_mode)
             .unwrap_or_default(),
             node_bitcoind_sync_progress: None,
+            node_bitcoind_sync_heights: None,
             node_bitcoind_ibd: None,
             node_bitcoind_subversion: None,
             daemon_switch_in_progress: false,

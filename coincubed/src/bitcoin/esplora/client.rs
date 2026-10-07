@@ -723,11 +723,28 @@ impl Client {
         K: Ord + Clone + std::fmt::Debug + Send,
         F: FnMut() -> FullScanRequest<K>,
     {
-        self.try_in_order(|client| {
+        let result = self.try_in_order(|client| {
+            let mut request = build_request();
+            // BDK checks these iterators between address batches, but otherwise
+            // keeps scanning up to the stop gap even after daemon shutdown.
+            // Stop each keychain before it starts another batch. Requests already
+            // in flight retain the transport timeout.
+            for spks in request.spks_by_keychain.values_mut() {
+                let abort = self.abort.clone();
+                let iter = std::mem::replace(spks, Box::new(std::iter::empty()));
+                *spks = Box::new(iter.take_while(move |_| !abort.load(Ordering::Relaxed)));
+            }
             client
-                .full_scan(build_request(), stop_gap, parallel_requests)
+                .full_scan(request, stop_gap, parallel_requests)
                 .map_err(|e| *e)
-        })
+        });
+        // Ending an iterator early produces a successful *partial* BDK scan.
+        // Never apply it or clear the persisted rescan marker on shutdown.
+        if self.abort.load(Ordering::Relaxed) {
+            Err(Error::Aborted)
+        } else {
+            result
+        }
     }
 }
 
@@ -1778,6 +1795,75 @@ mod tests {
         // request log rather than by a 404.
         m.insert("/blocks/tip/hash", (200, H2.to_string()));
         m
+    }
+
+    #[test]
+    fn full_scan_shutdown_stops_address_batches_and_rejects_partial_result() {
+        use bdk_electrum::bdk_chain::{local_chain::CheckPoint, BlockId};
+        use bitcoin::{
+            hashes::{sha256, Hash},
+            ScriptBuf,
+        };
+        let script = ScriptBuf::new();
+        let path = format!("/scripthash/{}/txs", sha256::Hash::hash(script.as_bytes()));
+        let mut paths = routes((200, blocks_json(&[bitcoin_summary(H1, 1, 1231006505, H0)])));
+        paths.insert("/block-height/0", (200, H0.into()));
+        paths.insert(Box::leak(path.into_boxed_str()), (200, "[]".into()));
+        let primary = mock_esplora(paths);
+        let fallback = mock_esplora(StdHashMap::new());
+        let client = client_with(vec![
+            primary.provider("primary"),
+            fallback.provider("fallback"),
+        ]);
+        let tip = CheckPoint::new(BlockId {
+            height: 0,
+            hash: H0.parse().unwrap(),
+        });
+        let build = |cancel: bool| {
+            let abort = client.abort.clone();
+            let script = script.clone();
+            FullScanRequest::from_chain_tip(tip.clone())
+                .set_spks_for_keychain(
+                    0,
+                    (0..).map(move |index| {
+                        // BDK has finished its first two-address HTTP batch. Model
+                        // daemon.stop setting the flag while a scan is underway.
+                        if cancel && index == 2 {
+                            abort.store(true, Ordering::Relaxed);
+                        }
+                        (index, script.clone())
+                    }),
+                )
+                .set_spks_for_keychain(1, (0..).map(|index| (index, ScriptBuf::new())))
+        };
+        assert!(matches!(
+            client.full_scan(|| build(true), 200, 2),
+            Err(Error::Aborted)
+        ));
+        assert_eq!(
+            primary
+                .requests()
+                .iter()
+                .filter(|p| p.starts_with("/scripthash/"))
+                .count(),
+            2
+        );
+        assert!(
+            fallback.requests().is_empty(),
+            "shutdown must not scan a fallback"
+        );
+
+        // Ordinary full scans still cover the complete gap on both keychains.
+        client.abort.store(false, Ordering::Relaxed);
+        client.full_scan(|| build(false), 4, 2).unwrap();
+        assert_eq!(
+            primary
+                .requests()
+                .iter()
+                .filter(|p| p.starts_with("/scripthash/"))
+                .count(),
+            10
+        );
     }
 
     #[test]

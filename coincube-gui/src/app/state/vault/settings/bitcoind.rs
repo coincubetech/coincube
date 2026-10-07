@@ -183,7 +183,10 @@ impl BitcoindSettingsState {
         // an external/Connect backend) falls back to the defaults; the section is
         // only shown for the internal managed node anyway.
         let managed_conf = InternalBitcoindConfig::from_file(&internal_bitcoind_config_path(
-            &internal_bitcoind_datadir(&cache.datadir_path),
+            &crate::node::bitcoind::internal_bitcoind_datadir_for(
+                &cache.datadir_path,
+                crate::node::bitcoind::NodeChainFamily::from_chain(cache.chain()),
+            ),
         ))
         .ok();
         let managed_prune_mb = managed_conf
@@ -305,7 +308,7 @@ impl BitcoindSettingsState {
         // (keeps addresses off public providers); every other network keeps a
         // public-primary chain (mempool.space → blockstream.info → Connect).
         // See `connect_esplora_config` for the assembled chain.
-        let esplora = crate::installer::connect_esplora_config(cache.network, &jwt);
+        let esplora = crate::installer::connect_esplora_config(cache.chain(), &jwt);
         info!(
             "Switching to Connect: primary={} fallback={:?} secondary_fallback={:?} token_len={}",
             esplora.addr,
@@ -405,6 +408,27 @@ impl State for BitcoindSettingsState {
             tracing::warn!("BitcoindSettingsState::update called without daemon");
             return Task::none();
         };
+        if cache.chain().is_blake2b() {
+            match &message {
+                Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+                    msg,
+                ))) => {
+                    if !matches!(
+                        msg,
+                        view::NodeSettingsMessage::SwitchToConnect
+                            | view::NodeSettingsMessage::SwitchToConnectFastPath(_)
+                            | view::NodeSettingsMessage::SwitchToBitcoind
+                    ) {
+                        return Task::none();
+                    }
+                }
+                Message::View(view::Message::Settings(
+                    view::SettingsMessage::BitcoindSettings(_)
+                    | view::SettingsMessage::EditBitcoindSettings,
+                )) => return Task::none(),
+                _ => {}
+            }
+        }
         match message {
             Message::DaemonConfigLoaded(res) => match res {
                 Ok(()) => {
@@ -1067,6 +1091,32 @@ impl State for BitcoindSettingsState {
     }
 
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        if cache.chain().is_blake2b() {
+            let cfg = self.full_config.as_ref();
+            let local = cfg.is_some_and(|cfg| {
+                matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)))
+            });
+            let pending = cfg.is_some_and(|cfg| cfg.pending_bitcoind.is_some());
+            let active = if local {
+                "Bitcoin Knots (Bitcoin Blake2b)"
+            } else {
+                "COINCUBE | Connect"
+            };
+            return view::vault::settings::bitcoind_settings(menu, cache, vec![
+                view::vault::settings::node_backend_status(
+                    active, if local { icon::bitcoin_icon() } else { icon::network_icon() },
+                    cache.node_bitcoind_sync_progress, cache.node_bitcoind_sync_heights,
+                    cache.node_bitcoind_ibd, cache.node_bitcoind_subversion.as_deref(),
+                    cache.node_bitcoind_last_log.as_deref(),
+                    local && cfg.is_some_and(|cfg| cfg.fallback_esplora.is_some()),
+                    !local && pending, false,
+                    cfg.is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
+                    self.node_switch_processing, cache.daemon_switch_in_progress,
+                    self.warning.as_ref().map(|e| e.to_string()),
+                ).map(|msg| view::Message::Settings(view::SettingsMessage::NodeSettings(msg))),
+                coincube_ui::component::text::text("The pruned Bitcoin Knots node uses outbound peer connections. Inbound Tor and node resource editing are unavailable for Bitcoin Blake2b.").into(),
+            ]);
+        }
         let can_edit_bitcoind_settings =
             self.bitcoind_settings.is_some() && !self.rescan_settings.processing;
         let can_edit_electrum_settings =
@@ -1190,12 +1240,16 @@ impl State for BitcoindSettingsState {
                         active_backend,
                         active_icon,
                         cache.node_bitcoind_sync_progress,
+                        cache.node_bitcoind_sync_heights,
                         cache.node_bitcoind_ibd,
                         cache.node_bitcoind_subversion.as_deref(),
                         cache.node_bitcoind_last_log.as_deref(),
                         can_switch_to_connect,
                         can_switch_to_bitcoind,
                         can_setup_local_node,
+                        self.full_config
+                            .as_ref()
+                            .is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
                         self.node_switch_processing,
                         cache.daemon_switch_in_progress,
                         warning_str,
