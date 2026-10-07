@@ -400,6 +400,11 @@ impl Config {
     pub fn for_persistence(&self) -> Self {
         let mut config = self.clone();
         if config.bitcoin_config.chain.is_blake2b() {
+            if let Some(backend) = config.fallback_esplora.as_mut() {
+                backend.token = None;
+                backend.fallback_token = None;
+                backend.secondary_fallback_token = None;
+            }
             if let Some(BitcoinBackend::Esplora(ref mut backend)) = config.bitcoin_backend {
                 backend.token = None;
                 backend.fallback_token = None;

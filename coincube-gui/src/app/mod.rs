@@ -2888,6 +2888,30 @@ impl App {
     /// Build an admitted fork Vault without constructing Liquid or Spark clients.
     #[allow(clippy::too_many_arguments)]
     pub fn new_for_chain(
+        cache: Cache,
+        wallet: Arc<Wallet>,
+        cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+        client: crate::services::coincube::CoincubeClient,
+        config: Config,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        data_dir: CoincubeDirectory,
+        cube_settings: settings::CubeSettings,
+    ) -> Result<(App, Task<Message>), Error> {
+        Self::new_for_chain_with_node(
+            cache,
+            wallet,
+            cube_encryption_key,
+            client,
+            config,
+            daemon,
+            data_dir,
+            cube_settings,
+            None,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_chain_with_node(
         mut cache: Cache,
         wallet: Arc<Wallet>,
         cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
@@ -2896,6 +2920,7 @@ impl App {
         daemon: Arc<dyn Daemon + Sync + Send>,
         data_dir: CoincubeDirectory,
         cube_settings: settings::CubeSettings,
+        internal_bitcoind: Option<Bitcoind>,
     ) -> Result<(App, Task<Message>), Error> {
         let chain = cube_settings.network;
         // A refused fork open never reaches `new_inner`, which is what takes
@@ -2924,14 +2949,35 @@ impl App {
             client.base_url.trim_end_matches('/'),
             crate::installer::connect_esplora_path(chain)
         );
+        let managed_dir = crate::node::bitcoind::internal_bitcoind_datadir_for(
+            &data_dir,
+            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+        );
+        let managed = |node: &coincubed::config::BitcoindConfig| {
+            node.addr.ip().is_loopback()
+                && node.rpc_auth
+                    == coincubed::config::BitcoindRpcAuth::CookieFile(
+                        crate::node::bitcoind::internal_bitcoind_cookie_path(
+                            &managed_dir,
+                            &chain.bitcoin_network(),
+                        ),
+                    )
+        };
         let correct_backend = matches!(&backend_config.bitcoin_backend,
             Some(coincubed::config::BitcoinBackend::Esplora(esplora))
                 if esplora.addr == endpoint && esplora.fallback_addr.is_none()
-                    && esplora.secondary_fallback_addr.is_none());
+                    && esplora.secondary_fallback_addr.is_none())
+            || matches!(&backend_config.bitcoin_backend, Some(coincubed::config::BitcoinBackend::Bitcoind(node)) if managed(node));
         if backend_config.bitcoin_config.chain != chain
             || !daemon.backend().is_embedded()
             || !correct_backend
-            || backend_config.pending_bitcoind.is_some()
+            || internal_bitcoind
+                .as_ref()
+                .is_some_and(|node| !managed(&node.config))
+            || backend_config
+                .pending_bitcoind
+                .as_ref()
+                .is_some_and(|node| !managed(node))
         {
             return refuse(Error::Daemon(DaemonError::ConnectAnchor(
                 coincubed::connect::AdmissionError::InvalidBackend.into(),
@@ -2946,7 +2992,7 @@ impl App {
             config,
             daemon,
             data_dir,
-            None,
+            internal_bitcoind,
             cube_settings,
             None,
         );
@@ -6242,6 +6288,12 @@ impl App {
                                     new_cfg.pending_bitcoind = None;
                                     new_cfg.auto_switch_to_pending = Some(false);
                                     new_cfg.fallback_esplora = old_esplora;
+                                    if new_cfg.bitcoin_config.chain.is_blake2b() {
+                                        new_cfg.bitcoin_config.poll_interval_secs =
+                                            Duration::from_secs(
+                                                coincubed::config::LOCAL_BACKEND_POLL_INTERVAL_SECS,
+                                            );
+                                    }
                                     Some(new_cfg)
                                 });
                             if let Some(new_cfg) = switch {
@@ -8169,7 +8221,9 @@ impl App {
     pub fn spawn_daemon_switch(&mut self, cfg: DaemonConfig) -> Task<Message> {
         // A generic backend switch cannot carry fresh authenticated admission.
         // Reopen the fork Cube through its authenticated startup route instead.
-        if self.cache.chain().is_blake2b() || cfg.bitcoin_config.chain.is_blake2b() {
+        if cfg.bitcoin_config.chain != self.cache.chain()
+            || (cfg.bitcoin_config.chain.is_blake2b() && self.fork_connect_client.is_none())
+        {
             return Task::done(Message::View(view::Message::ShowError(
                 "Reopen this Bitcoin Blake2b Cube to change its authenticated Connect backend."
                     .into(),
@@ -8192,12 +8246,13 @@ impl App {
         // Mirror into the cache so the Node settings view reflects it.
         self.cache.daemon_switch_in_progress = true;
         let old_daemon = self.daemon.clone();
-        let network = cfg.bitcoin_config.network;
+        let chain = cfg.bitcoin_config.chain;
+        let connect_client = self.fork_connect_client.clone();
         let wallet_id = self.wallet.as_ref().expect("wallet should exist").id();
         let mut daemon_config_path = self
             .cache
             .datadir_path
-            .network_directory(network)
+            .network_directory(chain)
             .coincubed_data_directory(&wallet_id)
             .path()
             .to_path_buf();
@@ -8205,7 +8260,7 @@ impl App {
         Task::perform(
             async move {
                 match tokio::task::spawn_blocking(move || {
-                    restart_daemon_blocking(old_daemon, cfg, daemon_config_path)
+                    restart_daemon_blocking(old_daemon, cfg, daemon_config_path, connect_client)
                 })
                 .await
                 {
@@ -8706,12 +8761,13 @@ fn restart_daemon_blocking(
     old_daemon: Option<Arc<dyn Daemon + Sync + Send>>,
     cfg: DaemonConfig,
     daemon_config_path: std::path::PathBuf,
+    connect_client: Option<crate::services::coincube::CoincubeClient>,
 ) -> DaemonRestart {
     let recovery_cfg = old_daemon.as_ref().and_then(|d| d.config().cloned());
-    if cfg.bitcoin_config.chain.is_blake2b()
-        || recovery_cfg
-            .as_ref()
-            .is_some_and(|cfg| cfg.bitcoin_config.chain.is_blake2b())
+    if recovery_cfg
+        .as_ref()
+        .is_some_and(|previous| previous.bitcoin_config.chain != cfg.bitcoin_config.chain)
+        || (cfg.bitcoin_config.chain.is_blake2b() && connect_client.is_none())
     {
         return DaemonRestart::Failed {
             error: Error::Daemon(DaemonError::ConnectAnchor(
@@ -8720,6 +8776,21 @@ fn restart_daemon_blocking(
             recovered: old_daemon,
         };
     }
+    let start = |config: DaemonConfig| {
+        if !config.bitcoin_config.chain.is_blake2b() {
+            EmbeddedDaemon::start(config)
+        } else if matches!(
+            config.bitcoin_backend,
+            Some(coincubed::config::BitcoinBackend::Bitcoind(_))
+        ) {
+            EmbeddedDaemon::start_local_fork(config)
+        } else {
+            Handle::current().block_on(EmbeddedDaemon::start_authenticated(
+                config,
+                connect_client.clone().expect("fork session checked"),
+            ))
+        }
+    };
 
     if let Some(daemon) = &old_daemon {
         if let Err(e) = Handle::current().block_on(async { daemon.stop().await }) {
@@ -8731,12 +8802,12 @@ fn restart_daemon_blocking(
         }
     }
 
-    let daemon: Arc<dyn Daemon + Sync + Send> = match EmbeddedDaemon::start(cfg) {
+    let daemon: Arc<dyn Daemon + Sync + Send> = match start(cfg) {
         Ok(d) => Arc::new(d),
         Err(start_err) => {
             // New daemon failed to start. Bring the old one back so the app is
             // left usable rather than dead.
-            let recovered = recovery_cfg.and_then(|old_cfg| match EmbeddedDaemon::start(old_cfg) {
+            let recovered = recovery_cfg.and_then(|old_cfg| match start(old_cfg) {
                 Ok(old_daemon) => {
                     warn!(
                         "New daemon failed to start; recovered previous daemon. Start error: {}",

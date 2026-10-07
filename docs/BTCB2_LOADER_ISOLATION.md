@@ -1,23 +1,22 @@
-# BTCB2 loader isolation prerequisite
+# BTCB2 loader isolation
 
-The loader now follows the Cube's explicit `ChainId` for wallet/socket,
-first-scan, stored display settings and managed-node resources. Encoding
-`bitcoin::Network` remains for address and node network-section formats.
-BTCB2 pending-node detection and log subscriptions use `bitcoind-blake2b`,
-including its distinct testnet4 subdirectory, never Bitcoin's node directory.
+The authenticated fork loader starts a managed companion or an active local
+backend using explicit `ChainId`. Bitcoin Blake2b node files, cookie paths, locks,
+logs and configured-flavour records use `bitcoind-blake2b`; Bitcoin keeps
+`bitcoind`. Both mainnet and testnet4 retain their exact chain directory.
 
-Connect Esplora startup needs neither a local node nor managed Tor. When the
-optional managed route is selected, loader preflight and the new chain-aware
-Tor boundary keep BTCB2 from provisioning, reconfiguring or stopping Bitcoin's
-shared Tor process. BTCB2 managed Tor returns an explicit unavailable error
-before configuration access. Bitcoin still uses its existing implementation.
-A separate per-family Tor lifecycle is required before offering that optional
-managed path for BTCB2; this patch does not claim to implement it.
+Connect-only startup does not start a node or touch Tor. With a local companion,
+the loader selects the fork binary and validates its fork schedule before reuse.
+It clears only the fork config's stale inbound settings and uses outbound peers;
+it does not reconfigure or stop Bitcoin's Tor process.
 
-The app runtime gate remains dormant. Necessary remaining activation work is
-chain-preserving creation/restore and seed lifecycle, authenticated signing
-identity/feature checks, status/price consumption and synthetic end-to-end
-acceptance. Connect-only backend selection can proceed independently of the
-optional managed-Tor prerequisite, but must not be exposed by changing the
-runtime enum alone. No actual node, Tor process, wallet or existing database
-was changed by this task. Robert retains merge and deployment control.
+A synced node becomes the wallet backend only through the daemon's explicit
+embedded local-node admission. On restart, an active local backend avoids the
+Connect feature-status request, while existing Cube session/unlock authentication
+remains unchanged. The GUI preserves the managed handle and pending configuration
+across installer, loader and runtime handoff. Configs with an ordinary Bitcoin
+cookie, a remote address or an inconsistent chain are refused.
+
+Generic startup remains dormant for forks. External sockets, migration and
+remote backends remain closed. See `BTCB2_MANAGED_NODE.md` for the local trust
+boundary, activation checks and release limitations.
