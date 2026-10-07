@@ -12137,6 +12137,83 @@ pub(crate) mod claim_step1_tests {
         (app, wallet)
     }
 
+    /// The App acts on a completed full scan: the refresh that first reports it
+    /// rewrites the settings file without the restored Vault's rescan marker, and a
+    /// refresh while the scan is still running leaves the marker alone.
+    #[test]
+    fn a_completed_full_scan_retires_the_restored_vaults_rescan_marker() {
+        use crate::app::settings::{PendingRescan, WalletSettings};
+        use coincubed::commands::HistorySync;
+
+        fn drain(task: Task<Message>) {
+            use iced::futures::StreamExt;
+            if let Some(stream) = iced_runtime::task::into_stream(task) {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(stream.for_each(|_| async {}));
+            }
+        }
+
+        let root = std::env::temp_dir().join(format!("retire-marker-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let (mut app, wallet) = bitcoin_app(&root);
+        assert_eq!(
+            app.daemon_backend(),
+            DaemonBackend::EmbeddedCoincubed(Some(NodeType::Esplora))
+        );
+        let network_dir = app.cache.datadir_path.network_directory(app.cache.chain());
+        std::fs::create_dir_all(network_dir.path()).unwrap();
+        let marked = settings::Settings {
+            wallets: vec![WalletSettings {
+                name: format!("Coincube-{}", wallet.descriptor_checksum),
+                alias: None,
+                descriptor_checksum: wallet.descriptor_checksum.clone(),
+                pinned_at: None,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: None,
+                pending_rescan: Some(PendingRescan::DateUnknown),
+                keychain_keys_recorded: false,
+            }],
+            ..Default::default()
+        };
+        std::fs::write(
+            network_dir.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&marked).unwrap(),
+        )
+        .unwrap();
+        let marker = || {
+            let read: settings::Settings = serde_json::from_slice(
+                &std::fs::read(network_dir.path().join(settings::SETTINGS_FILE_NAME)).unwrap(),
+            )
+            .unwrap();
+            read.wallets[0].pending_rescan
+        };
+        let refresh = |history_sync: HistorySync| {
+            Message::UpdateDaemonCache(Ok(cache::DaemonCache {
+                blockheight: 970_247,
+                history_sync,
+                ..Default::default()
+            }))
+        };
+
+        drain(app.update(refresh(HistorySync {
+            full_scan_in_progress: true,
+            ..Default::default()
+        })));
+        assert_eq!(marker(), Some(PendingRescan::DateUnknown));
+
+        drain(app.update(refresh(HistorySync {
+            full_scan_completed_at: Some(1_791_329_974),
+            ..Default::default()
+        })));
+        assert_eq!(marker(), None, "the completed scan retires the marker");
+        std::fs::remove_dir_all(&root).ok();
+    }
+
     /// Put a claim target for `wallet` on the fork chain's settings file,
     /// as another App instance would.
     fn write_claim_target(root: &CoincubeDirectory, wallet: &Wallet) {

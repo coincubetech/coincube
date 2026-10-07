@@ -111,23 +111,41 @@ pub(crate) fn balance_sync_state(
             label: "Syncing".to_string(),
         },
         SyncStatus::LatestWalletSync => SyncState::Checking,
-        SyncStatus::SyncFailing { message, since } if empty => SyncState::Unknown {
+        SyncStatus::SyncFailing {
+            message,
+            since,
+            retry_progress,
+        } if empty => SyncState::Unknown {
             progress: None,
             label: format!(
-                "Balance unavailable: syncing has failed since {}. {}",
+                "Balance unavailable: syncing has failed since {}{}. {}",
                 format_failure_time(*since),
+                retry_note(*retry_progress),
                 failure_detail(message),
             ),
             failing: true,
         },
-        SyncStatus::SyncFailing { message, since } => SyncState::Stale {
+        SyncStatus::SyncFailing {
+            message,
+            since,
+            retry_progress,
+        } => SyncState::Stale {
             message: format!(
-                "Last known balance: syncing has failed since {}. {}",
+                "Last known balance: syncing has failed since {}{}. {}",
                 format_failure_time(*since),
+                retry_note(*retry_progress),
                 failure_detail(message),
             ),
         },
     }
+}
+
+/// ", retrying (x%)" while a full scan is retrying after failures, so a retry that
+/// is getting somewhere does not read as failed throughout.
+fn retry_note(retry_progress: Option<f64>) -> String {
+    retry_progress
+        .map(|p| format!(", retrying ({:.1}%)", 100.0 * p))
+        .unwrap_or_default()
 }
 
 /// When a run of failed polls began, in local time.
@@ -670,6 +688,7 @@ mod balance_state_tests {
         let failing = SyncStatus::SyncFailing {
             message: "Esplora client error".into(),
             since: 0,
+            retry_progress: None,
         };
         match balance_sync_state(&failing, Amount::ZERO, false) {
             SyncState::Unknown {
@@ -703,6 +722,21 @@ mod balance_state_tests {
             balance_sync_state(&SyncStatus::Synced, Amount::ZERO, false),
             SyncState::Synced
         ));
+    }
+
+    #[test]
+    fn a_retrying_scan_shows_its_progress_alongside_the_failure() {
+        let retrying = SyncStatus::SyncFailing {
+            message: "Esplora client error".into(),
+            since: 0,
+            retry_progress: Some(0.5),
+        };
+        match balance_sync_state(&retrying, Amount::ZERO, false) {
+            SyncState::Unknown { label, .. } => {
+                assert!(label.contains("retrying (50.0%)"), "{}", label)
+            }
+            _ => panic!("an empty balance must not be shown while syncing fails"),
+        }
     }
 
     #[test]

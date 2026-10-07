@@ -790,6 +790,10 @@ pub enum SyncStatus {
         message: String,
         /// Unix time the run of failures began.
         since: u32,
+        /// Progress of the full scan retrying right now, if one is. A slow server
+        /// can take most of an hour per attempt, and an attempt that is getting
+        /// somewhere should say so rather than read as failed throughout.
+        retry_progress: Option<f64>,
     },
 }
 
@@ -845,6 +849,7 @@ pub fn sync_status(
         return SyncStatus::SyncFailing {
             message: failure.message.clone(),
             since: failure.since,
+            retry_progress: history.full_scan_progress(),
         };
     }
     if history.full_scan_in_progress {
@@ -1430,6 +1435,7 @@ mod sync_status_tests {
             SyncStatus::SyncFailing {
                 message: "Esplora client error".into(),
                 since: 100,
+                retry_progress: None,
             }
         );
     }
@@ -1440,11 +1446,17 @@ mod sync_status_tests {
     fn failures_take_precedence_over_a_restarted_scan() {
         let history = HistorySync {
             full_scan_in_progress: true,
+            addresses_checked: 1,
+            addresses_expected: 4,
             ..failing(3)
         };
+        // ...while still showing how far the retry has got.
         assert!(matches!(
             sync_status(ESPLORA, 10, 1.0, Some(5), Some(1), &history),
-            SyncStatus::SyncFailing { .. }
+            SyncStatus::SyncFailing {
+                retry_progress: Some(p),
+                ..
+            } if p == 0.25
         ));
     }
 

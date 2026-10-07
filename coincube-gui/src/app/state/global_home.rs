@@ -97,15 +97,21 @@ struct BalanceReadiness {
 /// Whether the Vault's balance is still loading rather than known.
 ///
 /// Before the daemon's first poll there is no tip. After it, an empty Vault whose
-/// full scan is still running has not loaded its history yet: its zero is a
-/// placeholder, not a balance, and counting it would put a restored Vault's funds
-/// into the Total Balance as nothing.
+/// full scan is still running, or whose polls keep failing, has not loaded its
+/// history: its zero is a placeholder, not a balance, and counting it would put a
+/// restored Vault's funds into the Total Balance as nothing. Failing polls end their
+/// scan between attempts, so the scan flag alone would flip the Vault in and out of
+/// the total on every retry.
 fn vault_balance_pending(
     blockheight: i32,
     history: &coincubed::commands::HistorySync,
     vault_balance: Amount,
 ) -> bool {
-    blockheight <= 0 || (history.full_scan_in_progress && vault_balance == Amount::ZERO)
+    let failing = history.last_failure.as_ref().is_some_and(|failure| {
+        failure.consecutive >= crate::app::wallet::FAILED_POLLS_BEFORE_REPORTING
+    });
+    blockheight <= 0
+        || ((history.full_scan_in_progress || failing) && vault_balance == Amount::ZERO)
 }
 
 /// Whether the Total Balance placeholder should still be spinning.
@@ -3454,6 +3460,30 @@ mod tests {
             970_247,
             &HistorySync::default(),
             Amount::ZERO
+        ));
+    }
+
+    /// Between failed attempts there is no scan running, but the history still has
+    /// not loaded: an empty Vault stays out of the Total Balance.
+    #[test]
+    fn an_empty_vault_that_keeps_failing_to_sync_is_still_loading() {
+        use coincubed::commands::{HistorySync, PollFailure};
+        let failing = |consecutive| HistorySync {
+            last_failure: Some(PollFailure {
+                message: "Esplora client error".into(),
+                since: 1,
+                last_at: 2,
+                consecutive,
+            }),
+            ..Default::default()
+        };
+        assert!(vault_balance_pending(970_247, &failing(2), Amount::ZERO));
+        // One failure is a hiccup, not a reason to hide the Vault.
+        assert!(!vault_balance_pending(970_247, &failing(1), Amount::ZERO));
+        assert!(!vault_balance_pending(
+            970_247,
+            &failing(5),
+            Amount::from_sat(1)
         ));
     }
 
