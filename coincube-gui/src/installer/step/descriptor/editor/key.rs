@@ -239,6 +239,29 @@ pub enum SelectKeySourceMessage {
     BackToGrid,
 }
 
+/// The Hardware Device card's tip on the Bitcoin Blake2b picker. A device
+/// signs the legacy way, so a spend that only devices sign is replayable
+/// onto Bitcoin; the Cube Key on the same path can sign it protected.
+pub(super) const BLAKE2B_HARDWARE_DEVICE_TIP: &str = "Use a plugged-in hardware signer. \
+     Supported: Ledger Nano S/S+/X, Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY. \
+     Your device signs the standard Bitcoin way, so a spend signed only by devices can be \
+     replayed onto Bitcoin unless the coins were split first. Put your Cube Key on the same \
+     path to protect it.";
+
+/// The Border Wallet card's tip, the same on every chain.
+const BORDER_WALLET_TIP: &str = "A deterministic key derived from a Border Wallet Grid \
+     Generation Seed — a visual 2048-cell grid you memorise or back up. The Grid Generation \
+     Seed itself is derived from your encrypted local seed or Passkey.";
+
+/// One card of the key-source grid: what it shows and what pressing it
+/// sends (`None` renders it disabled).
+struct GridCard {
+    icon: fn() -> Text<'static>,
+    title: &'static str,
+    tip: Option<&'static str>,
+    on_press: Option<SelectKeySourceMessage>,
+}
+
 /// This struct represent metadata about a spending path, including whether it's
 /// a primary path or a timelocked recovery path, keys used
 /// in this path, if safety-net feature is allowed for this path.
@@ -1615,6 +1638,46 @@ impl SelectKeySource {
     // rest fire their existing selection flows directly and end up at
     // `details_view` for alias entry.
 
+    /// The key-source cards of the Bitcoin Blake2b picker, in display
+    /// order: Cube Key, Hardware Device, Border Wallet, Import xpub, Paste
+    /// xpub. Keychain keys and provider tokens are not offered there.
+    fn blake2b_grid_cards(&self) -> Vec<GridCard> {
+        let master_fg = self.master_signer.lock().expect("poisoned").fingerprint();
+        vec![
+            GridCard {
+                icon: icon::cube_icon,
+                title: "Cube Key",
+                tip: None,
+                on_press: (!self.keys.contains_key(&master_fg))
+                    .then_some(SelectKeySourceMessage::SelectGenerateMasterKey),
+            },
+            GridCard {
+                icon: icon::usb_icon,
+                title: "Hardware Device",
+                tip: Some(BLAKE2B_HARDWARE_DEVICE_TIP),
+                on_press: Some(SelectKeySourceMessage::ShowHardwareListen),
+            },
+            GridCard {
+                icon: icon::grid_icon,
+                title: "Border Wallet",
+                tip: Some(BORDER_WALLET_TIP),
+                on_press: Some(SelectKeySourceMessage::SelectBorderWalletSafetyNet),
+            },
+            GridCard {
+                icon: icon::key_icon,
+                title: "Import xpub",
+                tip: None,
+                on_press: Some(SelectKeySourceMessage::SelectLoadXpub),
+            },
+            GridCard {
+                icon: icon::key_icon,
+                title: "Paste xpub",
+                tip: None,
+                on_press: Some(SelectKeySourceMessage::SelectEnterXpub),
+            },
+        ]
+    }
+
     fn view_grid(
         &self,
         // `hws` is unused on the grid screen — hardware listing lives
@@ -1631,31 +1694,12 @@ impl SelectKeySource {
         );
 
         if self.chain.is_blake2b() {
-            let master_fg = self.master_signer.lock().expect("poisoned").fingerprint();
-            let content = Column::new()
-                .spacing(10)
-                .push(header)
-                .push(
-                    self.view_card(
-                        icon::cube_icon(),
-                        "Cube Key",
-                        None,
-                        (!self.keys.contains_key(&master_fg))
-                            .then_some(SelectKeySourceMessage::SelectGenerateMasterKey),
-                    ),
-                )
-                .push(self.view_card(
-                    icon::key_icon(),
-                    "Import xpub",
-                    None,
-                    Some(SelectKeySourceMessage::SelectLoadXpub),
-                ))
-                .push(self.view_card(
-                    icon::key_icon(),
-                    "Paste xpub",
-                    None,
-                    Some(SelectKeySourceMessage::SelectEnterXpub),
-                ))
+            let content = self
+                .blake2b_grid_cards()
+                .into_iter()
+                .fold(Column::new().spacing(10).push(header), |col, card| {
+                    col.push(self.view_card((card.icon)(), card.title, card.tip, card.on_press))
+                })
                 .push((!self.keys.is_empty()).then(|| self.view_keys()))
                 .width(modal::MODAL_WIDTH);
             return Container::new(content)
@@ -1730,11 +1774,7 @@ impl SelectKeySource {
                 // a follow-up.
                 icon::grid_icon(),
                 "Border Wallet",
-                Some(
-                    "A deterministic key derived from a Border Wallet Grid Generation Seed — \
-                     a visual 2048-cell grid you memorise or back up. The Grid Generation Seed \
-                     itself is derived from your encrypted local seed or Passkey.",
-                ),
+                Some(BORDER_WALLET_TIP),
                 Some(SelectKeySourceMessage::SelectBorderWalletSafetyNet),
             ))
             .push(self.view_card(
@@ -2288,11 +2328,13 @@ impl super::DescriptorEditModal for SelectKeySource {
     fn update(&mut self, hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         if self.chain.is_blake2b() {
             if let Message::SelectKeySource(ref msg) = message {
+                // Hardware devices and Border Wallet are allowed on Bitcoin
+                // Blake2b (HW-1): their messages pass, and a fetched key still
+                // goes through `available_for_creation` in `LoadKey` below.
+                // Keychain and provider-token entry points stay refused
+                // before any work.
                 let refused = match msg {
-                    SelectKeySourceMessage::ShowHardwareListen
-                    | SelectKeySourceMessage::ShowKeychainKeys
-                    | SelectKeySourceMessage::SelectDevice(_)
-                    | SelectKeySourceMessage::FetchFromDevice(_, _)
+                    SelectKeySourceMessage::ShowKeychainKeys
                     | SelectKeySourceMessage::FetchCubeKeys
                     | SelectKeySourceMessage::CubeKeysLoaded(_)
                     | SelectKeySourceMessage::SelectKeychainKey(_)
@@ -2300,8 +2342,7 @@ impl super::DescriptorEditModal for SelectKeySource {
                     | SelectKeySourceMessage::SelectEnterCosignerToken
                     | SelectKeySourceMessage::PasteToken
                     | SelectKeySourceMessage::Token(_)
-                    | SelectKeySourceMessage::ProviderKey(_)
-                    | SelectKeySourceMessage::SelectBorderWalletSafetyNet => true,
+                    | SelectKeySourceMessage::ProviderKey(_) => true,
                     SelectKeySourceMessage::LoadKey(Ok(key)) => {
                         !key.source.available_for_creation(self.chain)
                     }
@@ -2432,11 +2473,9 @@ impl super::DescriptorEditModal for SelectKeySource {
         }
     }
     fn subscription(&self, hws: &HardwareWallets) -> Subscription<Message> {
-        let hw = if self.chain.is_blake2b() {
-            Subscription::none()
-        } else {
-            hws.refresh().map(Message::HardwareWallets)
-        };
+        // Device discovery runs on every chain, Bitcoin Blake2b included
+        // (HW-1): the picker offers hardware devices there too.
+        let hw = hws.refresh().map(Message::HardwareWallets);
         if let Some(modal) = self.modal.as_ref() {
             if let Some(sub) = modal.subscription() {
                 let import = sub.map(|m| {
@@ -2792,38 +2831,338 @@ mod tests {
     use std::str::FromStr;
     use std::sync::{Arc, Mutex};
 
+    /// The Bitcoin Blake2b chains the creation gate applies to.
+    const FORK_CHAINS: [crate::chain::ChainId; 2] = [
+        crate::chain::ChainId::BitcoinBlake2b,
+        crate::chain::ChainId::BitcoinBlake2bTestnet4,
+    ];
+
+    fn fork_picker(chain: crate::chain::ChainId) -> SelectKeySource {
+        let mut picker = empty_picker();
+        picker.chain = chain;
+        picker.network = chain.bitcoin_network();
+        picker
+    }
+
+    /// Every Keychain and provider-token message is refused on a Bitcoin
+    /// Blake2b picker before any work: no task, no fetch, no step change, no
+    /// selected key. Hardware devices and Border Wallet are not in this list
+    /// (HW-1).
     #[test]
     fn fork_picker_refuses_external_source_events_before_work() {
-        for chain in [
-            crate::chain::ChainId::BitcoinBlake2b,
-            crate::chain::ChainId::BitcoinBlake2bTestnet4,
-        ] {
-            let mut picker = empty_picker();
-            picker.chain = chain;
-            picker.network = chain.bitcoin_network();
+        use crate::app::settings::{Provider, ProviderKey};
+        let keychain_fg = Fingerprint::from_str("0a0b0c0d").unwrap();
+        let token_key = {
+            let mut key = manual_key(Fingerprint::from_str("0e0f0a0b").unwrap());
+            key.source = KeySource::Token(
+                KeyKind::SafetyNet,
+                ProviderKey {
+                    uuid: "uuid".to_string(),
+                    token: "token".to_string(),
+                    provider: Provider {
+                        uuid: "provider".to_string(),
+                        name: "Provider".to_string(),
+                    },
+                },
+            );
+            key
+        };
+        for chain in FORK_CHAINS {
+            let mut picker = fork_picker(chain);
+            picker
+                .keys
+                .insert(keychain_fg, (vec![], keychain_key(keychain_fg, 1, 7)));
             let mut hws = HardwareWallets::new(
                 CoincubeDirectory::new(PathBuf::new()),
                 chain.bitcoin_network(),
             );
             for event in [
-                SelectKeySourceMessage::ShowHardwareListen,
                 SelectKeySourceMessage::ShowKeychainKeys,
                 SelectKeySourceMessage::FetchCubeKeys,
+                SelectKeySourceMessage::CubeKeysLoaded(Err("synthetic".to_string())),
+                SelectKeySourceMessage::SelectKeychainKey(resolved_key(7, "0a0b0c0d", 1)),
                 SelectKeySourceMessage::SelectEnterSafetyNetToken,
+                SelectKeySourceMessage::SelectEnterCosignerToken,
+                SelectKeySourceMessage::PasteToken,
                 SelectKeySourceMessage::Token("synthetic".to_string()),
-                SelectKeySourceMessage::SelectBorderWalletSafetyNet,
+                SelectKeySourceMessage::ProviderKey(Ok(token_key.clone())),
+                SelectKeySourceMessage::ProviderKey(Err(Error::Unexpected("x".to_string()))),
+                SelectKeySourceMessage::LoadKey(Ok(keychain_key(keychain_fg, 1, 7))),
+                SelectKeySourceMessage::LoadKey(Ok(token_key.clone())),
+                SelectKeySourceMessage::SelectKey(keychain_fg),
             ] {
-                let _ = picker.update(&mut hws, SelectKeySource::route(event));
-                assert_eq!(picker.step, Step::Grid);
-                assert!(!picker.keychain_keys_loading);
-                assert!(!picker.processing);
-                assert!(picker.error.is_some());
+                picker.error = None;
+                let label = format!("{chain:?} {event:?}");
+                let task = picker.update(&mut hws, SelectKeySource::route(event));
+                assert!(iced_runtime::task::into_stream(task).is_none(), "{}", label);
+                assert_eq!(picker.step, Step::Grid, "{}", label);
+                assert!(!picker.keychain_keys_loading, "{}", label);
+                assert!(!picker.processing, "{}", label);
+                assert!(
+                    matches!(picker.selected_key, SelectedKey::None),
+                    "{}",
+                    label
+                );
+                assert_eq!(
+                    picker.error.as_deref(),
+                    Some("This key source is not available for Bitcoin Blake2b yet"),
+                    "{}",
+                    label
+                );
             }
             let _ = picker.update(
                 &mut hws,
                 SelectKeySource::route(SelectKeySourceMessage::SelectEnterXpub),
             );
             assert_eq!(picker.step, Step::PasteXpubEntry);
+        }
+    }
+
+    /// HW-1 Amendment A: on a Bitcoin Blake2b picker the Border Wallet card
+    /// asks the descriptor editor to open the wizard, and a Border Wallet key
+    /// passes `LoadKey`, as on Bitcoin.
+    #[tokio::test]
+    async fn fork_picker_passes_border_wallet_messages() {
+        use iced::futures::StreamExt;
+        for chain in FORK_CHAINS {
+            let mut picker = fork_picker(chain);
+            let mut hws = HardwareWallets::new(
+                CoincubeDirectory::new(PathBuf::new()),
+                chain.bitcoin_network(),
+            );
+            let task = picker.update(
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::SelectBorderWalletSafetyNet),
+            );
+            assert!(picker.error.is_none(), "{:?}", chain);
+            let mut stream = iced_runtime::task::into_stream(task).expect("a task");
+            let mut opened = false;
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(Message::DefineDescriptor(
+                    message::DefineDescriptor::OpenBorderWalletWizard(_),
+                )) = action
+                {
+                    opened = true;
+                }
+            }
+            assert!(opened, "{:?}: the wizard was not requested", chain);
+
+            let mut key = manual_key(Fingerprint::from_str("0c0d0e0f").unwrap());
+            key.source = KeySource::BorderWallet {
+                grid_seed_source: crate::app::settings::GridSeedSource::Independent,
+            };
+            let _ = picker.update(
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::LoadKey(Ok(key))),
+            );
+            assert!(picker.error.is_none(), "{:?}", chain);
+            assert!(matches!(&picker.selected_key, SelectedKey::New(k)
+                if matches!(k.source, KeySource::BorderWallet { .. })));
+        }
+    }
+
+    /// A device that answers with the xpub of a generated signer.
+    struct XpubDevice(Signer);
+
+    impl std::fmt::Debug for XpubDevice {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(f, "XpubDevice({})", self.0.fingerprint())
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl async_hwi::HWI for XpubDevice {
+        fn device_kind(&self) -> DeviceKind {
+            DeviceKind::Specter
+        }
+        async fn get_version(&self) -> Result<Version, async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn get_master_fingerprint(&self) -> Result<Fingerprint, async_hwi::Error> {
+            Ok(self.0.fingerprint())
+        }
+        async fn get_extended_pubkey(
+            &self,
+            path: &DerivationPath,
+        ) -> Result<coincube_core::miniscript::bitcoin::bip32::Xpub, async_hwi::Error> {
+            Ok(self.0.get_extended_pubkey(path))
+        }
+        async fn register_wallet(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<Option<[u8; 32]>, async_hwi::Error> {
+            Ok(None)
+        }
+        async fn is_wallet_registered(
+            &self,
+            _name: &str,
+            _policy: &str,
+        ) -> Result<bool, async_hwi::Error> {
+            Ok(true)
+        }
+        async fn display_address(
+            &self,
+            _script: &async_hwi::AddressScript,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+        async fn sign_tx(
+            &self,
+            _psbt: &mut coincube_core::miniscript::bitcoin::Psbt,
+        ) -> Result<(), async_hwi::Error> {
+            Err(async_hwi::Error::UnimplementedMethod)
+        }
+    }
+
+    /// Run `message` and every message its tasks produce, in order.
+    async fn drive(picker: &mut SelectKeySource, hws: &mut HardwareWallets, message: Message) {
+        use iced::futures::StreamExt;
+        let mut queue = std::collections::VecDeque::from([message]);
+        while let Some(message) = queue.pop_front() {
+            let task = picker.update(hws, message);
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(Message::SelectKeySource(msg)) = action {
+                        queue.push_back(SelectKeySource::route(msg));
+                    }
+                }
+            }
+        }
+    }
+
+    /// HW-1: on both Bitcoin Blake2b chains the picker opens the hardware
+    /// screen, selects a connected device and fetches its key on the
+    /// chain's Bitcoin network (`chain.bitcoin_network()`). The fetched
+    /// device key passes `LoadKey`'s creation check and reaches the alias
+    /// step with no refusal.
+    #[tokio::test]
+    async fn fork_picker_fetches_a_hardware_device_key() {
+        for chain in FORK_CHAINS {
+            let network = chain.bitcoin_network();
+            let mut picker = fork_picker(chain);
+            let signer = Signer::generate(network).unwrap();
+            let fg = signer.fingerprint();
+            let mut hws = HardwareWallets::new(CoincubeDirectory::new(PathBuf::new()), network);
+            hws.list = vec![HardwareWallet::Supported {
+                id: "specter-1".to_string(),
+                device: Arc::new(XpubDevice(signer)),
+                kind: DeviceKind::Specter,
+                fingerprint: fg,
+                version: None,
+                registered: None,
+                alias: None,
+            }];
+
+            drive(
+                &mut picker,
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::ShowHardwareListen),
+            )
+            .await;
+            assert_eq!(picker.step, Step::HardwareListen, "{:?}", chain);
+            assert!(picker.error.is_none(), "{:?}", chain);
+
+            drive(
+                &mut picker,
+                &mut hws,
+                SelectKeySource::route(SelectKeySourceMessage::SelectDevice(fg)),
+            )
+            .await;
+            assert!(picker.error.is_none(), "{chain:?}: {:?}", picker.error);
+            assert!(
+                picker.details_error.is_none(),
+                "{chain:?}: {:?}",
+                picker.details_error
+            );
+            assert!(!picker.processing, "{:?}", chain);
+            assert_eq!(picker.step, Step::Details, "{:?}", chain);
+            let SelectedKey::New(key) = &picker.selected_key else {
+                panic!("{:?}: no device key was selected", chain);
+            };
+            assert!(matches!(
+                key.source,
+                KeySource::Device(DeviceKind::Specter, None)
+            ));
+            assert_eq!(key.fingerprint, fg);
+            assert!(check_key_network(&key.key, network), "{:?}", chain);
+            let DescriptorPublicKey::XPub(xkey) = &key.key else {
+                panic!("{:?}: not an xpub", chain);
+            };
+            assert_eq!(
+                xkey.origin.as_ref().map(|(_, path)| path.clone()),
+                Some(derivation_path(
+                    network,
+                    ChildNumber::from_hardened_idx(0).unwrap()
+                ))
+            );
+        }
+    }
+
+    /// HW-1: device discovery runs on the Bitcoin Blake2b picker as it does
+    /// on a Bitcoin-family one.
+    #[test]
+    fn hardware_discovery_runs_on_every_chain() {
+        use iced::advanced::subscription::into_recipes;
+        let hws = sandbox_hws();
+        let bitcoin = into_recipes(empty_picker().subscription(&hws)).len();
+        assert!(bitcoin > 0);
+        for chain in FORK_CHAINS {
+            assert_eq!(
+                into_recipes(fork_picker(chain).subscription(&hws)).len(),
+                bitcoin,
+                "{:?}",
+                chain
+            );
+        }
+    }
+
+    /// HW-1: the Bitcoin Blake2b grid offers exactly Cube Key, Hardware
+    /// Device, Border Wallet, Import xpub and Paste xpub, in that order. The
+    /// Hardware Device card says its spends can be replayed and points to
+    /// the Cube Key; the Border Wallet card keeps its Bitcoin tip.
+    #[test]
+    fn fork_grid_offers_cube_key_hardware_and_xpubs() {
+        for chain in FORK_CHAINS {
+            let picker = fork_picker(chain);
+            let cards = picker.blake2b_grid_cards();
+            assert_eq!(
+                cards.iter().map(|card| card.title).collect::<Vec<_>>(),
+                [
+                    "Cube Key",
+                    "Hardware Device",
+                    "Border Wallet",
+                    "Import xpub",
+                    "Paste xpub"
+                ]
+            );
+            assert!(matches!(
+                cards[0].on_press,
+                Some(SelectKeySourceMessage::SelectGenerateMasterKey)
+            ));
+            assert!(matches!(
+                cards[1].on_press,
+                Some(SelectKeySourceMessage::ShowHardwareListen)
+            ));
+            assert!(matches!(
+                cards[2].on_press,
+                Some(SelectKeySourceMessage::SelectBorderWalletSafetyNet)
+            ));
+            assert_eq!(cards[2].tip, Some(BORDER_WALLET_TIP));
+            assert!(matches!(
+                cards[3].on_press,
+                Some(SelectKeySourceMessage::SelectLoadXpub)
+            ));
+            assert!(matches!(
+                cards[4].on_press,
+                Some(SelectKeySourceMessage::SelectEnterXpub)
+            ));
+            assert_eq!(cards[1].tip, Some(BLAKE2B_HARDWARE_DEVICE_TIP));
+            assert!(BLAKE2B_HARDWARE_DEVICE_TIP
+                .contains("can be replayed onto Bitcoin unless the coins were split first"));
+            assert!(BLAKE2B_HARDWARE_DEVICE_TIP.contains("Cube Key on the same path"));
+            // The grid renders on the fork chain.
+            let _ = picker.view_grid(Vec::new());
         }
     }
 
