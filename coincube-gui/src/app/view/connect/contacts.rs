@@ -350,7 +350,7 @@ fn invite_form_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcco
             .align_y(Alignment::Center),
     )
     .style(theme::button::transparent)
-     // No horizontal padding, so the arrow lines up with the heading below.
+    // No horizontal padding, so the arrow lines up with the heading below.
     .padding([5, 0])
     .on_press(ConnectAccountMessage::Contacts(ContactsMessage::BackToList));
 
