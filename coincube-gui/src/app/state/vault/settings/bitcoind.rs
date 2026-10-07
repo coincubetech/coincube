@@ -455,11 +455,15 @@ impl State for BitcoindSettingsState {
                 Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
                     msg,
                 ))) => {
+                    // The scan-discard confirmation belongs to the switch: without
+                    // it a mid-scan "Switch to local node" is a dead click here.
                     if !matches!(
                         msg,
                         view::NodeSettingsMessage::SwitchToConnect
                             | view::NodeSettingsMessage::SwitchToConnectFastPath(_)
                             | view::NodeSettingsMessage::SwitchToBitcoind
+                            | view::NodeSettingsMessage::ConfirmSwitchDiscardingScan
+                            | view::NodeSettingsMessage::CancelSwitchDiscardingScan
                     ) {
                         return Task::none();
                     }
@@ -1137,7 +1141,7 @@ impl State for BitcoindSettingsState {
             } else {
                 "COINCUBE | Connect"
             };
-            return view::vault::settings::bitcoind_settings(menu, cache, vec![
+            let mut panels = vec![
                 view::vault::settings::node_backend_status(
                     active, if local { icon::bitcoin_icon() } else { icon::network_icon() },
                     cache.node_bitcoind_sync_progress, cache.node_bitcoind_sync_heights,
@@ -1150,7 +1154,17 @@ impl State for BitcoindSettingsState {
                     self.warning.as_ref().map(|e| e.to_string()),
                 ).map(|msg| view::Message::Settings(view::SettingsMessage::NodeSettings(msg))),
                 coincube_ui::component::text::text("The pruned Bitcoin Knots node uses outbound peer connections. Inbound Tor and node resource editing are unavailable for Bitcoin Blake2b.").into(),
-            ]);
+            ];
+            // This chain's node is always pruned: explain a refused switch here
+            // too, as the Bitcoin view does.
+            if !local && pending {
+                if let Some(why) = pruned_switch_refusal(cache) {
+                    panels.push(view::vault::settings::pruned_node_notice(why));
+                }
+            }
+            return self.with_scan_discard_modal(view::vault::settings::bitcoind_settings(
+                menu, cache, panels,
+            ));
         }
         let can_edit_bitcoind_settings =
             self.bitcoind_settings.is_some() && !self.rescan_settings.processing;
@@ -1404,18 +1418,8 @@ impl State for BitcoindSettingsState {
 
         // A pending Core↔Knots switch pops a confirmation modal over the page;
         // clicking the backdrop cancels it.
-        if let Some(scan) = self.pending_scan_discard {
-            modal::Modal::new(
-                content,
-                view::vault::settings::switch_discards_scan_confirm(scan)
-                    .map(|m| view::Message::Settings(view::SettingsMessage::NodeSettings(m))),
-            )
-            .on_blur(Some(view::Message::Settings(
-                view::SettingsMessage::NodeSettings(
-                    view::NodeSettingsMessage::CancelSwitchDiscardingScan,
-                ),
-            )))
-            .into()
+        if self.pending_scan_discard.is_some() {
+            self.with_scan_discard_modal(content)
         } else if let Some(flavor) = self.pending_flavor_switch {
             modal::Modal::new(
                 content,
@@ -1429,6 +1433,31 @@ impl State for BitcoindSettingsState {
         } else {
             content
         }
+    }
+}
+
+impl BitcoindSettingsState {
+    /// `content` under the "switching discards the running scan" confirmation, when
+    /// one is pending; clicking the backdrop cancels it. Shared by the Bitcoin and
+    /// Bitcoin Blake2b views, so neither can lose the confirmation its switch waits on.
+    fn with_scan_discard_modal<'a>(
+        &self,
+        content: Element<'a, view::Message>,
+    ) -> Element<'a, view::Message> {
+        let Some(scan) = self.pending_scan_discard else {
+            return content;
+        };
+        modal::Modal::new(
+            content,
+            view::vault::settings::switch_discards_scan_confirm(scan)
+                .map(|m| view::Message::Settings(view::SettingsMessage::NodeSettings(m))),
+        )
+        .on_blur(Some(view::Message::Settings(
+            view::SettingsMessage::NodeSettings(
+                view::NodeSettingsMessage::CancelSwitchDiscardingScan,
+            ),
+        )))
+        .into()
     }
 }
 
@@ -3720,6 +3749,71 @@ mod tests {
     /// (`blockheight` 0) and no poll has completed this session. `sync_status`
     /// reads that as `Synced` for an Esplora backend, so the scan must be
     /// recognised from the missing poll instead.
+    /// Bitcoin Blake2b's settings only pass the switch messages through. The
+    /// scan-discard confirmation must pass too, or a mid-scan switch on that chain
+    /// is a dead click: the guard holds it and nothing can confirm or cancel.
+    #[test]
+    fn blake2b_manual_switch_mid_scan_can_be_confirmed_or_cancelled() {
+        use crate::app::local_switch::{NodePruning, RunningScan};
+
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(PathBuf::from(
+            "/tmp/bitcoin/.cookie",
+        ))));
+        cfg.auto_switch_to_pending = Some(true);
+        let cache = Cache {
+            fiat_chain: crate::chain::ChainId::BitcoinBlake2b,
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(NodePruning::Unpruned),
+            last_poll_at_startup: None,
+            daemon_cache: crate::app::cache::DaemonCache {
+                blockheight: 0,
+                last_poll_timestamp: None,
+                rescan_progress: None,
+                ..Default::default()
+            },
+            ..Cache::default()
+        };
+        assert!(cache.chain().is_blake2b());
+
+        // "Keep scanning" clears the held switch.
+        let mut state = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+        let _ = state.update(
+            Some(daemon(Some(cfg.clone()))),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        assert_eq!(state.pending_scan_discard, Some(RunningScan::WalletSync));
+        let _ = state.view(
+            &Menu::Vault(crate::app::menu::VaultSubMenu::Overview),
+            &cache,
+        );
+        let _ = state.update(
+            Some(daemon(Some(cfg.clone()))),
+            &cache,
+            node_message(view::NodeSettingsMessage::CancelSwitchDiscardingScan),
+        );
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(!state.node_switch_processing);
+
+        // "Switch anyway" switches.
+        let _ = state.update(
+            Some(daemon(Some(cfg.clone()))),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        let _ = state.update(
+            Some(daemon(Some(cfg))),
+            &cache,
+            node_message(view::NodeSettingsMessage::ConfirmSwitchDiscardingScan),
+        );
+        assert_eq!(state.pending_scan_discard, None);
+        assert!(
+            state.node_switch_processing,
+            "the confirmed switch was dropped"
+        );
+    }
+
     #[test]
     fn manual_switch_confirms_during_a_connect_vaults_first_scan() {
         use crate::app::local_switch::{NodePruning, RunningScan};
