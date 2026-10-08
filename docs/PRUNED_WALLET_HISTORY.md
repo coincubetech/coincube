@@ -115,3 +115,20 @@ Relevant upstream RPC documentation: [importprunedfunds](https://bitcoincore.org
 [getblockfrompeer](https://bitcoincore.org/en/doc/29.0.0/rpc/blockchain/getblockfrompeer/),
 [rescanblockchain](https://bitcoincore.org/en/doc/29.0.0/rpc/wallet/rescanblockchain/),
 and [pruneblockchain](https://bitcoincore.org/en/doc/29.0.0/rpc/blockchain/pruneblockchain/).
+
+### Guided switch and default retention
+
+For a Connect Vault, select **Switch to local node**. When the managed local
+wallet is missing history, Tenshu offers **Import Connect history** as the
+recommended first step. Recovery from a height/date and a custom rolling
+retention window are under **Advanced wallet history recovery options**.
+An existing interrupted recovery remains visible so it can be resumed.
+Once reconciliation and a fresh history check succeed, an explicit switch
+request is retried through the normal sync and running-scan guards.
+
+The default remains automatic pruning by the node's storage-size target.
+Existing targets are preserved; new managed nodes retain Tenshu's existing
+15,000 MiB target. No rolling day window is selected or applied by default.
+Core's upstream default disables pruning, and its minimum automatic target is
+550 MiB; neither value is a time-based retention default. After switching,
+custom day-based retention remains available under **Advanced node settings**.

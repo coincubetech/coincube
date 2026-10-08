@@ -2310,17 +2310,54 @@ pub fn custom_esplora_section<'a>(
 /// each value actually does. `processing` is true while a restart is in flight.
 pub fn wallet_history_section<'a>(
     start: &'a form::Value<String>,
-    days: &'a form::Value<String>,
     status: &'a crate::app::node_history::Status,
+    advanced: bool,
 ) -> Element<'a, NodeSettingsMessage> {
     use crate::node::history::Phase;
-    let mut content=Column::new().spacing(15)
-        .push(text("Wallet history recovery").bold().size(18))
-        .push(text("Import transactions discovered by Connect. Missing proofs, unsupported transactions and missing spend history are recovered by downloading and scanning blocks.").size(14))
-        .push(button::secondary(None,"Import Connect history").on_press(NodeSettingsMessage::ImportConnectHistory))
-        .push(form::Form::new_trimmed("Block height or YYYY-MM-DD",start,NodeSettingsMessage::RecoveryStartEdited))
-        .push(button::secondary(None,"Recover from this height or date").on_press(NodeSettingsMessage::RecoveryStart))
-        .push(text("Recovery saves wallet transactions before discarding eligible old blocks. It resumes when Tenshu reopens. Keep Tenshu open while it runs; other Vaults using this managed node briefly reconnect when pruning controls are applied.").size(12).style(theme::text::secondary));
+    let mut content = Column::new().spacing(15)
+        .push(text("Recover history to switch to your local node").bold().size(18))
+        .push(text("Your local wallet is missing some history. Import what Connect has already found, then check it against your node before switching.").size(14))
+        .push(text("Recommended: Import Connect history").bold())
+        .push(text("Usually the quickest option. If more history is needed, Tenshu downloads and scans the missing blocks.").size(14));
+    let mut import = button::primary(None, "Import Connect history");
+    if !status.busy
+        && status.job.as_ref().is_none_or(|job| {
+            matches!(
+                job.phase,
+                Phase::Complete | Phase::Cancelled | Phase::Paused
+            )
+        })
+    {
+        import = import.on_press(NodeSettingsMessage::ImportConnectHistory);
+    }
+    content = content.push(import).push(
+        button::transparent(
+            None,
+            if advanced {
+                "Hide advanced wallet history recovery options"
+            } else {
+                "Advanced wallet history recovery options"
+            },
+        )
+        .on_press(NodeSettingsMessage::RecoveryAdvancedToggled),
+    );
+    if advanced {
+        let mut recover = button::secondary(None, "Recover from this height or date");
+        if !status.busy
+            && status.job.as_ref().is_none_or(|job| {
+                matches!(
+                    job.phase,
+                    Phase::Complete | Phase::Cancelled | Phase::Paused
+                )
+            })
+        {
+            recover = recover.on_press(NodeSettingsMessage::RecoveryStart);
+        }
+        content = content
+            .push(form::Form::new_trimmed("Block height or YYYY-MM-DD", start, NodeSettingsMessage::RecoveryStartEdited))
+            .push(recover)
+            .push(text("Downloads and scans blocks from your chosen point. Keep Tenshu open while it runs; progress is saved if interrupted.").size(12).style(theme::text::secondary));
+    }
     if let Some(job) = &status.job {
         let label = match job.phase {
             Phase::FetchingForLoad => "Downloading blocks needed to load the wallet",
@@ -2374,13 +2411,41 @@ pub fn wallet_history_section<'a>(
     if let Some(error) = &status.error {
         content = content.push(text(error).style(theme::text::warning));
     }
+    if !status.busy
+        && status
+            .job
+            .as_ref()
+            .is_none_or(|job| matches!(job.phase, Phase::Complete | Phase::Cancelled))
+    {
+        content = content.push(
+            button::transparent(None, "Keep using Connect")
+                .on_press(NodeSettingsMessage::RecoveryDismiss),
+        );
+    }
+    card::simple(content).into()
+}
+
+pub fn rolling_retention_section<'a>(
+    days: &'a form::Value<String>,
+    status: &'a crate::app::node_history::Status,
+) -> Element<'a, NodeSettingsMessage> {
     let policy = status.policy.as_ref().filter(|policy| !policy.temporary);
-    content=content.push(separation().width(Length::Fill))
-        .push(text("Rolling block retention").bold().size(18))
-        .push(text(policy.map(|policy|format!("Keeping the most recent {} days of blocks.",policy.days)).unwrap_or_else(||"Using the node's storage-size target.".into())))
-        .push(form::Form::new_trimmed("Days (for example 180 or 365)",days,NodeSettingsMessage::RetentionDaysEdited))
-        .push(button::secondary(None,"Apply retention and recover missing blocks").on_press(NodeSettingsMessage::RetentionApply))
-        .push(text("Extending the window downloads missing blocks. Disk use depends on block sizes and can be hundreds of GB. Tenshu manages this window while open; if closed, the node retains new blocks until Tenshu reopens. Whole block files and Bitcoin's minimum recent-block reserve can keep extra data. Apply a storage-size target below to leave rolling retention.").size(12).style(theme::text::secondary));
+    let mut content = Column::new().spacing(15)
+        .push(text("Block retention").bold().size(18))
+        .push(text(policy.map(|policy|format!("Keeping the most recent {} days of blocks.",policy.days)).unwrap_or_else(||"Default: automatic pruning using your node’s storage-size target.".into())))
+        .push(text("Choose a rolling window only if you want to keep more history. This can use hundreds of GB.").size(14))
+        .push(form::Form::new_trimmed("Optional retention days (for example 180 or 365)",days,NodeSettingsMessage::RetentionDaysEdited));
+    let mut apply = button::secondary(None, "Apply retention and recover missing blocks");
+    if !status.busy
+        && days
+            .value
+            .parse::<u32>()
+            .is_ok_and(|days| (1..=3650).contains(&days))
+    {
+        apply = apply.on_press(NodeSettingsMessage::RetentionApply);
+    }
+    content = content.push(apply)
+        .push(text("Extending the window downloads missing blocks. Tenshu maintains the window while open. To return to automatic pruning, apply a storage-size target in node resources.").size(12).style(theme::text::secondary));
     card::simple(content).into()
 }
 

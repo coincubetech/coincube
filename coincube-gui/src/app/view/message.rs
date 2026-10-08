@@ -613,6 +613,9 @@ pub enum InstallStatsViewMessage {
 
 #[derive(Debug, Clone)]
 pub enum NodeSettingsMessage {
+    RecoveryAdvancedToggled,
+    NodeAdvancedToggled,
+    RecoveryDismiss,
     RecoveryStartEdited(String),
     RecoveryStart,
     ImportConnectHistory,

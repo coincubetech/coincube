@@ -6580,6 +6580,51 @@ impl App {
             Message::SetInternalBitcoind(bitcoind) => {
                 self.internal_bitcoind = Some(bitcoind);
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+                view::NodeSettingsMessage::SwitchToBitcoind,
+            ))) => {
+                let managed = self
+                    .daemon
+                    .as_ref()
+                    .and_then(|d| d.config())
+                    .and_then(local_node_sync_config)
+                    .is_some_and(|cfg| {
+                        crate::node::retention::is_managed_endpoint(
+                            &self.cache.datadir_path,
+                            self.cache.network,
+                            self.cache.chain(),
+                            cfg,
+                        )
+                    });
+                let missing = self
+                    .cache
+                    .node_bitcoind_pruning
+                    .zip(self.cache.local_switch_history)
+                    .is_some_and(|(pruning, history)| {
+                        local_switch::pruned_node_serves(pruning, history).is_err()
+                    });
+                if managed && missing && self.cache.node_bitcoind_ibd == Some(false) {
+                    self.cache.node_history_switch_requested = true;
+                    self.auto_switch_suppressed = false;
+                }
+                if let Some(panel) = self.panels.vault_settings.as_mut() {
+                    return panel.update(self.daemon.clone(), &self.cache, message);
+                }
+                return Task::none();
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+                view::NodeSettingsMessage::RecoveryDismiss
+                | view::NodeSettingsMessage::RecoveryCancel,
+            ))) => {
+                // Returning to Connect withdraws promotion consent for this
+                // session, including a previously enabled automatic switch.
+                self.auto_switch_suppressed = true;
+                self.cache.node_history_switch_requested = false;
+                if let Some(panel) = self.panels.vault_settings.as_mut() {
+                    return panel.update(self.daemon.clone(), &self.cache, message);
+                }
+                return Task::none();
+            }
             Message::NodeHistory(action) => {
                 if self.cache.chain().is_blake2b() {
                     return Task::none();
@@ -6911,6 +6956,8 @@ impl App {
                         if !ibd
                             && !self.daemon_switch_in_progress
                             && !self.auto_switch_suppressed
+                            && (!self.cache.node_history_switch_requested
+                                || self.cache.node_history.reconciled)
                             && !self.node_history_in_progress
                             && !self.cache.node_history.job.as_ref().is_some_and(|job| {
                                 !matches!(
@@ -6926,7 +6973,9 @@ impl App {
                                     // (`Some(false)`). An absent flag (`None`) is a
                                     // legacy adopted node — the old build promoted it
                                     // on sync with no flag — so it must promote too.
-                                    if c.auto_switch_to_pending == Some(false) {
+                                    if c.auto_switch_to_pending == Some(false)
+                                        && !self.cache.node_history_switch_requested
+                                    {
                                         return None;
                                     }
                                     let pending = c.pending_bitcoind.clone()?;
@@ -7551,6 +7600,7 @@ impl App {
                     self.node_history_in_progress = false;
                     self.node_history_pending = None;
                     self.cache.node_history = node_history::Status::default();
+                    self.cache.node_history_switch_requested = false;
                     self.cache.node_bitcoind_sync_progress = None;
                     self.cache.node_bitcoind_sync_heights = None;
                     self.cache.node_bitcoind_ibd = None;
@@ -7584,6 +7634,7 @@ impl App {
                     self.node_history_in_progress = false;
                     self.node_history_pending = None;
                     self.cache.node_history = node_history::Status::default();
+                    self.cache.node_history_switch_requested = false;
                 }
                 self.wallet = Some(wallet.clone());
                 self.cache.has_vault = true;
@@ -14132,6 +14183,93 @@ pub(crate) mod claim_step1_tests {
 mod local_node_sync_tests {
     use super::*;
     use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+
+    #[tokio::test]
+    async fn manual_recovery_switch_survives_navigation_and_honors_cancellation() {
+        use local_switch::{NodePruning, VaultHistory};
+        let root = std::env::temp_dir().join(format!("guided-switch-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let pending = BitcoindConfig {
+            addr: "127.0.0.1:8332".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::CookieFile(
+                crate::node::bitcoind::internal_bitcoind_cookie_path(
+                    &crate::node::bitcoind::internal_bitcoind_datadir(&app.cache.datadir_path),
+                    &app.cache.network,
+                ),
+            ),
+        };
+        let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+        cfg.pending_bitcoind = Some(pending.clone());
+        cfg.auto_switch_to_pending = Some(false);
+        app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
+        app.cache.node_bitcoind_ibd = Some(false);
+        app.cache.node_bitcoind_pruning = Some(NodePruning::Pruned {
+            prune_height: 970_000,
+        });
+        app.cache.local_switch_history = Some(VaultHistory::From(946_000));
+        app.cache.daemon_cache.blockheight = 970_500;
+        app.cache.last_poll_at_startup = Some(100);
+        app.cache.daemon_cache.last_poll_timestamp = Some(200);
+        let node_page = Menu::Vault(menu::VaultSubMenu::Settings(Some(
+            menu::SettingsOption::Node,
+        )));
+        drop(app.set_current_panel(node_page.clone()));
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::NodeSettings(view::NodeSettingsMessage::SwitchToBitcoind),
+        ))));
+        assert!(app.cache.node_history_switch_requested);
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Transactions(None))));
+        drop(app.set_current_panel(node_page));
+        assert!(
+            app.cache.node_history_switch_requested,
+            "page recreation lost consent"
+        );
+        let progress = |app: &App, history| Message::BitcoindSyncProgress {
+            app: app.cache.app_generation,
+            history_epoch: app.node_history_epoch,
+            wallet: app.wallet.as_ref().map(|w| w.id()),
+            config: pending.clone(),
+            result: Ok(LocalNodeSync {
+                progress: 1.0,
+                ibd: false,
+                blocks: 970_500,
+                headers: 970_500,
+                subversion: None,
+                pruning: Some(NodePruning::Pruned {
+                    prune_height: 970_000,
+                }),
+            }),
+            vault_history: history,
+        };
+        drop(app.update(progress(&app, Some(VaultHistory::TrackedLocally))));
+        assert!(!app.daemon_switch_in_progress, "wait for reconciliation");
+        app.cache.node_history.reconciled = true;
+        drop(app.update(progress(&app, None)));
+        assert!(
+            !app.daemon_switch_in_progress,
+            "wait for fresh history permission"
+        );
+        drop(app.update(progress(&app, Some(VaultHistory::TrackedLocally))));
+        assert!(
+            app.daemon_switch_in_progress,
+            "explicit parked-node switch was not completed; hold={:?}",
+            app.local_switch_hold
+        );
+        app.daemon_switch_in_progress = false;
+        app.cache.daemon_switch_in_progress = false;
+        drop(app.update(Message::View(view::Message::Settings(
+            view::SettingsMessage::NodeSettings(view::NodeSettingsMessage::RecoveryDismiss),
+        ))));
+        assert!(!app.cache.node_history_switch_requested);
+        assert!(app.auto_switch_suppressed);
+        drop(app.update(progress(&app, Some(VaultHistory::TrackedLocally))));
+        assert!(
+            !app.daemon_switch_in_progress,
+            "dismissal must withdraw promotion consent"
+        );
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn current_history_completion_releases_busy_state_when_daemon_disappears() {
