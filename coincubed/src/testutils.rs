@@ -54,6 +54,10 @@ pub struct DummyBitcoind {
     /// The history-sync record the daemon installed, shared so a test can check
     /// which one it was after handing this backend over.
     pub history_sync: sync::Arc<sync::Mutex<Option<sync::Arc<crate::bitcoin::HistorySyncCache>>>>,
+    /// What `sees_mempool` reports. Defaults to `true`, i.e. a backend whose
+    /// (always empty) mempool answers are trusted. Set to `false` to model
+    /// Esplora, whose mempool reads are always empty whatever is in it.
+    pub sees_mempool: bool,
 }
 
 /// The endpoint [`DummyBitcoind`] reports by default.
@@ -93,6 +97,7 @@ impl DummyBitcoind {
             backend_id: Some(dummy_backend_id(DUMMY_RPC_ADDR, DUMMY_CREDENTIALS)),
             walks_ancestors: true,
             history_sync: Default::default(),
+            sees_mempool: true,
         }
     }
 }
@@ -257,6 +262,10 @@ impl BitcoinInterface for DummyBitcoind {
 
     fn mempool_entry(&self, _: &bitcoin::Txid) -> Option<MempoolEntry> {
         None
+    }
+
+    fn sees_mempool(&self) -> bool {
+        self.sees_mempool
     }
 }
 

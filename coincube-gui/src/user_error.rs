@@ -88,6 +88,8 @@ pub const CC_DMN_RPC: &str = "CC-DMN-RPC";
 pub const CC_DMN_START: &str = "CC-DMN-START";
 pub const CC_DMN_COINSELECT: &str = "CC-DMN-COINSELECT";
 pub const CC_DMN_UNSUPPORTED: &str = "CC-DMN-UNSUPPORTED";
+pub const CC_DMN_BROADCAST: &str = "CC-DMN-BROADCAST";
+pub const CC_DMN_RBF_FEE: &str = "CC-DMN-RBF-FEE";
 
 // ── Liquid / Spark wallets ──────────────────────────────────────────────────
 pub const CC_LQD_SDK: &str = "CC-LQD-SDK";
@@ -313,6 +315,12 @@ impl From<&Error> for UserError {
             ),
 
             Error::Daemon(e) => match e {
+                DaemonError::Rpc(code, detail)
+                    if i64::from(*code) == coincubed::commands::TX_BROADCAST_ERROR =>
+                {
+                    broadcast_refusal(detail)
+                }
+
                 // The daemon's own message is not user copy: `invalid_params`
                 // names JSON-RPC parameters ("Missing 'destinations'
                 // parameter.", "Invalid 'psbt' parameter."), which tells a
@@ -484,6 +492,42 @@ impl From<&Error> for UserError {
             ),
         }
     }
+}
+
+/// Copy for a broadcast the daemon could not get through
+/// ([`coincubed::commands::TX_BROADCAST_ERROR`]).
+///
+/// `detail` is the backend's answer, relayed by the daemon. It is read to tell
+/// one refusal apart and never shown: a replacement (Cancel transaction or Bump
+/// fee) paying too little to replace the pending transaction it conflicts with.
+/// Broadcasting that same transaction again can never work, so no retry is
+/// offered for it. Any other failure, an unreachable backend first of all, may
+/// well go through next time.
+fn broadcast_refusal(detail: &str) -> UserError {
+    if underpays_replacement(detail) {
+        UserError::new(
+            "Fee too low to replace the pending transaction",
+            "Delete this transaction, then open the pending one in Transactions and choose Cancel transaction or Bump fee again.",
+            CC_DMN_RBF_FEE,
+            false,
+        )
+    } else {
+        UserError::new(
+            "Couldn't broadcast the transaction",
+            "Check that your Bitcoin backend is reachable, then try again. If it keeps failing, contact support and quote the reference below.",
+            CC_DMN_BROADCAST,
+            true,
+        )
+    }
+}
+
+/// Whether a node refused a replacement for paying too little to replace what it
+/// conflicts with: Bitcoin Core's `insufficient fee` refusals (a feerate not above
+/// the replaced transaction's, or a fee not above the fees it would evict), which
+/// Esplora and Electrum servers pass on as Core wrote them.
+fn underpays_replacement(detail: &str) -> bool {
+    let detail = detail.to_ascii_lowercase();
+    detail.contains("insufficient fee") || detail.contains("rejecting replacement")
 }
 
 impl Display for UserError {
@@ -890,6 +934,14 @@ mod tests {
             Error::Daemon(DaemonError::NotImplemented),
             Error::Daemon(DaemonError::ClientNotSupported),
             Error::Daemon(DaemonError::Unexpected("x".to_string())),
+            Error::Daemon(DaemonError::Rpc(
+                coincubed::commands::TX_BROADCAST_ERROR as i32,
+                "x".to_string(),
+            )),
+            Error::Daemon(DaemonError::Rpc(
+                coincubed::commands::TX_BROADCAST_ERROR as i32,
+                "insufficient fee, rejecting replacement".to_string(),
+            )),
             Error::Daemon(DaemonError::Start(
                 coincubed::StartupError::DefaultDataDirNotFound,
             )),
@@ -987,6 +1039,48 @@ mod tests {
         )));
         assert!(!line.contains("psbt"), "raw detail leaked: {}", line);
         assert!(line.contains(CC_DMN_RPC));
+    }
+
+    /// A cancel the network refused for paying too little, as Esplora relays
+    /// Bitcoin Core's refusal (verbatim from a field report). It used to read
+    /// "Something went wrong — Try again", but broadcasting the same
+    /// transaction again can never work.
+    #[test]
+    fn a_refused_replacement_says_its_fee_is_too_low_and_offers_no_retry() {
+        let detail = r#"Failed to broadcast transaction: Esplora client error: 'HttpResponse { status: 400, message: "sendrawtransaction RPC error: {\"code\":-26,\"message\":\"insufficient fee, rejecting replacement 49c7ab9f8656a39cac28cb2ab7929b3682aff03681a87cef255d5f7ead707efe; new feerate 0.00001007 BTC/kvB <= old feerate 0.00020000 BTC/kvB\"}" }'."#;
+        let u: UserError = (&Error::Daemon(DaemonError::Rpc(
+            coincubed::commands::TX_BROADCAST_ERROR as i32,
+            detail.to_string(),
+        )))
+            .into();
+
+        assert_eq!(u.reference, CC_DMN_RBF_FEE);
+        assert_eq!(u.title, "Fee too low to replace the pending transaction");
+        assert!(
+            !u.retryable,
+            "the same transaction cannot be relayed on a retry"
+        );
+        for field in [&u.title, &u.guidance] {
+            for leaked in ["Esplora", "sendrawtransaction", "49c7ab9f", "kvB"] {
+                assert!(!field.contains(leaked), "{} leaked in {}", leaked, field);
+            }
+        }
+    }
+
+    /// Any other broadcast failure keeps its retry: the backend may just have
+    /// been out of reach. Its answer stays in the log either way.
+    #[test]
+    fn other_broadcast_failures_stay_retryable() {
+        let u: UserError = (&Error::Daemon(DaemonError::Rpc(
+            coincubed::commands::TX_BROADCAST_ERROR as i32,
+            "Failed to broadcast transaction: Esplora client error: 'Reqwest(operation timed out)'"
+                .to_string(),
+        )))
+            .into();
+
+        assert_eq!(u.reference, CC_DMN_BROADCAST);
+        assert!(u.retryable);
+        assert!(!u.guidance.contains("Reqwest"), "{}", u.guidance);
     }
 
     /// The Liquid SDK's own strings are GraphQL/swap-service traces. None of

@@ -738,6 +738,17 @@ pub trait BitcoinInterface: Send {
     fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
         Ok(self.mempool_entry(txid))
     }
+
+    /// Whether [`Self::mempool_spenders_result`] reads this backend's mempool.
+    ///
+    /// A backend that answers `false` (Esplora) always reports an empty mempool,
+    /// which reads exactly like "nothing spends these outpoints". `rbfpsbt` takes
+    /// that answer as what a replacement must outbid, so it must not trust it
+    /// here: it would price every cancel at the 1 sat/vb relay minimum, below the
+    /// transaction being replaced, and the network would refuse the replacement.
+    fn sees_mempool(&self) -> bool {
+        true
+    }
 }
 
 impl BitcoinInterface for d::BitcoinD {
@@ -1588,6 +1599,10 @@ impl BitcoinInterface for esplora::Esplora {
         Vec::new()
     }
 
+    fn sees_mempool(&self) -> bool {
+        false
+    }
+
     fn sync_progress(&self) -> SyncProgress {
         let blocks = self.chain_tip().height as u64;
         SyncProgress::new(1.0, blocks, blocks)
@@ -1806,6 +1821,10 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
 
     fn mempool_entry_result(&self, txid: &bitcoin::Txid) -> Result<Option<MempoolEntry>, String> {
         self.lock().unwrap().mempool_entry_result(txid)
+    }
+
+    fn sees_mempool(&self) -> bool {
+        self.lock().unwrap().sees_mempool()
     }
 }
 

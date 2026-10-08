@@ -35,6 +35,12 @@ use std::{
     time::SystemTime,
 };
 
+/// Stable JSON-RPC server error code for [`CommandError::TxBroadcast`], a failure
+/// to broadcast a transaction to the P2P network. The desktop uses it to tell a
+/// refused broadcast apart from other failures, whichever side of an external
+/// daemon boundary it happened on.
+pub const TX_BROADCAST_ERROR: i64 = 1_000;
+
 /// Stable JSON-RPC server error code for [`CommandError::UnsafeLegacyAlternative`].
 /// The desktop uses it to preserve the typed policy refusal across an external
 /// daemon boundary instead of treating it as generic invalid input.
@@ -696,6 +702,152 @@ impl DaemonControl {
                 })
             })
             .transpose()
+    }
+
+    /// The minimum feerate and the replaced fees for a replacement of `txid`, worked out from our
+    /// own records, for a backend that cannot see the mempool
+    /// ([`BitcoinInterface::sees_mempool`]).
+    ///
+    /// The replacement conflicts with whatever our records show spending the coins of `txid`
+    /// (`txid` itself when they show nothing), and all of it is taken to still be in the mempool:
+    /// if some of it was evicted the replacement pays more than it had to, whereas leaving out
+    /// some that is there gets the replacement refused. The minimum feerate is one above the
+    /// highest of theirs (rule #6). The replaced fees are theirs plus those of the descendants our
+    /// records show, that is our own transactions spending their outputs (rule #3). A descendant
+    /// someone else made from one of their outputs is not in our records, and can still get the
+    /// replacement refused.
+    fn replacement_minimums_from_records(
+        &self,
+        db_conn: &mut Box<dyn DatabaseConnection>,
+        tx_getter: &mut DbTxGetter<'_>,
+        txid: &bitcoin::Txid,
+        prev_tx: &bitcoin::Transaction,
+        prev_psbt: Option<&Psbt>,
+        prev_coins: &HashMap<bitcoin::OutPoint, Coin>,
+    ) -> (u64, bitcoin::Amount) {
+        // Our coins spent by an unconfirmed transaction: the inputs of everything priced below,
+        // and what links a transaction to its descendants.
+        let spending = db_conn.coins(&[CoinStatus::Spending], &[]);
+        let values: HashMap<bitcoin::OutPoint, bitcoin::Amount> = prev_coins
+            .values()
+            .chain(spending.values())
+            .map(|coin| (coin.outpoint, coin.amount))
+            .collect();
+        // Fee and virtual size of a transaction, if it only spends coins we know the value of.
+        let price = |tx: &bitcoin::Transaction| -> Option<(bitcoin::Amount, u64)> {
+            let spent = tx
+                .input
+                .iter()
+                .try_fold(bitcoin::Amount::ZERO, |sum, txin| {
+                    sum.checked_add(*values.get(&txin.previous_output)?)
+                })?;
+            let created = tx
+                .output
+                .iter()
+                .try_fold(bitcoin::Amount::ZERO, |sum, txo| sum.checked_add(txo.value))?;
+            let fee = spent.checked_sub(created)?;
+            let vsize: u64 = tx.vsize().try_into().ok()?;
+            (fee <= bitcoin::Amount::MAX_MONEY).then_some((fee, vsize))
+        };
+        // Kept within the money supply, so that coin selection adding the replacement's own relay
+        // fee to it cannot overflow.
+        let add_fee = |total: bitcoin::Amount, fee: bitcoin::Amount| {
+            total
+                .checked_add(fee)
+                .map_or(bitcoin::Amount::MAX_MONEY, |sum| {
+                    sum.min(bitcoin::Amount::MAX_MONEY)
+                })
+        };
+
+        let mut conflicts: Vec<bitcoin::Txid> = prev_coins
+            .values()
+            .filter_map(|coin| coin.spend_txid)
+            .collect();
+        conflicts.sort_unstable();
+        conflicts.dedup();
+        if conflicts.is_empty() {
+            conflicts.push(*txid);
+        }
+
+        let mut min_feerate_vb = 1;
+        let mut replaced_fee = bitcoin::Amount::ZERO;
+        for conflict in &conflicts {
+            let tx = if conflict == txid {
+                // Sized as relayed, with its witnesses: the copy the poller stored, else the
+                // stored PSBT finalized, for a broadcast the poller has not caught up with. Short
+                // of both, the unsigned transaction understates its size and so overstates its
+                // feerate: the replacement then pays more than it must, never less.
+                tx_getter
+                    .get_tx(txid)
+                    .or_else(|| {
+                        // Only finalized to be sized, by the plain finalizer: the Bitcoin Blake2b
+                        // one logs replay warnings that are only meant for a broadcast.
+                        let mut psbt = prev_psbt
+                            .filter(|_| !self.config.bitcoin_config.chain.is_blake2b())?
+                            .clone();
+                        psbt.finalize_mut(&self.secp).ok()?;
+                        Some(psbt.extract_tx_unchecked_fee_rate())
+                    })
+                    .or_else(|| Some(prev_tx.clone()))
+            } else {
+                tx_getter.get_tx(conflict)
+            };
+            match tx.as_ref().and_then(&price) {
+                Some((fee, vsize)) => {
+                    // The feerate is rounded down, so one more is strictly above it.
+                    if let Some(floor) = fee
+                        .to_sat()
+                        .checked_div(vsize)
+                        .and_then(|feerate| feerate.checked_add(1))
+                    {
+                        min_feerate_vb = std::cmp::max(min_feerate_vb, floor);
+                    }
+                    replaced_fee = add_fee(replaced_fee, fee);
+                }
+                None => log::warn!(
+                    "Cannot price {} from our records: the replacement of {} may pay too little \
+                     to be relayed",
+                    conflict,
+                    txid
+                ),
+            }
+        }
+
+        // Our own transactions spending their outputs are evicted along with them, so their fees
+        // count towards what the replacement must pay as well.
+        let mut seen: HashSet<bitcoin::Txid> = conflicts.iter().copied().collect();
+        let mut parents = conflicts;
+        while let Some(parent) = parents.pop() {
+            for child in spending
+                .values()
+                .filter(|coin| coin.outpoint.txid == parent)
+                .filter_map(|coin| coin.spend_txid)
+            {
+                if !seen.insert(child) {
+                    continue;
+                }
+                match tx_getter.get_tx(&child).as_ref().and_then(&price) {
+                    Some((fee, _)) => replaced_fee = add_fee(replaced_fee, fee),
+                    None => log::warn!(
+                        "Cannot price {}, which spends from {}: the replacement of {} may pay too \
+                         little to be relayed",
+                        child,
+                        parent,
+                        txid
+                    ),
+                }
+                parents.push(child);
+            }
+        }
+
+        log::info!(
+            "Backend cannot see the mempool: the replacement of {} must pay at least {} sat/vb \
+             and more than {} sat of replaced fees, per our records",
+            txid,
+            min_feerate_vb,
+            replaced_fee.to_sat()
+        );
+        (min_feerate_vb, replaced_fee)
     }
 }
 
@@ -1419,8 +1571,9 @@ impl DaemonControl {
             return Err(CommandError::RbfError(RbfErrorInfo::SuperfluousFeerate));
         }
 
-        let prev_tx = if let Some(psbt) = db_conn.spend_tx(txid) {
-            psbt.unsigned_tx
+        let prev_psbt = db_conn.spend_tx(txid);
+        let prev_tx = if let Some(psbt) = &prev_psbt {
+            psbt.unsigned_tx.clone()
         } else {
             db_conn
                 .coins(&[CoinStatus::Spending], &[])
@@ -1459,39 +1612,52 @@ impl DaemonControl {
         // https://github.com/bitcoin/bitcoin/blob/master/doc/policy/mempool-replacements.md). By
         // default (ie if the transaction we are replacing was dropped from the mempool) there is
         // no minimum absolute fee and the minimum feerate is 1, the minimum relay feerate.
-        let (min_feerate_vb, descendant_fees) = self
-            .bitcoin
-            .mempool_spenders_result(&prev_outpoints)
-            // An unreachable node is not "the replaced transaction left the
-            // mempool": that would drop the RBF minimums (#594).
-            .map_err(CommandError::MempoolUnavailable)?
-            .into_iter()
-            .try_fold(
-                (1, bitcoin::Amount::from_sat(0)),
-                |(min_feerate, descendant_fee), entry| {
-                    // A zero size or an overflowing fee is an unusable backend
-                    // answer: an error, not a panic under the backend lock (#597).
-                    let unusable = || {
-                        CommandError::MempoolUnavailable(format!(
-                            "unusable mempool entry while replacing {}: {:?}",
-                            txid, entry
+        let (min_feerate_vb, descendant_fees) = if self.bitcoin.sees_mempool() {
+            self.bitcoin
+                .mempool_spenders_result(&prev_outpoints)
+                // An unreachable node is not "the replaced transaction left the
+                // mempool": that would drop the RBF minimums (#594).
+                .map_err(CommandError::MempoolUnavailable)?
+                .into_iter()
+                .try_fold(
+                    (1, bitcoin::Amount::from_sat(0)),
+                    |(min_feerate, descendant_fee), entry| {
+                        // A zero size or an overflowing fee is an unusable backend
+                        // answer: an error, not a panic under the backend lock (#597).
+                        let unusable = || {
+                            CommandError::MempoolUnavailable(format!(
+                                "unusable mempool entry while replacing {}: {:?}",
+                                txid, entry
+                            ))
+                        };
+                        let entry_feerate = entry
+                            .fees
+                            .base
+                            .checked_div(entry.vsize)
+                            .and_then(|feerate| feerate.to_sat().checked_add(1))
+                            .ok_or_else(unusable)?;
+                        let descendant_fee = descendant_fee
+                            .checked_add(entry.fees.descendant)
+                            .ok_or_else(unusable)?;
+                        Ok::<_, CommandError>((
+                            std::cmp::max(min_feerate, entry_feerate),
+                            descendant_fee,
                         ))
-                    };
-                    let entry_feerate = entry
-                        .fees
-                        .base
-                        .checked_div(entry.vsize)
-                        .and_then(|feerate| feerate.to_sat().checked_add(1))
-                        .ok_or_else(unusable)?;
-                    let descendant_fee = descendant_fee
-                        .checked_add(entry.fees.descendant)
-                        .ok_or_else(unusable)?;
-                    Ok::<_, CommandError>((
-                        std::cmp::max(min_feerate, entry_feerate),
-                        descendant_fee,
-                    ))
-                },
-            )?;
+                    },
+                )?
+        } else {
+            // This backend's mempool always reads empty, which would pass for "dropped" and price
+            // the replacement at 1 sat/vb, below the transaction it replaces: the network would
+            // refuse it. Price it from what our own records show spending these coins instead.
+            self.replacement_minimums_from_records(
+                &mut db_conn,
+                &mut tx_getter,
+                txid,
+                &prev_tx,
+                prev_psbt.as_ref(),
+                &prev_coins,
+            )
+        };
         // Check replacement transaction's target feerate, if set, is high enough,
         // and otherwise set it to the min feerate found above.
         let feerate_vb = if is_cancel {
@@ -3765,6 +3931,248 @@ mod tests {
             bip32::ChildNumber::from(CHANGE_COMMIT_CONFLICT_LIMIT as u32)
         );
         daemon.shutdown();
+    }
+
+    /// The amount [`spend_in_mempool`] pays out of the wallet.
+    const PAYMENT: u64 = 100_000;
+
+    /// A wallet with two confirmed coins, the first spent at `feerate_vb` to pay [`PAYMENT`] out
+    /// with change. Our records show that spend as broadcast and unconfirmed: its PSBT is stored
+    /// and the coin is marked as spent by it. Its signed transaction is returned rather than
+    /// stored, the caller deciding whether the poller has seen it yet.
+    fn spend_in_mempool(
+        bitcoind: DummyBitcoind,
+        feerate_vb: u64,
+    ) -> (DummyCoincube, Psbt, bitcoin::Transaction) {
+        let ms = DummyCoincube::new(bitcoind, DummyDatabase::new());
+        let control = ms.control();
+        let funding = funding_tx(control, &[(0, 300_000, 13, false), (1, 200_000, 14, false)]);
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&funding));
+        let coins: Vec<Coin> = [(0u32, 300_000u64, 13u32), (1, 200_000, 14)]
+            .iter()
+            .map(|&(vout, amount, index)| Coin {
+                outpoint: bitcoin::OutPoint::new(funding.compute_txid(), vout),
+                is_immature: false,
+                block_info: Some(BlockInfo { height: 1, time: 1 }),
+                amount: bitcoin::Amount::from_sat(amount),
+                derivation_index: index.into(),
+                is_change: false,
+                spend_txid: None,
+                spend_block: None,
+                is_from_self: false,
+            })
+            .collect();
+        db_conn.new_unspent_coins(&coins);
+        let destination =
+            bitcoin::Address::from_str("bc1qnsexk3gnuyayu92fc3tczvc7k62u22a22ua2kv").unwrap();
+        let psbt = replacement(control.create_spend(
+            &HashMap::from([(destination, PAYMENT)]),
+            &[coins[0].outpoint],
+            feerate_vb,
+            None,
+        ));
+        db_conn.store_spend(&psbt);
+        db_conn.spend_coins(&[(coins[0].outpoint, psbt.unsigned_tx.compute_txid())]);
+        let signed = with_witnesses(psbt.unsigned_tx.clone());
+        (ms, psbt, signed)
+    }
+
+    /// `tx` with witnesses standing in for its signatures, giving it a signed transaction's size.
+    fn with_witnesses(mut tx: bitcoin::Transaction) -> bitcoin::Transaction {
+        for txin in &mut tx.input {
+            txin.witness = Witness::from_slice(&[vec![0; 72], vec![0; 70]]);
+        }
+        tx
+    }
+
+    /// The PSBT of a spend or replacement that was successfully created.
+    fn replacement(result: Result<CreateSpendResult, CommandError>) -> Psbt {
+        match result {
+            Ok(CreateSpendResult::Success { psbt, .. }) => psbt,
+            other => panic!("expected a transaction, got {:?}", other),
+        }
+    }
+
+    fn vsize(tx: &bitcoin::Transaction) -> u64 {
+        tx.vsize().try_into().unwrap()
+    }
+
+    /// Esplora cannot see the mempool and always reads it as empty, so `rbfpsbt` priced every
+    /// cancel at 1 sat/vb, under the transaction being replaced, and the network refused it. On
+    /// such a backend the replacement is priced from our own records instead.
+    #[test]
+    fn rbf_without_a_mempool_view_outbids_the_replaced_transaction() {
+        let mut esplora = DummyBitcoind::new();
+        esplora.sees_mempool = false;
+        let (ms, psbt, signed) = spend_in_mempool(esplora, 20);
+        let control = ms.control();
+        let txid = psbt.unsigned_tx.compute_txid();
+        let fee = psbt.fee().unwrap().to_sat();
+        let floor = fee / vsize(&signed) + 1;
+
+        // Before the poller stores the signed transaction, the unsigned one stands in for it. It
+        // lacks witnesses, so it overstates the feerate: the replacement pays more, never less.
+        let unsigned_floor = fee / vsize(&psbt.unsigned_tx) + 1;
+        assert!(unsigned_floor > floor);
+        assert_eq!(
+            control.rbf_psbt(&txid, false, Some(unsigned_floor - 1)),
+            Err(CommandError::RbfError(RbfErrorInfo::TooLowFeerate(
+                unsigned_floor - 1,
+                unsigned_floor
+            )))
+        );
+
+        // Once stored, the signed transaction's own feerate is the one to beat (rule #6).
+        control
+            .db()
+            .lock()
+            .unwrap()
+            .connection()
+            .new_txs(std::slice::from_ref(&signed));
+        assert_eq!(
+            control.rbf_psbt(&txid, false, Some(floor - 1)),
+            Err(CommandError::RbfError(RbfErrorInfo::TooLowFeerate(
+                floor - 1,
+                floor
+            )))
+        );
+        let bump = replacement(control.rbf_psbt(&txid, false, Some(floor)));
+        assert!(bump.fee().unwrap().to_sat() >= fee + vsize(&bump.unsigned_tx));
+
+        // A cancel pays more than the transaction it replaces, plus its own relay (rules #3, #4).
+        // Being smaller than that transaction, it then pays a higher feerate too (rule #6).
+        let cancel = replacement(control.rbf_psbt(&txid, true, None));
+        assert_eq!(
+            cancel.unsigned_tx.output.len(),
+            1,
+            "a cancel pays us back only"
+        );
+        assert_eq!(
+            cancel.unsigned_tx.input[0].previous_output,
+            psbt.unsigned_tx.input[0].previous_output
+        );
+        assert!(vsize(&cancel.unsigned_tx) < vsize(&psbt.unsigned_tx));
+        assert!(cancel.fee().unwrap().to_sat() >= fee + vsize(&cancel.unsigned_tx));
+        ms.shutdown();
+
+        // A backend that sees the mempool is trusted when it reads empty: the transaction left
+        // the mempool, nothing is left to outbid. That is how every cancel was priced on Esplora.
+        let (ms, psbt, signed) = spend_in_mempool(DummyBitcoind::new(), 20);
+        let control = ms.control();
+        let txid = psbt.unsigned_tx.compute_txid();
+        control
+            .db()
+            .lock()
+            .unwrap()
+            .connection()
+            .new_txs(std::slice::from_ref(&signed));
+        let cancel = replacement(control.rbf_psbt(&txid, true, None));
+        assert!(cancel.fee().unwrap() < psbt.fee().unwrap());
+        ms.shutdown();
+    }
+
+    /// Our own transactions spending from the replaced one are evicted with it, so the
+    /// replacement must pay their fees as well (rule #3). Without a mempool view, they are found
+    /// in our records.
+    #[test]
+    fn rbf_without_a_mempool_view_pays_for_our_descendants() {
+        const CHILD_FEE: u64 = 5_000;
+        let mut esplora = DummyBitcoind::new();
+        esplora.sees_mempool = false;
+        let (ms, psbt, signed) = spend_in_mempool(esplora, 20);
+        let control = ms.control();
+        let txid = psbt.unsigned_tx.compute_txid();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&signed));
+
+        // The change was spent before the transaction creating it confirmed.
+        let (vout, change) = psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .enumerate()
+            .find(|(_, txo)| txo.value.to_sat() != PAYMENT)
+            .unwrap();
+        let change_outpoint = bitcoin::OutPoint::new(txid, vout.try_into().unwrap());
+        db_conn.new_unspent_coins(&[Coin {
+            outpoint: change_outpoint,
+            is_immature: false,
+            block_info: None,
+            amount: change.value,
+            derivation_index: 0.into(),
+            is_change: true,
+            spend_txid: None,
+            spend_block: None,
+            is_from_self: true,
+        }]);
+        let child = with_witnesses(bitcoin::Transaction {
+            version: TxVersion::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: change_outpoint,
+                script_sig: ScriptBuf::new(),
+                sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                witness: Witness::new(),
+            }],
+            output: vec![TxOut {
+                value: change.value - Amount::from_sat(CHILD_FEE),
+                script_pubkey: ScriptBuf::from_bytes([vec![0x51, 0x20], vec![0xcd; 32]].concat()),
+            }],
+        });
+        db_conn.new_txs(std::slice::from_ref(&child));
+        db_conn.spend_coins(&[(change_outpoint, child.compute_txid())]);
+
+        let cancel = replacement(control.rbf_psbt(&txid, true, None));
+        assert!(
+            cancel.fee().unwrap().to_sat()
+                >= psbt.fee().unwrap().to_sat() + CHILD_FEE + vsize(&cancel.unsigned_tx)
+        );
+        ms.shutdown();
+    }
+
+    /// Our records may show the coins spent by another transaction than the one asked to be
+    /// replaced: a fee bump that replaced it already. That one is in the mempool and is the one to
+    /// outbid, while the transaction it replaced is not paid for a second time.
+    #[test]
+    fn rbf_without_a_mempool_view_outbids_what_our_records_show_spending_the_coins() {
+        let mut esplora = DummyBitcoind::new();
+        esplora.sees_mempool = false;
+        let (ms, psbt, signed) = spend_in_mempool(esplora, 20);
+        let control = ms.control();
+        let txid = psbt.unsigned_tx.compute_txid();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&signed));
+
+        let bump = replacement(control.rbf_psbt(&txid, false, Some(40)));
+        let bump_txid = bump.unsigned_tx.compute_txid();
+        let signed_bump = with_witnesses(bump.unsigned_tx.clone());
+        db_conn.store_spend(&bump);
+        db_conn.new_txs(std::slice::from_ref(&signed_bump));
+        db_conn.unspend_coins(&[psbt.unsigned_tx.input[0].previous_output]);
+        db_conn.spend_coins(
+            &bump
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|txin| (txin.previous_output, bump_txid))
+                .collect::<Vec<_>>(),
+        );
+
+        let bump_fee = bump.fee().unwrap().to_sat();
+        let floor = bump_fee / vsize(&signed_bump) + 1;
+        assert_eq!(
+            control.rbf_psbt(&txid, false, Some(floor - 1)),
+            Err(CommandError::RbfError(RbfErrorInfo::TooLowFeerate(
+                floor - 1,
+                floor
+            )))
+        );
+        let cancel = replacement(control.rbf_psbt(&txid, true, None));
+        let cancel_fee = cancel.fee().unwrap().to_sat();
+        assert!(cancel_fee >= bump_fee + vsize(&cancel.unsigned_tx));
+        assert!(cancel_fee < bump_fee + psbt.fee().unwrap().to_sat());
+        ms.shutdown();
     }
 
     #[test]
