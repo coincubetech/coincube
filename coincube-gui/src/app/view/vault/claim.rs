@@ -220,11 +220,12 @@ fn preconditions_view<'a>(
 
     Column::new()
         .spacing(20)
-        .push(header("Step 1 of 2 — make your Bitcoin coins unspendable on Bitcoin Blake2b"))
+        .push(header("Step 1 of 2 — split on Bitcoin"))
+        .push(p1_regular("Your paired Blake2b Cube is set up. Now check the coins and network fee, then review and sign the Bitcoin transfer. Creating the Cube alone did not split or claim coins."))
         .push(p1_regular(
             "Step 1 sends every coin this Vault held before the fork back to itself, with a small marker \
              that Bitcoin Blake2b rejects while its replay protection is active. Nothing leaves the Vault. \
-             Step 2, sweeping the same coins on Bitcoin Blake2b, is a later release.",
+             After this transaction has six Bitcoin confirmations, continue in the paired Bitcoin Blake2b Cube to review and sign step 2.",
         ))
         .push(
             Container::new(checklist)

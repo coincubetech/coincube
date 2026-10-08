@@ -196,11 +196,12 @@ pub use claim::ClaimSource;
 pub use descriptor::{KeySource, KeySourceKind, KeychainKeyOwner, PathKind, PathSequence};
 pub use message::Message;
 use step::{
-    BackupDescriptor, BackupMnemonic, ChooseBackend, ChooseDescriptorTemplate, CoincubeConnectStep,
-    DefineDescriptor, DefineNode, DescriptorTemplateDescription, Final, ImportDescriptor,
-    ImportRemoteWallet, InheritanceRestoreStep, InternalBitcoindStep, OwnerKeychainRestoreStep,
-    RecoverMnemonic, RecoveryKitRestoreStep, RegisterDescriptor, RemoteBackendLogin,
-    RestorePinSetupStep, RestoreScope, SelectBitcoindTypeStep, Step, WalletAlias,
+    BackupDescriptor, BackupMnemonic, ChooseBackend, ChooseDescriptorTemplate, ClaimOverview,
+    CoincubeConnectStep, DefineDescriptor, DefineNode, DescriptorTemplateDescription, Final,
+    ImportDescriptor, ImportRemoteWallet, InheritanceRestoreStep, InternalBitcoindStep,
+    OwnerKeychainRestoreStep, RecoverMnemonic, RecoveryKitRestoreStep, RegisterDescriptor,
+    RemoteBackendLogin, RestorePinSetupStep, RestoreScope, SelectBitcoindTypeStep, Step,
+    WalletAlias,
 };
 
 #[derive(Debug, Clone)]
@@ -279,6 +280,8 @@ pub struct SourceCube {
 }
 
 pub struct Installer {
+    pub(crate) navigation_error: Option<String>,
+    pub(crate) claim_target_saved: bool,
     pub network: bitcoin::Network,
     pub datadir: CoincubeDirectory,
 
@@ -661,6 +664,8 @@ impl Installer {
         let context = context;
 
         let mut installer = Installer {
+            navigation_error: None,
+            claim_target_saved: false,
             network,
             source_cube: None,
             datadir: destination_path.clone(),
@@ -687,6 +692,7 @@ impl Installer {
                     // showing it again would produce a second physical copy of
                     // one secret for no recovery benefit.
                     UserFlow::ClaimBlake2b { .. } => vec![
+                        ClaimOverview.into(),
                         RegisterDescriptor::new_import_wallet().into(),
                         CoincubeConnectStep::new().into(),
                         SelectBitcoindTypeStep::new().into(),
@@ -956,6 +962,9 @@ impl Installer {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if matches!(&message, Message::Next | Message::Previous) {
+            self.navigation_error = None;
+        }
         match message {
             Message::HardwareWallets(msg) => {
                 let update = matches!(&msg, &HardwareWalletMessage::List(_));
@@ -1140,6 +1149,43 @@ impl Installer {
                 self.progress(),
                 self.context.remote_backend.user_email(),
             );
+
+        let content = if let Some(error) = &self.navigation_error {
+            Column::new()
+                .push(
+                    coincube_ui::widget::Container::new(
+                        Column::new()
+                            .spacing(10)
+                            .push(coincube_ui::component::card::warning(error.clone()))
+                            .push(
+                                coincube_ui::component::button::secondary(
+                                    None,
+                                    "Return to Bitcoin Cube",
+                                )
+                                .on_press(Message::BackToApp(self.network)),
+                            ),
+                    )
+                    .padding(20),
+                )
+                .push(content)
+                .into()
+        } else {
+            content
+        };
+
+        let content = if self.context.claim_source.is_some() {
+            Column::new()
+                .push(
+                    coincube_ui::widget::Container::new(coincube_ui::component::text::p1_regular(
+                        "Claim Bitcoin Blake2b: prepare Cube → split on Bitcoin → claim on Blake2b",
+                    ))
+                    .padding(20),
+                )
+                .push(content)
+                .into()
+        } else {
+            content
+        };
 
         if self.network != Network::Bitcoin {
             Column::with_children(vec![network_banner(self.network).into(), content]).into()

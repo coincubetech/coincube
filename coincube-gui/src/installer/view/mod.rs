@@ -2020,6 +2020,29 @@ pub fn start_internal_bitcoind<'a>(
     )
 }
 
+pub fn claim_setup_install<'a>(
+    progress: (usize, usize),
+    email: Option<&'a str>,
+    generating: bool,
+    warning: Option<&'a String>,
+) -> Element<'a, Message> {
+    layout(
+        progress,
+        email,
+        "Prepare your Blake2b Cube",
+        Column::new().spacing(20)
+            .push(p1_regular(if generating {
+                "Creating the matching Blake2b Vault…"
+            } else {
+                "Blake2b Cube setup. The next step opens Bitcoin Claim in your original Cube."
+            }))
+            .push(warning.map(|e| card::invalid(text(e))))
+            .push(p1_regular("Setup does not submit a claim transaction. You’ll review the Bitcoin split and its network fee next.")),
+        true,
+        (!generating && warning.is_some()).then_some(Message::Previous),
+    )
+}
+
 pub fn install<'a>(
     progress: (usize, usize),
     email: Option<&'a str>,

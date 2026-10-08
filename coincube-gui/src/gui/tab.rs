@@ -1578,6 +1578,23 @@ impl Tab {
                     };
 
                     if cube.network.is_blake2b() {
+                        // Target setup is a prerequisite, not the Claim itself.
+                        // Reopen the Bitcoin source and let App re-check admission
+                        // and the persisted target before entering step one.
+                        if let Some(source) = &i.source_cube {
+                            i.claim_target_saved = true;
+                            match reopen_claim_source(&i.datadir, source) {
+                                Ok((state, task)) => {
+                                    app::claim_intent::arm(source.settings.id.clone());
+                                    self.state = state;
+                                    return task;
+                                }
+                                Err(error) => {
+                                    i.navigation_error = Some(error);
+                                    return Task::none();
+                                }
+                            }
+                        }
                         if self.pending_split_after_install {
                             self.pending_split_after_install = false;
                             let (mut home, command) =
@@ -1609,17 +1626,7 @@ impl Tab {
                             wallet_settings: settings_opt.map(|s| *s),
                             connect_client: i.context.coincube_client.clone(),
                         };
-                        // Leaving the source Cube: a completed claim opens the
-                        // *target*, so the source's unlocked signer and PIN
-                        // must not outlive the transition. `close_cube` is the
-                        // primitive the ordinary App→Home path uses (`:718`),
-                        // and it is scoped to that Cube — a newer or unrelated
-                        // session is untouched. The target's own unlock does not
-                        // read it: `PinEntry` verifies by decrypting the
-                        // target's seed file with the PIN the user types.
-                        if let Some(source) = &i.source_cube {
-                            app::session::close_cube(&source.settings.id);
-                        }
+                        // Fresh fork creation still opens the target's own PIN screen.
                         self.state =
                             unlock_state(cube, i.datadir.path().to_path_buf(), on_success, None);
                         return Task::none();
@@ -1735,57 +1742,20 @@ impl Tab {
                     // source Cube has a Vault (that is what a claim reuses) and
                     // rebuilding it Vault-less would hide it until relaunch.
                     if let Some(source) = i.source_cube.take() {
-                        let cfg = app::Config::from_file(
-                            &i.datadir
-                                .network_directory(source.settings.network)
-                                .path()
-                                .join(app::config::DEFAULT_FILE_NAME),
-                        )
-                        .expect("A gui configuration file must be present");
-                        // The same lookup the ordinary open path uses (`:1043`),
-                        // and for the same reason: `WalletId` is the checksum
-                        // *and* the timestamp, so matching on the checksum alone
-                        // can select a different Vault of the same descriptor —
-                        // a re-created one, or a pinned sibling. Cancel must
-                        // restore the Vault the Cube actually points at.
-                        let wallet_settings = vault_settings_for_cube(
-                            &i.datadir,
-                            source.settings.network,
-                            &source.settings,
-                        );
-                        // A remote-backed source has no local daemon to start:
-                        // its ordinary unlock goes to `CoincubeLiteLogin`, and
-                        // handing it to the Loader would try to bring up a
-                        // daemon for a Vault that lives on the backend. Cancel
-                        // has to restore the backend the source actually uses,
-                        // not the one most sources use.
-                        if let Some(settings) = wallet_settings
-                            .clone()
-                            .filter(|w| w.remote_backend_auth.is_some())
-                        {
-                            let (login, command) = login::CoincubeLiteLogin::new(
-                                i.datadir.clone(),
-                                source.settings.network.bitcoin_network(),
-                                settings,
-                                source.breez_client.clone(),
-                                source.spark_backend.clone(),
-                            );
-                            self.state = State::Login(login);
-                            return command.map(Message::Login);
+                        match reopen_claim_source(&i.datadir, &source) {
+                            Ok((state, task)) => {
+                                if i.claim_target_saved {
+                                    app::claim_intent::arm(source.settings.id.clone());
+                                }
+                                self.state = state;
+                                return task;
+                            }
+                            Err(error) => {
+                                i.source_cube = Some(source);
+                                i.navigation_error = Some(error);
+                                return Task::none();
+                            }
                         }
-                        let (loader, command) = Loader::new(
-                            i.datadir.clone(),
-                            cfg,
-                            source.settings.network.bitcoin_network(),
-                            None,
-                            None,
-                            wallet_settings,
-                            source.settings.clone(),
-                            source.breez_client.clone(),
-                            source.spark_backend.clone(),
-                        );
-                        self.state = State::Loader(loader);
-                        return command.map(Message::Load);
                     }
                     // Go back to app without vault using stored cube settings and breez_client
                     if let Some(cube) = &i.cube_settings {
@@ -3592,6 +3562,60 @@ pub(crate) fn installer_exit_identity(i: &Installer) -> Option<RestoreCubeIdenti
                 .then(|| i.context.wallet_alias.clone())
         }))
         .map(|(uuid, name)| RestoreCubeIdentity { uuid, name })
+}
+
+/// Reopen the source through its normal local or remote Vault loader.
+/// This preserves the source's wallet identity and parked SDK handles.
+fn reopen_claim_source(
+    datadir: &CoincubeDirectory,
+    source: &installer::SourceCube,
+) -> Result<(State, Task<Message>), String> {
+    let cfg = app::Config::from_file(
+        &datadir
+            .network_directory(source.settings.network)
+            .path()
+            .join(app::config::DEFAULT_FILE_NAME),
+    )
+    .map_err(|error| format!("Couldn’t reopen your Bitcoin Cube: {error}. Restore its gui.toml configuration, then try returning again."))?;
+    // The same lookup the ordinary open path uses (`:1043`),
+    // and for the same reason: `WalletId` is the checksum
+    // *and* the timestamp, so matching on the checksum alone
+    // can select a different Vault of the same descriptor —
+    // a re-created one, or a pinned sibling. The return must
+    // restore the Vault the Cube actually points at.
+    let wallet_settings =
+        vault_settings_for_cube(datadir, source.settings.network, &source.settings);
+    // A remote-backed source has no local daemon to start:
+    // its ordinary unlock goes to `CoincubeLiteLogin`, and
+    // handing it to the Loader would try to bring up a
+    // daemon for a Vault that lives on the backend. Cancel
+    // must restore the backend the source actually uses,
+    // not the one most sources use.
+    if let Some(settings) = wallet_settings
+        .clone()
+        .filter(|w| w.remote_backend_auth.is_some())
+    {
+        let (login, command) = login::CoincubeLiteLogin::new(
+            datadir.clone(),
+            source.settings.network.bitcoin_network(),
+            settings,
+            source.breez_client.clone(),
+            source.spark_backend.clone(),
+        );
+        return Ok((State::Login(login), command.map(Message::Login)));
+    }
+    let (loader, command) = Loader::new(
+        datadir.clone(),
+        cfg,
+        source.settings.network.bitcoin_network(),
+        None,
+        None,
+        wallet_settings,
+        source.settings.clone(),
+        source.breez_client.clone(),
+        source.spark_backend.clone(),
+    );
+    Ok((State::Loader(loader), command.map(Message::Load)))
 }
 
 /// The seed credentials the freshly minted Cube records: which master signer
@@ -5683,6 +5707,7 @@ mod unlock_routing_tests {
 #[cfg(test)]
 mod fork_completion_tests {
     use super::*;
+    use crate::app::settings::CubeSettings;
     use crate::chain::ChainId;
 
     #[test]
@@ -5717,6 +5742,127 @@ mod fork_completion_tests {
         assert!(!tab.pending_split_after_install);
         assert!(matches!(tab.state, State::Home(_)));
         let _ = std::fs::remove_dir_all(root_path);
+    }
+
+    /// Exercise the real save completion seam without starting a daemon or
+    /// touching an existing Cube. Only a successful, current Claim setup
+    /// may arm navigation to step one in the Bitcoin source.
+    #[test]
+    fn claim_setup_returns_to_bitcoin_only_after_current_successful_save() {
+        let _guard = app::session::test_guard();
+        for outcome in [
+            "success",
+            "save-failed",
+            "stale",
+            "cancel",
+            "missing-config",
+            "cancel-missing-config",
+        ] {
+            let root_path =
+                std::env::temp_dir().join(format!("claim-setup-return-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(root_path.clone());
+            let source_dir = root.network_directory(ChainId::Bitcoin);
+            source_dir.init().unwrap();
+            if !outcome.ends_with("missing-config") {
+                app::Config::new(false)
+                    .to_file(&source_dir.path().join(app::config::DEFAULT_FILE_NAME))
+                    .unwrap();
+            }
+            let source = CubeSettings::new_with_raw_id(
+                "claim-source".into(),
+                "Original Bitcoin Cube".into(),
+                ChainId::Bitcoin,
+            );
+            let target = CubeSettings::new_with_raw_id(
+                "claim-target".into(),
+                "Paired Blake2b Cube".into(),
+                ChainId::BitcoinBlake2b,
+            );
+            let (mut installer, _) = Installer::new(
+                root,
+                bitcoin::Network::Bitcoin,
+                None,
+                installer::UserFlow::CreateWallet,
+                true,
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+            installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+            installer.source_cube = Some(installer::SourceCube {
+                settings: source.clone(),
+                breez_client: None,
+                spark_backend: None,
+            });
+            let mut tab = Box::new(Tab::new(1, State::Installer(installer)));
+            app::claim_intent::clear();
+            let msg = if outcome.starts_with("cancel") {
+                Message::Install(installer::Message::BackToApp(bitcoin::Network::Bitcoin))
+            } else {
+                Message::ForkInstallCompleted(
+                    if outcome == "stale" {
+                        tab.fork_session_generation.wrapping_sub(1)
+                    } else {
+                        tab.fork_session_generation
+                    },
+                    installer::Message::CubeSaved(
+                        if outcome == "save-failed" {
+                            Err("synthetic save failure".into())
+                        } else {
+                            Ok((target, None, None))
+                        },
+                        None,
+                        None,
+                    ),
+                )
+            };
+            // Drop the returned task: navigation is under test; no daemon starts.
+            let _ = tab.update(msg);
+            assert_eq!(
+                app::claim_intent::take(&source.id),
+                outcome == "success",
+                "{outcome}"
+            );
+            if outcome == "success" || outcome == "cancel" {
+                let State::Loader(loader) = &tab.state else {
+                    panic!("{}: must reopen Bitcoin", outcome)
+                };
+                assert_eq!(loader.cube_settings.id, source.id);
+                assert_eq!(loader.cube_settings.network, ChainId::Bitcoin);
+            } else {
+                assert!(matches!(tab.state, State::Installer(_)), "{}", outcome);
+                if outcome.ends_with("missing-config") {
+                    let State::Installer(installer) = &tab.state else {
+                        unreachable!()
+                    };
+                    assert!(installer
+                        .navigation_error
+                        .as_deref()
+                        .unwrap()
+                        .contains("reopen your Bitcoin Cube"));
+                    let _ = installer.view();
+                }
+            }
+            if outcome.ends_with("missing-config") {
+                app::Config::new(false)
+                    .to_file(&source_dir.path().join(app::config::DEFAULT_FILE_NAME))
+                    .unwrap();
+                let _ = tab.update(Message::Install(installer::Message::BackToApp(
+                    bitcoin::Network::Bitcoin,
+                )));
+                assert!(matches!(tab.state, State::Loader(_)));
+                assert_eq!(
+                    app::claim_intent::take(&source.id),
+                    outcome == "missing-config",
+                    "only completed setup resumes Claim on retry"
+                );
+            }
+            drop(tab);
+            std::fs::remove_dir_all(root_path).unwrap();
+        }
     }
 
     async fn outputs(task: Task<Message>) -> Vec<Message> {
