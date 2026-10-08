@@ -342,7 +342,8 @@ pub struct BitcoinD {
     /// How many times we'll retry upon failure to send a request.
     retries: usize,
     /// Exact-chain admission for a local Blake2b wallet; never inferred from encoding.
-    local_fork_chain: Option<coincube_core::chain::ChainId>,
+    pub(super) local_fork_chain: Option<coincube_core::chain::ChainId>,
+    pub(super) record_replay: crate::bitcoin::WalletRecordReplay,
 }
 
 macro_rules! params {
@@ -433,6 +434,7 @@ impl BitcoinD {
             config: config.clone(),
             retries: 0,
             local_fork_chain: None,
+            record_replay: Default::default(),
         };
         log::info!("Checking the connection to bitcoind.");
         dummy_bitcoind.check_connection()?;
@@ -475,6 +477,7 @@ impl BitcoinD {
             config: config.clone(),
             retries: BITCOIND_RETRY_LIMIT,
             local_fork_chain: None,
+            record_replay: Default::default(),
         })
     }
 
@@ -1020,6 +1023,31 @@ impl BitcoinD {
             Err(e) if e.is_unknown_to_wallet() => Ok(false),
             Err(e) => Err(e),
         }
+    }
+
+    /// Proof import and bounded scans preserve records without changing the
+    /// descriptor timestamp. Confirm the record against the active chain rather
+    /// than treating that timestamp as evidence of missing history.
+    pub(crate) fn records_confirmed_transaction(
+        &self,
+        txid: &bitcoin::Txid,
+        height: i32,
+    ) -> Result<bool, BitcoindError> {
+        let transaction = match self.make_faillible_wallet_request(
+            "gettransaction",
+            params!(Json::String(txid.to_string())),
+        ) {
+            Ok(transaction) => transaction,
+            Err(e) if e.is_unknown_to_wallet() => return Ok(false),
+            Err(e) => return Err(e),
+        };
+        if transaction["txid"].as_str() != Some(txid.to_string().as_str())
+            || transaction["confirmations"].as_i64().unwrap_or(0) <= 0
+        {
+            return Ok(false);
+        }
+        let hash = self.get_block_hash_result(height)?;
+        Ok(transaction["blockhash"].as_str() == Some(hash.to_string().as_str()))
     }
 
     /// The earliest point any of this wallet's descriptors was scanned from.

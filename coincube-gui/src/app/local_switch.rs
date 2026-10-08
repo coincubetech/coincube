@@ -235,7 +235,7 @@ pub fn auto_switch_hold(
 }
 
 /// The same authentication used for the node sync probe and its wallet probe.
-pub(super) async fn rpc_credentials(
+pub(crate) async fn rpc_credentials(
     cfg: &coincubed::config::BitcoindConfig,
 ) -> Result<(String, String), String> {
     use coincubed::config::BitcoindRpcAuth;

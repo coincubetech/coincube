@@ -469,8 +469,8 @@ fn heal_scan_window(
         .connection()
         .coins(&[], &[]);
     let confirmed: Vec<_> = coins
-        .into_iter()
-        .filter_map(|(outpoint, coin)| coin.block_info.map(|block| (block, outpoint)))
+        .iter()
+        .filter_map(|(outpoint, coin)| coin.block_info.map(|block| (block, *outpoint)))
         .collect();
     let Some((oldest, newest_outpoint)) = scan_probe_points(&confirmed) else {
         return;
@@ -479,6 +479,30 @@ fn heal_scan_window(
     let Some(scanned_from) = bitcoind.earliest_descriptor_timestamp() else {
         return;
     };
+    // Historical proof imports and bounded scans leave descriptor timestamps
+    // at "now". If every confirmed funding/spending record is present on the
+    // active chain, asking for an unavailable time-based rescan would repeat
+    // forever. A recent funding record alone cannot establish this coverage.
+    if history_outside_scan_window(scanned_from, Some(oldest)).is_some() {
+        let mut required = std::collections::BTreeMap::new();
+        for (outpoint, coin) in &coins {
+            if let Some(block) = coin.block_info {
+                required.insert(outpoint.txid, block.height);
+            }
+            if let (Some(txid), Some(block)) = (coin.spend_txid, coin.spend_block) {
+                required.insert(txid, block.height);
+            }
+        }
+        let all_recorded = required.iter().all(|(txid, height)| {
+            bitcoind
+                .records_confirmed_transaction(txid, *height)
+                .unwrap_or(false)
+        });
+        if all_recorded {
+            log::debug!("Local wallet records all known confirmed history; descriptor timestamps need no repair");
+            return;
+        }
+    }
     // Asked only when there is something to ask about, and only about one coin:
     // a wallet RPC per start, not per coin.
     let newest_coin_known = match bitcoind.knows_transaction(&newest_outpoint.txid) {

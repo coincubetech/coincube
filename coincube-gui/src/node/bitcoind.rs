@@ -1232,8 +1232,8 @@ pub const MAX_CONNECTIONS_DEFAULT: u16 = 20;
 
 /// bitcoind's minimum legal `prune` target, in MiB. The managed node is *always*
 /// pruned (invariant I1: no "keep everything" option), so this is the floor for
-/// every prune choice — no UI path emits a smaller value or `prune=0`. Enforced
-/// by input validation before a value is written.
+/// every storage-size choice. The history controller uses `prune=1` for
+/// managed deletion; no UI path emits `prune=0`.
 pub const PRUNE_MIN: u32 = 550;
 
 /// "Minimal" prune preset — bitcoind's floor, 550 MB of block data.
@@ -2255,11 +2255,42 @@ impl Bitcoind {
         // It runs before the first irreversible step below — stopping a
         // mismatched running node — so a refusal leaves that node running
         // rather than stopped with no replacement started.
+        let history_lease = if chain.is_blake2b() {
+            None
+        } else {
+            Some(
+                crate::node::history::HistoryLease::acquire(&crate::node::retention::directory(
+                    coincube_datadir,
+                    network,
+                ))
+                .map_err(StartInternalBitcoindError::ConfigUnavailable)?,
+            )
+        };
+        let rolling = if chain.is_blake2b() {
+            None
+        } else {
+            crate::node::retention::load(coincube_datadir, network)
+                .map_err(StartInternalBitcoindError::ConfigUnavailable)?
+        };
+        let explicit_wallet_loading = rolling.is_some()
+            || (!chain.is_blake2b()
+                && crate::node::retention::requires_wallet_bootstrap(coincube_datadir, network)
+                    .map_err(StartInternalBitcoindError::ConfigUnavailable)?);
         crate::node::managed_conf::update_managed_conf(coincube_datadir, family, |txn| {
-            Ok(((), txn.conf.clone()))
+            let mut conf = txn.conf.clone();
+            if rolling.is_some() {
+                if let Some(section) = conf
+                    .as_mut()
+                    .and_then(|conf| conf.networks.get_mut(&network))
+                {
+                    section.prune = 1;
+                }
+            }
+            Ok(((), conf))
         })
         .map(|outcome| outcome.logged("rewriting the managed bitcoin.conf before the spawn"))
         .map_err(|e| StartInternalBitcoindError::ConfigUnavailable(e.to_string()))?;
+        drop(history_lease);
         if let Some((running, running_flavor)) = running {
             // A global flavour switch — e.g. Core is up for existing Vaults and
             // the user just picked Knots: stop it so we can relaunch the
@@ -2306,6 +2337,9 @@ impl Bitcoind {
                 "-listenonion=0".into(),
                 "-discover=0".into(),
             ]);
+        }
+        if explicit_wallet_loading {
+            args.push("-nowallet".into());
         }
         args.extend(
             exe_flavor
