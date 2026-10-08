@@ -1385,6 +1385,32 @@ impl State for BitcoindSettingsState {
                 }
             }
 
+            // Recovery must be available while Connect is still active: its
+            // pending managed node may need history before it can be selected.
+            if self.pending_node_setup.is_none()
+                && self
+                    .full_config
+                    .as_ref()
+                    .and_then(crate::app::local_node_sync_config)
+                    .is_some_and(|cfg| {
+                        crate::node::retention::is_managed_endpoint(
+                            &cache.datadir_path,
+                            cache.network,
+                            cache.chain(),
+                            cfg,
+                        )
+                    })
+            {
+                setting_panels.push(
+                    view::vault::settings::wallet_history_section(
+                        &self.recovery_start,
+                        &self.retention_days,
+                        &cache.node_history,
+                    )
+                    .map(map_node_msg),
+                );
+            }
+
             if self.bitcoind_settings.is_some() || self.electrum_settings.is_some() {
                 if let Some(settings) = self.bitcoind_settings.as_ref() {
                     setting_panels.push(settings.view(cache, can_edit_bitcoind_settings).map(
@@ -1442,30 +1468,6 @@ impl State for BitcoindSettingsState {
                             &self.node_prune_mb,
                             &self.node_max_mempool_mb,
                             false,
-                        )
-                        .map(map_node_msg),
-                    );
-                }
-
-                if self.pending_node_setup.is_none()
-                    && self
-                        .full_config
-                        .as_ref()
-                        .and_then(crate::app::local_node_sync_config)
-                        .is_some_and(|cfg| {
-                            crate::node::retention::is_managed_endpoint(
-                                &cache.datadir_path,
-                                cache.network,
-                                cache.chain(),
-                                cfg,
-                            )
-                        })
-                {
-                    setting_panels.push(
-                        view::vault::settings::wallet_history_section(
-                            &self.recovery_start,
-                            &self.retention_days,
-                            &cache.node_history,
                         )
                         .map(map_node_msg),
                     );
@@ -4073,6 +4075,87 @@ mod tests {
             state.node_switch_processing,
             "the confirmed switch was dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn connect_with_pending_managed_node_exposes_history_recovery() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let cache = Cache::default();
+        let managed = bitcoind_config(BitcoindRpcAuth::CookieFile(
+            crate::node::bitcoind::internal_bitcoind_cookie_path(
+                &crate::node::bitcoind::internal_bitcoind_datadir(&cache.datadir_path),
+                &cache.network,
+            ),
+        ));
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(managed.clone());
+        let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Overview);
+        for (local, external, blake2b, expected) in [
+            (false, false, false, true),
+            (true, false, false, true),
+            (false, true, false, false),
+            (false, false, true, false),
+        ] {
+            let mut cfg = cfg.clone();
+            let mut cache = cache.clone();
+            if local {
+                cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(managed.clone()));
+            }
+            if external {
+                cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(
+                    PathBuf::from("/tmp/external-node/.cookie"),
+                )));
+            }
+            if blake2b {
+                cache.fiat_chain = crate::chain::ChainId::BitcoinBlake2b;
+            }
+            let state = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+            if !local {
+                assert!(state.bitcoind_settings.is_none());
+                assert!(state.electrum_settings.is_none());
+            }
+            let mut element = state.view(&menu, &cache);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 2400.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            for label in [
+                "Wallet history recovery",
+                "Import Connect history",
+                "Rolling block retention",
+            ] {
+                assert_eq!(labels.0.iter().any(|text| text == label), expected,
+                    "missing/unsupported history controls: local={local} external={external} blake2b={blake2b}: {label}");
+            }
+        }
     }
 
     #[test]
