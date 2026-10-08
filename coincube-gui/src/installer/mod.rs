@@ -1173,20 +1173,6 @@ impl Installer {
             content
         };
 
-        let content = if self.context.claim_source.is_some() {
-            Column::new()
-                .push(
-                    coincube_ui::widget::Container::new(coincube_ui::component::text::p1_regular(
-                        "Claim Bitcoin Blake2b: prepare Cube → split on Bitcoin → claim on Blake2b",
-                    ))
-                    .padding(20),
-                )
-                .push(content)
-                .into()
-        } else {
-            content
-        };
-
         if self.network != Network::Bitcoin {
             Column::with_children(vec![network_banner(self.network).into(), content]).into()
         } else {

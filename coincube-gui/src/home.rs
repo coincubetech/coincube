@@ -935,18 +935,6 @@ impl Home {
         }
     }
 
-    /// Which claim entry the Cube at `index` offers, if any: the target
-    /// installer, or step 1 once the target exists. Same source as
-    /// [`claim_availability`](Self::claim_availability); the card's label is
-    /// derived from this, never the other way round.
-    pub(crate) fn claim_entry(&self, index: usize) -> Option<app::features::ClaimEntry> {
-        if self.has_recorded_claim_completion(index) {
-            return None;
-        }
-        self.claim_source_cube(index)
-            .and_then(app::features::claim_entry)
-    }
-
     /// Retire the Home prompt from a complete historical record only. The
     /// in-Cube Claim route stays available for fresh confirmation/reorg checks;
     /// these settings never grant signing or submission authority.
@@ -4415,12 +4403,6 @@ impl Home {
                                                         i,
                                                         signed_in,
                                                         self.cube_sync_hint(cube),
-                                                        self.claim_entry(i).map(|entry| {
-                                                            match entry {
-                                                                app::features::ClaimEntry::CreateTarget => "Claim Bitcoin Blake2b",
-                                                                app::features::ClaimEntry::Step1 => "Continue Bitcoin Blake2b claim",
-                                                            }
-                                                        }),
                                                     ))
                                                 },
                                             );
@@ -5313,10 +5295,6 @@ fn cubes_list_item<'a>(
     i: usize,
     signed_in: bool,
     sync_error: Option<String>,
-    // Whether this Cube may start a Bitcoin Blake2b claim. `None` hides the
-    // card entirely — an account without the fork has no BTCB2 at all, which
-    // is not a per-Cube state the user can act on.
-    claim: Option<&'a str>,
 ) -> Element<'a, ViewMessage> {
     // Single tri-state cube icon (Phase 1, duress mode): the Cube's
     // relationship to Connect — Sovereign (outline) → Registered (filled,
@@ -5397,12 +5375,6 @@ fn cubes_list_item<'a>(
                     .style(theme::button::secondary)
                     .padding(10)
                     .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i)))
-            }))
-            .push_maybe(claim.map(|label| {
-                Button::new(p1_regular(label))
-                    .style(theme::button::secondary)
-                    .padding(10)
-                    .on_press(ViewMessage::ClaimBlake2b(i))
             })),
     )
     .into()
@@ -8211,16 +8183,16 @@ mod tests {
     #[test]
     fn pure_home_view_helpers_build_for_local_remote_and_form_variants() {
         let mut local = cube("local-a", "Local A", Network::Bitcoin);
-        let _ = cubes_list_item(&local, 0, false, None, None);
+        let _ = cubes_list_item(&local, 0, false, None);
         // Sovereign + signed in, with the server's refusal recorded: the
         // warning variant of the sync tooltip.
-        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()), None);
+        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()));
 
         local.remote_synced = true;
-        let _ = cubes_list_item(&local, 1, true, None, None);
+        let _ = cubes_list_item(&local, 1, true, None);
 
         local.recovery_kit_last_backed_up_descriptor_fingerprint = Some("hash".to_string());
-        let _ = cubes_list_item(&local, 2, true, None, None);
+        let _ = cubes_list_item(&local, 2, true, None);
 
         let mut remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = remote_cube_list_item(&remote);
@@ -10227,7 +10199,6 @@ mod chain_identity_open_tests {
             serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":true}))
                 .unwrap(),
         );
-        assert!(home.claim_entry(0).is_none());
         assert!(!home.claim_availability(0).is_available());
         assert!(drain(home.update(Message::View(ViewMessage::ClaimBlake2b(0)))).is_empty());
         assert!(!app::claim_intent::take(&cube.id));
@@ -10253,7 +10224,6 @@ mod chain_identity_open_tests {
             for message in drain(home.on_focus()) {
                 let _ = home.update(message);
             }
-            assert!(home.claim_entry(0).is_some());
             assert!(home.claim_availability(0).is_available());
         }
         let late_refresh = drain(home.on_focus());
@@ -10483,7 +10453,10 @@ mod chain_identity_open_tests {
                     home.displayed_networks.contains(&ChainId::BitcoinBlake2b),
                     server && opted_in
                 );
-                assert_eq!(home.claim_entry(0).is_some(), server && opted_in);
+                assert_eq!(
+                    home.claim_availability(0).is_available(),
+                    server && opted_in
+                );
                 if !(server && opted_in) {
                     assert!(drain(home.update(Message::View(ViewMessage::SelectNetwork(
                         ChainId::BitcoinBlake2b
