@@ -2308,6 +2308,147 @@ pub fn custom_esplora_section<'a>(
 /// cap, then apply via a force-restart. Reuses the installer's shared controls so
 /// the presets/fields never drift, and adds the honesty copy about what changing
 /// each value actually does. `processing` is true while a restart is in flight.
+pub fn wallet_history_section<'a>(
+    start: &'a form::Value<String>,
+    status: &'a crate::app::node_history::Status,
+    advanced: bool,
+) -> Element<'a, NodeSettingsMessage> {
+    use crate::node::history::Phase;
+    let mut content = Column::new().spacing(15)
+        .push(text("Recover history to switch to your local node").bold().size(18))
+        .push(text("Your local wallet is missing some history. Import what Connect has already found, then check it against your node before switching.").size(14))
+        .push(text("Recommended: Import Connect history").bold())
+        .push(text("Usually the quickest option. If more history is needed, Tenshu downloads and scans the missing blocks.").size(14));
+    let mut import = button::primary(None, "Import Connect history");
+    if !status.busy
+        && status.job.as_ref().is_none_or(|job| {
+            matches!(
+                job.phase,
+                Phase::Complete | Phase::Cancelled | Phase::Paused
+            )
+        })
+    {
+        import = import.on_press(NodeSettingsMessage::ImportConnectHistory);
+    }
+    content = content.push(import).push(
+        button::transparent(
+            None,
+            if advanced {
+                "Hide advanced wallet history recovery options"
+            } else {
+                "Advanced wallet history recovery options"
+            },
+        )
+        .on_press(NodeSettingsMessage::RecoveryAdvancedToggled),
+    );
+    if advanced {
+        let mut recover = button::secondary(None, "Recover from this height or date");
+        if !status.busy
+            && status.job.as_ref().is_none_or(|job| {
+                matches!(
+                    job.phase,
+                    Phase::Complete | Phase::Cancelled | Phase::Paused
+                )
+            })
+        {
+            recover = recover.on_press(NodeSettingsMessage::RecoveryStart);
+        }
+        content = content
+            .push(form::Form::new_trimmed("Block height or YYYY-MM-DD", start, NodeSettingsMessage::RecoveryStartEdited))
+            .push(recover)
+            .push(text("Downloads and scans blocks from your chosen point. Keep Tenshu open while it runs; progress is saved if interrupted.").size(12).style(theme::text::secondary));
+    }
+    if let Some(job) = &status.job {
+        let label = match job.phase {
+            Phase::FetchingForLoad => "Downloading blocks needed to load the wallet",
+            Phase::Downloading => "Downloading blocks",
+            Phase::Scanning => "Scanning wallet transactions",
+            Phase::Reconciling => "Checking transaction and spend history",
+            Phase::Paused => "Recovery paused",
+            Phase::Complete => "Recovery scan complete",
+            Phase::Cancelled => "Recovery cancelled",
+        };
+        content = content
+            .push(text(format!(
+                "{label}: blocks {}–{} · {:.1}% scanned",
+                job.start,
+                job.target,
+                job.progress() * 100.0
+            )))
+            .push(ProgressBar::new(0.0..=1.0, job.progress()));
+        if matches!(
+            job.phase,
+            Phase::FetchingForLoad | Phase::Downloading | Phase::Scanning | Phase::Reconciling
+        ) {
+            content = content.push(
+                button::secondary(None, "Pause after this batch")
+                    .on_press(NodeSettingsMessage::RecoveryPause),
+            );
+        } else if job.phase == Phase::Paused {
+            content = content.push(
+                button::secondary(None, "Resume recovery")
+                    .on_press(NodeSettingsMessage::RecoveryResume),
+            );
+        }
+        if !matches!(job.phase, Phase::Complete | Phase::Cancelled) {
+            content = content.push(
+                button::secondary(None, "Cancel recovery")
+                    .on_press(NodeSettingsMessage::RecoveryCancel),
+            );
+        }
+        if let Some(error) = &job.last_error {
+            content = content.push(text(error).style(theme::text::warning));
+        }
+        if status.reconciled {
+            content = content.push(text(
+                "Transaction and spend history reconciled with the local wallet.",
+            ));
+        }
+    }
+    if status.busy {
+        content = content.push(text("Processing the current batch…").size(12));
+    }
+    if let Some(error) = &status.error {
+        content = content.push(text(error).style(theme::text::warning));
+    }
+    if !status.busy
+        && status
+            .job
+            .as_ref()
+            .is_none_or(|job| matches!(job.phase, Phase::Complete | Phase::Cancelled))
+    {
+        content = content.push(
+            button::transparent(None, "Keep using Connect")
+                .on_press(NodeSettingsMessage::RecoveryDismiss),
+        );
+    }
+    card::simple(content).into()
+}
+
+pub fn rolling_retention_section<'a>(
+    days: &'a form::Value<String>,
+    status: &'a crate::app::node_history::Status,
+) -> Element<'a, NodeSettingsMessage> {
+    let policy = status.policy.as_ref().filter(|policy| !policy.temporary);
+    let mut content = Column::new().spacing(15)
+        .push(text("Block retention").bold().size(18))
+        .push(text(policy.map(|policy|format!("Keeping the most recent {} days of blocks.",policy.days)).unwrap_or_else(||"Default: automatic pruning using your node’s storage-size target.".into())))
+        .push(text("Choose a rolling window only if you want to keep more history. This can use hundreds of GB.").size(14))
+        .push(form::Form::new_trimmed("Optional retention days (for example 180 or 365)",days,NodeSettingsMessage::RetentionDaysEdited));
+    let mut apply = button::secondary(None, "Apply retention and recover missing blocks");
+    if !status.busy
+        && days
+            .value
+            .parse::<u32>()
+            .is_ok_and(|days| (1..=3650).contains(&days))
+    {
+        apply = apply.on_press(NodeSettingsMessage::RetentionApply);
+    }
+    content = content.push(apply)
+        .push(text("Extending the window downloads missing blocks. Tenshu maintains the window while open. To return to automatic pruning, apply a storage-size target in node resources.").size(12).style(theme::text::secondary));
+    card::simple(content).into()
+}
+
 pub fn node_resources_section<'a>(
     prune: &'a form::Value<String>,
     max_mempool: &'a form::Value<String>,

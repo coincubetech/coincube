@@ -13,7 +13,7 @@ fn backend(addr: SocketAddr) -> BitcoinD {
         rpc_auth: config::BitcoindRpcAuth::UserPass("test".into(), "test".into()),
     };
     let client = |kind| RwLock::new(BitcoinD::build_client(&config, "poll-test", kind).unwrap());
-    BitcoinD {
+    let mut bit = BitcoinD {
         local_fork_chain: None,
         poll_node_client: client(ClientKind::PollNode),
         poll_wallet_client: client(ClientKind::PollWallet),
@@ -25,7 +25,178 @@ fn backend(addr: SocketAddr) -> BitcoinD {
         watchonly_wallet_path: "poll-test".into(),
         retries: BITCOIND_RETRY_LIMIT,
         config,
-    }
+        record_replay: Default::default(),
+    };
+    bit.record_replay.acknowledge(1);
+    bit
+}
+
+#[test]
+fn replay_tickets_do_not_lose_a_request_arriving_during_an_older_poll() {
+    use crate::bitcoin::BitcoinInterface;
+    let mut bit = backend("127.0.0.1:1".parse().unwrap());
+    let older = bit.request_wallet_record_replay().unwrap();
+    let newer = bit.request_wallet_record_replay().unwrap();
+    bit.acknowledge_wallet_record_replay(older);
+    assert_eq!(bit.wallet_record_replay_pending(), Some(newer));
+    bit.acknowledge_wallet_record_replay(newer);
+    assert_eq!(bit.wallet_record_replay_pending(), None);
+}
+
+#[test]
+fn a_full_poll_queue_leaves_replay_pending_without_blocking_the_controller() {
+    use crate::bitcoin::BitcoinInterface;
+    let mut control = command_control("127.0.0.1:1".parse().unwrap());
+    let (sender, _receiver) = std::sync::mpsc::sync_channel(1);
+    sender
+        .try_send(crate::poller::PollerMessage::PollNowNoAck)
+        .unwrap();
+    control.poller_sender = sender;
+    let started = Instant::now();
+    assert!(control.replay_wallet_records().is_err());
+    assert!(started.elapsed() < Duration::from_secs(1));
+    assert!(control.bitcoin.wallet_record_replay_pending().is_some());
+}
+
+#[test]
+fn recovered_core_spent_history_replays_into_the_daemon_at_an_unchanged_database_tip() {
+    use crate::bitcoin::BitcoinInterface;
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let mut control = command_control(listener.local_addr().unwrap());
+    let root = std::env::temp_dir().join(format!(
+        "record-replay-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).unwrap();
+    let sqlite = crate::database::sqlite::SqliteDb::new(
+        root.join("wallet.sqlite3"),
+        Some(crate::database::sqlite::FreshDbOptions::new(
+            control.config.bitcoin_config.chain,
+            control.config.main_descriptor.clone(),
+        )),
+        &control.secp,
+    )
+    .unwrap();
+    control.db = std::sync::Arc::new(std::sync::Mutex::new(sqlite));
+    let tip = crate::bitcoin::BlockChainTip {
+        height: 100,
+        hash: bitcoin::BlockHash::from_byte_array([1; 32]),
+    };
+    control.db.connection().update_tip(&tip);
+    let desc = control.config.main_descriptor.receive_descriptor();
+    let address = desc
+        .derive(500.into(), &control.secp)
+        .address(bitcoin::Network::Bitcoin);
+    let mut funding =
+        bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin).txdata[0].clone();
+    funding.input[0].previous_output =
+        bitcoin::OutPoint::new(bitcoin::Txid::from_byte_array([2; 32]), 0);
+    funding.output[0].script_pubkey = address.script_pubkey();
+    funding.output[0].value = bitcoin::Amount::from_sat(100_000_000);
+    let txid = funding.compute_txid();
+    let mut spender = funding.clone();
+    spender.input[0].previous_output = bitcoin::OutPoint::new(txid, 0);
+    spender.output[0].script_pubkey = bitcoin::ScriptBuf::from_bytes(vec![0x6a]);
+    spender.output[0].value = bitcoin::Amount::from_sat(99_990_000);
+    let spendid = spender.compute_txid();
+    let spent_transaction = serde_json::json!({"hex":bitcoin::consensus::encode::serialize_hex(&spender),"confirmations":90,"blockhash":bitcoin::BlockHash::from_byte_array([4;32]),"blockheight":11,"blocktime":1700000600,"generated":false});
+    let transaction = serde_json::json!({"hex":bitcoin::consensus::encode::serialize_hex(&funding),"confirmations":91,"blockhash":bitcoin::BlockHash::from_byte_array([3;32]),"blockheight":10,"blocktime":1700000000,"generated":false});
+    let chain = serde_json::json!({"bestblockhash":tip.hash,"blocks":tip.height});
+    let mut script = vec![
+        ("getwalletinfo", serde_json::json!({"scanning":false})),
+        ("getblockchaininfo", chain.clone()),
+        (
+            "getblockhash",
+            serde_json::json!(bitcoin::blockdata::constants::genesis_block(
+                bitcoin::Network::Bitcoin
+            )
+            .block_hash()),
+        ),
+        (
+            "listsinceblock",
+            serde_json::json!({"transactions":[{"category":"receive","txid":txid,"vout":0,"amount":1.0,"blockheight":10,"address":address,"parent_descs":[desc.as_descriptor_public_key().to_string()]}]}),
+        ),
+        ("gettransaction", transaction.clone()),
+        ("gettxout", Json::Null),
+        ("gettransaction", transaction.clone()),
+        ("getblockchaininfo", chain),
+    ];
+    script.splice(
+        6..7,
+        vec![
+            ("gettransaction", transaction.clone()),
+            (
+                "getblockhash",
+                serde_json::json!(bitcoin::BlockHash::from_byte_array([8; 32])),
+            ),
+            (
+                "listsinceblock",
+                serde_json::json!({"transactions":[{"category":"send","txid":spendid}]}),
+            ),
+            ("gettransaction", spent_transaction.clone()),
+            ("gettransaction", spent_transaction.clone()),
+            ("gettransaction", transaction.clone()),
+            ("gettransaction", spent_transaction.clone()),
+        ],
+    );
+    let transactions: std::collections::HashMap<bitcoin::Txid, Json> =
+        IntoIterator::into_iter([(txid, transaction), (spendid, spent_transaction)]).collect();
+    let script: Vec<_> = script
+        .into_iter()
+        .map(|(method, value)| {
+            (
+                method,
+                if method == "gettransaction" {
+                    Reply::Transactions(transactions.clone())
+                } else {
+                    Reply::Result(value)
+                },
+            )
+        })
+        .collect();
+    let (stop, stopped) = std::sync::mpsc::channel();
+    let node = scripted_node(listener, script, stopped);
+    let ticket = control.bitcoin.request_wallet_record_replay().unwrap();
+    crate::bitcoin::poller::test_poll(
+        &mut control.bitcoin,
+        &control.db,
+        &control.secp,
+        &[
+            control.config.main_descriptor.receive_descriptor().clone(),
+            control.config.main_descriptor.change_descriptor().clone(),
+        ],
+        &Default::default(),
+        &Default::default(),
+    );
+    stop.send(()).unwrap();
+    node.join().unwrap();
+    assert_eq!(
+        control.bitcoin.wallet_record_replay_pending(),
+        None,
+        "ticket {ticket} was not acknowledged"
+    );
+    let coins = control.list_coins(&[], &[]).coins;
+    assert_eq!(coins.len(), 1);
+    assert_eq!(coins[0].block_height, Some(10));
+    assert_eq!(coins[0].outpoint.txid, txid);
+    assert_eq!(coins[0].spend_info.as_ref().unwrap().txid, spendid);
+    assert_eq!(coins[0].spend_info.as_ref().unwrap().height, Some(11));
+    assert_eq!(
+        control.list_transactions(&[txid]).transactions[0].tx,
+        funding
+    );
+    assert_eq!(control.db.connection().chain_tip(), Some(tip));
+    assert_eq!(
+        control.list_transactions(&[spendid]).transactions[0].tx,
+        spender
+    );
+    assert_eq!(u32::from(coins[0].derivation_index), 500);
+    drop(control);
+    std::fs::remove_dir_all(root).unwrap();
 }
 
 // One bounded HTTP exchange. Matching the request ID exercises the real RPC
@@ -36,16 +207,16 @@ fn response<T>(
     error: Json,
     call: impl FnOnce(&BitcoinD) -> T,
 ) -> T {
-    responses(vec![(method, result, error)], call)
+    responses(vec![(method, result, error)], |bit| call(bit))
 }
 
 fn responses<T>(
     exchanges: Vec<(&'static str, Json, Json)>,
-    call: impl FnOnce(&BitcoinD) -> T,
+    call: impl FnOnce(&mut BitcoinD) -> T,
 ) -> T {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.set_nonblocking(true).unwrap();
-    let bit = backend(listener.local_addr().unwrap());
+    let mut bit = backend(listener.local_addr().unwrap());
     let worker = thread::spawn(move || {
         for (method, result, error) in exchanges {
             let deadline = Instant::now() + Duration::from_secs(5);
@@ -94,7 +265,7 @@ fn responses<T>(
             write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}", body.len(), body).unwrap();
         }
     });
-    let result = call(&bit);
+    let result = call(&mut bit);
     worker.join().unwrap();
     result
 }
@@ -416,6 +587,7 @@ enum Reply {
     /// The node's JSON-RPC error reply, sent as bitcoind does: HTTP 500 with
     /// `{"result": null, "error": {"code": .., "message": ..}}` (#597).
     Error(i64, &'static str),
+    Transactions(std::collections::HashMap<bitcoin::Txid, Json>),
 }
 
 impl From<Json> for Reply {
@@ -493,6 +665,10 @@ fn scripted_node<R: Into<Reply>>(
             let request: Json = serde_json::from_slice(&body).unwrap();
             assert_eq!(request["method"], method, "unexpected RPC order");
             let (status, body) = match reply {
+                Reply::Transactions(transactions) => (
+                    "200 OK",
+                    serde_json::json!({"result":transactions.get(&request["params"][0].as_str().unwrap().parse::<bitcoin::Txid>().unwrap()).unwrap(),"error":null,"id":request["id"]}),
+                ),
                 Reply::Result(result) => (
                     "200 OK",
                     serde_json::json!({"result":result,"error":null,"id":request["id"]}),

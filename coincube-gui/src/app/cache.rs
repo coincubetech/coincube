@@ -121,6 +121,8 @@ pub struct Cache {
     /// upload used vs. target, onion address), polled from its RPC on tick.
     /// `None` until the first poll, or when the backend isn't a local node.
     pub node_net_stats: Option<NodeNetStats>,
+    pub node_history: super::node_history::Status,
+    pub node_history_switch_requested: bool,
     pub network: Network,
     /// The `last_poll_timestamp` when starting the application.
     pub last_poll_at_startup: Option<u32>,
@@ -369,6 +371,8 @@ impl std::default::Default for Cache {
             daemon_switch_in_progress: false,
             node_bitcoind_last_log: None,
             node_net_stats: None,
+            node_history: super::node_history::Status::default(),
+            node_history_switch_requested: false,
             network: Network::Bitcoin,
             last_poll_at_startup: None,
             daemon_cache: DaemonCache::default(),

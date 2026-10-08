@@ -1,4 +1,6 @@
 mod looper;
+#[cfg(test)]
+pub(crate) use looper::poll as test_poll;
 
 use crate::{bitcoin::BitcoinInterface, database::DatabaseInterface};
 use coincube_core::descriptors;

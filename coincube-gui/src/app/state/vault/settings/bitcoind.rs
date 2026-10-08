@@ -147,6 +147,11 @@ pub struct BitcoindSettingsState {
     /// on-disk `bitcoin.conf` for the active network; applied via a force-restart.
     node_prune_mb: form::Value<String>,
     node_max_mempool_mb: form::Value<String>,
+    recovery_start: form::Value<String>,
+    retention_days: form::Value<String>,
+    recovery_requested: bool,
+    recovery_advanced: bool,
+    node_advanced: bool,
     /// "Your own Esplora" editor (`PLAN-connect-blinding` PR D5). Pre-filled
     /// with the active Esplora primary so the field always shows where chain
     /// queries actually go. Nothing is applied until the URL answers a probe.
@@ -258,6 +263,20 @@ impl BitcoindSettingsState {
                 warning: None,
             },
             custom_esplora_probing: false,
+            recovery_requested: cache.node_history_switch_requested,
+            recovery_advanced: false,
+            node_advanced: false,
+            recovery_start: form::Value::default(),
+            retention_days: form::Value {
+                value: crate::node::retention::load(&cache.datadir_path, cache.network)
+                    .ok()
+                    .flatten()
+                    .filter(|policy| !policy.temporary)
+                    .map(|policy| policy.days.to_string())
+                    .unwrap_or_default(),
+                valid: true,
+                warning: None,
+            },
             custom_esplora_status: None,
             pending_scan_discard: None,
         }
@@ -588,6 +607,74 @@ impl State for BitcoindSettingsState {
             Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(msg))) => {
                 use view::NodeSettingsMessage;
                 match msg {
+                    NodeSettingsMessage::RecoveryAdvancedToggled => {
+                        self.recovery_advanced = !self.recovery_advanced;
+                    }
+                    NodeSettingsMessage::NodeAdvancedToggled => {
+                        self.node_advanced = !self.node_advanced;
+                    }
+                    NodeSettingsMessage::RecoveryDismiss => {
+                        self.recovery_requested = false;
+                        self.warning = None;
+                    }
+                    NodeSettingsMessage::RecoveryStartEdited(value) => {
+                        self.recovery_start.valid =
+                            crate::app::node_history::parse_start(&value).is_ok();
+                        self.recovery_start.value = value;
+                    }
+                    NodeSettingsMessage::RetentionDaysEdited(value) => {
+                        self.retention_days.valid = value
+                            .parse::<u32>()
+                            .is_ok_and(|days| (1..=3650).contains(&days));
+                        self.retention_days.value = value;
+                    }
+                    NodeSettingsMessage::RecoveryStart => {
+                        self.recovery_start.valid =
+                            crate::app::node_history::parse_start(&self.recovery_start.value)
+                                .is_ok();
+                        if self.recovery_start.valid {
+                            return Task::done(Message::NodeHistory(
+                                crate::app::node_history::Action::Recover(
+                                    self.recovery_start.value.clone(),
+                                ),
+                            ));
+                        }
+                    }
+                    NodeSettingsMessage::ImportConnectHistory => {
+                        return Task::done(Message::NodeHistory(
+                            crate::app::node_history::Action::Import,
+                        ))
+                    }
+                    NodeSettingsMessage::RecoveryResume => {
+                        return Task::done(Message::NodeHistory(
+                            crate::app::node_history::Action::Resume,
+                        ))
+                    }
+                    NodeSettingsMessage::RecoveryPause => {
+                        return Task::done(Message::NodeHistory(
+                            crate::app::node_history::Action::Pause,
+                        ))
+                    }
+                    NodeSettingsMessage::RecoveryCancel => {
+                        self.recovery_requested = false;
+                        return Task::done(Message::NodeHistory(
+                            crate::app::node_history::Action::Cancel,
+                        ));
+                    }
+                    NodeSettingsMessage::RetentionApply => {
+                        self.retention_days.valid = self
+                            .retention_days
+                            .value
+                            .parse::<u32>()
+                            .is_ok_and(|days| (1..=3650).contains(&days));
+                        if let Ok(days) = self.retention_days.value.parse::<u32>() {
+                            if self.retention_days.valid {
+                                return Task::done(Message::NodeHistory(
+                                    crate::app::node_history::Action::Retain(days),
+                                ));
+                            }
+                        }
+                    }
                     NodeSettingsMessage::SwitchToConnect => {
                         // The App-level dispatcher always rewrites this into
                         // either `SwitchToConnectFastPath(jwt)` (if a Connect
@@ -847,6 +934,23 @@ impl State for BitcoindSettingsState {
                         // Check whether the local wallet already tracks the history
                         // or can recover it from the node's retained blocks.
                         if let Err(reason) = local_node_serves_vault(cache) {
+                            let managed = self
+                                .full_config
+                                .as_ref()
+                                .and_then(crate::app::local_node_sync_config)
+                                .is_some_and(|cfg| {
+                                    crate::node::retention::is_managed_endpoint(
+                                        &cache.datadir_path,
+                                        cache.network,
+                                        cache.chain(),
+                                        cfg,
+                                    )
+                                });
+                            if managed && pruned_switch_refusal(cache).is_some() {
+                                self.recovery_requested = true;
+                                self.warning = None;
+                                return Task::none();
+                            }
                             self.warning = Some(Error::Unexpected(reason));
                             return Task::none();
                         }
@@ -1308,9 +1412,73 @@ impl State for BitcoindSettingsState {
                 // Standing notice, not just a click-time warning: the
                 // automatic switch is refused too, and the "will switch
                 // once synced" copy above would otherwise go unexplained.
-                if can_switch_to_bitcoind {
-                    if let Some(why) = pruned_switch_refusal(cache) {
-                        setting_panels.push(view::vault::settings::pruned_node_notice(why));
+            }
+
+            // Recovery must be available while Connect is still active: its
+            // pending managed node may need history before it can be selected.
+            if self.pending_node_setup.is_none()
+                && self
+                    .full_config
+                    .as_ref()
+                    .and_then(crate::app::local_node_sync_config)
+                    .is_some_and(|cfg| {
+                        crate::node::retention::is_managed_endpoint(
+                            &cache.datadir_path,
+                            cache.network,
+                            cache.chain(),
+                            cfg,
+                        )
+                    })
+            {
+                let recovery_active = cache.node_history.job.as_ref().is_some_and(|job| {
+                    !matches!(
+                        job.phase,
+                        crate::node::history::Phase::Complete
+                            | crate::node::history::Phase::Cancelled
+                    )
+                });
+                if self.recovery_requested || recovery_active || cache.node_history.busy {
+                    setting_panels.push(
+                        view::vault::settings::wallet_history_section(
+                            &self.recovery_start,
+                            &cache.node_history,
+                            self.recovery_advanced,
+                        )
+                        .map(map_node_msg),
+                    );
+                    if self.recovery_advanced {
+                        setting_panels.push(
+                            view::vault::settings::rolling_retention_section(
+                                &self.retention_days,
+                                &cache.node_history,
+                            )
+                            .map(map_node_msg),
+                        );
+                    }
+                }
+                if self.full_config.as_ref().is_some_and(|cfg| {
+                    matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)))
+                }) {
+                    setting_panels.push(
+                        coincube_ui::component::button::transparent(
+                            None,
+                            if self.node_advanced {
+                                "Hide advanced node settings"
+                            } else {
+                                "Advanced node settings"
+                            },
+                        )
+                        .on_press(map_node_msg(view::NodeSettingsMessage::NodeAdvancedToggled))
+                        .into(),
+                    );
+                    if self.node_advanced {
+                        setting_panels.push(
+                            view::vault::settings::rolling_retention_section(
+                                &self.retention_days,
+                                &cache.node_history,
+                            )
+                            .map(map_node_msg),
+                        );
                     }
                 }
             }
@@ -1471,6 +1639,18 @@ impl From<BitcoindSettingsState> for Box<dyn State> {
 /// what the node probe last read into the cache. `Err` carries the copy to
 /// show; an unknown answer refuses for now rather than guessing.
 fn local_node_serves_vault(cache: &Cache) -> Result<(), String> {
+    if cache.node_history.busy
+        || cache.node_history.job.as_ref().is_some_and(|job| {
+            !matches!(
+                job.phase,
+                crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
+            )
+        })
+    {
+        return Err(
+            "Finish or cancel wallet history recovery before switching to the local node".into(),
+        );
+    }
     use crate::app::local_switch::{pruned_node_serves, NodePruning};
     match cache.node_bitcoind_pruning {
         None => Err("Couldn't read your local node's pruning settings yet. \
@@ -1538,6 +1718,9 @@ fn write_internal_bitcoind_config(
     // identity marker. A provider of another chain family is refused before any
     // of them is touched.
     provider_serves_network(flavor, network)?;
+    if resources.is_some() {
+        crate::node::retention::disable(coincube_datadir, network)?;
+    }
     let bitcoind_datadir = internal_bitcoind_datadir(coincube_datadir);
 
     // From the read of the conf to its replacement, under the datadir-wide
@@ -1695,7 +1878,7 @@ fn configure_and_start_internal_bitcoind(
 /// tor-install + `spawn_blocking(configure_and_start_internal_bitcoind)` used by
 /// the setup, flavour-switch, and restart flows so the blocking step's
 /// `prepare_inbound_tor` can actually start Tor.
-async fn ensure_tor_and_start_managed(
+pub(crate) async fn ensure_tor_and_start_managed(
     coincube_datadir: CoincubeDirectory,
     network: Network,
     flavor: NodeFlavor,
@@ -1706,8 +1889,48 @@ async fn ensure_tor_and_start_managed(
     // Tor is provisioned for the Bitcoin node; not for a provider that cannot
     // serve this chain.
     provider_serves_network(flavor, network)?;
+    // Recovery starts suppress automatic wallet loading, so a stale wallet
+    // cannot prevent the node from serving the blocks needed to repair it.
+    // Reattach wallets that were already live for other Cubes after restart.
+    let old_conf = InternalBitcoindConfig::from_file(&internal_bitcoind_config_path(
+        &internal_bitcoind_datadir(&coincube_datadir),
+    ))
+    .ok();
+    let previous = old_conf
+        .as_ref()
+        .and_then(|conf| conf.networks.get(&network))
+        .map(|section| BitcoindConfig {
+            addr: internal_bitcoind_address(section.rpc_port),
+            rpc_auth: BitcoindRpcAuth::CookieFile(internal_bitcoind_cookie_path(
+                &internal_bitcoind_datadir(&coincube_datadir),
+                &network,
+            )),
+        });
+    let loaded = if force_restart {
+        match &previous {
+            Some(cfg) => match crate::node::history::NodeRpc::new(cfg, "", network.into()).await {
+                Ok(rpc) => rpc
+                    .call(false, "listwallets", serde_json::json!([]))
+                    .await
+                    .ok()
+                    .and_then(|value| {
+                        value.as_array().map(|values| {
+                            values
+                                .iter()
+                                .filter_map(|value| value.as_str().map(str::to_owned))
+                                .collect::<Vec<_>>()
+                        })
+                    })
+                    .unwrap_or_default(),
+                Err(_) => vec![],
+            },
+            None => vec![],
+        }
+    } else {
+        vec![]
+    };
     crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir).await;
-    tokio::task::spawn_blocking(move || {
+    let started = tokio::task::spawn_blocking(move || {
         configure_and_start_internal_bitcoind(
             coincube_datadir,
             network,
@@ -1718,7 +1941,31 @@ async fn ensure_tor_and_start_managed(
         )
     })
     .await
-    .unwrap_or_else(|e| Err(e.to_string()))
+    .unwrap_or_else(|e| Err(e.to_string()))?;
+    reload_wallets_after_restart(&started.0, network, loaded).await;
+    Ok(started)
+}
+
+/// Wallet catch-up failures cannot invalidate a successfully started node.
+async fn reload_wallets_after_restart(
+    config: &BitcoindConfig,
+    network: Network,
+    loaded: Vec<String>,
+) {
+    for wallet in loaded {
+        let result = async {
+            let rpc = crate::node::history::NodeRpc::new(config, &wallet, network.into()).await?;
+            rpc.ensure_loaded(&wallet).await
+        }
+        .await;
+        match result {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(wallet = %wallet,
+                "A previously loaded Vault needs historical block recovery before it can reconnect"),
+            Err(error) => tracing::warn!(wallet = %wallet, %error,
+                "The local node started, but this Vault could not reconnect"),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -2208,6 +2455,86 @@ const SIGNET_GENESIS_BLOCK_TIMESTAMP: i64 = 1598918400;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reload_error_does_not_prevent_other_wallets_reconnecting() {
+        use httpmock::prelude::*;
+        use serde_json::json;
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .json_body_partial(r#"{"method":"listwallets"}"#);
+                then.status(200)
+                    .json_body(json!({"id":"history", "result":[]}));
+            })
+            .await;
+        let first = server.mock_async(|when, then| {
+            when.method(POST).json_body_partial(r#"{"method":"createwallet","params":["failed",true,true,"",false,true,true]}"#);
+            then.status(200).json_body(json!({"id":"history", "error":{"code":-4,"message":"Synthetic reload failure"}}));
+        }).await;
+        let second = server
+            .mock_async(|when, then| {
+                when.method(POST).json_body_partial(
+                    r#"{"method":"createwallet","params":["ready",true,true,"",false,true,true]}"#,
+                );
+                then.status(200)
+                    .json_body(json!({"id":"history", "result":{}}));
+            })
+            .await;
+        let config = BitcoindConfig {
+            addr: *server.address(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+        };
+        reload_wallets_after_restart(
+            &config,
+            Network::Regtest,
+            vec!["failed".into(), "ready".into()],
+        )
+        .await;
+        first.assert_async().await;
+        second.assert_async().await;
+    }
+
+    #[test]
+    fn manual_switch_waits_for_recovery_even_with_cached_history_permission() {
+        let mut cache = Cache {
+            node_bitcoind_pruning: Some(crate::app::local_switch::NodePruning::Pruned {
+                prune_height: 1000,
+            }),
+            local_switch_history: Some(crate::app::local_switch::VaultHistory::TrackedLocally),
+            ..Cache::default()
+        };
+        assert!(local_node_serves_vault(&cache).is_ok());
+        cache.node_history.busy = true;
+        assert!(local_node_serves_vault(&cache).is_err());
+        cache.node_history.busy = false;
+        let binding = crate::node::history::Binding {
+            genesis: coincube_core::miniscript::bitcoin::blockdata::constants::genesis_block(
+                Network::Bitcoin,
+            )
+            .block_hash(),
+            node_instance: "fixture".into(),
+            endpoint: "fixture".into(),
+            wallet: "fixture".into(),
+            descriptor: "fixture".into(),
+        };
+        cache.node_history.job = Some(
+            crate::node::history::Recovery::new(
+                binding,
+                100,
+                200,
+                coincube_core::miniscript::bitcoin::blockdata::constants::genesis_block(
+                    Network::Bitcoin,
+                )
+                .block_hash(),
+            )
+            .unwrap(),
+        );
+        assert!(local_node_serves_vault(&cache).is_err());
+    }
     use crate::daemon::{DaemonBackend, DaemonError};
     use crate::node::bitcoind::RpcAuth;
     use coincube_core::{
@@ -3820,6 +4147,144 @@ mod tests {
             state.node_switch_processing,
             "the confirmed switch was dropped"
         );
+    }
+
+    #[tokio::test]
+    async fn history_controls_follow_switch_intent_and_advanced_disclosure() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let cache = Cache {
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(crate::app::local_switch::NodePruning::Pruned {
+                prune_height: 970_000,
+            }),
+            local_switch_history: Some(crate::app::local_switch::VaultHistory::From(946_000)),
+            ..Cache::default()
+        };
+        let managed = bitcoind_config(BitcoindRpcAuth::CookieFile(
+            crate::node::bitcoind::internal_bitcoind_cookie_path(
+                &crate::node::bitcoind::internal_bitcoind_datadir(&cache.datadir_path),
+                &cache.network,
+            ),
+        ));
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(managed.clone());
+        let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Overview);
+        for (local, external, blake2b, clicked, advanced, expected, retention) in [
+            (false, false, false, false, false, false, false),
+            (false, false, false, true, false, true, false),
+            (false, false, false, true, true, true, true),
+            (true, false, false, false, false, false, false),
+            (true, false, false, false, true, false, true),
+            (false, true, false, true, true, false, false),
+            (false, false, true, true, true, false, false),
+        ] {
+            let mut cfg = cfg.clone();
+            let mut cache = cache.clone();
+            if local {
+                cfg.bitcoin_backend = Some(BitcoinBackend::Bitcoind(managed.clone()));
+            }
+            if external {
+                cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(
+                    PathBuf::from("/tmp/external-node/.cookie"),
+                )));
+            }
+            if blake2b {
+                cache.fiat_chain = crate::chain::ChainId::BitcoinBlake2b;
+            }
+            let mut state = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+            assert!(
+                state.retention_days.value.is_empty(),
+                "no rolling window is selected by default"
+            );
+            let daemon = daemon(Some(cfg));
+            if clicked {
+                let _ = state.update(
+                    Some(daemon.clone()),
+                    &cache,
+                    node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+                );
+            }
+            if advanced {
+                let toggle = if local {
+                    view::NodeSettingsMessage::NodeAdvancedToggled
+                } else {
+                    view::NodeSettingsMessage::RecoveryAdvancedToggled
+                };
+                let _ = state.update(Some(daemon), &cache, node_message(toggle));
+            }
+            if !local {
+                assert!(state.bitcoind_settings.is_none());
+                assert!(state.electrum_settings.is_none());
+            }
+            let mut element = state.view(&menu, &cache);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 2400.0)),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            for label in [
+                "Recover history to switch to your local node",
+                "Recommended: Import Connect history",
+                "Import Connect history",
+            ] {
+                assert_eq!(labels.0.iter().any(|text| text == label), expected,
+                    "missing/unsupported history controls: local={local} external={external} blake2b={blake2b}: {label}");
+            }
+            assert_eq!(
+                labels
+                    .0
+                    .iter()
+                    .any(|text| text == "Recover from this height or date"),
+                expected && advanced
+            );
+            assert_eq!(
+                labels.0.iter().any(|text| text == "Block retention"),
+                retention
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_switch_intent_survives_node_page_recreation() {
+        let mut cache = Cache::default();
+        let cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        let first = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+        assert!(!first.recovery_requested);
+        // The App retains intent above the recreated settings page, scoped to
+        // its wallet/node context; its invalidation and cancellation clear it.
+        cache.node_history_switch_requested = true;
+        let reopened = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+        assert!(reopened.recovery_requested);
+        cache.node_history_switch_requested = false;
+        let cancelled = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+        assert!(!cancelled.recovery_requested);
     }
 
     #[test]

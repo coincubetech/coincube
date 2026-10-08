@@ -613,6 +613,17 @@ pub enum InstallStatsViewMessage {
 
 #[derive(Debug, Clone)]
 pub enum NodeSettingsMessage {
+    RecoveryAdvancedToggled,
+    NodeAdvancedToggled,
+    RecoveryDismiss,
+    RecoveryStartEdited(String),
+    RecoveryStart,
+    ImportConnectHistory,
+    RecoveryResume,
+    RecoveryPause,
+    RecoveryCancel,
+    RetentionDaysEdited(String),
+    RetentionApply,
     /// Trigger from the "Switch to COINCUBE | Connect" button. Always
     /// rewritten by the App-level dispatcher into either
     /// `SwitchToConnectFastPath(jwt)` (when a Connect session is live) or a

@@ -2,6 +2,8 @@ pub mod descriptor;
 pub mod import_descriptor;
 
 mod backend;
+mod claim_overview;
+pub use claim_overview::ClaimOverview;
 mod coincube_connect;
 pub mod inheritance_restore;
 mod mnemonic;
@@ -83,6 +85,7 @@ pub trait Step {
 
 pub struct Final {
     generating: bool,
+    claim_setup: bool,
     internal_bitcoind: Option<Bitcoind>,
     warning: Option<String>,
     wallet_settings: Option<WalletSettings>,
@@ -109,6 +112,7 @@ impl Final {
         Self {
             internal_bitcoind: None,
             generating: false,
+            claim_setup: false,
             warning: None,
             wallet_settings: None,
             key_redemptions: HashMap::new(),
@@ -132,6 +136,7 @@ impl Default for Final {
 
 impl Step for Final {
     fn load_context(&mut self, ctx: &Context) {
+        self.claim_setup = ctx.claim_source.is_some();
         self.internal_bitcoind.clone_from(&ctx.internal_bitcoind);
         self.key_redemptions = ctx
             .keys
@@ -353,14 +358,18 @@ impl Step for Final {
                 if out.members_added == 1 { "" } else { "s" }
             )
         });
-        view::install(
-            progress,
-            email,
-            self.generating,
-            self.wallet_settings.is_some() && self.warning.is_none(),
-            self.warning.as_ref(),
-            caption,
-        )
+        if self.claim_setup {
+            view::claim_setup_install(progress, email, self.generating, self.warning.as_ref())
+        } else {
+            view::install(
+                progress,
+                email,
+                self.generating,
+                self.wallet_settings.is_some() && self.warning.is_none(),
+                self.warning.as_ref(),
+                caption,
+            )
+        }
     }
 }
 

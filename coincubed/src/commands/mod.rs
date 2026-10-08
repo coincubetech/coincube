@@ -1875,6 +1875,31 @@ impl DaemonControl {
         Ok(())
     }
 
+    /// Replay saved Core wallet transactions into our DB without a block rescan.
+    /// Startup requests this too, so interruption never loses the obligation.
+    pub fn replay_wallet_records(&mut self) -> Result<(), CommandError> {
+        let ticket = self
+            .bitcoin
+            .request_wallet_record_replay()
+            .map_err(CommandError::RescanTrigger)?;
+        let (tx, rx) = mpsc::sync_channel(0);
+        self.poller_sender
+            .try_send(PollerMessage::PollNow(tx))
+            .map_err(|e| CommandError::RescanTrigger(e.to_string()))?;
+        rx.recv_timeout(std::time::Duration::from_secs(120))
+            .map_err(|e| CommandError::RescanTrigger(e.to_string()))?;
+        if self
+            .bitcoin
+            .wallet_record_replay_pending()
+            .is_some_and(|pending| pending >= ticket)
+        {
+            return Err(CommandError::RescanTrigger(
+                "The wallet record replay has not completed; retry".into(),
+            ));
+        }
+        Ok(())
+    }
+
     /// list_confirmed_transactions retrieves a limited list of transactions which occurred between two given dates.
     pub fn list_confirmed_transactions(
         &self,
