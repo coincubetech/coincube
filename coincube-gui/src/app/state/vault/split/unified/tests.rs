@@ -1068,8 +1068,10 @@ fn split_unified_holds_seeds_only_zeroized() {
             let end = start + ident.len();
             let before = rest[..start].chars().last().unwrap_or(' ');
             let after = rest[end..].chars().next().unwrap_or(' ');
-            let word = !(before.is_alphanumeric() || before == '_')
-                && !(after.is_alphanumeric() || after == '_');
+            let word = !(before.is_alphanumeric()
+                || before == '_'
+                || after.is_alphanumeric()
+                || after == '_');
             assert!(
                 !word,
                 "the moved-out `{}` is used beyond `seeds.add`: {:?}",

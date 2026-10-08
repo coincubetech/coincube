@@ -586,6 +586,7 @@ impl State for ForkClaimPanel {
         let mut body = Column::new()
             .spacing(20)
             .push(h3("Claim Bitcoin Blake2b — step 2").bold())
+            .push(p1_regular("Review and sign the transfer on Bitcoin Blake2b. The wizard checks the Bitcoin split and replay protection before submission, then tracks the fork transaction until confirmation."))
             .push_maybe(self.error.as_ref().map(|e| card::warning(e.clone())))
             .push_maybe(self.busy.then(|| p1_regular("Checking both chains…")))
             .push(

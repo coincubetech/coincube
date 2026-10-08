@@ -293,9 +293,8 @@ async fn a_fork_installer_is_never_handed_the_callers_breez_or_spark_clients() {
     // Parked, not handed in — and the distinction is the whole point. The
     // installer holds the source Cube's handle so backing out can rebuild that
     // Cube; what it must never do is give it to the Cube being built. On the
-    // success path the installer is dropped when the target's unlock screen
-    // replaces it, releasing the last `Arc` and shutting the Spark bridge down
-    // — correct behaviour for leaving a Cube, not a leak.
+    // success path returns these handles to the original Bitcoin Cube for
+    // the split transaction; they never enter the fork Cube.
     assert_eq!(
         Arc::strong_count(&breez),
         2,
@@ -383,7 +382,7 @@ async fn the_claim_flow_never_asks_for_a_pin_a_descriptor_or_the_mnemonic_again(
     let _guard = crate::app::session::test_guard();
     let server = MockServer::start_async().await;
     let (source, _) = source("Savings");
-    let (installer, _) = Installer::try_new_for_chain(
+    let (mut installer, _) = Installer::try_new_for_chain(
         temp_root("steps"),
         ChainId::BitcoinBlake2b,
         None,
@@ -404,14 +403,26 @@ async fn the_claim_flow_never_asks_for_a_pin_a_descriptor_or_the_mnemonic_again(
     // target inherits the source Cube's.
     assert_eq!(
         installer.steps.len(),
-        6,
-        "descriptor → Connect → node → optional local node → alias → done"
+        7,
+        "overview → descriptor → Connect → node → optional local node → alias → done"
+    );
+    assert_eq!(
+        installer.current, 0,
+        "Claim opens on the overview, before node setup"
     );
     assert!(installer.context.descriptor.is_some());
     assert!(installer.context.restore_pin.is_none());
     assert!(
         !installer.context.fresh_fork_seed_backed_up,
         "no backup step runs, so nothing marks one as done"
+    );
+    let _ = installer.view();
+    let _ = installer.update(Message::Next);
+    assert!(installer.current > 0, "Continue advances to target setup");
+    let _ = installer.update(Message::Previous);
+    assert_eq!(
+        installer.current, 0,
+        "Back returns to the Claim explanation"
     );
 }
 
@@ -1574,28 +1585,25 @@ async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
     let _ = std::fs::remove_dir_all(root.path());
 }
 
-/// A completed claim opens the **target**, so the source Cube's session must
-/// not survive the handoff.
-///
-/// The source is unlocked by construction (a claim cannot start otherwise), and
-/// its signer sits in the process-global session. Without this the source's
-/// unlocked master signer and PIN outlive the screen that justified them, on a
-/// Cube the user has navigated away from. `close_cube` is the primitive the
-/// ordinary App→Home path uses and is scoped to that Cube alone.
+/// Successful target setup returns to the Bitcoin source for step one.
+/// Its existing unlocked session stays scoped to that source; the fork is
+/// not unlocked or given signing authority by completing setup.
 #[tokio::test]
-async fn completing_a_claim_revokes_the_source_cubes_session() {
+async fn completing_claim_setup_returns_to_the_source_session_for_step_one() {
     let _guard = crate::app::session::test_guard();
     let server = MockServer::start_async().await;
     let (source, source_fingerprint) = source("Savings");
     let source_id = source.cube_id().to_string();
     let root = temp_root("session-handoff");
-    let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
-    std::fs::create_dir_all(fork_dir.path()).unwrap();
-    std::fs::write(
-        fork_dir.path().join(crate::app::config::DEFAULT_FILE_NAME),
-        b"",
-    )
-    .unwrap();
+    let source_dir = root.network_directory(ChainId::Bitcoin);
+    source_dir.init().unwrap();
+    crate::app::Config::new(false)
+        .to_file(
+            &source_dir
+                .path()
+                .join(crate::app::config::DEFAULT_FILE_NAME),
+        )
+        .unwrap();
 
     // The unlocked signer a live source Cube holds.
     crate::app::session::store_unlocked_signer(
@@ -1637,13 +1645,15 @@ async fn completing_a_claim_revokes_the_source_cubes_session() {
     )));
 
     assert!(
-        matches!(tab.state, crate::gui::tab::State::PinEntry(_)),
-        "the claim hands off to the target's unlock screen"
+        matches!(tab.state, crate::gui::tab::State::Loader(_)),
+        "target setup returns to the source's Vault loader"
     );
     assert!(
-        crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_none(),
-        "the source Cube's unlocked signer must not outlive the handoff"
+        crate::app::session::unlocked_signer(&source_id, source_fingerprint).is_some(),
+        "the source remains open for the Bitcoin split; the fork is not unlocked"
     );
+    assert!(crate::app::claim_intent::take(&source_id));
+    crate::app::session::close();
     let _ = std::fs::remove_dir_all(root.path());
 }
 
