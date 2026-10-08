@@ -482,7 +482,7 @@ mod local_capability_tests {
             when.method(GET).path("/api/v1/connect/features").matches(|request| request.headers.as_ref().is_none_or(|headers| headers.iter().all(|(name,_)| !name.eq_ignore_ascii_case("authorization"))));
             then.status(200).json_body(serde_json::json!({"data":{"plans":[],"bitcoin_blake2b_enabled":true,"liquidEnabled":true}}));
         }).await;
-        let mut client = CoincubeClient::for_test(&server.base_url());
+        let mut client = CoincubeClient::for_test(server.base_url());
         client.set_token("synthetic-account-token");
         assert!(global_blake2b_enabled(client.clone()).await);
         assert_eq!(client.token(), Some("synthetic-account-token"));

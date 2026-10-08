@@ -503,7 +503,7 @@ mod fork_handoff_tests {
                 backup: None,
                 wallet_settings: Some(wallet),
                 connect_client: Some(crate::services::coincube::CoincubeClient::for_test(
-                    &server.base_url(),
+                    server.base_url(),
                 )),
             },
             None,
