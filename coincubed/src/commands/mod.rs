@@ -716,6 +716,10 @@ impl DaemonControl {
     /// records show, that is our own transactions spending their outputs (rule #3). A descendant
     /// someone else made from one of their outputs is not in our records, and can still get the
     /// replacement refused.
+    ///
+    /// A conflict spending a coin we have no value for cannot be priced, and could pay more than
+    /// anything we would guess: that is a [`CommandError::MempoolUnavailable`], not a replacement
+    /// built without it.
     fn replacement_minimums_from_records(
         &self,
         db_conn: &mut Box<dyn DatabaseConnection>,
@@ -724,7 +728,7 @@ impl DaemonControl {
         prev_tx: &bitcoin::Transaction,
         prev_psbt: Option<&Psbt>,
         prev_coins: &HashMap<bitcoin::OutPoint, Coin>,
-    ) -> (u64, bitcoin::Amount) {
+    ) -> Result<(u64, bitcoin::Amount), CommandError> {
         // Our coins spent by an unconfirmed transaction: the inputs of everything priced below,
         // and what links a transaction to its descendants.
         let spending = db_conn.coins(&[CoinStatus::Spending], &[]);
@@ -792,8 +796,8 @@ impl DaemonControl {
             } else {
                 tx_getter.get_tx(conflict)
             };
-            match tx.as_ref().and_then(&price) {
-                Some((fee, vsize)) => {
+            match tx.as_ref().map(&price) {
+                Some(Some((fee, vsize))) => {
                     // The feerate is rounded down, so one more is strictly above it.
                     if let Some(floor) = fee
                         .to_sat()
@@ -803,6 +807,13 @@ impl DaemonControl {
                         min_feerate_vb = std::cmp::max(min_feerate_vb, floor);
                     }
                     replaced_fee = add_fee(replaced_fee, fee);
+                }
+                Some(None) => {
+                    return Err(CommandError::MempoolUnavailable(format!(
+                        "cannot work out the fee of {}, which the replacement of {} must outbid, \
+                         from our records",
+                        conflict, txid
+                    )))
                 }
                 None => log::warn!(
                     "Cannot price {} from our records: the replacement of {} may pay too little \
@@ -847,7 +858,7 @@ impl DaemonControl {
             min_feerate_vb,
             replaced_fee.to_sat()
         );
-        (min_feerate_vb, replaced_fee)
+        Ok((min_feerate_vb, replaced_fee))
     }
 }
 
@@ -1656,7 +1667,7 @@ impl DaemonControl {
                 &prev_tx,
                 prev_psbt.as_ref(),
                 &prev_coins,
-            )
+            )?
         };
         // Check replacement transaction's target feerate, if set, is high enough,
         // and otherwise set it to the min feerate found above.
@@ -4197,6 +4208,56 @@ mod tests {
         let cancel_fee = cancel.fee().unwrap().to_sat();
         assert!(cancel_fee >= bump_fee + vsize(&cancel.unsigned_tx));
         assert!(cancel_fee < bump_fee + psbt.fee().unwrap().to_sat());
+        ms.shutdown();
+    }
+
+    /// A conflict our records show, but which also spends a coin they have no value for, cannot
+    /// be priced. Leaving it out would build a replacement it may outpay, so there is none.
+    #[test]
+    fn rbf_without_a_mempool_view_refuses_a_conflict_it_cannot_price() {
+        let mut esplora = DummyBitcoind::new();
+        esplora.sees_mempool = false;
+        let (ms, psbt, signed) = spend_in_mempool(esplora, 20);
+        let control = ms.control();
+        let txid = psbt.unsigned_tx.compute_txid();
+        let mut db_conn = control.db().lock().unwrap().connection();
+        db_conn.new_txs(std::slice::from_ref(&signed));
+
+        let our_coin = psbt.unsigned_tx.input[0].previous_output;
+        let not_ours = bitcoin::OutPoint::new(
+            Txid::from_str("617eab1fc0b03ee7f82ba70166725291783461f1a0e7975eaf8b5f8f674234f3")
+                .unwrap(),
+            0,
+        );
+        let conflict = with_witnesses(bitcoin::Transaction {
+            version: TxVersion::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: [our_coin, not_ours]
+                .iter()
+                .map(|previous_output| TxIn {
+                    previous_output: *previous_output,
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(250_000),
+                script_pubkey: ScriptBuf::from_bytes([vec![0x51, 0x20], vec![0xcd; 32]].concat()),
+            }],
+        });
+        db_conn.new_txs(std::slice::from_ref(&conflict));
+        db_conn.unspend_coins(&[our_coin]);
+        db_conn.spend_coins(&[(our_coin, conflict.compute_txid())]);
+
+        assert!(matches!(
+            control.rbf_psbt(&txid, true, None),
+            Err(CommandError::MempoolUnavailable(_))
+        ));
+        assert!(matches!(
+            control.rbf_psbt(&txid, false, Some(50)),
+            Err(CommandError::MempoolUnavailable(_))
+        ));
         ms.shutdown();
     }
 
