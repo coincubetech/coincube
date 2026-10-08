@@ -489,7 +489,50 @@ impl BackendId {
 pub type ConfirmedCoins = (Vec<(bitcoin::OutPoint, i32, u32)>, Vec<bitcoin::OutPoint>);
 
 /// Our Bitcoin backend.
+/// Tickets prevent an older successful poll from acknowledging a newer request.
+#[derive(Debug)]
+pub(crate) struct WalletRecordReplay {
+    requested: u64,
+    acknowledged: u64,
+}
+impl Default for WalletRecordReplay {
+    fn default() -> Self {
+        Self {
+            requested: 1,
+            acknowledged: 0,
+        }
+    }
+}
+impl WalletRecordReplay {
+    pub(crate) fn request(&mut self) -> Result<u64, String> {
+        self.requested = self
+            .requested
+            .checked_add(1)
+            .ok_or("Wallet replay ticket exhausted")?;
+        Ok(self.requested)
+    }
+    pub(crate) fn pending(&self) -> Option<u64> {
+        (self.requested > self.acknowledged).then_some(self.requested)
+    }
+    pub(crate) fn acknowledge(&mut self, ticket: u64) {
+        self.acknowledged = self.acknowledged.max(ticket.min(self.requested));
+    }
+}
+
 pub trait BitcoinInterface: Send {
+    fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
+        Err("Wallet record replay requires a regular Bitcoin Core/Knots backend".into())
+    }
+    fn wallet_record_replay_pending(&self) -> Option<u64> {
+        None
+    }
+    /// Explicit recovery must not claim completion with unmapped owned outputs.
+    /// The automatic startup replay is best effort so outliers cannot stop sync.
+    fn wallet_record_replay_requires_complete_mapping(&self) -> bool {
+        self.wallet_record_replay_pending()
+            .is_some_and(|ticket| ticket > 1)
+    }
+    fn acknowledge_wallet_record_replay(&mut self, _ticket: u64) {}
     /// Install the daemon shutdown signal for bounded polling reads.
     fn set_poll_abort(&mut self, _abort: sync::Arc<sync::atomic::AtomicBool>) {}
 
@@ -741,6 +784,22 @@ pub trait BitcoinInterface: Send {
 }
 
 impl BitcoinInterface for d::BitcoinD {
+    fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
+        if self.local_fork_chain.is_some() {
+            return Err("Wallet record replay is available for regular Bitcoin only".into());
+        }
+        self.record_replay.request()
+    }
+    fn wallet_record_replay_pending(&self) -> Option<u64> {
+        if self.local_fork_chain.is_some() {
+            None
+        } else {
+            self.record_replay.pending()
+        }
+    }
+    fn acknowledge_wallet_record_replay(&mut self, ticket: u64) {
+        self.record_replay.acknowledge(ticket);
+    }
     fn set_poll_abort(&mut self, abort: sync::Arc<sync::atomic::AtomicBool>) {
         self.poll_abort = abort;
     }
@@ -756,8 +815,16 @@ impl BitcoinInterface for d::BitcoinD {
         tip: &BlockChainTip,
         descs: &[descriptors::SinglePathCoincubeDesc],
     ) -> Result<Vec<UTxO>, String> {
+        // Core keeps recovered transaction records even after their bodies are
+        // pruned. Replay those records once on startup and after explicit scans.
+        let hash = if self.wallet_record_replay_pending().is_some() {
+            self.try_get_block_hash(0)?
+                .ok_or("Missing genesis for wallet record replay")?
+        } else {
+            tip.hash
+        };
         Ok(self
-            .try_list_since_block(&tip.hash)?
+            .try_list_since_block(&hash)?
             .received_coins
             .into_iter()
             .filter_map(|entry| {
@@ -1622,6 +1689,22 @@ impl BitcoinInterface for esplora::Esplora {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>> {
+    fn request_wallet_record_replay(&mut self) -> Result<u64, String> {
+        self.lock().unwrap().request_wallet_record_replay()
+    }
+    fn wallet_record_replay_pending(&self) -> Option<u64> {
+        self.lock().unwrap().wallet_record_replay_pending()
+    }
+    fn wallet_record_replay_requires_complete_mapping(&self) -> bool {
+        self.lock()
+            .unwrap()
+            .wallet_record_replay_requires_complete_mapping()
+    }
+    fn acknowledge_wallet_record_replay(&mut self, ticket: u64) {
+        self.lock()
+            .unwrap()
+            .acknowledge_wallet_record_replay(ticket);
+    }
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,

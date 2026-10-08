@@ -27,6 +27,8 @@ use miniscript::{
 };
 
 pub struct DummyBitcoind {
+    pub(crate) record_replay: Option<sync::Arc<sync::Mutex<crate::bitcoin::WalletRecordReplay>>>,
+    pub(crate) request_replay_during_received: bool,
     pub rescan_start: Option<BlockChainTip>,
     pub poll_failure: Option<&'static str>,
     pub received: Vec<UTxO>,
@@ -77,6 +79,8 @@ impl DummyBitcoind {
         )
         .unwrap();
         Self {
+            record_replay: None,
+            request_replay_during_received: false,
             rescan_start: None,
             poll_failure: None,
             received: Vec::new(),
@@ -98,6 +102,16 @@ impl DummyBitcoind {
 }
 
 impl BitcoinInterface for DummyBitcoind {
+    fn wallet_record_replay_pending(&self) -> Option<u64> {
+        self.record_replay
+            .as_ref()
+            .and_then(|state| state.lock().unwrap().pending())
+    }
+    fn acknowledge_wallet_record_replay(&mut self, ticket: u64) {
+        if let Some(state) = &self.record_replay {
+            state.lock().unwrap().acknowledge(ticket);
+        }
+    }
     fn set_history_sync_cache(&mut self, cache: sync::Arc<crate::bitcoin::HistorySyncCache>) {
         *self.history_sync.lock().unwrap() = Some(cache);
     }
@@ -107,6 +121,15 @@ impl BitcoinInterface for DummyBitcoind {
         _: &BlockChainTip,
         _: &[descriptors::SinglePathCoincubeDesc],
     ) -> Result<Vec<UTxO>, String> {
+        if self.request_replay_during_received {
+            self.record_replay
+                .as_ref()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .request()
+                .unwrap();
+        }
         Ok(self.received.clone())
     }
     fn try_confirmed_coins(
