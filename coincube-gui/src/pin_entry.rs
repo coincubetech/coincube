@@ -146,6 +146,20 @@ impl PinEntry {
         self.pin_input.value()
     }
 
+    pub(crate) fn requires_connect(&self) -> bool {
+        let PinEntrySuccess::LoadApp {
+            datadir,
+            wallet_settings,
+            ..
+        } = &self.on_success;
+        self.cube.network.is_blake2b()
+            && !crate::chain::has_managed_local_fork(
+                datadir,
+                self.cube.network,
+                wallet_settings.as_ref(),
+            )
+    }
+
     pub fn take_fork_signer(&self) -> Option<std::sync::Arc<coincube_core::signer::MasterSigner>> {
         self.fork_signer.lock().ok()?.take()
     }
@@ -220,11 +234,19 @@ impl PinEntry {
                 let fork_signer = self.fork_signer.clone();
                 let PinEntrySuccess::LoadApp { connect_client, .. } = &self.on_success;
                 let connect_client = connect_client.clone();
+                let requires_connect = self.requires_connect();
                 let generation = self.fork_generation;
                 let is_fork = cube.network.is_blake2b();
                 let task = Task::perform(
                     async move {
-                        if cube.network.is_blake2b() {
+                        if cube.network.is_blake2b() && !requires_connect {
+                            crate::chain::require_local_feature(
+                                cube.network,
+                                connect_client.clone(),
+                                &crate::dir::CoincubeDirectory::new(root.clone()),
+                            )
+                            .await?;
+                        } else if cube.network.is_blake2b() {
                             let client = connect_client.as_ref().ok_or_else(|| {
                                 "Sign in to Connect before unlocking this Bitcoin Blake2b Cube"
                                     .to_string()
@@ -433,6 +455,84 @@ mod fork_handoff_tests {
             None,
         )
     }
+    #[tokio::test]
+    async fn local_pin_reopen_uses_anonymous_capability_and_keeps_chain_bound_signer() {
+        use httpmock::prelude::*;
+        use iced::futures::StreamExt;
+        let chain = crate::chain::ChainId::BitcoinBlake2bTestnet4;
+        let path = std::env::temp_dir().join(format!("local-pin-{}", uuid::Uuid::new_v4()));
+        let root = crate::dir::CoincubeDirectory::new(path.clone());
+        let (_, wallet) = crate::chain::managed_local_fixture(&root, chain);
+        let signer =
+            coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+        let mut cube =
+            CubeSettings::new_with_raw_id("local-pin-fixture".into(), "Local".into(), chain);
+        cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+        signer
+            .store_encrypted_for_chain(&path, chain, &secp, None, "1234", &cube.id, None)
+            .unwrap();
+        let server = MockServer::start_async().await;
+        let feature = server
+            .mock_async(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/connect/features")
+                    .matches(|request| {
+                        request.headers.as_ref().is_none_or(|headers| {
+                            headers
+                                .iter()
+                                .all(|(name, _)| !name.eq_ignore_ascii_case("authorization"))
+                        })
+                    });
+                then.status(200).json_body(
+                    serde_json::json!({"data":{"plans":[],"bitcoin_blake2b_enabled":true}}),
+                );
+            })
+            .await;
+        let pref = crate::app::settings::global::GlobalSettings::path(&root);
+        crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(&pref, true)
+            .unwrap();
+        let mut pin = PinEntry::new(
+            cube,
+            path.clone(),
+            PinEntrySuccess::LoadApp {
+                datadir: root.clone(),
+                config: crate::app::Config::new(false),
+                network: chain.bitcoin_network(),
+                internal_bitcoind: None,
+                backup: None,
+                wallet_settings: Some(wallet),
+                connect_client: Some(crate::services::coincube::CoincubeClient::for_test(
+                    &server.base_url(),
+                )),
+            },
+            None,
+        );
+        assert!(!pin.requires_connect());
+        for (index, digit) in "1234".chars().enumerate() {
+            drop(
+                pin.update(Message::PinInput(pin_input::Message::DigitChanged(
+                    index,
+                    digit.to_string(),
+                ))),
+            );
+        }
+        let task = pin.update(Message::Submit);
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                drop(pin.update(message));
+            }
+        }
+        assert!(pin.error.is_none(), "{:?}", pin.error);
+        let unlocked = pin
+            .take_fork_signer()
+            .expect("signed-out local PIN opens the fork signer");
+        assert_eq!(unlocked.fingerprint(&secp), signer.fingerprint(&secp));
+        feature.assert_async().await;
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
     #[test]
     fn production_handoff_keeps_fork_signer_out_of_legacy_bitcoin_cache() {
         let _guard = crate::app::session::test_guard();

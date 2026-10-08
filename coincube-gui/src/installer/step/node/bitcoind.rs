@@ -18,7 +18,10 @@ use tracing::info;
 
 use jsonrpc::{client::Client, simple_http::SimpleHttpTransport};
 
-use coincube_ui::{component::form, widget::*};
+use coincube_ui::{
+    component::{form, text::Text as _},
+    widget::*,
+};
 
 use crate::dir::CoincubeDirectory;
 use crate::{
@@ -590,6 +593,7 @@ pub struct SelectBitcoindTypeStep {
     show_advanced: bool,
     network: Network,
     chain: crate::chain::ChainId,
+    local_available: bool,
     connect_authenticated: bool,
     /// Managed-node flavour to install when a node is installed. Defaults to
     /// Knots; the user can switch to Core. Carried into
@@ -624,6 +628,7 @@ impl SelectBitcoindTypeStep {
             network: Network::Bitcoin,
             chain: crate::chain::ChainId::Bitcoin,
             connect_authenticated: false,
+            local_available: false,
             node_flavor: NodeFlavor::Knots,
             existing_flavor: None,
         }
@@ -636,13 +641,14 @@ impl Step for SelectBitcoindTypeStep {
         self.network = ctx.network;
         self.chain = ctx.bitcoin_config.chain;
         self.connect_authenticated = ctx.use_coincube_connect;
+        self.local_available = ctx.fresh_fork_cube;
         if self.chain.is_blake2b() {
             // Do not inspect or inherit the Bitcoin family's global node config.
             // Connect-only remains the default until managed loader isolation lands.
             if chain_changed {
-                self.use_connect = true;
-                self.use_external = true;
-                self.install_node = false;
+                self.use_connect = self.connect_authenticated || !self.local_available;
+                self.use_external = self.use_connect;
+                self.install_node = !self.use_connect;
             }
             self.show_advanced = false;
             self.node_flavor = NodeFlavor::KnotsBlake2b;
@@ -676,11 +682,18 @@ impl Step for SelectBitcoindTypeStep {
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         if let Message::SelectBitcoindType(msg) = message {
             if self.chain.is_blake2b()
+                && !self.local_available
+                && matches!(msg, message::SelectBitcoindTypeMsg::UseExternal(false))
+            {
+                return Task::none();
+            }
+            if self.chain.is_blake2b()
                 && !matches!(
                     msg,
                     message::SelectBitcoindTypeMsg::ContinueWithConnect
                         | message::SelectBitcoindTypeMsg::UseConnect
                         | message::SelectBitcoindTypeMsg::ToggleInstallNode
+                        | message::SelectBitcoindTypeMsg::UseExternal(false)
                 )
             {
                 return Task::none();
@@ -716,7 +729,16 @@ impl Step for SelectBitcoindTypeStep {
     fn apply(&mut self, ctx: &mut Context) -> bool {
         if ctx.bitcoin_config.chain.is_blake2b() {
             if !self.use_connect {
-                return false;
+                if self.use_external || !ctx.fresh_fork_cube {
+                    return false;
+                }
+                ctx.node_flavor = NodeFlavor::KnotsBlake2b;
+                ctx.use_coincube_connect = false;
+                ctx.install_node_alongside_connect = false;
+                ctx.bitcoind_is_external = false;
+                ctx.bitcoin_backend = None;
+                ctx.pending_bitcoind_config = None;
+                return true;
             }
             let Some(token) = &ctx.connect_jwt else {
                 return false;
@@ -805,6 +827,7 @@ impl Step for SelectBitcoindTypeStep {
             PRUNE_DEFAULT,
             self.connect_authenticated,
             self.node_flavor,
+            self.local_available,
         )
     }
 }
@@ -962,6 +985,15 @@ impl Default for DefineBitcoind {
 }
 
 pub struct InternalBitcoindStep {
+    local_feature_client: Option<crate::services::coincube::CoincubeClient>,
+    local_feature_request: u64,
+    local_feature_pending: bool,
+    local_feature_checked_at: Option<std::time::Instant>,
+    local_feature_revoked: bool,
+    wait_for_local_fork: bool,
+    local_sync_ready: bool,
+    local_sync_pending: bool,
+    local_sync_error: Option<String>,
     coincube_datadir: CoincubeDirectory,
     bitcoind_datadir: PathBuf,
     network: Network,
@@ -1032,6 +1064,15 @@ impl InternalBitcoindStep {
             },
             max_mempool_mb: form::Value::default(),
             resources_loaded: false,
+            local_feature_client: None,
+            local_feature_request: 0,
+            local_feature_pending: false,
+            local_feature_checked_at: None,
+            local_feature_revoked: false,
+            wait_for_local_fork: false,
+            local_sync_ready: false,
+            local_sync_pending: false,
+            local_sync_error: None,
         }
     }
 
@@ -1101,7 +1142,17 @@ impl Step for InternalBitcoindStep {
             self.internal_bitcoind_config = None;
             self.flavor_confirmed = false;
             self.resources_loaded = false;
+            self.local_sync_ready = false;
+            self.local_sync_pending = false;
+            self.local_sync_error = None;
+            self.local_feature_request = self.local_feature_request.wrapping_add(1);
+            self.local_feature_pending = false;
+            self.local_feature_checked_at = None;
+            self.local_feature_revoked = false;
         }
+        self.local_feature_client = ctx.coincube_client.clone();
+        self.wait_for_local_fork =
+            ctx.bitcoin_config.chain.is_blake2b() && !ctx.install_node_alongside_connect;
         self.chain = ctx.bitcoin_config.chain;
         self.flavor = ctx.node_flavor;
         self.bitcoind_datadir = bitcoind::internal_bitcoind_datadir_for(
@@ -1165,7 +1216,131 @@ impl Step for InternalBitcoindStep {
     }
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
         if let Message::InternalBitcoind(msg) = message {
+            use message::InternalBitcoindMsg as M;
+            let msg = match msg {
+                M::LocalFeatureChecked(chain, request, pending, result) => {
+                    if chain != self.chain || request != self.local_feature_request {
+                        return Task::none();
+                    }
+                    self.local_feature_pending = false;
+                    if let Err(error) = result {
+                        self.local_feature_request = self.local_feature_request.wrapping_add(1);
+                        self.local_feature_revoked = true;
+                        self.local_feature_checked_at = None;
+                        self.local_sync_ready = false;
+                        self.local_sync_pending = false;
+                        self.error = Some(error.clone());
+                        self.local_sync_error = Some(error);
+                        self.exe_download = None;
+                        self.stop();
+                        return Task::none();
+                    }
+                    self.local_feature_checked_at = Some(std::time::Instant::now());
+                    *pending
+                }
+                M::Previous => {
+                    self.local_feature_request = self.local_feature_request.wrapping_add(1);
+                    self.local_feature_pending = false;
+                    self.local_feature_checked_at = None;
+                    self.local_feature_revoked = false;
+                    self.local_sync_ready = false;
+                    self.local_sync_pending = false;
+                    M::Previous
+                }
+                msg if self.wait_for_local_fork => {
+                    if matches!(msg, M::Reload) {
+                        self.local_feature_revoked = false;
+                    }
+                    if self.local_feature_revoked {
+                        return Task::none();
+                    }
+                    let mutation = matches!(
+                        msg,
+                        M::ConfirmFlavor | M::DefineConfig | M::Download | M::Install | M::Start
+                    );
+                    let sync_refresh = matches!(msg, M::CheckLocalSync)
+                        && self
+                            .local_feature_checked_at
+                            .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(60));
+                    if sync_refresh && self.local_feature_pending {
+                        return Task::none();
+                    }
+                    if mutation || sync_refresh {
+                        self.local_sync_pending = false;
+                        self.local_feature_pending = true;
+                        self.local_feature_request = self.local_feature_request.wrapping_add(1);
+                        let request = self.local_feature_request;
+                        let chain = self.chain;
+                        let client = self.local_feature_client.clone();
+                        let root = self.coincube_datadir.clone();
+                        return Task::perform(
+                            async move {
+                                crate::chain::require_local_feature(chain, client, &root).await
+                            },
+                            move |result| {
+                                Message::InternalBitcoind(M::LocalFeatureChecked(
+                                    chain,
+                                    request,
+                                    Box::new(msg.clone()),
+                                    result,
+                                ))
+                            },
+                        );
+                    }
+                    msg
+                }
+                msg => msg,
+            };
             match msg {
+                message::InternalBitcoindMsg::LocalFeatureChecked(..) => {
+                    unreachable!("handled above")
+                }
+                message::InternalBitcoindMsg::CheckLocalSync => {
+                    if !self.wait_for_local_fork
+                        || self.local_sync_ready
+                        || self.local_sync_pending
+                        || !matches!(self.started, Some(Ok(())))
+                    {
+                        return Task::none();
+                    }
+                    let Some(node) = self.bitcoind_config.clone() else {
+                        return Task::none();
+                    };
+                    self.local_sync_pending = true;
+                    let request = self.local_feature_request;
+                    let chain = self.chain;
+                    return Task::perform(
+                        async move {
+                            tokio::task::spawn_blocking(move || {
+                                // This probe reads node RPC only; it does not create a wallet.
+                                coincubed::BitcoinD::new(&node, "local-fork-admission-probe".into())
+                                    .and_then(|node| node.check_local_fork_chain(chain, true))
+                                    .map_err(|e| e.to_string())
+                            })
+                            .await
+                            .unwrap_or_else(|e| Err(e.to_string()))
+                        },
+                        move |result| {
+                            Message::InternalBitcoind(
+                                message::InternalBitcoindMsg::LocalSyncChecked(
+                                    chain, request, result,
+                                ),
+                            )
+                        },
+                    );
+                }
+                message::InternalBitcoindMsg::LocalSyncChecked(chain, request, result) => {
+                    if chain != self.chain
+                        || request != self.local_feature_request
+                        || !self.local_sync_pending
+                        || !matches!(self.started, Some(Ok(())))
+                    {
+                        return Task::none();
+                    }
+                    self.local_sync_pending = false;
+                    self.local_sync_ready = result.is_ok();
+                    self.local_sync_error = result.err();
+                }
                 message::InternalBitcoindMsg::Previous => {
                     if let Some(bitcoind) = self.internal_bitcoind.take() {
                         bitcoind.stop();
@@ -1537,13 +1712,21 @@ impl Step for InternalBitcoindStep {
     }
 
     fn subscription(&self, _hws: &HardwareWallets) -> Subscription<Message> {
-        Subscription::none()
+        if self.wait_for_local_fork
+            && !self.local_feature_revoked
+            && matches!(self.started, Some(Ok(())))
+        {
+            iced::time::every(std::time::Duration::from_secs(5))
+                .map(|_| Message::InternalBitcoind(message::InternalBitcoindMsg::CheckLocalSync))
+        } else {
+            Subscription::none()
+        }
     }
 
     fn load(&self) -> Task<Message> {
         // Wait for the user to choose Core/Knots and confirm on this screen
         // before doing anything (download/install/start).
-        if !self.flavor_confirmed {
+        if !self.flavor_confirmed || self.local_feature_revoked {
             return Task::none();
         }
         if self.internal_bitcoind_config.is_none() {
@@ -1567,6 +1750,13 @@ impl Step for InternalBitcoindStep {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
+        if self.wait_for_local_fork
+            && (self.local_feature_revoked
+                || self.local_feature_checked_at.is_none()
+                || !self.local_sync_ready)
+        {
+            return false;
+        }
         // Any errors have been handled as part of `message::InternalBitcoindMsg::Start`
         if let Some(Ok(_)) = self.started {
             let bitcoind_config = self.bitcoind_config.clone();
@@ -1611,6 +1801,25 @@ impl Step for InternalBitcoindStep {
         progress: (usize, usize),
         _email: Option<&str>,
     ) -> Element<Message> {
+        if self.wait_for_local_fork
+            && matches!(self.started, Some(Ok(())))
+            && !self.local_sync_ready
+        {
+            let mut content = iced::widget::Column::new().spacing(20)
+                .push(coincube_ui::component::text::text("Syncing your local Bitcoin Blake2b node").bold())
+                .push(coincube_ui::component::text::text("Keep Tenshu open while the node syncs. This can take several hours. The Vault will be created after your node verifies the active Blake2b chain."));
+            if let Some(error) = &self.local_sync_error {
+                content = content.push(coincube_ui::component::text::text(error));
+            }
+            return view::layout(
+                progress,
+                None,
+                "Local node synchronization",
+                content,
+                true,
+                Some(Message::Previous),
+            );
+        }
         view::start_internal_bitcoind(
             progress,
             self.flavor,
@@ -1645,6 +1854,150 @@ impl Step for InternalBitcoindStep {
 mod tests {
     use super::*;
     use bitcoin_hashes::sha256;
+
+    #[test]
+    fn local_node_feature_denial_blocks_provisioning_and_stale_sync() {
+        let path =
+            std::env::temp_dir().join(format!("local-provision-denied-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let mut step = InternalBitcoindStep::new(&root);
+        step.chain = crate::chain::ChainId::BitcoinBlake2b;
+        step.wait_for_local_fork = true;
+        step.flavor = NodeFlavor::KnotsBlake2b;
+        let mut hws = HardwareWallets::new(root.clone(), Network::Bitcoin);
+        for operation in [
+            message::InternalBitcoindMsg::DefineConfig,
+            message::InternalBitcoindMsg::Download,
+            message::InternalBitcoindMsg::Install,
+            message::InternalBitcoindMsg::Start,
+        ] {
+            step.local_feature_revoked = false;
+            drop(step.update(&mut hws, Message::InternalBitcoind(operation.clone())));
+            let request = step.local_feature_request;
+            drop(step.update(
+                &mut hws,
+                Message::InternalBitcoind(message::InternalBitcoindMsg::LocalFeatureChecked(
+                    step.chain,
+                    request,
+                    Box::new(operation),
+                    Err("feature disabled".into()),
+                )),
+            ));
+            assert!(step.local_feature_revoked);
+            assert!(!path.exists());
+        }
+        step.started = Some(Ok(()));
+        step.local_sync_pending = true;
+        drop(step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::LocalSyncChecked(
+                step.chain,
+                step.local_feature_request,
+                Ok(()),
+            )),
+        ));
+        assert!(!step.local_sync_ready);
+        let mut ctx = Context::new_for_chain(
+            step.chain,
+            root,
+            crate::installer::context::RemoteBackend::None,
+            None,
+            None,
+        );
+        assert!(!step.apply(&mut ctx));
+    }
+
+    #[test]
+    fn previous_discards_local_sync_from_the_old_node_attempt() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("local-sync-generation-{}", uuid::Uuid::new_v4())),
+        );
+        let mut step = InternalBitcoindStep::new(&root);
+        step.chain = crate::chain::ChainId::BitcoinBlake2b;
+        step.wait_for_local_fork = true;
+        let mut hws = HardwareWallets::new(root, Network::Bitcoin);
+        step.started = Some(Ok(()));
+        step.local_sync_pending = true;
+        let old_request = step.local_feature_request;
+        drop(step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::Previous),
+        ));
+        step.started = Some(Ok(()));
+        step.local_sync_pending = true;
+        drop(step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::LocalSyncChecked(
+                step.chain,
+                old_request,
+                Ok(()),
+            )),
+        ));
+        assert!(!step.local_sync_ready);
+        drop(step.update(
+            &mut hws,
+            Message::InternalBitcoind(message::InternalBitcoindMsg::LocalSyncChecked(
+                step.chain,
+                step.local_feature_request,
+                Ok(()),
+            )),
+        ));
+        assert!(step.local_sync_ready);
+    }
+
+    #[test]
+    fn anonymous_local_selection_never_installs_a_connect_fallback() {
+        let path = std::env::temp_dir().join(format!("local-selector-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let mut ctx = Context::new_for_chain(
+            crate::chain::ChainId::BitcoinBlake2bTestnet4,
+            root.clone(),
+            crate::installer::context::RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.fresh_fork_cube = true;
+        let mut select = SelectBitcoindTypeStep::new();
+        select.load_context(&ctx);
+        let mut hws = HardwareWallets::new(root.clone(), ctx.network);
+        drop(select.update(
+            &mut hws,
+            Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false)),
+        ));
+        assert!(select.apply(&mut ctx));
+        assert_eq!(ctx.node_flavor, NodeFlavor::KnotsBlake2b);
+        assert!(
+            !ctx.use_coincube_connect
+                && !ctx.install_node_alongside_connect
+                && !ctx.bitcoind_is_external
+        );
+        assert!(ctx.bitcoin_backend.is_none() && ctx.pending_bitcoind_config.is_none());
+        let mut internal = InternalBitcoindStep::new(&root);
+        internal.load_context(&ctx);
+        internal.started = Some(Ok(()));
+        assert!(
+            !internal.apply(&mut ctx),
+            "cannot create a Vault while syncing"
+        );
+        assert!(ctx.bitcoin_backend.is_none());
+        internal.local_sync_ready = true;
+        internal.local_feature_checked_at = Some(std::time::Instant::now());
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:18444".parse().unwrap(),
+            rpc_auth: BitcoindRpcAuth::CookieFile(path.join("synthetic.cookie")),
+        };
+        internal.bitcoind_config = Some(config);
+        assert!(internal.apply(&mut ctx));
+        assert!(matches!(
+            ctx.bitcoin_backend,
+            Some(BitcoinBackend::Bitcoind(_))
+        ));
+        assert!(ctx.pending_bitcoind_config.is_none());
+        assert!(
+            !path.exists(),
+            "selection/sync guards create no wallet artifacts"
+        );
+    }
 
     /// A Blake2b start whose managed conf cannot be prepared is refused, and the
     /// refusal is the start's recorded outcome. Left unrecorded, `load` dispatched
@@ -1831,7 +2184,18 @@ mod tests {
         for _ in 0..5 {
             let _ = step.update(
                 &mut hws,
-                Message::InternalBitcoind(message::InternalBitcoindMsg::DefineConfig),
+                // This helper tests configuration writing after feature admission;
+                // separate local admission tests cover positive/negative API checks.
+                Message::InternalBitcoind(if step.wait_for_local_fork {
+                    message::InternalBitcoindMsg::LocalFeatureChecked(
+                        step.chain,
+                        step.local_feature_request,
+                        Box::new(message::InternalBitcoindMsg::DefineConfig),
+                        Ok(()),
+                    )
+                } else {
+                    message::InternalBitcoindMsg::DefineConfig
+                }),
             );
             let path = bitcoind::internal_bitcoind_config_path(&step.bitcoind_datadir);
             if let Ok(conf) = InternalBitcoindConfig::from_file(&path) {

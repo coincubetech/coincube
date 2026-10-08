@@ -421,6 +421,14 @@ impl std::fmt::Debug for RestorePinSetupMsg {
 
 #[derive(Debug, Clone)]
 pub enum InternalBitcoindMsg {
+    LocalFeatureChecked(
+        crate::chain::ChainId,
+        u64,
+        Box<InternalBitcoindMsg>,
+        Result<(), String>,
+    ),
+    CheckLocalSync,
+    LocalSyncChecked(crate::chain::ChainId, u64, Result<(), String>),
     Previous,
     Reload,
     /// Pick the managed node flavour (Bitcoin Core or Bitcoin Knots)

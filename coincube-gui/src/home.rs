@@ -256,6 +256,8 @@ struct PendingRemoteRename {
 }
 
 pub struct Home {
+    global_blake2b_enabled: bool,
+    global_feature_request: u64,
     pending_fork_claim: Option<app::claim_intent::ForkHandoff>,
     state: State,
     displayed_networks: Vec<ChainId>,
@@ -419,6 +421,8 @@ impl Home {
         let network_dir = datadir_path.network_directory(network);
         (
             Self {
+                global_blake2b_enabled: false,
+                global_feature_request: 0,
                 pending_fork_claim: None,
                 // Resolved on the first `refresh_displayed_networks`.
                 btcb2_claim_targets: std::collections::HashSet::new(),
@@ -484,6 +488,10 @@ impl Home {
             // when a session is already in the keyring — without
             // waiting for the user to navigate to the Connect section.
             Task::batch([
+                Task::perform(
+                    crate::chain::global_blake2b_enabled(CoincubeClient::new()),
+                    |enabled| Message::GlobalFeatureLoaded(0, enabled),
+                ),
                 probe_network_datadir(network, network_dir),
                 Task::done(Message::View(ViewMessage::ConnectAccount(
                     ConnectAccountMessage::Init,
@@ -806,6 +814,21 @@ impl Home {
                 .is_available()
     }
 
+    /// Local-node visibility uses the anonymous flag; Connect retains its own grant.
+    pub(crate) fn chain_availability(&self, chain: ChainId) -> app::features::Availability {
+        if !chain.is_blake2b() {
+            return app::features::Availability::Available;
+        }
+        if self.connect_account.bitcoin_blake2b_opt_in
+            && (self.global_blake2b_enabled
+                || self.connect_chain_availability(chain).is_available())
+        {
+            app::features::Availability::Available
+        } else {
+            app::features::Availability::Unavailable { reason: "Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability.".into() }
+        }
+    }
+
     /// Account-scoped admission for the explicit Connect-only fork route.
     pub(crate) fn connect_chain_availability(&self, chain: ChainId) -> app::features::Availability {
         if !chain.is_blake2b() {
@@ -962,6 +985,16 @@ impl Home {
         })
     }
 
+    fn recheck_global_feature(&mut self) -> Task<Message> {
+        self.global_feature_request = self.global_feature_request.wrapping_add(1);
+        let request = self.global_feature_request;
+        let client = self.connect_account.client.clone();
+        Task::perform(
+            crate::chain::global_blake2b_enabled(client),
+            move |enabled| Message::GlobalFeatureLoaded(request, enabled),
+        )
+    }
+
     /// Refresh saved preferences after a successful edit in any Home tab.
     pub(crate) fn reload_global_settings(&mut self) -> Task<Message> {
         let path = GlobalSettings::path(&self.datadir_path);
@@ -1007,7 +1040,7 @@ impl Home {
             vec![ChainId::Bitcoin]
         };
         if self
-            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .chain_availability(ChainId::BitcoinBlake2b)
             .is_available()
         {
             self.displayed_networks.push(ChainId::BitcoinBlake2b);
@@ -1182,6 +1215,13 @@ impl Home {
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
+        if let Message::GlobalFeatureLoaded(request, enabled) = message {
+            if request == self.global_feature_request {
+                self.global_blake2b_enabled = enabled;
+                return self.reload_global_settings();
+            }
+            return Task::none();
+        }
         self.refresh_displayed_networks();
         if self.network.is_blake2b() {
             // Explicitly supported launcher actions only. No legacy seed-only,
@@ -1221,7 +1261,7 @@ impl Home {
             };
             if !allowed {
                 self.set_error(
-                    "Bitcoin Blake2b supports only an authenticated Connect Vault with a PIN",
+                    "Bitcoin Blake2b supports a PIN-protected Vault using a local node or Connect",
                 );
                 return Task::none();
             }
@@ -1234,7 +1274,7 @@ impl Home {
                         | ViewMessage::Run(_)
                 )
             ) {
-                if let Some(reason) = self.connect_chain_availability(self.network).reason() {
+                if let Some(reason) = self.chain_availability(self.network).reason() {
                     self.set_error(reason.to_string());
                     return Task::none();
                 }
@@ -2192,14 +2232,14 @@ impl Home {
                 if !(self.developer_mode
                     || network == ChainId::Bitcoin
                     || network == ChainId::BitcoinBlake2b
-                        && self.connect_chain_availability(network).is_available())
+                        && self.chain_availability(network).is_available())
                 {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
                     );
                     return Task::none();
                 }
-                if let Some(reason) = self.connect_chain_availability(network).reason() {
+                if let Some(reason) = self.chain_availability(network).reason() {
                     self.set_error(reason.to_string());
                     return Task::none();
                 }
@@ -2248,6 +2288,11 @@ impl Home {
                         self.settings_error = None;
                         Task::batch([
                             self.reload_global_settings(),
+                            if enabled {
+                                self.recheck_global_feature()
+                            } else {
+                                Task::none()
+                            },
                             Task::done(Message::GlobalSettingsChanged),
                         ])
                     }
@@ -2390,8 +2435,7 @@ impl Home {
                             ));
                             return Task::none();
                         }
-                        if let Some(reason) = self.connect_chain_availability(cube.network).reason()
-                        {
+                        if let Some(reason) = self.chain_availability(cube.network).reason() {
                             self.error = Some(reason.to_string());
                             return Task::none();
                         }
@@ -2693,6 +2737,9 @@ impl Home {
                     self.connect_account.active_sub = sub.clone();
                 }
                 self.active_section = section;
+                if matches!(self.active_section, HomeSection::Settings) {
+                    return self.recheck_global_feature();
+                }
                 if matches!(self.active_section, HomeSection::Cubes) {
                     return self.on_focus();
                 }
@@ -4262,7 +4309,7 @@ impl Home {
     }
 
     pub fn view(&self) -> Element<Message> {
-        let unavailable = self.connect_chain_availability(self.network);
+        let unavailable = self.chain_availability(self.network);
         let unavailable_content = unavailable.reason().map(|reason| {
             Column::new()
                 .spacing(16)
@@ -5968,6 +6015,7 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 pub enum Message {
     /// Bubble successful preference writes to the GUI for every open tab.
     GlobalSettingsChanged,
+    GlobalFeatureLoaded(u64, bool),
     View(ViewMessage),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
     ReturnBitcoinClaim(app::claim_intent::ForkHandoff),
@@ -10243,6 +10291,64 @@ mod chain_identity_open_tests {
     }
 
     #[test]
+    fn anonymous_feature_refresh_recovers_and_discards_stale_denial() {
+        let _guard = crate::app::session::test_guard();
+        let root = CoincubeDirectory::new(tmp_datadir("anonymous-refresh"));
+        GlobalSettings::update_bitcoin_blake2b_beta(&GlobalSettings::path(&root), true).unwrap();
+        let (mut home, task) = Home::new_for_chain(root.clone(), None);
+        drop(task);
+        drop(home.update(Message::GlobalFeatureLoaded(0, false)));
+        assert!(!home
+            .chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        drop(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::Settings,
+        ))));
+        let request = home.global_feature_request;
+        assert_eq!(request, 1);
+        drop(home.update(Message::GlobalFeatureLoaded(request, true)));
+        drop(home.update(Message::GlobalFeatureLoaded(0, false)));
+        assert!(home
+            .chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        assert!(home.connect_account.features.is_none());
+        assert!(!home.connect_account.is_authenticated());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn anonymous_global_flag_offers_local_creation_without_connect_entitlements() {
+        let _guard = crate::app::session::test_guard();
+        let root = CoincubeDirectory::new(tmp_datadir("anonymous-local"));
+        let (mut home, task) = Home::new_for_chain(root.clone(), None);
+        drop(task);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
+        home.global_blake2b_enabled = true;
+        home.refresh_displayed_networks();
+        assert!(home.displayed_networks.contains(&ChainId::BitcoinBlake2b));
+        assert!(home.connect_account.features.is_none());
+        assert!(!home.connect_account.is_authenticated());
+        assert!(!home
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::Cubes {
+            cubes: vec![],
+            create_cube: false,
+            source: ChainId::BitcoinBlake2b,
+        };
+        let produced = drain(home.update(Message::View(ViewMessage::CreateCube)));
+        assert!(produced.iter().any(|message| matches!(
+            message,
+            Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, None)
+        )));
+        home.connect_account.bitcoin_blake2b_opt_in = false;
+        home.refresh_displayed_networks();
+        assert!(!home.displayed_networks.contains(&ChainId::BitcoinBlake2b));
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
     fn claim_handoff_waits_for_admission_and_uses_normal_run_with_exact_identity() {
         let _guard = crate::app::session::test_guard();
         let dir = tmp_datadir("claim-handoff");
@@ -10720,7 +10826,7 @@ mod chain_identity_open_tests {
             assert!(msgs.is_empty(), "{:?}", chain);
             assert_eq!(
                 error.as_deref(),
-                Some("Bitcoin Blake2b isn't enabled for this account."),
+                Some("Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability."),
                 "{:?}",
                 chain
             );

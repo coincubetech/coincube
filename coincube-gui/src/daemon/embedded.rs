@@ -90,7 +90,7 @@ impl Drop for PendingConnectDaemon {
     fn drop(&mut self) {
         if let Some(handle) = self.0.take() {
             if let Err(error) = handle.stop_for_cleanup() {
-                log::error!("Connect daemon cleanup failed: {}", error);
+                log::error!("Fork daemon cleanup failed: {}", error);
             }
         }
     }
@@ -254,12 +254,14 @@ impl Drop for EmbeddedDaemon {
     fn drop(&mut self) {
         // Existing Bitcoin lifecycle is unchanged. A canceled fork startup or
         // abandoned GUI owner must not retain a poller and its authentication.
-        if let Some(session) = &self.connect_session {
-            session.invalidate();
+        if self.config.bitcoin_config.chain.is_blake2b() {
+            if let Some(session) = &self.connect_session {
+                session.invalidate();
+            }
             let cleanup = |handle: Option<DaemonHandle>| {
                 if let Some(handle) = handle {
                     if let Err(error) = handle.stop_for_cleanup() {
-                        log::error!("Connect daemon cleanup failed: {}", error);
+                        log::error!("Fork daemon cleanup failed: {}", error);
                     }
                 }
             };
@@ -1154,5 +1156,46 @@ mod poison_submission_scheduling_tests {
                 SubmissionError::Uncertain { .. }
             ))
         ));
+    }
+}
+
+#[cfg(test)]
+mod local_drop_tests {
+    use super::*;
+    #[test]
+    fn abandoned_local_daemon_stops_and_joins_owned_workers_without_connect() {
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc, Arc,
+        };
+        let path = std::env::temp_dir().join(format!("local-drop-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (config, _) =
+            crate::chain::managed_local_fixture(&root, crate::chain::ChainId::BitcoinBlake2b);
+        let (sender, receiver) = mpsc::sync_channel(1);
+        let stopped = Arc::new(AtomicBool::new(false));
+        let done = stopped.clone();
+        let poller = std::thread::spawn(move || {
+            assert_eq!(format!("{:?}", receiver.recv().unwrap()), "Shutdown");
+            done.store(true, Ordering::SeqCst);
+        });
+        let abort = Arc::new(AtomicBool::new(false));
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let daemon = EmbeddedDaemon {
+            config,
+            connect_session: None,
+            handle: Arc::new(Mutex::new(Some(DaemonHandle::Server {
+                poller_sender: sender,
+                poller_handle: poller,
+                rpcserver_shutdown: shutdown.clone(),
+                rpcserver_handle: std::thread::spawn(|| Ok(())),
+                scan_abort: abort.clone(),
+            }))),
+        };
+        drop(daemon);
+        assert!(stopped.load(Ordering::SeqCst));
+        assert!(abort.load(Ordering::SeqCst));
+        assert!(shutdown.load(Ordering::SeqCst));
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

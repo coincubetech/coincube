@@ -1101,6 +1101,24 @@ impl ConnectAccountPanel {
         }
     }
 
+    /// A local node does not bind its lifetime to the admitted Connect bearer.
+    pub(crate) fn use_local_backend(&mut self) {
+        self.admitted_client = false;
+        self.admitted_reopen_required = false;
+    }
+
+    /// Discard this tab's account memory without touching the shared keyring.
+    pub(crate) fn detach_local_session(&mut self) {
+        self.admitted_client = true; // clear_session must not delete another tab's new login.
+        self.clear_session();
+        self.admitted_reopen_required = false;
+        self.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        self.invalidate_auth();
+    }
+
     pub fn revoke_admitted_client(&mut self) {
         if self.admitted_client {
             self.clear_session();

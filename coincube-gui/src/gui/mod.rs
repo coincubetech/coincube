@@ -254,9 +254,13 @@ impl GUI {
         };
         let auth_from_fork_app = if auth_change.is_some() {
             match &message {
-                Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) => self.panes.get(*pane_id)
+                Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) => self
+                    .panes
+                    .get(*pane_id)
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
-                    .is_some_and(|tab| matches!(&tab.state, tab::State::App(app) if app.cube_settings().network.is_blake2b())),
+                    .is_some_and(
+                        |tab| matches!(&tab.state, tab::State::App(app) if app.requires_connect()),
+                    ),
                 _ => false,
             }
         } else {
