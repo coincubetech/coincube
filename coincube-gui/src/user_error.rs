@@ -523,11 +523,14 @@ fn broadcast_refusal(detail: &str) -> UserError {
 
 /// Whether a node refused a replacement for paying too little to replace what it
 /// conflicts with: Bitcoin Core's `insufficient fee` refusals (a feerate not above
-/// the replaced transaction's, or a fee not above the fees it would evict), which
-/// Esplora and Electrum servers pass on as Core wrote them.
+/// the replaced transaction's, or a fee not above the fees it would evict), and its
+/// `insufficient feerate: does not improve feerate diagram`, which Esplora and
+/// Electrum servers pass on as Core wrote them.
+///
+/// Not every "rejecting replacement" is about the fee: one with too many
+/// conflicting clusters is refused whatever it pays, so it gets the retryable copy.
 fn underpays_replacement(detail: &str) -> bool {
-    let detail = detail.to_ascii_lowercase();
-    detail.contains("insufficient fee") || detail.contains("rejecting replacement")
+    detail.to_ascii_lowercase().contains("insufficient fee")
 }
 
 impl Display for UserError {
@@ -1065,6 +1068,36 @@ mod tests {
                 assert!(!field.contains(leaked), "{} leaked in {}", leaked, field);
             }
         }
+    }
+
+    /// A replacement that doesn't improve the feerate diagram is refused for its
+    /// fee too: "insufficient feerate" contains "insufficient fee".
+    #[test]
+    fn a_replacement_not_improving_the_feerate_diagram_is_a_fee_refusal() {
+        let u: UserError = (&Error::Daemon(DaemonError::Rpc(
+            coincubed::commands::TX_BROADCAST_ERROR as i32,
+            "Failed to broadcast transaction: replacement-failed, insufficient feerate: does not improve feerate diagram"
+                .to_string(),
+        )))
+            .into();
+
+        assert_eq!(u.reference, CC_DMN_RBF_FEE);
+        assert!(!u.retryable);
+    }
+
+    /// A replacement refused for conflicting with too many clusters is refused
+    /// whatever it pays, so it must not be told its fee is too low.
+    #[test]
+    fn a_cluster_limit_refusal_is_not_a_fee_refusal() {
+        let u: UserError = (&Error::Daemon(DaemonError::Rpc(
+            coincubed::commands::TX_BROADCAST_ERROR as i32,
+            "Failed to broadcast transaction: too many potential replacements, rejecting replacement 49c7ab9f8656a39cac28cb2ab7929b3682aff03681a87cef255d5f7ead707efe; too many conflicting clusters (101 > 100)"
+                .to_string(),
+        )))
+            .into();
+
+        assert_eq!(u.reference, CC_DMN_BROADCAST);
+        assert!(u.retryable);
     }
 
     /// Any other broadcast failure keeps its retry: the backend may just have
