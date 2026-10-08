@@ -863,6 +863,7 @@ pub struct App {
     node_history_in_progress: bool,
     node_history_pending: Option<node_history::Action>,
     node_history_epoch: u64,
+    node_history_request_epoch: u64,
     /// Set at the global Connect auth boundary (`Tab::invalidate_fork_session`
     /// → [`Self::on_global_auth_change`]): the session this tab's Connect
     /// panel still shows is not one a claim may work under. Lifted only by
@@ -3479,6 +3480,7 @@ impl App {
             node_history_in_progress: false,
             node_history_pending: None,
             node_history_epoch: 0,
+            node_history_request_epoch: 0,
             claim_session_invalidated: false,
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
@@ -3694,6 +3696,7 @@ impl App {
                 node_history_in_progress: false,
                 node_history_pending: None,
                 node_history_epoch: 0,
+                node_history_request_epoch: 0,
                 claim_session_invalidated: false,
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
@@ -6456,6 +6459,8 @@ impl App {
                 if config != managed.config {
                     return Task::none();
                 }
+                self.node_history_request_epoch = self.node_history_request_epoch.wrapping_add(1);
+                let request_epoch = self.node_history_request_epoch;
                 self.node_history_in_progress = true;
                 self.cache.node_history.busy = true;
                 self.cache.node_history.error = None;
@@ -6477,6 +6482,7 @@ impl App {
                     async move {
                         let result = context.run(action).await.map(Box::new);
                         Message::NodeHistoryCompleted {
+                            request_epoch,
                             app,
                             wallet: wallet_id,
                             config,
@@ -6487,11 +6493,19 @@ impl App {
                 );
             }
             Message::NodeHistoryCompleted {
+                request_epoch,
                 app,
                 wallet,
                 config,
                 result,
             } => {
+                if request_epoch != self.node_history_request_epoch {
+                    return Task::none();
+                }
+                // The current worker has finished even when its configuration
+                // disappeared. An older worker must never release a newer one.
+                self.node_history_in_progress = false;
+                self.cache.node_history.busy = false;
                 if app != self.cache.app_generation
                     || self.wallet.as_ref().map(|w| w.id()) != Some(wallet)
                     || self
@@ -6501,10 +6515,9 @@ impl App {
                         .and_then(local_node_sync_config)
                         != Some(&config)
                 {
+                    self.node_history_pending = None;
                     return Task::none();
                 }
-                self.node_history_in_progress = false;
-                self.cache.node_history.busy = false;
                 match result {
                     Ok(outcome) => {
                         self.cache.node_history = outcome.status;
@@ -7388,6 +7401,8 @@ impl App {
                 // clears its cached permission before polling the replacement.
                 if result.is_ok() {
                     self.bitcoind_sync_probe_in_progress = false;
+                    self.node_history_request_epoch =
+                        self.node_history_request_epoch.wrapping_add(1);
                     self.node_history_in_progress = false;
                     self.node_history_pending = None;
                     self.cache.node_history = node_history::Status::default();
@@ -7419,6 +7434,8 @@ impl App {
                     self.cache.local_switch_history = None;
                     self.local_switch_hold = None;
                     self.bitcoind_sync_probe_in_progress = false;
+                    self.node_history_request_epoch =
+                        self.node_history_request_epoch.wrapping_add(1);
                     self.node_history_in_progress = false;
                     self.node_history_pending = None;
                     self.cache.node_history = node_history::Status::default();
@@ -13432,6 +13449,56 @@ pub(crate) mod claim_step1_tests {
 mod local_node_sync_tests {
     use super::*;
     use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
+
+    #[test]
+    fn current_history_completion_releases_busy_state_when_daemon_disappears() {
+        let root =
+            std::env::temp_dir().join(format!("history-completion-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let wallet = app.wallet.as_ref().unwrap().id();
+        app.node_history_request_epoch = 2;
+        app.node_history_in_progress = true;
+        app.cache.node_history.busy = true;
+        app.node_history_pending = Some(node_history::Action::Poll);
+        app.daemon = None;
+        drop(app.update(Message::NodeHistoryCompleted {
+            request_epoch: 2,
+            app: app.cache.app_generation,
+            wallet,
+            config: node(8333),
+            result: Err("stale context".into()),
+        }));
+        assert!(!app.node_history_in_progress);
+        assert!(!app.cache.node_history.busy);
+        assert!(app.node_history_pending.is_none());
+        assert!(app.cache.node_history.error.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn superseded_history_completion_cannot_release_a_new_worker() {
+        let root = std::env::temp_dir().join(format!("history-epoch-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        let wallet = app.wallet.as_ref().unwrap().id();
+        app.node_history_request_epoch = 3;
+        app.node_history_in_progress = true;
+        app.cache.node_history.busy = true;
+        app.node_history_pending = Some(node_history::Action::Poll);
+        drop(app.update(Message::NodeHistoryCompleted {
+            request_epoch: 2,
+            app: app.cache.app_generation,
+            wallet,
+            config: node(8333),
+            result: Err("obsolete worker".into()),
+        }));
+        assert!(app.node_history_in_progress);
+        assert!(app.cache.node_history.busy);
+        assert!(app.node_history_pending.is_some());
+        assert!(app.cache.node_history.error.is_none());
+        let _ = std::fs::remove_dir_all(root);
+    }
 
     #[test]
     fn a_probe_started_before_recovery_cannot_restore_history_permission() {

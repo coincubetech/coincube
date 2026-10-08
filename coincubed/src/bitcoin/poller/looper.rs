@@ -176,7 +176,7 @@ fn update_coins(
             break;
         }
         if unresolved.len() == before {
-            if bit.wallet_record_replay_pending().is_some() {
+            if bit.wallet_record_replay_requires_complete_mapping() {
                 return Err("Recovered wallet outputs could not be mapped within the prepared address range; restore the Vault's address indices before completing recovery".into());
             }
             for utxo in unresolved {
@@ -1248,6 +1248,52 @@ mod failure_tests {
         );
         assert_eq!(state.lock().unwrap().pending(), Some(2));
         assert!(db.connection().last_poll_timestamp().is_some());
+    }
+
+    #[test]
+    fn startup_replay_outlier_does_not_stall_polling_but_explicit_recovery_stays_incomplete() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for explicit in [false, true] {
+            let state = sync::Arc::new(sync::Mutex::new(
+                crate::bitcoin::WalletRecordReplay::default(),
+            ));
+            if explicit {
+                state.lock().unwrap().request().unwrap();
+            }
+            let mut backend = DummyBitcoind::new();
+            backend.record_replay = Some(state.clone());
+            let database = DummyDatabase::new();
+            database.connection().update_tip(&backend.tip);
+            backend.received = vec![UTxO {
+                outpoint: bitcoin::OutPoint::new(bitcoin::Txid::all_zeros(), 0),
+                amount: bitcoin::Amount::from_sat(100_000),
+                block_height: Some(99),
+                address: UTxOAddress::Address(
+                    descs[0]
+                        .derive(1500.into(), &secp)
+                        .address(database.connection().network())
+                        .into_unchecked(),
+                ),
+                is_immature: false,
+            }];
+            let mut bit: sync::Arc<sync::Mutex<dyn BitcoinInterface>> =
+                sync::Arc::new(sync::Mutex::new(backend));
+            let db: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
+                sync::Arc::new(sync::Mutex::new(database));
+            let history = HistorySyncCache::default();
+            poll(&mut bit, &db, &secp, &descs, &Default::default(), &history);
+            assert_eq!(
+                state.lock().unwrap().pending(),
+                if explicit { Some(2) } else { None }
+            );
+            assert_eq!(db.connection().last_poll_timestamp().is_some(), !explicit);
+            if !explicit {
+                // A second ordinary poll can advance the chain after the startup outlier.
+                poll(&mut bit, &db, &secp, &descs, &Default::default(), &history);
+                assert!(db.connection().last_poll_timestamp().is_some());
+            }
+        }
     }
 
     #[test]

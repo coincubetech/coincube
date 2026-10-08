@@ -526,6 +526,12 @@ pub trait BitcoinInterface: Send {
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         None
     }
+    /// Explicit recovery must not claim completion with unmapped owned outputs.
+    /// The automatic startup replay is best effort so outliers cannot stop sync.
+    fn wallet_record_replay_requires_complete_mapping(&self) -> bool {
+        self.wallet_record_replay_pending()
+            .is_some_and(|ticket| ticket > 1)
+    }
     fn acknowledge_wallet_record_replay(&mut self, _ticket: u64) {}
     /// Install the daemon shutdown signal for bounded polling reads.
     fn set_poll_abort(&mut self, _abort: sync::Arc<sync::atomic::AtomicBool>) {}
@@ -1688,6 +1694,11 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
     }
     fn wallet_record_replay_pending(&self) -> Option<u64> {
         self.lock().unwrap().wallet_record_replay_pending()
+    }
+    fn wallet_record_replay_requires_complete_mapping(&self) -> bool {
+        self.lock()
+            .unwrap()
+            .wallet_record_replay_requires_complete_mapping()
     }
     fn acknowledge_wallet_record_replay(&mut self, ticket: u64) {
         self.lock()

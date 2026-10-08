@@ -249,6 +249,7 @@ pub enum Message {
     PollBitcoindSync,
     NodeHistory(super::node_history::Action),
     NodeHistoryCompleted {
+        request_epoch: u64,
         app: crate::app::cache::AppGeneration,
         wallet: crate::app::settings::WalletId,
         config: coincubed::config::BitcoindConfig,

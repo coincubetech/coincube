@@ -49,8 +49,10 @@ permit the Connect-to-local handoff while that obligation remains recorded.
 A recent date does not establish complete older history. Descriptor ranges
 preserve Core's existing range and include current Coincube indices plus a margin.
 Replay maps outputs through index 1000 or the existing wallet lookahead, whichever
-is larger; unmatched owned outputs leave replay incomplete and require restoring
-the Vault's address indices. These operations use watch-only descriptor wallets.
+is larger. Startup replay logs and skips unmatched owned outputs so ordinary
+wallet syncing can continue. An explicit recovery replay remains incomplete for
+such outputs and requires restoring the Vault's address indices before it can
+claim complete history. These operations use watch-only descriptor wallets.
 
 ## Retention, interruption, and disk use
 

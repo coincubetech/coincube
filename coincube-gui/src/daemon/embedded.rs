@@ -752,12 +752,20 @@ impl Daemon for EmbeddedDaemon {
     }
 
     async fn replay_wallet_records(&self) -> Result<(), DaemonError> {
-        self.command(|daemon| {
-            daemon
+        let mut control = match self.handle.lock().await.as_ref() {
+            Some(DaemonHandle::Controller { control, .. }) => control.clone(),
+            Some(_) => return Err(DaemonError::ClientNotSupported),
+            None => return Err(DaemonError::DaemonStopped),
+        };
+        // Only the control clone enters the worker. Reads and shutdown must
+        // remain possible while this synchronous poll acknowledgement waits.
+        tokio::task::spawn_blocking(move || {
+            control
                 .replay_wallet_records()
                 .map_err(|e| DaemonError::Unexpected(e.to_string()))
         })
         .await
+        .map_err(|e| DaemonError::Unexpected(format!("Wallet replay worker failed: {e}")))?
     }
 
     async fn create_recovery(

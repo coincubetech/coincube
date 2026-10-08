@@ -1868,15 +1868,30 @@ pub(crate) async fn ensure_tor_and_start_managed(
     })
     .await
     .unwrap_or_else(|e| Err(e.to_string()))?;
+    reload_wallets_after_restart(&started.0, network, loaded).await;
+    Ok(started)
+}
+
+/// Wallet catch-up failures cannot invalidate a successfully started node.
+async fn reload_wallets_after_restart(
+    config: &BitcoindConfig,
+    network: Network,
+    loaded: Vec<String>,
+) {
     for wallet in loaded {
-        let rpc = crate::node::history::NodeRpc::new(&started.0, &wallet, network.into()).await?;
-        if !rpc.ensure_loaded(&wallet).await? {
-            tracing::warn!(
-                "A previously loaded Vault needs historical block recovery before it can reconnect"
-            );
+        let result = async {
+            let rpc = crate::node::history::NodeRpc::new(config, &wallet, network.into()).await?;
+            rpc.ensure_loaded(&wallet).await
+        }
+        .await;
+        match result {
+            Ok(true) => {}
+            Ok(false) => tracing::warn!(wallet = %wallet,
+                "A previously loaded Vault needs historical block recovery before it can reconnect"),
+            Err(error) => tracing::warn!(wallet = %wallet, %error,
+                "The local node started, but this Vault could not reconnect"),
         }
     }
-    Ok(started)
 }
 
 #[derive(Debug)]
@@ -2366,6 +2381,49 @@ const SIGNET_GENESIS_BLOCK_TIMESTAMP: i64 = 1598918400;
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn reload_error_does_not_prevent_other_wallets_reconnecting() {
+        use httpmock::prelude::*;
+        use serde_json::json;
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .json_body_partial(r#"{"method":"listwallets"}"#);
+                then.status(200)
+                    .json_body(json!({"id":"history", "result":[]}));
+            })
+            .await;
+        let first = server.mock_async(|when, then| {
+            when.method(POST).json_body_partial(r#"{"method":"createwallet","params":["failed",true,true,"",false,true,true]}"#);
+            then.status(200).json_body(json!({"id":"history", "error":{"code":-4,"message":"Synthetic reload failure"}}));
+        }).await;
+        let second = server
+            .mock_async(|when, then| {
+                when.method(POST).json_body_partial(
+                    r#"{"method":"createwallet","params":["ready",true,true,"",false,true,true]}"#,
+                );
+                then.status(200)
+                    .json_body(json!({"id":"history", "result":{}}));
+            })
+            .await;
+        let config = BitcoindConfig {
+            addr: *server.address(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+        };
+        reload_wallets_after_restart(
+            &config,
+            Network::Regtest,
+            vec!["failed".into(), "ready".into()],
+        )
+        .await;
+        first.assert_async().await;
+        second.assert_async().await;
+    }
+
     #[test]
     fn manual_switch_waits_for_recovery_even_with_cached_history_permission() {
         let mut cache = Cache {

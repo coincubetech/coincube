@@ -104,11 +104,13 @@ impl NodeRpc {
             .client
             .post(url.clone())
             .basic_auth(&self.user, Some(&self.pass))
-            .timeout(Duration::from_secs(if method == "rescanblockchain" {
-                120
-            } else {
-                10
-            }))
+            .timeout(Duration::from_secs(
+                if matches!(method, "rescanblockchain" | "loadwallet") {
+                    120
+                } else {
+                    10
+                },
+            ))
             .json(&json!({"jsonrpc":"2.0", "id":"history", "method":method, "params":params}))
             .send()
             .await
@@ -376,10 +378,18 @@ impl NodeRpc {
         if !scheduled {
             return Err("No archival peer is available to recover old blocks; retry after the node connects to peers".into());
         }
-        // The RPC schedules a request; it does not acknowledge receipt. Yield
-        // with an unchanged checkpoint when a body has not arrived yet.
-        tokio::time::sleep(Duration::from_millis(500)).await;
-        self.has_block(hash).await
+        // Scheduling is not receipt. Allow a bounded download window before
+        // consuming a retry or selecting another peer for the same block.
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(45);
+        loop {
+            tokio::time::sleep(Duration::from_millis(500)).await;
+            if self.has_block(hash).await? {
+                return Ok(true);
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Ok(false);
+            }
+        }
     }
 }
 
@@ -994,6 +1004,59 @@ mod tests {
         std::fs::write(&path, b"{broken").unwrap();
         assert!(read_json::<Recovery>(&path).is_err());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[tokio::test]
+    async fn slow_wallet_load_outlives_the_normal_rpc_timeout() {
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST);
+                then.status(200)
+                    .delay(Duration::from_secs(11))
+                    .json_body(json!({"id":"history", "result":{}}));
+            })
+            .await;
+        let client = rpc(&server).await;
+        let (loaded, ordinary) = tokio::join!(
+            client.call(false, "loadwallet", json!(["fixture"])),
+            client.call(false, "getwalletinfo", json!([])),
+        );
+        assert!(loaded.is_ok());
+        assert!(ordinary.is_err());
+    }
+
+    #[tokio::test]
+    async fn scheduled_block_download_is_polled_without_rescheduling() {
+        let server = MockServer::start_async().await;
+        let missing = server.mock_async(|when, then| {
+            when.method(POST).json_body_partial(r#"{"method":"getblock"}"#);
+            then.status(200).json_body(json!({"id":"history", "error":{"code":-1,"message":"Block not available (pruned data)"}}));
+        }).await;
+        response(
+            &server,
+            "getpeerinfo",
+            json!([{"id":7,"inbound":false,"services":"0000000000000009"}]),
+        )
+        .await;
+        let scheduled = server
+            .mock_async(|when, then| {
+                when.method(POST)
+                    .json_body_partial(r#"{"method":"getblockfrompeer"}"#);
+                then.status(200)
+                    .json_body(json!({"id":"history", "result":{}}));
+            })
+            .await;
+        let client = rpc(&server).await;
+        let arriving = async {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+            missing.delete_async().await;
+            response(&server, "getblock", json!(serialize_hex(&genesis()))).await;
+        };
+        let (downloaded, ()) =
+            tokio::join!(client.fetch_block(genesis().block_hash(), 0), arriving);
+        assert!(downloaded.unwrap());
+        scheduled.assert_async().await;
     }
 
     #[tokio::test]
