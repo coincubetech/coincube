@@ -4293,7 +4293,7 @@ impl Home {
     fn creation_form(&self) -> Element<ViewMessage> {
         if self.network.is_blake2b() {
             return Column::new().spacing(16)
-                .push(text("Create a Bitcoin Blake2b Vault with Connect. Other wallet and recovery flows are unavailable."))
+                .push(text("Create a Bitcoin Blake2b Vault. Other wallet and recovery flows are unavailable."))
                 .push(button::primary(None, "Create Vault").on_press(ViewMessage::CreateWallet))
                 .into();
         }
