@@ -111,9 +111,12 @@ fn update_coins(
                         let start = initial_highest
                             .checked_add(gap)
                             .ok_or("Derivation range overflow")?;
-                        let end = highest
+                        let mut end = highest
                             .checked_add(gap)
                             .ok_or("Derivation range overflow")?;
+                        if bit.wallet_record_replay_pending().is_some() {
+                            end = end.max(1001);
+                        }
                         let mut found = None;
                         for index in start..end {
                             let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
@@ -173,6 +176,9 @@ fn update_coins(
             break;
         }
         if unresolved.len() == before {
+            if bit.wallet_record_replay_requires_complete_mapping() {
+                return Err("Recovered wallet outputs could not be mapped within the prepared address range; restore the Vault's address indices before completing recovery".into());
+            }
             for utxo in unresolved {
                 log::error!(
                     "Cannot map owned coin {} to a derivation index; skipping it for now",
@@ -646,6 +652,7 @@ pub fn poll(
     history_sync: &HistorySyncCache,
 ) {
     let mut db_conn = db.connection();
+    let replay_ticket = bit.wallet_record_replay_pending();
     let result = observe_rescan(&mut db_conn, bit).and_then(|rescan| {
         // Keep the persisted rescan marker until the post-rollback wallet
         // update succeeds. Otherwise callers can observe completion while
@@ -683,6 +690,9 @@ pub fn poll(
             );
         }
         return;
+    }
+    if let Some(ticket) = replay_ticket {
+        bit.acknowledge_wallet_record_replay(ticket);
     }
     history_sync.poll_succeeded(now);
     db_conn.set_last_poll(now);
@@ -1213,6 +1223,78 @@ mod failure_tests {
     use super::*;
     use crate::testutils::{DummyBitcoind, DummyDatabase};
     use bitcoin::{bip32::ChildNumber, hashes::Hash};
+
+    #[test]
+    fn an_old_poll_cannot_acknowledge_a_replay_requested_after_its_record_read() {
+        let state = sync::Arc::new(sync::Mutex::new(
+            crate::bitcoin::WalletRecordReplay::default(),
+        ));
+        let mut backend = DummyBitcoind::new();
+        backend.record_replay = Some(state.clone());
+        backend.request_replay_during_received = true;
+        let db = DummyDatabase::new();
+        db.connection().update_tip(&backend.tip);
+        let mut bit: sync::Arc<sync::Mutex<dyn BitcoinInterface>> =
+            sync::Arc::new(sync::Mutex::new(backend));
+        let db: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
+            sync::Arc::new(sync::Mutex::new(db));
+        poll(
+            &mut bit,
+            &db,
+            &secp256k1::Secp256k1::verification_only(),
+            &super::tests::test_descs(),
+            &Default::default(),
+            &Default::default(),
+        );
+        assert_eq!(state.lock().unwrap().pending(), Some(2));
+        assert!(db.connection().last_poll_timestamp().is_some());
+    }
+
+    #[test]
+    fn startup_replay_outlier_does_not_stall_polling_but_explicit_recovery_stays_incomplete() {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let descs = super::tests::test_descs();
+        for explicit in [false, true] {
+            let state = sync::Arc::new(sync::Mutex::new(
+                crate::bitcoin::WalletRecordReplay::default(),
+            ));
+            if explicit {
+                state.lock().unwrap().request().unwrap();
+            }
+            let mut backend = DummyBitcoind::new();
+            backend.record_replay = Some(state.clone());
+            let database = DummyDatabase::new();
+            database.connection().update_tip(&backend.tip);
+            backend.received = vec![UTxO {
+                outpoint: bitcoin::OutPoint::new(bitcoin::Txid::all_zeros(), 0),
+                amount: bitcoin::Amount::from_sat(100_000),
+                block_height: Some(99),
+                address: UTxOAddress::Address(
+                    descs[0]
+                        .derive(1500.into(), &secp)
+                        .address(database.connection().network())
+                        .into_unchecked(),
+                ),
+                is_immature: false,
+            }];
+            let mut bit: sync::Arc<sync::Mutex<dyn BitcoinInterface>> =
+                sync::Arc::new(sync::Mutex::new(backend));
+            let db: sync::Arc<sync::Mutex<dyn DatabaseInterface>> =
+                sync::Arc::new(sync::Mutex::new(database));
+            let history = HistorySyncCache::default();
+            poll(&mut bit, &db, &secp, &descs, &Default::default(), &history);
+            assert_eq!(
+                state.lock().unwrap().pending(),
+                if explicit { Some(2) } else { None }
+            );
+            assert_eq!(db.connection().last_poll_timestamp().is_some(), !explicit);
+            if !explicit {
+                // A second ordinary poll can advance the chain after the startup outlier.
+                poll(&mut bit, &db, &secp, &descs, &Default::default(), &history);
+                assert!(db.connection().last_poll_timestamp().is_some());
+            }
+        }
+    }
 
     #[test]
     fn staged_lookahead_resolves_reversed_deposits_and_skips_unmapped_without_writes() {

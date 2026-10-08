@@ -247,9 +247,18 @@ pub enum Message {
     SetInternalBitcoind(Bitcoind),
     /// Fired by the bitcoind-sync subscription to trigger a progress probe.
     PollBitcoindSync,
+    NodeHistory(super::node_history::Action),
+    NodeHistoryCompleted {
+        request_epoch: u64,
+        app: crate::app::cache::AppGeneration,
+        wallet: crate::app::settings::WalletId,
+        config: coincubed::config::BitcoindConfig,
+        result: Result<Box<super::node_history::Outcome>, String>,
+    },
     /// A direct local-node observation, scoped to its App and RPC configuration.
     BitcoindSyncProgress {
         app: crate::app::cache::AppGeneration,
+        history_epoch: u64,
         wallet: Option<crate::app::settings::WalletId>,
         config: coincubed::config::BitcoindConfig,
         result: Result<super::LocalNodeSync, String>,
