@@ -263,7 +263,7 @@ impl BitcoindSettingsState {
                 warning: None,
             },
             custom_esplora_probing: false,
-            recovery_requested: false,
+            recovery_requested: cache.node_history_switch_requested,
             recovery_advanced: false,
             node_advanced: false,
             recovery_start: form::Value::default(),
@@ -564,22 +564,6 @@ impl State for BitcoindSettingsState {
                 self.rescan_settings.processing = false;
             }
             Message::UpdatePanelCache(_) => {
-                // A manual switch intent survives recovery, but never bypasses
-                // the existing node/history/scan checks when it completes.
-                if self.recovery_requested
-                    && cache.node_history.reconciled
-                    && !cache.node_history.busy
-                    && cache.node_bitcoind_ibd == Some(false)
-                    && local_node_serves_vault(cache).is_ok()
-                {
-                    self.recovery_requested = false;
-                    self.warning = None;
-                    return Task::done(Message::View(view::Message::Settings(
-                        view::SettingsMessage::NodeSettings(
-                            view::NodeSettingsMessage::SwitchToBitcoind,
-                        ),
-                    )));
-                }
                 self.rescan_settings.processing = cache.rescan_progress().is_some_and(|p| p < 1.0);
             }
             Message::View(view::Message::Settings(view::SettingsMessage::BitcoindSettings(
@@ -4287,74 +4271,20 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    async fn recovery_completion_retries_only_an_explicit_switch_intent() {
-        use crate::app::local_switch::{NodePruning, VaultHistory};
-        use iced::futures::StreamExt;
-        let mut cache = Cache {
-            node_bitcoind_ibd: Some(false),
-            node_bitcoind_pruning: Some(NodePruning::Pruned {
-                prune_height: 970_000,
-            }),
-            local_switch_history: Some(VaultHistory::From(946_000)),
-            ..Cache::default()
-        };
-        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
-        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(
-            crate::node::bitcoind::internal_bitcoind_cookie_path(
-                &crate::node::bitcoind::internal_bitcoind_datadir(&cache.datadir_path),
-                &cache.network,
-            ),
-        )));
-        cfg.auto_switch_to_pending = Some(false);
-        let daemon = daemon(Some(cfg.clone()));
-        let mut state = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
-        let _ = state.update(
-            Some(daemon.clone()),
-            &cache,
-            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
-        );
-        assert!(state.recovery_requested);
-        assert!(state.warning.is_none());
-        // A completed import alone cannot bypass a fresh history probe.
-        cache.node_history.reconciled = true;
-        assert!(iced_runtime::task::into_stream(state.update(
-            Some(daemon.clone()),
-            &cache,
-            Message::UpdatePanelCache(true)
-        ))
-        .is_none());
-        assert!(state.recovery_requested);
-        cache.local_switch_history = Some(VaultHistory::TrackedLocally);
-        let task = state.update(
-            Some(daemon.clone()),
-            &cache,
-            Message::UpdatePanelCache(true),
-        );
-        let mut stream =
-            iced_runtime::task::into_stream(task).expect("retry after verified completion");
-        assert!(matches!(
-            stream.next().await,
-            Some(iced_runtime::Action::Output(Message::View(
-                view::Message::Settings(view::SettingsMessage::NodeSettings(
-                    view::NodeSettingsMessage::SwitchToBitcoind
-                ))
-            )))
-        ));
-        assert!(!state.recovery_requested);
-        // Dismissing recovery withdraws the manual intent.
-        state.recovery_requested = true;
-        let _ = state.update(
-            Some(daemon.clone()),
-            &cache,
-            node_message(view::NodeSettingsMessage::RecoveryDismiss),
-        );
-        assert!(iced_runtime::task::into_stream(state.update(
-            Some(daemon),
-            &cache,
-            Message::UpdatePanelCache(true)
-        ))
-        .is_none());
+    #[test]
+    fn recovery_switch_intent_survives_node_page_recreation() {
+        let mut cache = Cache::default();
+        let cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        let first = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+        assert!(!first.recovery_requested);
+        // The App retains intent above the recreated settings page, scoped to
+        // its wallet/node context; its invalidation and cancellation clear it.
+        cache.node_history_switch_requested = true;
+        let reopened = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+        assert!(reopened.recovery_requested);
+        cache.node_history_switch_requested = false;
+        let cancelled = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+        assert!(!cancelled.recovery_requested);
     }
 
     #[test]
