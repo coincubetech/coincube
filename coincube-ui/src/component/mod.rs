@@ -90,6 +90,16 @@ pub fn received_celebration_page<'a, M: Clone + 'a>(
     iced::widget::mouse_area(page).on_press(on_dismiss).into()
 }
 
+fn celebration_line_size(amount_display: &str, verb_suffix: &str) -> f32 {
+    const FITS_AT_FULL_SIZE: usize = 52;
+    let chars = amount_display.chars().count() + 1 + verb_suffix.chars().count();
+    if chars <= FITS_AT_FULL_SIZE {
+        20.0
+    } else {
+        16.0
+    }
+}
+
 pub fn sent_celebration_page<'a, M: Clone + 'a>(
     context: &str,
     amount_display: &'a str,
@@ -100,6 +110,7 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
 ) -> Element<'a, M> {
     use quote_display::{self as qd, QuoteDisplayProps};
 
+    let line_size = celebration_line_size(amount_display, verb_suffix);
     let inner = Column::new()
         .spacing(20)
         .width(Length::Fill)
@@ -114,17 +125,21 @@ pub fn sent_celebration_page<'a, M: Clone + 'a>(
                 .spacing(5)
                 .push(
                     iced::widget::text(amount_display)
-                        .size(20)
+                        .size(line_size)
                         .color(crate::color::ORANGE)
                         .font(iced::Font {
                             style: iced::font::Style::Italic,
                             ..Default::default()
                         }),
                 )
-                .push(iced::widget::text(verb_suffix).size(20).font(iced::Font {
-                    style: iced::font::Style::Italic,
-                    ..Default::default()
-                })),
+                .push(
+                    iced::widget::text(verb_suffix)
+                        .size(line_size)
+                        .font(iced::Font {
+                            style: iced::font::Style::Italic,
+                            ..Default::default()
+                        }),
+                ),
         )
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(
