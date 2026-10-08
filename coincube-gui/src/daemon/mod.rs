@@ -318,6 +318,9 @@ pub trait Daemon: Debug {
     }
 
     async fn start_rescan(&self, t: u32) -> Result<(), DaemonError>;
+    async fn replay_wallet_records(&self) -> Result<(), DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
     async fn list_confirmed_txs(
         &self,
         _start: u32,

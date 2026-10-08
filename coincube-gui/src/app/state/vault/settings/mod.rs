@@ -1,4 +1,4 @@
-mod bitcoind;
+pub(crate) mod bitcoind;
 mod wallet;
 
 use std::convert::From;

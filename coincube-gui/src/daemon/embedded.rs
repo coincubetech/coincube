@@ -751,6 +751,15 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn replay_wallet_records(&self) -> Result<(), DaemonError> {
+        self.command(|daemon| {
+            daemon
+                .replay_wallet_records()
+                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+        })
+        .await
+    }
+
     async fn create_recovery(
         &self,
         address: Address<address::NetworkUnchecked>,

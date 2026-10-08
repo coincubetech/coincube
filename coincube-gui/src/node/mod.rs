@@ -3,7 +3,9 @@ use coincubed::config::BitcoinBackend;
 pub mod bitcoind;
 pub mod electrum;
 pub mod esplora;
+pub mod history;
 pub mod managed_conf;
+pub mod retention;
 pub mod revalidate;
 pub mod tor;
 

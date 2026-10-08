@@ -26,9 +26,10 @@
 //! is recorded first, as before). Bind-and-release port probing remains the
 //! candidate source; see `docs/BTCB2_MANAGED_NODE.md`.
 //!
-//! Lock ordering: this is a leaf lock. It is never acquired while another lock
-//! is held (the node-identity marker lock in `bitcoind::ensure_node_instance_marker`
-//! is taken *after* it is released, never inside), and nothing blocking — no
+//! Lock ordering: this is a leaf lock. The history controller may acquire it
+//! after its per-network lease when changing pruning mode; the reverse order
+//! is prohibited. Other writers acquire it alone. The node-identity marker lock in `bitcoind::ensure_node_instance_marker`
+//! is taken *after* it is released, never inside, and nothing blocking — no
 //! Tor bootstrap, no node spawn, no RPC — runs while it is held.
 
 use std::fmt;
