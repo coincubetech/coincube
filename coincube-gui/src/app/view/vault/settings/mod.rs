@@ -704,7 +704,7 @@ pub fn pruned_node_notice<'a, M: 'a>(
     Container::new(
         Column::new()
             .spacing(8)
-            .push(caption("Local node can't show this Vault"))
+            .push(caption("Local wallet history unavailable"))
             .push(p2_regular(why.to_string()).style(theme::text::warning)),
     )
     .padding(15)
