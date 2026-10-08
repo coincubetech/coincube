@@ -6580,6 +6580,18 @@ impl App {
             Message::SetInternalBitcoind(bitcoind) => {
                 self.internal_bitcoind = Some(bitcoind);
             }
+            Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+                view::NodeSettingsMessage::RecoveryDismiss
+                | view::NodeSettingsMessage::RecoveryCancel,
+            ))) => {
+                // Returning to Connect withdraws promotion consent for this
+                // session, including a previously enabled automatic switch.
+                self.auto_switch_suppressed = true;
+                if let Some(panel) = self.panels.vault_settings.as_mut() {
+                    return panel.update(self.daemon.clone(), &self.cache, message);
+                }
+                return Task::none();
+            }
             Message::NodeHistory(action) => {
                 if self.cache.chain().is_blake2b() {
                     return Task::none();

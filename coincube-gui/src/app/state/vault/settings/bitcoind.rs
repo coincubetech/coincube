@@ -149,6 +149,9 @@ pub struct BitcoindSettingsState {
     node_max_mempool_mb: form::Value<String>,
     recovery_start: form::Value<String>,
     retention_days: form::Value<String>,
+    recovery_requested: bool,
+    recovery_advanced: bool,
+    node_advanced: bool,
     /// "Your own Esplora" editor (`PLAN-connect-blinding` PR D5). Pre-filled
     /// with the active Esplora primary so the field always shows where chain
     /// queries actually go. Nothing is applied until the URL answers a probe.
@@ -260,6 +263,9 @@ impl BitcoindSettingsState {
                 warning: None,
             },
             custom_esplora_probing: false,
+            recovery_requested: false,
+            recovery_advanced: false,
+            node_advanced: false,
             recovery_start: form::Value::default(),
             retention_days: form::Value {
                 value: crate::node::retention::load(&cache.datadir_path, cache.network)
@@ -267,7 +273,7 @@ impl BitcoindSettingsState {
                     .flatten()
                     .filter(|policy| !policy.temporary)
                     .map(|policy| policy.days.to_string())
-                    .unwrap_or_else(|| "180".into()),
+                    .unwrap_or_default(),
                 valid: true,
                 warning: None,
             },
@@ -558,6 +564,22 @@ impl State for BitcoindSettingsState {
                 self.rescan_settings.processing = false;
             }
             Message::UpdatePanelCache(_) => {
+                // A manual switch intent survives recovery, but never bypasses
+                // the existing node/history/scan checks when it completes.
+                if self.recovery_requested
+                    && cache.node_history.reconciled
+                    && !cache.node_history.busy
+                    && cache.node_bitcoind_ibd == Some(false)
+                    && local_node_serves_vault(cache).is_ok()
+                {
+                    self.recovery_requested = false;
+                    self.warning = None;
+                    return Task::done(Message::View(view::Message::Settings(
+                        view::SettingsMessage::NodeSettings(
+                            view::NodeSettingsMessage::SwitchToBitcoind,
+                        ),
+                    )));
+                }
                 self.rescan_settings.processing = cache.rescan_progress().is_some_and(|p| p < 1.0);
             }
             Message::View(view::Message::Settings(view::SettingsMessage::BitcoindSettings(
@@ -601,6 +623,16 @@ impl State for BitcoindSettingsState {
             Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(msg))) => {
                 use view::NodeSettingsMessage;
                 match msg {
+                    NodeSettingsMessage::RecoveryAdvancedToggled => {
+                        self.recovery_advanced = !self.recovery_advanced;
+                    }
+                    NodeSettingsMessage::NodeAdvancedToggled => {
+                        self.node_advanced = !self.node_advanced;
+                    }
+                    NodeSettingsMessage::RecoveryDismiss => {
+                        self.recovery_requested = false;
+                        self.warning = None;
+                    }
                     NodeSettingsMessage::RecoveryStartEdited(value) => {
                         self.recovery_start.valid =
                             crate::app::node_history::parse_start(&value).is_ok();
@@ -640,9 +672,10 @@ impl State for BitcoindSettingsState {
                         ))
                     }
                     NodeSettingsMessage::RecoveryCancel => {
+                        self.recovery_requested = false;
                         return Task::done(Message::NodeHistory(
                             crate::app::node_history::Action::Cancel,
-                        ))
+                        ));
                     }
                     NodeSettingsMessage::RetentionApply => {
                         self.retention_days.valid = self
@@ -917,6 +950,23 @@ impl State for BitcoindSettingsState {
                         // Check whether the local wallet already tracks the history
                         // or can recover it from the node's retained blocks.
                         if let Err(reason) = local_node_serves_vault(cache) {
+                            let managed = self
+                                .full_config
+                                .as_ref()
+                                .and_then(crate::app::local_node_sync_config)
+                                .is_some_and(|cfg| {
+                                    crate::node::retention::is_managed_endpoint(
+                                        &cache.datadir_path,
+                                        cache.network,
+                                        cache.chain(),
+                                        cfg,
+                                    )
+                                });
+                            if managed && pruned_switch_refusal(cache).is_some() {
+                                self.recovery_requested = true;
+                                self.warning = None;
+                                return Task::none();
+                            }
                             self.warning = Some(Error::Unexpected(reason));
                             return Task::none();
                         }
@@ -1378,11 +1428,6 @@ impl State for BitcoindSettingsState {
                 // Standing notice, not just a click-time warning: the
                 // automatic switch is refused too, and the "will switch
                 // once synced" copy above would otherwise go unexplained.
-                if can_switch_to_bitcoind {
-                    if let Some(why) = pruned_switch_refusal(cache) {
-                        setting_panels.push(view::vault::settings::pruned_node_notice(why));
-                    }
-                }
             }
 
             // Recovery must be available while Connect is still active: its
@@ -1401,14 +1446,57 @@ impl State for BitcoindSettingsState {
                         )
                     })
             {
-                setting_panels.push(
-                    view::vault::settings::wallet_history_section(
-                        &self.recovery_start,
-                        &self.retention_days,
-                        &cache.node_history,
+                let recovery_active = cache.node_history.job.as_ref().is_some_and(|job| {
+                    !matches!(
+                        job.phase,
+                        crate::node::history::Phase::Complete
+                            | crate::node::history::Phase::Cancelled
                     )
-                    .map(map_node_msg),
-                );
+                });
+                if self.recovery_requested || recovery_active || cache.node_history.busy {
+                    setting_panels.push(
+                        view::vault::settings::wallet_history_section(
+                            &self.recovery_start,
+                            &cache.node_history,
+                            self.recovery_advanced,
+                        )
+                        .map(map_node_msg),
+                    );
+                    if self.recovery_advanced {
+                        setting_panels.push(
+                            view::vault::settings::rolling_retention_section(
+                                &self.retention_days,
+                                &cache.node_history,
+                            )
+                            .map(map_node_msg),
+                        );
+                    }
+                }
+                if self.full_config.as_ref().is_some_and(|cfg| {
+                    matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)))
+                }) {
+                    setting_panels.push(
+                        coincube_ui::component::button::transparent(
+                            None,
+                            if self.node_advanced {
+                                "Hide advanced node settings"
+                            } else {
+                                "Advanced node settings"
+                            },
+                        )
+                        .on_press(map_node_msg(view::NodeSettingsMessage::NodeAdvancedToggled))
+                        .into(),
+                    );
+                    if self.node_advanced {
+                        setting_panels.push(
+                            view::vault::settings::rolling_retention_section(
+                                &self.retention_days,
+                                &cache.node_history,
+                            )
+                            .map(map_node_msg),
+                        );
+                    }
+                }
             }
 
             if self.bitcoind_settings.is_some() || self.electrum_settings.is_some() {
@@ -4078,7 +4166,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connect_with_pending_managed_node_exposes_history_recovery() {
+    async fn history_controls_follow_switch_intent_and_advanced_disclosure() {
         use iced::advanced::{
             layout,
             renderer::Headless,
@@ -4102,7 +4190,14 @@ mod tests {
         )
         .await
         .expect("software renderer");
-        let cache = Cache::default();
+        let cache = Cache {
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(crate::app::local_switch::NodePruning::Pruned {
+                prune_height: 970_000,
+            }),
+            local_switch_history: Some(crate::app::local_switch::VaultHistory::From(946_000)),
+            ..Cache::default()
+        };
         let managed = bitcoind_config(BitcoindRpcAuth::CookieFile(
             crate::node::bitcoind::internal_bitcoind_cookie_path(
                 &crate::node::bitcoind::internal_bitcoind_datadir(&cache.datadir_path),
@@ -4112,11 +4207,14 @@ mod tests {
         let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
         cfg.pending_bitcoind = Some(managed.clone());
         let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Overview);
-        for (local, external, blake2b, expected) in [
-            (false, false, false, true),
-            (true, false, false, true),
-            (false, true, false, false),
-            (false, false, true, false),
+        for (local, external, blake2b, clicked, advanced, expected, retention) in [
+            (false, false, false, false, false, false, false),
+            (false, false, false, true, false, true, false),
+            (false, false, false, true, true, true, true),
+            (true, false, false, false, false, false, false),
+            (true, false, false, false, true, false, true),
+            (false, true, false, true, true, false, false),
+            (false, false, true, true, true, false, false),
         ] {
             let mut cfg = cfg.clone();
             let mut cache = cache.clone();
@@ -4131,7 +4229,27 @@ mod tests {
             if blake2b {
                 cache.fiat_chain = crate::chain::ChainId::BitcoinBlake2b;
             }
-            let state = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+            let mut state = BitcoindSettingsState::new(Some(cfg.clone()), &cache, false, false);
+            assert!(
+                state.retention_days.value.is_empty(),
+                "no rolling window is selected by default"
+            );
+            let daemon = daemon(Some(cfg));
+            if clicked {
+                let _ = state.update(
+                    Some(daemon.clone()),
+                    &cache,
+                    node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+                );
+            }
+            if advanced {
+                let toggle = if local {
+                    view::NodeSettingsMessage::NodeAdvancedToggled
+                } else {
+                    view::NodeSettingsMessage::RecoveryAdvancedToggled
+                };
+                let _ = state.update(Some(daemon), &cache, node_message(toggle));
+            }
             if !local {
                 assert!(state.bitcoind_settings.is_none());
                 assert!(state.electrum_settings.is_none());
@@ -4148,14 +4266,95 @@ mod tests {
                 .as_widget_mut()
                 .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
             for label in [
-                "Wallet history recovery",
+                "Recover history to switch to your local node",
+                "Recommended: Import Connect history",
                 "Import Connect history",
-                "Rolling block retention",
             ] {
                 assert_eq!(labels.0.iter().any(|text| text == label), expected,
                     "missing/unsupported history controls: local={local} external={external} blake2b={blake2b}: {label}");
             }
+            assert_eq!(
+                labels
+                    .0
+                    .iter()
+                    .any(|text| text == "Recover from this height or date"),
+                expected && advanced
+            );
+            assert_eq!(
+                labels.0.iter().any(|text| text == "Block retention"),
+                retention
+            );
         }
+    }
+
+    #[tokio::test]
+    async fn recovery_completion_retries_only_an_explicit_switch_intent() {
+        use crate::app::local_switch::{NodePruning, VaultHistory};
+        use iced::futures::StreamExt;
+        let mut cache = Cache {
+            node_bitcoind_ibd: Some(false),
+            node_bitcoind_pruning: Some(NodePruning::Pruned {
+                prune_height: 970_000,
+            }),
+            local_switch_history: Some(VaultHistory::From(946_000)),
+            ..Cache::default()
+        };
+        let mut cfg = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        cfg.pending_bitcoind = Some(bitcoind_config(BitcoindRpcAuth::CookieFile(
+            crate::node::bitcoind::internal_bitcoind_cookie_path(
+                &crate::node::bitcoind::internal_bitcoind_datadir(&cache.datadir_path),
+                &cache.network,
+            ),
+        )));
+        cfg.auto_switch_to_pending = Some(false);
+        let daemon = daemon(Some(cfg.clone()));
+        let mut state = BitcoindSettingsState::new(Some(cfg), &cache, false, false);
+        let _ = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::SwitchToBitcoind),
+        );
+        assert!(state.recovery_requested);
+        assert!(state.warning.is_none());
+        // A completed import alone cannot bypass a fresh history probe.
+        cache.node_history.reconciled = true;
+        assert!(iced_runtime::task::into_stream(state.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::UpdatePanelCache(true)
+        ))
+        .is_none());
+        assert!(state.recovery_requested);
+        cache.local_switch_history = Some(VaultHistory::TrackedLocally);
+        let task = state.update(
+            Some(daemon.clone()),
+            &cache,
+            Message::UpdatePanelCache(true),
+        );
+        let mut stream =
+            iced_runtime::task::into_stream(task).expect("retry after verified completion");
+        assert!(matches!(
+            stream.next().await,
+            Some(iced_runtime::Action::Output(Message::View(
+                view::Message::Settings(view::SettingsMessage::NodeSettings(
+                    view::NodeSettingsMessage::SwitchToBitcoind
+                ))
+            )))
+        ));
+        assert!(!state.recovery_requested);
+        // Dismissing recovery withdraws the manual intent.
+        state.recovery_requested = true;
+        let _ = state.update(
+            Some(daemon.clone()),
+            &cache,
+            node_message(view::NodeSettingsMessage::RecoveryDismiss),
+        );
+        assert!(iced_runtime::task::into_stream(state.update(
+            Some(daemon),
+            &cache,
+            Message::UpdatePanelCache(true)
+        ))
+        .is_none());
     }
 
     #[test]
