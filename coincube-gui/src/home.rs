@@ -237,6 +237,8 @@ pub struct RemoteCube {
 pub enum HomeSection {
     /// Cube list (default)
     Cubes,
+    /// Installation-wide preferences, available without a Connect account.
+    Settings,
     /// Connect account-level sub-page
     Connect(app::menu::ConnectSubMenu),
     /// Heir "Recover a Vault" discovery surface (COIN-377 / PR 1). Global —
@@ -254,6 +256,8 @@ struct PendingRemoteRename {
 }
 
 pub struct Home {
+    global_blake2b_enabled: bool,
+    global_feature_request: u64,
     pending_fork_claim: Option<app::claim_intent::ForkHandoff>,
     state: State,
     displayed_networks: Vec<ChainId>,
@@ -285,6 +289,7 @@ pub struct Home {
     /// time. Not secret — these entries are already in `settings.json`.
     creation_backup_cubes: Vec<CubeSettings>,
     developer_mode: bool,
+    settings_error: Option<String>,
     /// Connect account tier — controls how many Cubes can be created per network.
     account_tier: AccountTier,
     /// Account-level Connect panel (login, plan, security, etc.)
@@ -398,6 +403,9 @@ impl Home {
     ) -> (Self, Task<Message>) {
         let developer_mode =
             GlobalSettings::load_developer_mode(&GlobalSettings::path(&datadir_path));
+        let mut connect_account = ConnectAccountPanel::new();
+        connect_account.bitcoin_blake2b_opt_in =
+            GlobalSettings::load_bitcoin_blake2b_beta(&GlobalSettings::path(&datadir_path));
         let selected_network = network.unwrap_or(
             NETWORKS
                 .iter()
@@ -413,11 +421,17 @@ impl Home {
         let network_dir = datadir_path.network_directory(network);
         (
             Self {
+                global_blake2b_enabled: false,
+                global_feature_request: 0,
                 pending_fork_claim: None,
                 // Resolved on the first `refresh_displayed_networks`.
                 btcb2_claim_targets: std::collections::HashSet::new(),
                 state: State::Unchecked,
-                displayed_networks: NETWORKS.to_vec(),
+                displayed_networks: if developer_mode {
+                    NETWORKS.to_vec()
+                } else {
+                    vec![ChainId::Bitcoin]
+                },
                 network,
                 datadir_path: datadir_path.clone(),
                 error: None,
@@ -435,7 +449,8 @@ impl Home {
                 account_tier: GlobalSettings::load_account_tier(&GlobalSettings::path(
                     &datadir_path,
                 )),
-                connect_account: ConnectAccountPanel::new(),
+                connect_account,
+                settings_error: None,
                 recover_vault: RecoverVaultPanel::new(),
                 split_wallet: SplitWalletPanel::new(),
                 resume_split_after_install: false,
@@ -473,6 +488,10 @@ impl Home {
             // when a session is already in the keyring — without
             // waiting for the user to navigate to the Connect section.
             Task::batch([
+                Task::perform(
+                    crate::chain::global_blake2b_enabled(CoincubeClient::new()),
+                    |enabled| Message::GlobalFeatureLoaded(0, enabled),
+                ),
                 probe_network_datadir(network, network_dir),
                 Task::done(Message::View(ViewMessage::ConnectAccount(
                     ConnectAccountMessage::Init,
@@ -795,16 +814,32 @@ impl Home {
                 .is_available()
     }
 
+    /// Local-node visibility uses the anonymous flag; Connect retains its own grant.
+    pub(crate) fn chain_availability(&self, chain: ChainId) -> app::features::Availability {
+        if !chain.is_blake2b() {
+            return app::features::Availability::Available;
+        }
+        if self.connect_account.bitcoin_blake2b_opt_in
+            && (self.global_blake2b_enabled
+                || self.connect_chain_availability(chain).is_available())
+        {
+            app::features::Availability::Available
+        } else {
+            app::features::Availability::Unavailable { reason: "Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability.".into() }
+        }
+    }
+
     /// Account-scoped admission for the explicit Connect-only fork route.
     pub(crate) fn connect_chain_availability(&self, chain: ChainId) -> app::features::Availability {
         if !chain.is_blake2b() {
             return app::features::Availability::Available;
         }
         app::features::bitcoin_blake2b(app::features::BitcoinBlake2bServerFlag {
-            server_enabled: self
-                .connect_account
-                .authenticated_client()
-                .is_some_and(|c| c.token().is_some())
+            server_enabled: self.connect_account.bitcoin_blake2b_opt_in
+                && self
+                    .connect_account
+                    .authenticated_client()
+                    .is_some_and(|c| c.token().is_some())
                 && self
                     .connect_account
                     .features
@@ -950,6 +985,54 @@ impl Home {
         })
     }
 
+    fn recheck_global_feature(&mut self) -> Task<Message> {
+        self.global_feature_request = self.global_feature_request.wrapping_add(1);
+        let request = self.global_feature_request;
+        let client = self.connect_account.client.clone();
+        Task::perform(
+            crate::chain::global_blake2b_enabled(client),
+            move |enabled| Message::GlobalFeatureLoaded(request, enabled),
+        )
+    }
+
+    /// Refresh saved preferences after a successful edit in any Home tab.
+    pub(crate) fn reload_global_settings(&mut self) -> Task<Message> {
+        let path = GlobalSettings::path(&self.datadir_path);
+        self.developer_mode = GlobalSettings::load_developer_mode(&path);
+        self.connect_account.bitcoin_blake2b_opt_in =
+            GlobalSettings::load_bitcoin_blake2b_beta(&path);
+        self.refresh_displayed_networks();
+        if !self
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available()
+        {
+            self.pending_fork_claim = None;
+            self.resume_split_after_install = false;
+            self.split_wallet.cancel();
+            if matches!(self.active_section, HomeSection::SplitWallet) {
+                self.active_section = HomeSection::Cubes;
+            }
+        }
+        if !self.displayed_networks.contains(&self.network) {
+            self.abandon_creation_backup();
+            self.create_cube_pin.clear();
+            self.create_cube_pin_confirm.clear();
+            for word in &mut self.recovery_words {
+                word.clear();
+            }
+            self.pending_cube_id = None;
+            self.network = ChainId::Bitcoin;
+            self.error = None;
+            self.server_cube_limit = None;
+            self.state = State::Unchecked;
+            return probe_network_datadir(
+                self.network,
+                self.datadir_path.network_directory(self.network),
+            );
+        }
+        Task::none()
+    }
+
     fn refresh_displayed_networks(&mut self) {
         self.displayed_networks = if self.developer_mode {
             NETWORKS.to_vec()
@@ -957,7 +1040,7 @@ impl Home {
             vec![ChainId::Bitcoin]
         };
         if self
-            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .chain_availability(ChainId::BitcoinBlake2b)
             .is_available()
         {
             self.displayed_networks.push(ChainId::BitcoinBlake2b);
@@ -1132,6 +1215,13 @@ impl Home {
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
+        if let Message::GlobalFeatureLoaded(request, enabled) = message {
+            if request == self.global_feature_request {
+                self.global_blake2b_enabled = enabled;
+                return self.reload_global_settings();
+            }
+            return Task::none();
+        }
         self.refresh_displayed_networks();
         if self.network.is_blake2b() {
             // Explicitly supported launcher actions only. No legacy seed-only,
@@ -1148,9 +1238,13 @@ impl Home {
                         | ViewMessage::ConnectAccount(_)
                         | ViewMessage::ToggleConnect
                         | ViewMessage::ToggleDeveloperMode(_)
+                        | ViewMessage::ToggleBitcoinBlake2bBeta(_)
                         | ViewMessage::ToggleTheme
                         | ViewMessage::GoToSection(
-                            HomeSection::Cubes | HomeSection::Connect(_) | HomeSection::SplitWallet,
+                            HomeSection::Cubes
+                                | HomeSection::Settings
+                                | HomeSection::Connect(_)
+                                | HomeSection::SplitWallet,
                         )
                         | ViewMessage::SplitWallet(_)
                         | ViewMessage::OpenUrl(_)
@@ -1167,7 +1261,7 @@ impl Home {
             };
             if !allowed {
                 self.set_error(
-                    "Bitcoin Blake2b supports only an authenticated Connect Vault with a PIN",
+                    "Bitcoin Blake2b supports a PIN-protected Vault using a local node or Connect",
                 );
                 return Task::none();
             }
@@ -1180,7 +1274,7 @@ impl Home {
                         | ViewMessage::Run(_)
                 )
             ) {
-                if let Some(reason) = self.connect_chain_availability(self.network).reason() {
+                if let Some(reason) = self.chain_availability(self.network).reason() {
                     self.set_error(reason.to_string());
                     return Task::none();
                 }
@@ -2138,14 +2232,14 @@ impl Home {
                 if !(self.developer_mode
                     || network == ChainId::Bitcoin
                     || network == ChainId::BitcoinBlake2b
-                        && self.connect_chain_availability(network).is_available())
+                        && self.chain_availability(network).is_available())
                 {
                     tracing::debug!(
                         "Ignoring SelectNetwork action because developer mode is disabled"
                     );
                     return Task::none();
                 }
-                if let Some(reason) = self.connect_chain_availability(network).reason() {
+                if let Some(reason) = self.chain_availability(network).reason() {
                     self.set_error(reason.to_string());
                     return Task::none();
                 }
@@ -2172,27 +2266,42 @@ impl Home {
                 Task::batch(tasks)
             }
             Message::View(ViewMessage::ToggleDeveloperMode(enabled)) => {
-                let previous_developer_mode = self.developer_mode;
-                self.developer_mode = enabled;
                 let path = GlobalSettings::path(&self.datadir_path);
-                if let Err(e) = GlobalSettings::update_developer_mode(&path, enabled) {
-                    self.developer_mode = previous_developer_mode;
-                    self.error = Some(format!("Failed to update developer mode: {}", e));
-                } else {
-                    self.error = None;
+                match GlobalSettings::update_developer_mode(&path, enabled) {
+                    Ok(()) => {
+                        self.settings_error = None;
+                        Task::batch([
+                            self.reload_global_settings(),
+                            Task::done(Message::GlobalSettingsChanged),
+                        ])
+                    }
+                    Err(e) => {
+                        self.settings_error = Some(format!("Couldn't save developer mode: {e}"));
+                        Task::none()
+                    }
                 }
-
-                self.refresh_displayed_networks();
-                if !enabled
-                    && self.network != ChainId::Bitcoin
-                    && self.network != ChainId::BitcoinBlake2b
-                {
-                    self.network = ChainId::Bitcoin;
-                    let network_dir = self.datadir_path.network_directory(self.network);
-                    return probe_network_datadir(self.network, network_dir);
+            }
+            Message::View(ViewMessage::ToggleBitcoinBlake2bBeta(enabled)) => {
+                let path = GlobalSettings::path(&self.datadir_path);
+                match GlobalSettings::update_bitcoin_blake2b_beta(&path, enabled) {
+                    Ok(()) => {
+                        self.settings_error = None;
+                        Task::batch([
+                            self.reload_global_settings(),
+                            if enabled {
+                                self.recheck_global_feature()
+                            } else {
+                                Task::none()
+                            },
+                            Task::done(Message::GlobalSettingsChanged),
+                        ])
+                    }
+                    Err(e) => {
+                        self.settings_error =
+                            Some(format!("Couldn't save Bitcoin Blake2b beta: {e}"));
+                        Task::none()
+                    }
                 }
-
-                Task::none()
             }
             Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted)) => {
                 // Only delete from the Connect API if user opted in
@@ -2326,8 +2435,7 @@ impl Home {
                             ));
                             return Task::none();
                         }
-                        if let Some(reason) = self.connect_chain_availability(cube.network).reason()
-                        {
+                        if let Some(reason) = self.chain_availability(cube.network).reason() {
                             self.error = Some(reason.to_string());
                             return Task::none();
                         }
@@ -2629,6 +2737,9 @@ impl Home {
                     self.connect_account.active_sub = sub.clone();
                 }
                 self.active_section = section;
+                if matches!(self.active_section, HomeSection::Settings) {
+                    return self.recheck_global_feature();
+                }
                 if matches!(self.active_section, HomeSection::Cubes) {
                     return self.on_focus();
                 }
@@ -4182,7 +4293,7 @@ impl Home {
     fn creation_form(&self) -> Element<ViewMessage> {
         if self.network.is_blake2b() {
             return Column::new().spacing(16)
-                .push(text("Create a Bitcoin Blake2b Vault with Connect. Other wallet and recovery flows are unavailable."))
+                .push(text("Create a Bitcoin Blake2b Vault. Other wallet and recovery flows are unavailable."))
                 .push(button::primary(None, "Create Vault").on_press(ViewMessage::CreateWallet))
                 .into();
         }
@@ -4198,8 +4309,9 @@ impl Home {
     }
 
     pub fn view(&self) -> Element<Message> {
-        if let Some(reason) = self.connect_chain_availability(self.network).reason() {
-            return Column::new()
+        let unavailable = self.chain_availability(self.network);
+        let unavailable_content = unavailable.reason().map(|reason| {
+            Column::new()
                 .spacing(16)
                 .push(h3(self.network.label()))
                 .push(text(reason.to_string()))
@@ -4207,11 +4319,11 @@ impl Home {
                     button::secondary(None, "Back to Bitcoin")
                         .on_press(Message::View(ViewMessage::SelectNetwork(ChainId::Bitcoin))),
                 )
-                .into();
-        }
+                .into()
+        });
         let content = Into::<Element<ViewMessage>>::into(scrollable(
             Column::new()
-                // Developer mode controls — right-aligned at top
+                // Network selection — right-aligned at top
                 .push(
                     Row::new()
                         // Only offered when there is a list to go back to —
@@ -4232,30 +4344,14 @@ impl Home {
                         .push(Space::new().width(Length::Fill))
                         .spacing(10)
                         .push(
-                            Row::new()
-                                .spacing(10)
-                                .align_y(Alignment::Center)
-                                .push(text("Developer mode").style(theme::text::secondary))
-                                .push(
-                                    Toggler::new(self.developer_mode)
-                                        .on_toggle(ViewMessage::ToggleDeveloperMode)
-                                        .width(50)
-                                        .style(theme::toggler::orange),
-                                ),
-                        )
-                        .push(if self.developer_mode || self.connect_chain_availability(ChainId::BitcoinBlake2b).is_available() {
-                            Some(
-                                pick_list(
-                                    self.displayed_networks.as_slice(),
-                                    Some(self.network),
-                                    ViewMessage::SelectNetwork,
-                                )
-                                .style(theme::pick_list::primary)
-                                .padding(10),
+                            pick_list(
+                                self.displayed_networks.as_slice(),
+                                Some(self.network),
+                                ViewMessage::SelectNetwork,
                             )
-                        } else {
-                            None
-                        })
+                            .style(theme::pick_list::primary)
+                            .padding(10),
+                        )
                         .align_y(Alignment::Center)
                         .padding(iced::Padding::from([10, 0])),
                 )
@@ -4474,7 +4570,10 @@ impl Home {
         .map(Message::View);
 
         // If active section is Connect, show the account panel instead of cube list
-        let main_content: Element<Message> = if let HomeSection::Connect(_) = &self.active_section {
+        let main_content: Element<Message> = if matches!(self.active_section, HomeSection::Settings)
+        {
+            global_settings_view(self)
+        } else if let HomeSection::Connect(_) = &self.active_section {
             // Render Connect account panel view
             let connect_view: Element<ConnectAccountMessage> =
                 crate::app::view::connect::connect_account_panel(&self.connect_account);
@@ -4487,7 +4586,7 @@ impl Home {
             split_wallet::view(&self.split_wallet)
                 .map(|msg| Message::View(ViewMessage::SplitWallet(msg)))
         } else {
-            content
+            unavailable_content.unwrap_or(content)
         };
 
         // Build the sidebar
@@ -4674,35 +4773,93 @@ fn advisory_notice_modal(
     advisory: &'static crate::hw_advisory::Advisory,
 ) -> Element<'static, Message> {
     Container::new(
-        Column::new()
-            .spacing(15)
-            .padding(25)
-            .width(Length::Fixed(560.0))
-            .push(h4_bold(advisory.headline))
-            .push(p1_regular(advisory.notice))
-            .push(
-                Row::new()
-                    .spacing(10)
-                    .push(
-                        button::secondary(Some(icon::link_icon()), advisory.guide_label)
-                            .on_press(Message::View(ViewMessage::OpenUrl(
-                                advisory.url.to_string(),
-                            )))
-                            .width(Length::Fill),
-                    )
-                    .push(
-                        button::primary(Some(icon::check_icon()), "Got it")
-                            .on_press(Message::View(ViewMessage::DismissAdvisoryNotice))
-                            .width(Length::Fill),
-                    ),
-            ),
+        Container::new(scrollable(
+            Column::new()
+                .spacing(15)
+                .padding(25)
+                .width(Length::Fill)
+                .push(h4_bold(advisory.headline))
+                .push(p1_regular(advisory.notice))
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(
+                            button::secondary(Some(icon::link_icon()), advisory.guide_label)
+                                .on_press(Message::View(ViewMessage::OpenUrl(
+                                    advisory.url.to_string(),
+                                )))
+                                .width(Length::Fill),
+                        )
+                        .push(
+                            button::primary(Some(icon::check_icon()), "Got it")
+                                .on_press(Message::View(ViewMessage::DismissAdvisoryNotice))
+                                .width(Length::Fill),
+                        ),
+                ),
+        ))
+        .width(Length::Fill)
+        .max_width(560)
+        .max_height(700)
+        .style(theme::card::modal),
     )
-    .style(theme::card::modal)
+    .padding(16)
+    .center_x(Length::Fill)
     .into()
 }
 
+fn global_settings_view(home: &Home) -> Element<Message> {
+    let setting = |title, description, enabled, action: fn(bool) -> ViewMessage| {
+        Row::new()
+            .spacing(24)
+            .align_y(Alignment::Center)
+            .push(
+                Column::new()
+                    .spacing(6)
+                    .width(Length::Fill)
+                    .push(p1_bold(title))
+                    .push(p1_regular(description).style(theme::text::secondary)),
+            )
+            .push(
+                Toggler::new(enabled)
+                    .on_toggle(move |value| Message::View(action(value)))
+                    .width(50)
+                    .style(theme::toggler::orange),
+            )
+            .padding(20)
+    };
+    let settings = Column::new()
+        .spacing(0)
+        .push(setting(
+            "Developer mode",
+            "Show test networks in the Cubes network dropdown.",
+            home.developer_mode,
+            ViewMessage::ToggleDeveloperMode,
+        ))
+        .push(setting(
+            "Bitcoin Blake2b - Beta",
+            "Show Bitcoin Blake2b beta features in the app.",
+            home.connect_account.bitcoin_blake2b_opt_in,
+            ViewMessage::ToggleBitcoinBlake2bBeta,
+        ));
+    let mut content = Column::new()
+        .spacing(24)
+        .max_width(700)
+        .push(h3("Global Settings"))
+        .push(
+            p1_regular(
+                "Preferences apply to all Cubes on this device. Changes are saved automatically.",
+            )
+            .style(theme::text::secondary),
+        )
+        .push(card::simple(settings));
+    if let Some(error) = &home.settings_error {
+        content = content.push(p1_regular(error).style(theme::text::error));
+    }
+    content.into()
+}
+
 fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
-    use coincube_ui::{color, component::button as btn, component::text as txt, icon as ic};
+    use coincube_ui::{component::button as btn, component::text as txt, icon as ic};
 
     let msg = |vm: ViewMessage| -> Message { Message::View(vm) };
 
@@ -4740,41 +4897,48 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             ic::down_icon()
         };
         let connect_button: Element<Message> = iced::widget::Button::new(
-            Row::new()
-                .spacing(10)
-                .align_y(iced::alignment::Vertical::Center)
-                .push(ic::connect_icon().style(coincube_ui::theme::text::secondary))
-                .push(
-                    coincube_ui::component::text::p1_regular("Connect")
-                        .style(coincube_ui::theme::text::secondary),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(connect_chevron.style(coincube_ui::theme::text::secondary))
-                .padding(10),
+            Container::new(
+                Row::new()
+                    .spacing(10)
+                    .align_y(iced::alignment::Vertical::Center)
+                    .push(ic::connect_icon().style(coincube_ui::theme::text::secondary))
+                    .push(
+                        coincube_ui::component::text::p1_regular("Connect")
+                            .style(coincube_ui::theme::text::secondary),
+                    )
+                    .push(connect_chevron.style(coincube_ui::theme::text::secondary)),
+            )
+            .align_x(Alignment::Start)
+            .width(Length::Fill)
+            .padding(15),
         )
         .width(Length::Fill)
         .style(coincube_ui::theme::button::menu)
         .on_press(msg(ViewMessage::ToggleConnect))
         .into();
         col = col.push(connect_button);
-    }
-
-    // PR 8 entry: account flag and runtime support must both be live. The
-    // panel itself requires a destination BTCB2 Vault before it will scan.
-    if home.network == ChainId::Bitcoin
-        && home
-            .connect_chain_availability(ChainId::BitcoinBlake2b)
-            .is_available()
-    {
-        let active = matches!(home.active_section, HomeSection::SplitWallet);
-        let split_button = if active {
-            btn::menu_active(Some(ic::cube_icon()), "Split a Bitcoin wallet").width(Length::Fill)
-        } else {
-            btn::menu(Some(ic::cube_icon()), "Split a Bitcoin wallet")
-                .on_press(msg(ViewMessage::GoToSection(HomeSection::SplitWallet)))
+        if let Some(user) = &home.connect_account.user {
+            col = col.push(
+                Button::new(
+                    txt::caption(&user.email)
+                        .style(theme::text::secondary)
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                        .align_x(Alignment::Start)
+                        .width(Length::Fill),
+                )
+                .padding(iced::Padding {
+                    top: 0.0,
+                    right: 10.0,
+                    bottom: 10.0,
+                    left: 45.0,
+                })
                 .width(Length::Fill)
-        };
-        col = col.push(Row::new().push(split_button).width(Length::Fill));
+                .style(theme::button::menu)
+                .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
+                    app::menu::ConnectSubMenu::Overview,
+                )))),
+            );
+        }
     }
 
     if home.connect_expanded && is_authenticated {
@@ -4800,12 +4964,10 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             );
             let item = if is_active {
                 Row::new()
-                    .push(Space::new().width(Length::Fixed(20.0)))
                     .push(btn::menu_active(None, label).width(Length::Fill))
                     .width(Length::Fill)
             } else {
                 Row::new()
-                    .push(Space::new().width(Length::Fixed(20.0)))
                     .push(
                         btn::menu(None, label)
                             .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
@@ -4842,8 +5004,50 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         col = col.push(recover_button);
     }
 
-    // Bottom-pinned section: Sign In / email + theme toggle
+    // Bottom-pinned utilities: Split, Settings and theme.
     let mut bottom_col = Column::new().spacing(0).width(Length::Fill);
+
+    // PR 8 entry: account flag and runtime support must both be live. The
+    // panel itself requires a destination BTCB2 Vault before it will scan.
+    if home.network == ChainId::Bitcoin
+        && home
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available()
+    {
+        let active = matches!(home.active_section, HomeSection::SplitWallet);
+        let split_button = if active {
+            btn::menu_active(Some(ic::wallet_icon()), "Split a Bitcoin wallet").width(Length::Fill)
+        } else {
+            btn::menu(Some(ic::wallet_icon()), "Split a Bitcoin wallet")
+                .on_press(msg(ViewMessage::GoToSection(HomeSection::SplitWallet)))
+                .width(Length::Fill)
+        };
+        bottom_col = bottom_col.push(Row::new().push(split_button).width(Length::Fill));
+    }
+
+    let settings_button = if matches!(home.active_section, HomeSection::Settings) {
+        btn::menu_active(Some(ic::settings_icon()), "Settings").width(Length::Fill)
+    } else {
+        btn::menu(Some(ic::settings_icon()), "Settings")
+            .on_press(msg(ViewMessage::GoToSection(HomeSection::Settings)))
+            .width(Length::Fill)
+    };
+    bottom_col = bottom_col.push(settings_button);
+
+    let theme_toggle_btn =
+        coincube_ui::image::theme_toggle_button(home.theme_mode, msg(ViewMessage::ToggleTheme));
+
+    bottom_col = bottom_col.push(
+        Container::new(theme_toggle_btn)
+            .padding(iced::Padding {
+                top: 4.0,
+                right: 8.0,
+                bottom: 16.0,
+                left: 8.0,
+            })
+            .align_x(Alignment::Start)
+            .width(Length::Fill),
+    );
 
     if !is_authenticated {
         bottom_col = bottom_col.push(
@@ -4857,33 +5061,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             .padding(10)
             .width(Length::Fill),
         );
-    } else if let Some(user) = &home.connect_account.user {
-        bottom_col = bottom_col.push(
-            Container::new(
-                txt::caption(&user.email)
-                    .color(color::GREY_3)
-                    .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                    .align_x(Alignment::Center),
-            )
-            .padding(10)
-            .width(Length::Fill)
-            .center_x(Length::Fill),
-        );
     }
-
-    let theme_toggle_btn =
-        coincube_ui::image::theme_toggle_button(home.theme_mode, msg(ViewMessage::ToggleTheme));
-
-    bottom_col = bottom_col.push(
-        Container::new(theme_toggle_btn)
-            .padding(iced::Padding {
-                top: 4.0,
-                right: 8.0,
-                bottom: 16.0,
-                left: 8.0,
-            })
-            .center_x(Length::Fill),
-    );
 
     // Outer layout: scrollable menu fills, bottom section pinned
     Column::new()
@@ -5835,6 +6013,9 @@ fn map_connect_task(task: Task<app::message::Message>) -> Task<Message> {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Bubble successful preference writes to the GUI for every open tab.
+    GlobalSettingsChanged,
+    GlobalFeatureLoaded(u64, bool),
     View(ViewMessage),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
     ReturnBitcoinClaim(app::claim_intent::ForkHandoff),
@@ -6006,6 +6187,7 @@ pub enum ViewMessage {
     DeleteCube(DeleteCubeMessage),
     ToggleRecoveryCheckBox,
     ToggleDeveloperMode(bool),
+    ToggleBitcoinBlake2bBeta(bool),
     RecoveryWordInput {
         index: usize,
         word: String,
@@ -6687,10 +6869,11 @@ mod tests {
         home
     }
 
-    fn enable_btcb2(home: &mut Home) {
+    pub(super) fn enable_btcb2(home: &mut Home) {
         let mut client = CoincubeClient::new();
         client.set_token("synthetic-btcb2-token");
         home.connect_account.install_admitted_client(client);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
         home.connect_account.step = ConnectFlowStep::Dashboard;
         home.connect_account.user = Some(User {
             id: 7,
@@ -7570,6 +7753,7 @@ mod tests {
         let mut client = CoincubeClient::new();
         client.set_token("synthetic-split-qa-token");
         home.connect_account.install_admitted_client(client);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
         home.connect_account.features = Some(
             serde_json::from_value(serde_json::json!({
                 "plans": [],
@@ -10038,6 +10222,7 @@ mod chain_identity_open_tests {
         let mut client = CoincubeClient::new();
         client.set_token("synthetic-completion-token");
         home.connect_account.install_admitted_client(client);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
         home.connect_account.features = Some(
             serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":true}))
                 .unwrap(),
@@ -10106,6 +10291,64 @@ mod chain_identity_open_tests {
     }
 
     #[test]
+    fn anonymous_feature_refresh_recovers_and_discards_stale_denial() {
+        let _guard = crate::app::session::test_guard();
+        let root = CoincubeDirectory::new(tmp_datadir("anonymous-refresh"));
+        GlobalSettings::update_bitcoin_blake2b_beta(&GlobalSettings::path(&root), true).unwrap();
+        let (mut home, task) = Home::new_for_chain(root.clone(), None);
+        drop(task);
+        drop(home.update(Message::GlobalFeatureLoaded(0, false)));
+        assert!(!home
+            .chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        drop(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::Settings,
+        ))));
+        let request = home.global_feature_request;
+        assert_eq!(request, 1);
+        drop(home.update(Message::GlobalFeatureLoaded(request, true)));
+        drop(home.update(Message::GlobalFeatureLoaded(0, false)));
+        assert!(home
+            .chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        assert!(home.connect_account.features.is_none());
+        assert!(!home.connect_account.is_authenticated());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn anonymous_global_flag_offers_local_creation_without_connect_entitlements() {
+        let _guard = crate::app::session::test_guard();
+        let root = CoincubeDirectory::new(tmp_datadir("anonymous-local"));
+        let (mut home, task) = Home::new_for_chain(root.clone(), None);
+        drop(task);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
+        home.global_blake2b_enabled = true;
+        home.refresh_displayed_networks();
+        assert!(home.displayed_networks.contains(&ChainId::BitcoinBlake2b));
+        assert!(home.connect_account.features.is_none());
+        assert!(!home.connect_account.is_authenticated());
+        assert!(!home
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        home.network = ChainId::BitcoinBlake2b;
+        home.state = State::Cubes {
+            cubes: vec![],
+            create_cube: false,
+            source: ChainId::BitcoinBlake2b,
+        };
+        let produced = drain(home.update(Message::View(ViewMessage::CreateCube)));
+        assert!(produced.iter().any(|message| matches!(
+            message,
+            Message::Install(_, ChainId::BitcoinBlake2b, UserFlow::CreateWallet, None)
+        )));
+        home.connect_account.bitcoin_blake2b_opt_in = false;
+        home.refresh_displayed_networks();
+        assert!(!home.displayed_networks.contains(&ChainId::BitcoinBlake2b));
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
     fn claim_handoff_waits_for_admission_and_uses_normal_run_with_exact_identity() {
         let _guard = crate::app::session::test_guard();
         let dir = tmp_datadir("claim-handoff");
@@ -10156,6 +10399,7 @@ mod chain_identity_open_tests {
         let mut client = CoincubeClient::new();
         client.set_token("synthetic-handoff-token");
         home.connect_account.install_admitted_client(client);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
         home.connect_account.features = Some(
             serde_json::from_value(serde_json::json!({"plans":[],"bitcoinBlake2bEnabled":true}))
                 .unwrap(),
@@ -10209,12 +10453,130 @@ mod chain_identity_open_tests {
     }
 
     #[test]
+    fn global_beta_requires_both_switches_and_blocks_direct_entry() {
+        let dir = tmp_datadir("global-beta-gate");
+        let root = CoincubeDirectory::new(dir.clone());
+        let mut home = Home::new(root.clone(), Some(Network::Bitcoin)).0;
+        let cube = CubeSettings::new("Source".into(), Network::Bitcoin).with_vault(
+            settings::VaultIdentity {
+                wallet_id: settings::WalletId::new("source".into(), Some(1)),
+                fingerprint: None,
+            },
+        );
+        home.state = State::Cubes {
+            cubes: vec![cube],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        super::tests::enable_btcb2(&mut home);
+        for server in [false, true] {
+            home.connect_account.features = Some(
+                serde_json::from_value(serde_json::json!({
+                    "plans": [], "bitcoinBlake2bEnabled": server,
+                }))
+                .unwrap(),
+            );
+            for opted_in in [false, true] {
+                home.connect_account.bitcoin_blake2b_opt_in = opted_in;
+                home.refresh_displayed_networks();
+                assert_eq!(
+                    home.displayed_networks.contains(&ChainId::BitcoinBlake2b),
+                    server && opted_in
+                );
+                assert_eq!(home.claim_entry(0).is_some(), server && opted_in);
+                if !(server && opted_in) {
+                    assert!(drain(home.update(Message::View(ViewMessage::SelectNetwork(
+                        ChainId::BitcoinBlake2b
+                    ))))
+                    .is_empty());
+                    assert_eq!(home.network, ChainId::Bitcoin);
+                    assert!(drain(home.update(Message::View(ViewMessage::GoToSection(
+                        HomeSection::SplitWallet
+                    ))))
+                    .is_empty());
+                    assert_eq!(home.active_section, HomeSection::Cubes);
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn global_settings_remains_open_and_refreshes_a_sibling_home() {
+        let dir = tmp_datadir("global-beta-tabs");
+        let root = CoincubeDirectory::new(dir.clone());
+        let mut home = Home::new(root.clone(), Some(Network::Bitcoin)).0;
+        let mut sibling = Home::new(root.clone(), Some(Network::Bitcoin)).0;
+        super::tests::enable_btcb2(&mut home);
+        super::tests::enable_btcb2(&mut sibling);
+        drop(home.update(Message::View(ViewMessage::GoToSection(
+            HomeSection::Settings,
+        ))));
+        drop(home.update(Message::View(ViewMessage::ToggleBitcoinBlake2bBeta(true))));
+        drop(sibling.reload_global_settings());
+        assert!(sibling
+            .connect_chain_availability(ChainId::BitcoinBlake2b)
+            .is_available());
+        home.network = ChainId::BitcoinBlake2b;
+        sibling.network = ChainId::BitcoinBlake2b;
+        drop(home.update(Message::View(ViewMessage::ToggleBitcoinBlake2bBeta(false))));
+        drop(sibling.reload_global_settings());
+        assert_eq!(home.active_section, HomeSection::Settings);
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert_eq!(sibling.network, ChainId::Bitcoin);
+        assert!(!sibling
+            .displayed_networks
+            .contains(&ChainId::BitcoinBlake2b));
+        assert!(
+            !Home::new(root, Some(Network::Bitcoin))
+                .0
+                .connect_account
+                .bitcoin_blake2b_opt_in
+        );
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn global_settings_network_reset_scrubs_staged_creation_and_recovery() {
+        let dir = tmp_datadir("global-settings-creation");
+        let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Signet)).0;
+        home.network = ChainId::Signet;
+        home.developer_mode = true;
+        home.creation_backup_words = Some(zeroize::Zeroizing::new(vec!["synthetic".into()]));
+        home.recovery_words[0] = "synthetic".into();
+        home.state = State::CreationBackup(CreationBackupStep::Choice);
+        home.creating_cube = true;
+        drop(home.reload_global_settings());
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.creation_backup_words.is_none());
+        assert!(home.recovery_words.iter().all(String::is_empty));
+        assert!(!home.creating_cube);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn failed_global_settings_write_preserves_the_toggle() {
+        let dir = tmp_datadir("global-settings-write-error");
+        let root = CoincubeDirectory::new(dir.clone());
+        std::fs::write(GlobalSettings::path(&root), "invalid json").unwrap();
+        let mut home = Home::new(root, Some(Network::Bitcoin)).0;
+        drop(home.update(Message::View(ViewMessage::ToggleBitcoinBlake2bBeta(true))));
+        assert!(!home.connect_account.bitcoin_blake2b_opt_in);
+        assert!(home.settings_error.is_some());
+        drop(home.update(Message::View(ViewMessage::ToggleDeveloperMode(true))));
+        assert!(!home.developer_mode);
+        assert!(home.settings_error.is_some());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn authenticated_flag_controls_fork_launcher_and_never_enables_restore() {
         let dir = tmp_datadir("fork-feature-entry");
         let mut home = Home::new(CoincubeDirectory::new(dir.clone()), Some(Network::Bitcoin)).0;
         let mut client = CoincubeClient::new();
         client.set_token("synthetic-feature-token");
         home.connect_account.install_admitted_client(client);
+        home.connect_account.bitcoin_blake2b_opt_in = true;
         for flag in [None, Some(false), Some(true)] {
             home.connect_account.features = Some(
                 serde_json::from_value(serde_json::json!({
@@ -10464,7 +10826,7 @@ mod chain_identity_open_tests {
             assert!(msgs.is_empty(), "{:?}", chain);
             assert_eq!(
                 error.as_deref(),
-                Some("Bitcoin Blake2b isn't enabled for this account."),
+                Some("Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability."),
                 "{:?}",
                 chain
             );

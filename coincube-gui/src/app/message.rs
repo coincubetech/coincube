@@ -40,6 +40,7 @@ pub enum Message {
         identities: Vec<(usize, crate::services::branta::LookupResult)>,
     },
     Tick,
+    LocalForkFeatureChecked(bool),
     UpdateDaemonCache(Result<DaemonCache, Error>),
     CacheUpdated,
     /// Outcome of clearing a restored Vault's pending-rescan marker after a

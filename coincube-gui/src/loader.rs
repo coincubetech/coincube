@@ -75,7 +75,7 @@ type Coincubed = client::Coincubed<client::jsonrpc::JsonRPCClient>;
 type StartedResult = Result<
     (
         Arc<dyn Daemon + Sync + Send>,
-        Option<Bitcoind>,
+        PendingForkNode,
         GetInfoResult,
     ),
     Error,
@@ -101,6 +101,7 @@ pub struct Loader {
     /// from [`Message::BreezClientLoadedAfterPin`] through
     /// [`Message::BreezLoaded`] into [`app::App::new`].
     pub spark_backend: Option<std::sync::Arc<app::wallets::SparkBackend>>,
+    fork_session_revoked: bool,
     fork_task: Option<iced::task::Handle>,
     fork_retry_not_before: Option<std::time::Instant>,
     step: Step,
@@ -229,6 +230,41 @@ impl Loader {
         )
     }
 
+    pub fn new_local_fork(
+        datadir_path: CoincubeDirectory,
+        gui_config: GUIConfig,
+        wallet_settings: WalletSettings,
+        cube_settings: CubeSettings,
+        cube_encryption_key: Arc<crate::services::connect::crypto::CubeEncryptionKey>,
+    ) -> (Self, Task<Message>) {
+        Self::build(
+            datadir_path,
+            gui_config,
+            cube_settings.network.bitcoin_network(),
+            None,
+            None,
+            Some(wallet_settings),
+            cube_settings,
+            None,
+            None,
+            None,
+            Some(cube_encryption_key),
+        )
+    }
+
+    pub(crate) fn fork_revoked(&self) -> bool {
+        self.fork_session_revoked
+    }
+
+    pub(crate) fn requires_connect(&self) -> bool {
+        self.cube_settings.network.is_blake2b()
+            && !crate::chain::has_managed_local_fork(
+                &self.datadir_path,
+                self.cube_settings.network,
+                self.wallet_settings.as_ref(),
+            )
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn build(
         datadir_path: CoincubeDirectory,
@@ -248,7 +284,12 @@ impl Loader {
         // the caller wants to load under, or the wallet directory, the
         // daemon config and the Cube's own settings would disagree with each
         // other from this point on.
-        let support = if connect_client.is_some() {
+        let local_fork = crate::chain::has_managed_local_fork(
+            &datadir_path,
+            cube_settings.network,
+            wallet_settings.as_ref(),
+        );
+        let support = if connect_client.is_some() || local_fork {
             crate::chain::authenticated_connect_support(cube_settings.network)
         } else {
             cube_settings.network.runtime_support()
@@ -268,7 +309,8 @@ impl Loader {
             }
             crate::chain::RuntimeSupport::Supported
                 if cube_settings.network.is_blake2b()
-                    && (connect_client.as_ref().and_then(|c| c.token()).is_none()
+                    && ((!local_fork
+                        && connect_client.as_ref().and_then(|c| c.token()).is_none())
                         || internal_bitcoind.as_ref().is_some_and(|node| {
                             !node.config.addr.ip().is_loopback()
                                 || node.config.rpc_auth
@@ -308,11 +350,11 @@ impl Loader {
             Task::none()
         } else if cube_settings.network.is_blake2b() {
             Task::perform(
-                start_connect_daemon(
+                start_fork_daemon(
                     datadir_path.clone(),
                     cube_settings.network,
                     wallet_settings.clone().expect("validated Vault settings"),
-                    connect_client.clone().expect("validated Connect client"),
+                    connect_client.clone(),
                 ),
                 Message::Started,
             )
@@ -347,6 +389,7 @@ impl Loader {
                 network,
                 fork_retry_not_before: (cube_settings.network.is_blake2b() && refusal.is_none())
                     .then(|| std::time::Instant::now() + Duration::from_secs(30)),
+                fork_session_revoked: false,
                 fork_task,
                 datadir_path,
                 gui_config,
@@ -549,17 +592,17 @@ impl Loader {
     }
 
     fn on_start(&mut self, res: StartedResult) -> Task<Message> {
-        if self.cube_settings.network.is_blake2b() && self.connect_client.is_none() {
+        if self.cube_settings.network.is_blake2b() && self.fork_session_revoked {
             if let Ok((daemon, _, _)) = res {
                 daemon.invalidate_connect_session();
             }
             return Task::none();
         }
         match res {
-            Ok((daemon, bitcoind, info)) => {
+            Ok((daemon, mut bitcoind, info)) => {
                 // bitcoind may have been already started and given to the loader
                 // We should not override with None the loader bitcoind field
-                if let Some(bitcoind) = bitcoind {
+                if let Some(bitcoind) = bitcoind.node.take() {
                     self.internal_bitcoind = Some(bitcoind);
                 }
                 self.waiting_daemon_bitcoind = false;
@@ -626,6 +669,10 @@ impl Loader {
         if let Some(handle) = self.fork_task.take() {
             handle.abort();
         }
+        if let Some(node) = self.internal_bitcoind.take() {
+            node.stop();
+        }
+        self.fork_session_revoked = true;
         self.connect_client = None;
         self.cube_encryption_key = None;
         self.step = Step::Error(Box::new(Error::Unexpected(
@@ -1143,18 +1190,55 @@ fn backend_is_internal_bitcoind(config_path: &Path, internal_datadir: &Path) -> 
 
 /// Dedicated fork restart path, preserving exact-chain managed companions.
 /// Generic external sockets and config migration remain unavailable.
+#[cfg(test)]
 pub(crate) async fn start_connect_daemon(
     root: CoincubeDirectory,
     chain: crate::chain::ChainId,
     settings: WalletSettings,
     client: crate::services::coincube::CoincubeClient,
 ) -> StartedResult {
+    if client.token().is_none() {
+        return Err(Error::Unexpected(
+            "Authenticated Connect fork Vault required".into(),
+        ));
+    }
+    start_fork_daemon(root, chain, settings, Some(client)).await
+}
+
+// Worker results retain cleanup ownership when the async recipient is canceled.
+#[derive(Debug)]
+pub struct PendingForkNode {
+    node: Option<Bitcoind>,
+    cleanup: bool,
+}
+#[cfg(test)]
+impl PendingForkNode {
+    pub(crate) fn is_none(&self) -> bool {
+        self.node.is_none()
+    }
+}
+impl Drop for PendingForkNode {
+    fn drop(&mut self) {
+        if self.cleanup {
+            if let Some(node) = self.node.take() {
+                node.stop();
+            }
+        }
+    }
+}
+
+async fn start_fork_daemon(
+    root: CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    settings: WalletSettings,
+    client: Option<crate::services::coincube::CoincubeClient>,
+) -> StartedResult {
     if let crate::chain::RuntimeSupport::Dormant { reason } =
         crate::chain::authenticated_connect_support(chain)
     {
         return Err(Error::ChainUnavailable(reason));
     }
-    if !chain.is_blake2b() || client.token().is_none() || settings.remote_backend_auth.is_some() {
+    if !chain.is_blake2b() || settings.remote_backend_auth.is_some() {
         return Err(Error::Unexpected(
             "Authenticated Connect fork Vault required".into(),
         ));
@@ -1173,7 +1257,10 @@ pub(crate) async fn start_connect_daemon(
     }
     let expected =
         std::path::absolute(expected_dir.path()).map_err(|e| Error::Unexpected(e.to_string()))?;
-    if cfg.data_directory().is_none_or(|d| d.path() != expected) {
+    if cfg
+        .data_directory()
+        .is_none_or(|d| !crate::chain::same_path(d.path(), &expected))
+    {
         return Err(Error::Unexpected(
             "Connect daemon datadir differs from this Cube".into(),
         ));
@@ -1187,29 +1274,44 @@ pub(crate) async fn start_connect_daemon(
             ))
         }
     };
-    if !matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))) {
-        crate::chain::require_connect_feature(chain, &client)
+    let local_backend = crate::chain::is_managed_local_fork(&cfg, &root);
+    if matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))) && !local_backend {
+        return Err(Error::Unexpected(
+            "Bitcoin Blake2b requires its isolated managed node".into(),
+        ));
+    }
+    if local_backend {
+        crate::chain::require_local_feature(chain, client.clone(), &root)
+            .await
+            .map_err(Error::Unexpected)?;
+    } else {
+        let client = client.as_ref().ok_or_else(|| {
+            Error::Unexpected("Connect authentication is required for this backend".into())
+        })?;
+        crate::chain::require_connect_feature(chain, client, &root)
             .await
             .map_err(Error::Unexpected)?;
     }
     let internal = if let Some(node) = local {
         let root = root.clone();
-        Some(
-            tokio::task::spawn_blocking(move || {
-                Bitcoind::preflight_for_chain(chain, &root)?;
-                crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
-                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
-                        e.to_string(),
-                    )
-                })?;
-                Bitcoind::maybe_start_for_chain(chain, node, &root)
+        tokio::task::spawn_blocking(move || {
+            Bitcoind::preflight_for_chain(chain, &root)?;
+            crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
+                crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
+            })?;
+            Bitcoind::maybe_start_for_chain(chain, node, &root).map(|node| PendingForkNode {
+                node: Some(node),
+                cleanup: true,
             })
-            .await
-            .map_err(|e| Error::Unexpected(e.to_string()))?
-            .map_err(Error::Bitcoind)?,
-        )
+        })
+        .await
+        .map_err(|e| Error::Unexpected(e.to_string()))?
+        .map_err(Error::Bitcoind)?
     } else {
-        None
+        PendingForkNode {
+            node: None,
+            cleanup: true,
+        }
     };
     let daemon: Arc<dyn Daemon + Sync + Send> =
         if matches!(cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_))) {
@@ -1221,9 +1323,12 @@ pub(crate) async fn start_connect_daemon(
             )
         } else {
             Arc::new(
-                EmbeddedDaemon::start_authenticated(cfg, client)
-                    .await
-                    .map_err(Error::Daemon)?,
+                EmbeddedDaemon::start_authenticated(
+                    cfg,
+                    client.expect("authenticated backend checked"),
+                )
+                .await
+                .map_err(Error::Daemon)?,
             )
         };
     let info = daemon.get_info().await.map_err(Error::Daemon)?;
@@ -1371,7 +1476,14 @@ pub async fn start_bitcoind_and_daemon(
     let daemon = EmbeddedDaemon::start(config)?;
     let info = daemon.get_info().await?;
 
-    Ok((Arc::new(daemon), bitcoind, info))
+    Ok((
+        Arc::new(daemon),
+        PendingForkNode {
+            node: bitcoind,
+            cleanup: false,
+        },
+        info,
+    ))
 }
 
 async fn sync(
@@ -3046,5 +3158,95 @@ mod bootstrap_backend_selection_tests {
             before_elsewhere,
             "the other Cube's directory was written to"
         );
+    }
+}
+
+#[cfg(test)]
+mod local_start_cancel_tests {
+    use super::*;
+    #[test]
+    fn dropping_completed_local_started_message_releases_its_node_owner() {
+        let path =
+            std::env::temp_dir().join(format!("local-start-delivery-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (cfg, _) =
+            crate::chain::managed_local_fixture(&root, crate::chain::ChainId::BitcoinBlake2b);
+        let Some(BitcoinBackend::Bitcoind(node)) = cfg.bitcoin_backend.clone() else {
+            unreachable!()
+        };
+        let owner = Bitcoind::local_fork_for_test(node, &root, bitcoin::Network::Bitcoin);
+        let locks = crate::node::bitcoind::internal_bitcoind_datadir_for(
+            &root,
+            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+        )
+        .join("locks/bitcoin");
+        let other = locks.join("other-owner.lock");
+        std::fs::write(&other, "").unwrap();
+        let info = GetInfoResult {
+            version: "synthetic".into(),
+            network: bitcoin::Network::Bitcoin,
+            block_height: 0,
+            sync: 1.0,
+            descriptors: coincubed::commands::GetInfoDescriptors {
+                main: cfg.main_descriptor.clone(),
+            },
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: None,
+            history_sync: Default::default(),
+            receive_index: 0,
+            change_index: 0,
+        };
+        let daemon: Arc<dyn Daemon + Sync + Send> =
+            Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None));
+        let completed = Message::Started(Ok((
+            daemon,
+            PendingForkNode {
+                node: Some(owner),
+                cleanup: true,
+            },
+            info,
+        )));
+        drop(completed);
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
+        assert!(other.exists());
+        std::fs::remove_dir_all(path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn canceled_local_start_releases_only_its_managed_node_owner() {
+        let path =
+            std::env::temp_dir().join(format!("local-start-cancel-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (cfg, _) =
+            crate::chain::managed_local_fixture(&root, crate::chain::ChainId::BitcoinBlake2b);
+        let Some(BitcoinBackend::Bitcoind(node)) = cfg.bitcoin_backend else {
+            unreachable!()
+        };
+        let owner = Bitcoind::local_fork_for_test(node, &root, bitcoin::Network::Bitcoin);
+        let locks = crate::node::bitcoind::internal_bitcoind_datadir_for(
+            &root,
+            crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+        )
+        .join("locks/bitcoin");
+        let other = locks.join("other-owner.lock");
+        std::fs::write(&other, "").unwrap();
+        let (ready, received) = tokio::sync::oneshot::channel();
+        let task = tokio::spawn(async move {
+            let _owned = PendingForkNode {
+                node: Some(owner),
+                cleanup: true,
+            };
+            let _ = ready.send(());
+            std::future::pending::<()>().await;
+        });
+        received.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
+        assert!(other.exists());
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

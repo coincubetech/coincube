@@ -486,6 +486,7 @@ pub enum Message {
     },
     /// Bubbles up to GUI level to toggle the theme
     ToggleTheme,
+    GlobalSettingsChanged,
     /// Bubbles up to the pane so it can focus the Home tab on its
     /// Connect section — fired when the user clicks "Sign In" on the
     /// inline prompt rendered by a Connect-requiring feature page
@@ -668,6 +669,30 @@ impl Tab {
         }))
     }
 
+    pub(crate) fn reload_global_settings(&mut self, root: &CoincubeDirectory) -> Task<Message> {
+        let enabled = crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(
+            &crate::app::settings::global::GlobalSettings::path(root),
+        );
+        let fork = match &self.state {
+            State::App(app) => app.cube_settings().network.is_blake2b(),
+            State::Loader(loader) => loader.cube_settings.network.is_blake2b(),
+            State::PinEntry(pin) => pin.cube().network.is_blake2b(),
+            State::Installer(installer) => installer.context.bitcoin_config.chain.is_blake2b(),
+            _ => false,
+        };
+        let revoke = if fork && !enabled {
+            self.invalidate_fork_state(AuthChange::LogOut, true, true)
+        } else {
+            Task::none()
+        };
+        let refresh = match &mut self.state {
+            State::Home(home) => home.reload_global_settings().map(Message::Launch),
+            State::App(app) => app.reload_global_settings().map(Message::Run),
+            _ => Task::none(),
+        };
+        Task::batch([revoke, refresh])
+    }
+
     pub fn on_tick(&mut self) -> Task<Message> {
         // Idle auto-lock.
         //
@@ -731,6 +756,48 @@ impl Tab {
         change: AuthChange,
         originated: bool,
     ) -> Task<Message> {
+        self.invalidate_fork_state(change, originated, false)
+    }
+
+    fn invalidate_fork_state(
+        &mut self,
+        change: AuthChange,
+        originated: bool,
+        capability_revoked: bool,
+    ) -> Task<Message> {
+        if !capability_revoked {
+            match &mut self.state {
+                State::App(app)
+                    if app.cube_settings().network.is_blake2b() && !app.requires_connect() =>
+                {
+                    app.on_local_auth_change(originated);
+                    return Task::none();
+                }
+                State::Loader(loader)
+                    if loader.cube_settings.network.is_blake2b() && !loader.requires_connect() =>
+                {
+                    loader.connect_client = None;
+                    return Task::none();
+                }
+                State::PinEntry(pin)
+                    if pin.cube().network.is_blake2b() && !pin.requires_connect() =>
+                {
+                    let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                        &mut pin.on_success;
+                    *connect_client = None;
+                    return Task::none();
+                }
+                State::Installer(installer)
+                    if installer.context.fresh_fork_cube
+                        && !installer.context.use_coincube_connect =>
+                {
+                    installer.context.coincube_client = None;
+                    installer.context.connect_jwt = None;
+                    return Task::none();
+                }
+                _ => {}
+            }
+        }
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.pending_split_after_install = false;
         app::split_intent::clear();
@@ -748,7 +815,9 @@ impl Tab {
                 // wallet. EmbeddedDaemon Drop uses fork-scoped safe cleanup;
                 // App::stop would also stop unrelated globally managed Tor.
                 let (mut home, startup) = Home::new_for_chain(datadir, Some(cube.network));
-                home.set_error("Connect session changed. Sign in again to reopen this Cube.");
+                home.set_error(if capability_revoked {
+                    "Bitcoin Blake2b is disabled or its availability could not be verified. Check Global Settings before reopening this Cube."
+                } else { "Connect session changed. Sign in again to reopen this Cube." });
                 command = startup.map(Message::Launch);
                 replacement = Some(State::Home(home));
             }
@@ -758,21 +827,25 @@ impl Tab {
             // `App::on_global_auth_change`.
             State::App(app) => app.on_global_auth_change(change, originated),
             State::Loader(loader) if loader.cube_settings.network.is_blake2b() => {
-                loader.invalidate_fork_session()
+                loader.invalidate_fork_session();
+                if capability_revoked {
+                    loader.fail(loader::Error::Unexpected("Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube.".into()));
+                }
             }
             State::PinEntry(pin) if pin.cube().network.is_blake2b() => {
                 let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
                     &mut pin.on_success;
                 *connect_client = None;
-                pin.fail_open("Connect session changed. Return Home and sign in again.".into());
+                pin.fail_open(if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube." } else { "Connect session changed. Return Home and sign in again." }.into());
             }
             State::Installer(installer) if installer.context.bitcoin_config.chain.is_blake2b() => {
+                installer.stop();
                 let (mut home, startup) = Home::new_for_chain(
                     installer.datadir.clone(),
                     Some(installer.context.bitcoin_config.chain),
                 );
                 home.set_error(
-                    "Connect session changed; restart this Cube's installation after signing in",
+                    if capability_revoked { "Bitcoin Blake2b is disabled. Check Global Settings before restarting this installation." } else { "Connect session changed; restart this Cube's installation after signing in" },
                 );
                 command = startup.map(Message::Launch);
                 replacement = Some(State::Home(home));
@@ -823,7 +896,11 @@ impl Tab {
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let result = self.update_inner(message);
-        if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b() && app.authenticated_coincube_client().is_none())
+        if matches!(&self.state, State::App(app) if app.local_feature_revoked()) {
+            drop(result);
+            return self.invalidate_fork_state(AuthChange::LogOut, true, true);
+        }
+        if matches!(&self.state, State::App(app) if app.requires_connect() && app.authenticated_coincube_client().is_none())
         {
             drop(result);
             // A fork App that lost its client: its own arm tears it down; the
@@ -920,7 +997,7 @@ impl Tab {
             }
             (State::Home(l), Message::Launch(msg)) => match msg {
                 home::Message::Install(datadir, network, init, coincube_client) => {
-                    if let Some(reason) = l.connect_chain_availability(network).reason() {
+                    if let Some(reason) = l.chain_availability(network).reason() {
                         l.set_error(reason.to_string());
                         return Task::none();
                     }
@@ -1023,7 +1100,7 @@ impl Tab {
                         app::split_intent::clear();
                         return Task::none();
                     }
-                    if let Some(reason) = l.connect_chain_availability(cube.network).reason() {
+                    if let Some(reason) = l.chain_availability(cube.network).reason() {
                         l.set_error(reason.to_string());
                         app::split_intent::clear();
                         return Task::none();
@@ -1147,6 +1224,7 @@ impl Tab {
                 home::Message::View(home::ViewMessage::ToggleTheme) => {
                     Task::done(Message::ToggleTheme)
                 }
+                home::Message::GlobalSettingsChanged => Task::done(Message::GlobalSettingsChanged),
                 home::Message::ConnectSignedInBubble => Task::done(Message::ConnectSignedIn),
                 _ => l.update(msg).map(Message::Launch),
             },
@@ -1811,25 +1889,42 @@ impl Tab {
                     backup,
                     cube_settings,
                 ))) => {
+                    if loader.fork_revoked() {
+                        return Task::none();
+                    }
                     if cube_settings.network.is_blake2b() {
-                        let Some(client) = loader.connect_client.clone() else {
-                            return Task::done(Message::Load(loader::Message::Failure(
-                                crate::daemon::DaemonError::Unexpected(
-                                    "Connect session lost; reopen this Cube".into(),
-                                ),
-                            )));
+                        let opened = if loader.requires_connect() {
+                            let Some(client) = loader.connect_client.clone() else {
+                                return Task::done(Message::Load(loader::Message::Failure(
+                                    crate::daemon::DaemonError::Unexpected(
+                                        "Connect session lost; reopen this Cube".into(),
+                                    ),
+                                )));
+                            };
+                            App::new_for_chain_with_node(
+                                cache,
+                                wallet,
+                                loader.cube_encryption_key.clone(),
+                                client,
+                                loader.gui_config.clone(),
+                                daemon,
+                                loader.datadir_path.clone(),
+                                cube_settings,
+                                bitcoind,
+                            )
+                        } else {
+                            App::new_local_fork(
+                                cache,
+                                wallet,
+                                loader.cube_encryption_key.clone(),
+                                loader.gui_config.clone(),
+                                daemon,
+                                loader.datadir_path.clone(),
+                                cube_settings,
+                                bitcoind,
+                            )
                         };
-                        match App::new_for_chain_with_node(
-                            cache,
-                            wallet,
-                            loader.cube_encryption_key.clone(),
-                            client,
-                            loader.gui_config.clone(),
-                            daemon,
-                            loader.datadir_path.clone(),
-                            cube_settings,
-                            bitcoind,
-                        ) {
+                        match opened {
                             Ok((app, task)) => {
                                 self.state = State::App(app);
                                 return task.map(Message::Run);
@@ -2241,12 +2336,12 @@ impl Tab {
                             let pin = pin_entry.pin();
 
                             if cube.network.is_blake2b() {
-                                let Some(client) =
-                                    connect_client.clone().filter(|c| c.token().is_some())
-                                else {
+                                let requires_connect = pin_entry.requires_connect();
+                                let client = connect_client.clone().filter(|c| c.token().is_some());
+                                if requires_connect && client.is_none() {
                                     pin_entry.fail_open("Sign in to Connect from Home before opening this Bitcoin Blake2b Cube".into());
                                     return Task::none();
-                                };
+                                }
                                 let Some(wallet_settings) = wallet_settings
                                     .clone()
                                     .filter(|w| w.remote_backend_auth.is_none())
@@ -2271,14 +2366,24 @@ impl Tab {
                                     ),
                                 );
                                 app::session::open(cube.id.clone(), pin);
-                                let (loader, command) = Loader::new_for_chain(
-                                    datadir.clone(),
-                                    config.clone(),
-                                    wallet_settings,
-                                    cube,
-                                    client,
-                                    cek,
-                                );
+                                let (loader, command) = if requires_connect {
+                                    Loader::new_for_chain(
+                                        datadir.clone(),
+                                        config.clone(),
+                                        wallet_settings,
+                                        cube,
+                                        client.expect("authenticated backend checked"),
+                                        cek,
+                                    )
+                                } else {
+                                    Loader::new_local_fork(
+                                        datadir.clone(),
+                                        config.clone(),
+                                        wallet_settings,
+                                        cube,
+                                        cek,
+                                    )
+                                };
                                 self.state = State::Loader(loader);
                                 return command.map(Message::Load);
                             }
@@ -4339,7 +4444,7 @@ mod migration_warning_tests {
             assert_eq!(state, "Home", "{:?}", chain);
             assert_eq!(
                 error.as_deref(),
-                Some("Bitcoin Blake2b isn't enabled for this account."),
+                Some("Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability."),
                 "{:?}",
                 chain
             );
@@ -5466,6 +5571,33 @@ mod unlock_routing_tests {
         super::State::Loader(loader)
     }
 
+    #[test]
+    fn global_beta_off_invalidates_a_fork_loader_and_rejects_late_results() {
+        let _guard = crate::app::session::test_guard();
+        let root_path =
+            std::env::temp_dir().join(format!("coincube-beta-tab-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root_path).unwrap();
+        let root = crate::dir::CoincubeDirectory::new(root_path.clone());
+        let mut tab = super::Tab::new(1, blake2b_error_loader());
+        let before = tab.fork_session_generation;
+        drop(tab.reload_global_settings(&root));
+        assert_ne!(tab.fork_session_generation, before);
+        assert!(!tab.accepts_fork_generation(before));
+        assert_eq!(
+            tab.update(super::Message::ForkAsync(
+                before,
+                Box::new(super::Message::LockCube)
+            ))
+            .units(),
+            0
+        );
+        assert!(
+            matches!(tab.state, super::State::Loader(_)),
+            "stale results must not replace the refused loader"
+        );
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
     /// #578 review R1: Back from the loader error screen abandons the open
     /// and its Split handoff; Retry keeps it for the same open.
     #[test]
@@ -5653,7 +5785,9 @@ mod fork_completion_tests {
         // reviewer: 2 MiB aborts, 2176 KiB passes (not recursive growth).
         // Give only each fixture ordering 8 MiB, with coverage headroom;
         // production State layout and the global test runner stay unchanged.
-        for completed_before_logout in [false, true] {
+        for (completed_before_logout, local_capability) in
+            [(false, false), (true, false), (false, true), (true, true)]
+        {
             let result = std::thread::Builder::new()
                 .name(format!("fork-save-ordering-{completed_before_logout}"))
                 .stack_size(8 * 1024 * 1024)
@@ -5662,7 +5796,10 @@ mod fork_completion_tests {
                         .enable_all()
                         .build()
                         .unwrap()
-                        .block_on(post_install_completion_ordering(completed_before_logout));
+                        .block_on(post_install_completion_ordering(
+                            completed_before_logout,
+                            local_capability,
+                        ));
                 })
                 .unwrap()
                 .join();
@@ -5673,7 +5810,10 @@ mod fork_completion_tests {
         app::session::close();
     }
 
-    async fn post_install_completion_ordering(completed_before_logout: bool) {
+    async fn post_install_completion_ordering(
+        completed_before_logout: bool,
+        local_capability: bool,
+    ) {
         app::session::close();
         let root_path =
             std::env::temp_dir().join(format!("fork-save-cancel-{}", uuid::Uuid::new_v4()));
@@ -5698,6 +5838,7 @@ mod fork_completion_tests {
         .expect("a Bitcoin fixture installer");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
         installer.context.fresh_fork_cube = true;
+        installer.context.use_coincube_connect = !local_capability;
         installer.context.fresh_fork_seed_backed_up = true;
         installer.context.cube_id = Some("synthetic-save-cube".into());
         installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
@@ -5721,7 +5862,7 @@ mod fork_completion_tests {
             ));
             assert!(app::session::pin_for("synthetic-save-cube").is_none());
         }
-        let startup = tab.invalidate_fork_session(AuthChange::LogOut, false);
+        let startup = tab.invalidate_fork_state(AuthChange::LogOut, false, local_capability);
         // The Home task is preserved and its actual asynchronous directory
         // result is consumed. Auth Init itself is not run by this fixture.
         for result in outputs(startup).await {

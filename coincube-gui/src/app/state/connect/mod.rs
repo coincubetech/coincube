@@ -216,6 +216,11 @@ impl ConnectPanel {
             .set_active_cube_server_id(self.cube.server_cube_id);
     }
 
+    pub(crate) fn detach_local_session(&mut self) {
+        self.account.detach_local_session();
+        self.cube.clear_client();
+    }
+
     pub fn revoke_admitted_client(&mut self) {
         self.account.revoke_admitted_client();
         self.cube.clear_client();

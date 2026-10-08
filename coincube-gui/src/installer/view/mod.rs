@@ -1436,35 +1436,26 @@ pub fn select_bitcoind_type<'a>(
     prune_default_mb: u32,
     connect_authenticated: bool,
     node_flavor: crate::node::bitcoind::NodeFlavor,
+    local_available: bool,
 ) -> Element<'a, Message> {
     use crate::chain::ChainIdExt;
     if chain.is_blake2b() {
-        // Authenticated Connect is the only implemented fork startup route.
-        // Match the view to the state guard instead of offering ignored actions.
         let chain_name = chain.label();
-        let content = Container::new(
-            Column::new()
-                .spacing(20)
-                .max_width(620)
-                .push(text("Start with COINCUBE | Connect").bold())
-                .push(text(format!(
-                    "Your Vault will use our hosted Bitcoin Knots node for {chain_name} \
-                 through Esplora. No local node setup is required."
-                )))
-                .push(checkbox(install_node).label("Also install a pruned Bitcoin node on my device")
-                    .on_toggle(|_| Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)))
-                .push(text(if install_node {
-                    format!("Tenshu will install a pruned Bitcoin Knots node for {chain_name} in its own data directory. Your Vault will switch to it once its blockchain sync finishes. The local node uses outbound peer connections; inbound Tor is unavailable for this chain.")
-                } else {
-                    format!("Your Vault will use COINCUBE | Connect as its only {chain_name} backend.")
-                }))
-                .push(
-                    button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
-                        message::SelectBitcoindTypeMsg::ContinueWithConnect,
-                    )),
-                ),
-        )
-        .padding(30);
+        let mut choices = Column::new().spacing(20).max_width(620);
+        if local_available {
+            choices = choices
+            .push(text("Install a local pruned node").bold())
+            .push(text(format!("Run Bitcoin Knots for {chain_name} in an isolated data directory. No Connect account is required. Your node must finish syncing before the Vault can be created.")))
+            .push(button::primary(None, "Use a local node").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
+        }
+        if connect_authenticated || !local_available {
+            choices = choices
+                .push(text("Use COINCUBE | Connect").bold())
+                .push(text(format!("Use the hosted {chain_name} node while a local node syncs, or use Connect alone.")))
+                .push(checkbox(install_node).label("Also install a pruned node on my device").on_toggle(|_| Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)))
+                .push(button::secondary(None, "Use Connect").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
+        }
+        let content = Container::new(choices).padding(30);
         return layout(
             progress,
             None,
@@ -2783,7 +2774,7 @@ pub fn wallet_alias<'a>(
     )
 }
 
-fn layout<'a>(
+pub(super) fn layout<'a>(
     progress: (usize, usize),
     email: Option<&'a str>,
     title: &'static str,
@@ -3216,6 +3207,7 @@ mod tests {
             15_000,
             true,
             NodeFlavor::Core,
+            true,
         );
         let _ = select_bitcoind_type(
             (2, 4),
@@ -3225,6 +3217,7 @@ mod tests {
             15_000,
             true,
             NodeFlavor::Knots,
+            true,
         );
         let _ = select_bitcoind_type(
             (2, 4),
@@ -3234,6 +3227,7 @@ mod tests {
             15_000,
             false,
             NodeFlavor::Core,
+            true,
         );
 
         let _ = start_internal_bitcoind(
@@ -3396,6 +3390,7 @@ mod node_management_chain_tests {
                 } else {
                     NodeFlavor::Knots
                 },
+                true,
             );
             let mut tree = Tree::new(element.as_widget());
             let node = element.as_widget_mut().layout(
@@ -3407,27 +3402,15 @@ mod node_management_chain_tests {
             element
                 .as_widget_mut()
                 .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
-            assert!(labels
-                .0
-                .iter()
-                .any(|s| s == "Also install a pruned Bitcoin node on my device"));
             if chain.is_blake2b() {
-                assert!(labels.0.iter().any(
-                    |s| s.contains(&format!("hosted Bitcoin Knots node for {}", chain.label()))
-                ));
+                assert!(labels.0.iter().any(|s| s == "Use a local node"));
                 assert!(labels
                     .0
                     .iter()
-                    .any(|s| s.contains("install a pruned Bitcoin Knots node")
-                        && s.contains(chain.label())
-                        && s.contains("once its blockchain sync finishes")));
-                assert!(!labels.0.iter().any(|s| s.contains("Advanced options")
-                    || s == "Install a node only"
-                    || s == "I already have a node"));
-                assert!(labels
-                    .0
-                    .iter()
-                    .any(|s| s == &format!("{} node management", chain.label())));
+                    .any(|s| s.contains("No Connect account is required")
+                        && s.contains(chain.label())));
+                assert!(labels.0.iter().any(|s| s == "Use Connect"));
+                assert!(!labels.0.iter().any(|s| s == "I already have a node"));
             } else {
                 assert!(labels.0.iter().any(|s| s == "Install a node only"));
                 assert!(!labels

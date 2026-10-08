@@ -124,6 +124,12 @@ fn source(name: &str) -> (ClaimSource, Fingerprint) {
     )
 }
 
+fn enable_beta(root: &CoincubeDirectory) {
+    std::fs::create_dir_all(root.path()).unwrap();
+    let path = crate::app::settings::global::GlobalSettings::path(root);
+    crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(&path, true).unwrap();
+}
+
 fn temp_root(tag: &str) -> CoincubeDirectory {
     CoincubeDirectory::new(
         std::env::temp_dir().join(format!("claim-{tag}-{}", uuid::Uuid::new_v4())),
@@ -816,6 +822,7 @@ async fn the_real_install_writes_a_target_the_exit_seams_credential_opens() {
     let (server, esplora) = fork_install_server().await;
     let (source, source_fingerprint) = source("Savings");
     let root = temp_root("real-install");
+    enable_beta(&root);
     let root_path = root.path().to_path_buf();
 
     let (mut installer, _) = Installer::try_new_for_chain(
@@ -997,6 +1004,7 @@ async fn a_claim_interrupted_after_the_seed_write_can_be_retried_after_a_restart
     let (source, source_fingerprint) = source("Savings");
     let source_cube_id = source.cube_id().to_string();
     let root = temp_root("interrupted");
+    enable_beta(&root);
 
     let backend = BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
         addr: esplora,
@@ -1212,6 +1220,7 @@ async fn an_install_interrupted_between_the_wallet_and_the_cube_stays_retryable(
     let (server, esplora) = fork_install_server().await;
     let (source, _) = source("Savings");
     let root = temp_root("write-boundary");
+    enable_beta(&root);
     let backend = BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
         addr: esplora,
         token: None,

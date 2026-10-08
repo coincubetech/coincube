@@ -374,7 +374,9 @@ impl Installer {
         {
             return Err(Error::Unexpected(reason.to_string()));
         }
-        if chain.is_blake2b() && coincube_client.as_ref().and_then(|c| c.token()).is_none() {
+        if matches!(&user_flow, UserFlow::ClaimBlake2b { .. })
+            && coincube_client.as_ref().and_then(|c| c.token()).is_none()
+        {
             return Err(Error::Unexpected(
                 "Connect authentication is required for Bitcoin Blake2b".into(),
             ));
@@ -1163,20 +1165,34 @@ pub fn daemon_check(cfg: coincubed::config::Config) -> Result<(), Error> {
 async fn daemon_check_authenticated(
     cfg: coincubed::config::Config,
     client: Option<crate::services::coincube::CoincubeClient>,
+    root: &CoincubeDirectory,
 ) -> Result<(), Error> {
     if !cfg.bitcoin_config.chain.is_blake2b() {
         return daemon_check(cfg);
     }
     use crate::daemon::Daemon;
-    let client = client.ok_or_else(|| {
-        Error::Unexpected("Connect authentication is required for Bitcoin Blake2b".into())
-    })?;
-    crate::chain::require_connect_feature(cfg.bitcoin_config.chain, &client)
+    let chain = cfg.bitcoin_config.chain;
+    let daemon = if crate::chain::is_managed_local_fork(&cfg, root) {
+        crate::chain::require_local_feature(chain, client, root)
+            .await
+            .map_err(Error::Unexpected)?;
+        tokio::task::spawn_blocking(move || {
+            crate::daemon::embedded::EmbeddedDaemon::start_local_fork(cfg)
+        })
         .await
-        .map_err(Error::Unexpected)?;
-    let daemon = crate::daemon::embedded::EmbeddedDaemon::start_authenticated(cfg, client)
-        .await
-        .map_err(|e| Error::Unexpected(format!("Failed to admit Connect backend: {}", e)))?;
+        .map_err(|e| Error::Unexpected(e.to_string()))?
+        .map_err(|e| Error::Unexpected(format!("Failed to admit local backend: {e}")))?
+    } else {
+        let client = client.ok_or_else(|| {
+            Error::Unexpected("Connect authentication is required for this backend".into())
+        })?;
+        crate::chain::require_connect_feature(chain, &client, root)
+            .await
+            .map_err(Error::Unexpected)?;
+        crate::daemon::embedded::EmbeddedDaemon::start_authenticated(cfg, client)
+            .await
+            .map_err(|e| Error::Unexpected(format!("Failed to admit Connect backend: {e}")))?
+    };
     daemon
         .stop()
         .await
@@ -1346,6 +1362,7 @@ fn require_installable_chain(ctx: &Context) -> Result<(), Error> {
         return Err(Error::Unexpected(reason.to_string()));
     }
     if ctx.bitcoin_config.chain.is_blake2b()
+        && (ctx.use_coincube_connect || !ctx.fresh_fork_cube)
         && ctx
             .coincube_client
             .as_ref()
@@ -1426,7 +1443,24 @@ pub async fn install_local_wallet(
 
     let cfg: coincubed::config::Config = extract_daemon_config(&ctx, &wallet_settings)?;
 
-    daemon_check_authenticated(cfg.clone(), ctx.coincube_client.clone()).await?;
+    if ctx.claim_source.is_some() {
+        let client = ctx.coincube_client.as_ref().ok_or_else(|| {
+            Error::Unexpected("Connect authentication is required for a claim".into())
+        })?;
+        crate::chain::require_connect_feature(
+            ctx.bitcoin_config.chain,
+            client,
+            &ctx.coincube_directory,
+        )
+        .await
+        .map_err(Error::Unexpected)?;
+    }
+    daemon_check_authenticated(
+        cfg.clone(),
+        ctx.coincube_client.clone(),
+        &ctx.coincube_directory,
+    )
+    .await?;
     if ctx.bitcoin_config.chain.is_blake2b() {
         network_datadir
             .init()
@@ -2198,7 +2232,7 @@ mod pending_rescan_tests {
                 "fresh Cube must choose a PIN"
             );
             assert!(!root.exists(), "construction must not touch a datadir");
-            // The public entry still refuses this same chain while dormant.
+            // The explicit fresh local entry is available without an account.
             assert!(Installer::try_new_for_chain(
                 CoincubeDirectory::new(root),
                 chain,
@@ -2211,12 +2245,12 @@ mod pending_rescan_tests {
                 false,
                 None
             )
-            .is_err());
+            .is_ok());
         }
     }
 
     #[test]
-    fn dormant_chain_constructor_refuses_before_creating_any_files() {
+    fn local_chain_constructor_creates_no_files_or_sdk_handles() {
         for chain in [
             crate::chain::ChainId::BitcoinBlake2b,
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
@@ -2235,9 +2269,11 @@ mod pending_rescan_tests {
                 false,
                 None,
             );
-            assert!(
-                matches!(result, Err(Error::Unexpected(reason)) if reason.contains("Bitcoin Blake2b"))
-            );
+            let (installer, task) = result.unwrap();
+            drop(task);
+            assert!(installer.context.fresh_fork_cube);
+            assert!(installer.context.coincube_client.is_none());
+            assert!(installer.breez_client.is_none() && installer.spark_backend.is_none());
             assert!(!temp.exists());
         }
     }
@@ -2350,7 +2386,13 @@ mod pending_rescan_tests {
             staged_with_descriptor(None).descriptor.unwrap(),
             coincubed::datadir::DataDirectory::new(path.clone()),
         );
-        let err = daemon_check_authenticated(cfg, None).await.unwrap_err();
+        let err = daemon_check_authenticated(
+            cfg,
+            None,
+            &CoincubeDirectory::new(std::path::PathBuf::new()),
+        )
+        .await
+        .unwrap_err();
         assert!(
             matches!(err, Error::Unexpected(reason) if reason.contains("authentication is required"))
         );

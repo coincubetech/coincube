@@ -12,6 +12,12 @@ const DESCRIPTOR: &str = concat!(
     "BsBbgKHzaD5HkTkifK/<0;1>/*)))#3xh8xmhn"
 );
 
+fn enable_beta(root: &CoincubeDirectory) {
+    std::fs::create_dir_all(root.path()).unwrap();
+    let path = crate::app::settings::global::GlobalSettings::path(root);
+    crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(&path, true).unwrap();
+}
+
 fn client(server: &MockServer) -> CoincubeClient {
     let mut client = CoincubeClient::new();
     client.base_url = server.base_url();
@@ -192,6 +198,7 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let root_path =
         std::env::temp_dir().join(format!("btcb2-create-reopen-{}", uuid::Uuid::new_v4()));
     let root = CoincubeDirectory::new(root_path.clone());
+    enable_beta(&root);
     let mut client = CoincubeClient::new();
     client.base_url = server.base_url.clone();
     client.set_token("synthetic-activation-token");
@@ -224,7 +231,7 @@ async fn actual_fork_install_pin_unlock_and_authenticated_reopen_are_chain_bound
     let cube_id = installer.context.seed_cube_id().to_owned();
     let fingerprint = installer.master_signer_fingerprint();
     let wallet_id = WalletId::generate(installer.context.descriptor.as_ref().unwrap());
-    assert!(!root_path.exists());
+    assert_eq!(std::fs::read_dir(&root_path).unwrap().count(), 1);
     let settings = install_local_wallet(
         installer.context.clone(),
         wallet_id,
@@ -337,8 +344,12 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
                 .await;
             let root_path =
                 std::env::temp_dir().join(format!("btcb2-no-write-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(root_path.clone());
+            enable_beta(&root);
+            let settings_path = crate::app::settings::global::GlobalSettings::path(&root);
+            let settings_before = std::fs::read(&settings_path).unwrap();
             let (mut installer, _) = Installer::try_new_for_chain(
-                CoincubeDirectory::new(root_path.clone()),
+                root,
                 chain,
                 None,
                 UserFlow::CreateWallet,
@@ -372,13 +383,9 @@ async fn feature_refusals_precede_anchor_requests_and_all_fork_filesystem_writes
                     .await
                     .is_err()
             );
-            assert!(
-                !root_path.exists(),
-                "{:?} HTTP{} flag{:?}",
-                chain,
-                status,
-                flag
-            );
+            assert_eq!(std::fs::read_dir(&root_path).unwrap().count(), 1);
+            assert_eq!(std::fs::read(&settings_path).unwrap(), settings_before);
+            std::fs::remove_dir_all(root_path).unwrap();
             features.assert_hits_async(1).await;
             anchor.assert_hits_async(0).await;
         }

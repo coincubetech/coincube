@@ -102,7 +102,7 @@ impl Step for CoincubeConnectStep {
     ///   * Only a client with a token auto-advances; an unauthenticated
     ///     client still supplies the configured endpoint for the OTP flow.
     fn load_context(&mut self, ctx: &Context) {
-        self.required = ctx.bitcoin_config.chain.is_blake2b();
+        self.required = ctx.bitcoin_config.chain.is_blake2b() && !ctx.fresh_fork_cube;
         // load_context is called when entering this step, not between an OTP
         // response and apply. Re-entering after auth was undone must not reuse
         // a pending token or auto-advance from the previous visit.
@@ -156,7 +156,8 @@ impl Step for CoincubeConnectStep {
     }
 
     fn skip(&self, ctx: &Context) -> bool {
-        ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
+        (ctx.fresh_fork_cube && ctx.coincube_client.as_ref().and_then(|c| c.token()).is_none())
+            || ctx.network == coincube_core::miniscript::bitcoin::Network::Regtest
             || ctx.remote_backend.is_some()
             // An earlier step (today: `RecoveryKitRestoreStep`) has
             // already collected the user's JWT for the same Connect
@@ -169,7 +170,7 @@ impl Step for CoincubeConnectStep {
     }
 
     fn apply(&mut self, ctx: &mut Context) -> bool {
-        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() {
+        if self.skipped && ctx.bitcoin_config.chain.is_blake2b() && !ctx.fresh_fork_cube {
             self.error = Some("Connect authentication is required for Bitcoin Blake2b".to_string());
             return false;
         }

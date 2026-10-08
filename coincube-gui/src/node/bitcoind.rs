@@ -2056,6 +2056,25 @@ impl Bitcoind {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn local_fork_for_test(
+        config: BitcoindConfig,
+        root: &CoincubeDirectory,
+        network: Network,
+    ) -> Self {
+        Self {
+            config,
+            lock: LockFile::create(
+                BitcoindDirectory::new(internal_bitcoind_datadir_for(
+                    root,
+                    NodeChainFamily::BitcoinBlake2b,
+                )),
+                network,
+            )
+            .expect("synthetic local node owner"),
+        }
+    }
+
     /// Start the managed node for a chain, by identity.
     ///
     /// Select a managed family by exact identity. Fork nodes use their own

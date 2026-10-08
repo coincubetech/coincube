@@ -85,6 +85,7 @@ pub fn theme_toggle_button<'a, M: Clone + 'a>(
         .spacing(8)
         .align_y(iced::alignment::Vertical::Center),
     )
+    .width(iced::Length::Fill)
     .on_press(on_press)
     .style(crate::theme::button::transparent)
     .padding([8, 12])

@@ -254,9 +254,13 @@ impl GUI {
         };
         let auth_from_fork_app = if auth_change.is_some() {
             match &message {
-                Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) => self.panes.get(*pane_id)
+                Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) => self
+                    .panes
+                    .get(*pane_id)
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
-                    .is_some_and(|tab| matches!(&tab.state, tab::State::App(app) if app.cube_settings().network.is_blake2b())),
+                    .is_some_and(
+                        |tab| matches!(&tab.state, tab::State::App(app) if app.requires_connect()),
+                    ),
                 _ => false,
             }
         } else {
@@ -511,6 +515,19 @@ impl GUI {
                 } else {
                     Task::none()
                 }
+            }
+            Message::Pane(_, pane::Message::View(pane::ViewMessage::GlobalSettingsChanged)) => {
+                let root = &self.config.coincube_directory;
+                let mut tasks = Vec::new();
+                for (&pane_id, pane) in self.panes.iter_mut() {
+                    for tab in &mut pane.tabs {
+                        let tab_id = tab.id;
+                        tasks.push(tab.reload_global_settings(root).map(move |message| {
+                            Message::Pane(pane_id, pane::Message::Tab(tab_id, message))
+                        }));
+                    }
+                }
+                Task::batch(tasks)
             }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ToggleTheme)) => {
                 self.update(Message::ToggleTheme)

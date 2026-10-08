@@ -10,13 +10,15 @@
 //! launcher offers, the user-facing label and ticker, and whether this build
 //! can run a Cube on a chain at all ([`ChainIdExt`]).
 //!
-//! # Explicit Connect capability
+//! # Explicit fork capabilities
 //!
 //! Generic runtime support remains dormant for BTCB2 so managed-node,
 //! migration and duress entry points stay closed. The separately checked
 //! authenticated Connect Vault path uses `authenticated_connect_support`;
 //! its account flag, exact-chain anchor and dedicated provider are all
-//! required before daemon writes. This does not enable generic startup.
+//! required before daemon writes. The isolated managed local path instead uses
+//! the anonymous global flag and saved beta preference, with exact local-chain
+//! admission. Neither path enables generic startup.
 
 pub use coincube_core::chain::{ChainId, UnknownChainId};
 
@@ -63,18 +65,148 @@ pub(crate) fn authenticated_connect_support(chain: ChainId) -> RuntimeSupport {
 pub(crate) async fn require_connect_feature(
     chain: ChainId,
     client: &crate::services::coincube::CoincubeClient,
+    root: &crate::dir::CoincubeDirectory,
 ) -> Result<(), String> {
     if !chain.is_blake2b() || client.token().is_none() {
         return Err("An authenticated Bitcoin Blake2b Connect session is required".into());
+    }
+    let settings_path = crate::app::settings::global::GlobalSettings::path(root);
+    if !crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(&settings_path) {
+        return Err("Enable Bitcoin Blake2b - Beta in Global Settings to open this Cube".into());
     }
     let features = client
         .get_connect_features()
         .await
         .map_err(|_| "Bitcoin Blake2b availability could not be verified".to_string())?;
-    if features.bitcoin_blake2b_enabled != Some(true) {
+    if !crate::app::features::bitcoin_blake2b_enabled(
+        features.bitcoin_blake2b_enabled == Some(true),
+        crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(&settings_path),
+    ) {
         return Err("Bitcoin Blake2b isn't enabled for this account".into());
     }
     Ok(())
+}
+
+/// Read only the globally published fork capability, with no account bearer.
+pub(crate) async fn global_blake2b_enabled(
+    mut client: crate::services::coincube::CoincubeClient,
+) -> bool {
+    client.clear_token();
+    client
+        .get_connect_features()
+        .await
+        .ok()
+        .and_then(|features| features.bitcoin_blake2b_enabled)
+        == Some(true)
+}
+
+/// Local node admission still requires the saved beta preference and global flag.
+pub(crate) async fn require_local_feature(
+    chain: ChainId,
+    client: Option<crate::services::coincube::CoincubeClient>,
+    root: &crate::dir::CoincubeDirectory,
+) -> Result<(), String> {
+    let path = crate::app::settings::global::GlobalSettings::path(root);
+    if !chain.is_blake2b()
+        || !crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(&path)
+    {
+        return Err("Enable Bitcoin Blake2b - Beta in Global Settings to open this Cube".into());
+    }
+    if !global_blake2b_enabled(client.unwrap_or_default()).await
+        || !crate::app::settings::global::GlobalSettings::load_bitcoin_blake2b_beta(&path)
+    {
+        return Err("Bitcoin Blake2b availability could not be verified".into());
+    }
+    Ok(())
+}
+
+/// Classify only the isolated, managed local fork backend. Esplora companions,
+/// arbitrary RPC nodes and generic sockets never acquire this capability.
+pub(crate) fn is_managed_local_fork(
+    cfg: &coincubed::config::Config,
+    root: &crate::dir::CoincubeDirectory,
+) -> bool {
+    let chain = cfg.bitcoin_config.chain;
+    let directory = crate::node::bitcoind::internal_bitcoind_datadir_for(
+        root,
+        crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+    );
+    let Ok(managed) = crate::node::bitcoind::InternalBitcoindConfig::from_file(
+        &crate::node::bitcoind::internal_bitcoind_config_path(&directory),
+    ) else {
+        return false;
+    };
+    let Ok(ledger) = crate::node::revalidate::ManagedNodeState::try_load_for(
+        root,
+        crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+    ) else {
+        return false;
+    };
+    let flavor = ledger
+        .configured_flavor
+        .or(ledger.last_run_flavor)
+        .unwrap_or(crate::node::bitcoind::NodeFlavor::KnotsBlake2b);
+    chain.is_blake2b()
+        && cfg.bitcoin_config.check_chain_encoding().is_ok()
+        && flavor == crate::node::bitcoind::NodeFlavor::KnotsBlake2b
+        && cfg.pending_bitcoind.is_none()
+        && matches!(&cfg.bitcoin_backend,
+            Some(coincubed::config::BitcoinBackend::Bitcoind(node))
+                if node.addr.ip().is_loopback()
+                    && managed.networks.get(&chain.bitcoin_network()).is_some_and(|network| network.rpc_port == node.addr.port())
+                    && matches!(&node.rpc_auth, coincubed::config::BitcoindRpcAuth::CookieFile(cookie)
+                        if same_path(cookie, &crate::node::bitcoind::internal_bitcoind_cookie_path(
+                            &directory, &chain.bitcoin_network()))))
+}
+
+pub(crate) fn same_path(a: &std::path::Path, b: &std::path::Path) -> bool {
+    fn normalized(path: &std::path::Path) -> std::path::PathBuf {
+        let mut ancestor = path;
+        let mut suffix = Vec::new();
+        loop {
+            if let Ok(mut normalized) = std::fs::canonicalize(ancestor) {
+                for name in suffix.iter().rev() {
+                    normalized.push(name);
+                }
+                return normalized;
+            }
+            let Some(name) = ancestor.file_name() else {
+                return path.to_path_buf();
+            };
+            suffix.push(name.to_os_string());
+            let Some(parent) = ancestor.parent() else {
+                return path.to_path_buf();
+            };
+            ancestor = parent;
+        }
+    }
+    normalized(a) == normalized(b)
+}
+
+/// Read the Cube's own config before deciding whether its unlock needs Connect.
+pub(crate) fn has_managed_local_fork(
+    root: &crate::dir::CoincubeDirectory,
+    chain: ChainId,
+    wallet: Option<&crate::app::settings::WalletSettings>,
+) -> bool {
+    let Some(wallet) = wallet.filter(|w| w.remote_backend_auth.is_none()) else {
+        return false;
+    };
+    let directory = root
+        .network_directory(chain)
+        .coincubed_data_directory(&wallet.wallet_id());
+    let Ok(cfg) = coincubed::config::Config::from_file(Some(directory.path().join("daemon.toml")))
+    else {
+        return false;
+    };
+    cfg.bitcoin_config.chain == chain
+        && std::path::absolute(directory.path())
+            .ok()
+            .is_some_and(|expected| {
+                cfg.data_directory()
+                    .is_some_and(|found| same_path(found.path(), &expected))
+            })
+        && is_managed_local_fork(&cfg, root)
 }
 
 /// GUI policy over the shared [`ChainId`]: launcher selection, presentation
@@ -83,7 +215,7 @@ pub(crate) async fn require_connect_feature(
 /// it into scope (`use crate::chain::ChainIdExt`) where these are called.
 pub trait ChainIdExt {
     /// Baseline Bitcoin-family launcher entries. Home adds BTCB2 only when
-    /// its current authenticated account explicitly enables the Connect path.
+    /// the saved beta preference and global or authenticated availability allow it.
     const LAUNCHER: [ChainId; 5];
 
     /// Neutral, descriptive user-facing name (brand posture: no claim about
@@ -242,5 +374,204 @@ mod tests {
         ] {
             assert!(ChainId::from(network).runtime_support().is_supported());
         }
+    }
+}
+
+#[cfg(test)]
+mod global_beta_tests {
+    #[tokio::test]
+    async fn local_beta_off_refuses_admission_before_an_api_request() {
+        let dir =
+            std::env::temp_dir().join(format!("coincube-beta-admission-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let root = crate::dir::CoincubeDirectory::new(dir.clone());
+        let mut client = crate::services::coincube::CoincubeClient::new();
+        client.base_url = "http://127.0.0.1:1".into();
+        client.set_token("synthetic-beta-token");
+        let error = super::require_connect_feature(super::ChainId::BitcoinBlake2b, &client, &root)
+            .await
+            .unwrap_err();
+        assert!(error.contains("Global Settings"));
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn managed_local_fixture(
+    root: &crate::dir::CoincubeDirectory,
+    chain: ChainId,
+) -> (
+    coincubed::config::Config,
+    crate::app::settings::WalletSettings,
+) {
+    use coincube_core::miniscript::bitcoin;
+    use std::str::FromStr;
+    let mut wallet = crate::app::settings::WalletSettings {
+        name: "Local".into(),
+        alias: None,
+        descriptor_checksum: "d72le4dr".into(),
+        pinned_at: Some(1_720_000_000),
+        keys: vec![],
+        hardware_wallets: vec![],
+        remote_backend_auth: None,
+        start_internal_bitcoind: Some(true),
+        pending_rescan: None,
+        keychain_keys_recorded: false,
+    };
+    let directory = crate::node::bitcoind::internal_bitcoind_datadir_for(
+        root,
+        crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+    );
+    std::fs::create_dir_all(&directory).unwrap();
+    let mut managed = crate::node::bitcoind::InternalBitcoindConfig::for_flavor(
+        crate::node::bitcoind::NodeFlavor::KnotsBlake2b,
+    );
+    managed.networks.insert(
+        chain.bitcoin_network(),
+        crate::node::bitcoind::InternalBitcoindNetworkConfig {
+            rpc_port: 18444,
+            p2p_port: 18445,
+            prune: 550,
+            rpc_auth: None,
+        },
+    );
+    managed
+        .to_ini()
+        .write_to_file(crate::node::bitcoind::internal_bitcoind_config_path(
+            &directory,
+        ))
+        .unwrap();
+    let mainnet_descriptor = "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c";
+    if chain.bitcoin_network() == bitcoin::Network::Bitcoin {
+        wallet.descriptor_checksum = crate::app::wallet::Wallet::new(
+            coincube_core::descriptors::CoincubeDescriptor::from_str(mainnet_descriptor).unwrap(),
+        )
+        .descriptor_checksum;
+    }
+    let data = root
+        .network_directory(chain)
+        .coincubed_data_directory(&wallet.wallet_id());
+    std::fs::create_dir_all(data.path()).unwrap();
+    let cfg = coincubed::config::Config::new(
+        coincubed::config::BitcoinConfig::new(chain, std::time::Duration::from_secs(30)),
+        Some(coincubed::config::BitcoinBackend::Bitcoind(coincubed::config::BitcoindConfig {
+            addr: "127.0.0.1:18444".parse().unwrap(), rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                crate::node::bitcoind::internal_bitcoind_cookie_path(&directory, &chain.bitcoin_network())),
+        })), log::LevelFilter::Off,
+        coincube_core::descriptors::CoincubeDescriptor::from_str(if chain.bitcoin_network() == bitcoin::Network::Bitcoin { mainnet_descriptor } else { "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr" }).unwrap(),
+        coincubed::datadir::DataDirectory::new(data.path().to_path_buf()));
+    std::fs::write(
+        data.path().join("daemon.toml"),
+        toml::to_string(&cfg).unwrap(),
+    )
+    .unwrap();
+    (cfg, wallet)
+}
+
+#[cfg(test)]
+mod local_capability_tests {
+    use super::*;
+    use crate::{dir::CoincubeDirectory, services::coincube::CoincubeClient};
+    use httpmock::prelude::*;
+
+    #[tokio::test]
+    async fn global_capability_is_anonymous_and_does_not_borrow_account_overrides() {
+        let server = MockServer::start_async().await;
+        let anonymous = server.mock_async(|when, then| {
+            when.method(GET).path("/api/v1/connect/features").matches(|request| request.headers.as_ref().is_none_or(|headers| headers.iter().all(|(name,_)| !name.eq_ignore_ascii_case("authorization"))));
+            then.status(200).json_body(serde_json::json!({"data":{"plans":[],"bitcoin_blake2b_enabled":true,"liquidEnabled":true}}));
+        }).await;
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-account-token");
+        assert!(global_blake2b_enabled(client.clone()).await);
+        assert_eq!(client.token(), Some("synthetic-account-token"));
+        anonymous.assert_async().await;
+        anonymous.delete_async().await;
+        for body in [
+            serde_json::json!({"plans":[],"bitcoin_blake2b_enabled":false}),
+            serde_json::json!({"plans":[]}),
+        ] {
+            let denied = server
+                .mock_async(|when, then| {
+                    when.method(GET);
+                    then.status(200).json_body(serde_json::json!({"data":body}));
+                })
+                .await;
+            assert!(!global_blake2b_enabled(client.clone()).await);
+            denied.delete_async().await;
+        }
+        assert!(!global_blake2b_enabled(CoincubeClient::for_test("http://127.0.0.1:1")).await);
+    }
+
+    #[test]
+    fn local_capability_refuses_foreign_cookie_port_flavor_and_pending_backend() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let path =
+                std::env::temp_dir().join(format!("local-capability-{}", uuid::Uuid::new_v4()));
+            let root = CoincubeDirectory::new(path.clone());
+            let (cfg, wallet) = managed_local_fixture(&root, chain);
+            assert!(is_managed_local_fork(&cfg, &root));
+            assert!(has_managed_local_fork(&root, chain, Some(&wallet)));
+            let mut wrong = cfg.clone();
+            let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) =
+                &mut wrong.bitcoin_backend
+            else {
+                unreachable!()
+            };
+            node.addr.set_port(18446);
+            assert!(!is_managed_local_fork(&wrong, &root));
+            let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) =
+                &mut wrong.bitcoin_backend
+            else {
+                unreachable!()
+            };
+            node.addr = "192.0.2.1:18444".parse().unwrap();
+            assert!(!is_managed_local_fork(&wrong, &root));
+            wrong = cfg.clone();
+            let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) =
+                &mut wrong.bitcoin_backend
+            else {
+                unreachable!()
+            };
+            node.rpc_auth =
+                coincubed::config::BitcoindRpcAuth::CookieFile(path.join("bitcoin/.cookie"));
+            assert!(!is_managed_local_fork(&wrong, &root));
+            wrong = cfg.clone();
+            let Some(coincubed::config::BitcoinBackend::Bitcoind(node)) = &wrong.bitcoin_backend
+            else {
+                unreachable!()
+            };
+            wrong.pending_bitcoind = Some(node.clone());
+            assert!(!is_managed_local_fork(&wrong, &root));
+            crate::node::revalidate::ManagedNodeState {
+                configured_flavor: Some(crate::node::bitcoind::NodeFlavor::Core),
+                ..Default::default()
+            }
+            .save_for(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::BitcoinBlake2b,
+            )
+            .unwrap();
+            assert!(!is_managed_local_fork(&cfg, &root));
+            std::fs::remove_dir_all(path).unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn local_cube_reopens_through_a_datadir_alias() {
+        let path = std::env::temp_dir().join(format!("local-alias-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.join("real"));
+        let (cfg, wallet) = managed_local_fixture(&root, ChainId::BitcoinBlake2bTestnet4);
+        std::os::unix::fs::symlink(root.path(), path.join("alias")).unwrap();
+        let alias = CoincubeDirectory::new(path.join("alias"));
+        assert!(is_managed_local_fork(&cfg, &alias));
+        assert!(has_managed_local_fork(
+            &alias,
+            ChainId::BitcoinBlake2bTestnet4,
+            Some(&wallet)
+        ));
+        std::fs::remove_dir_all(path).unwrap();
     }
 }
