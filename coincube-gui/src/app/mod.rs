@@ -14208,6 +14208,7 @@ mod local_node_sync_tests {
             prune_height: 970_000,
         });
         app.cache.local_switch_history = Some(VaultHistory::From(946_000));
+        app.cache.daemon_cache.blockheight = 970_500;
         app.cache.last_poll_at_startup = Some(100);
         app.cache.daemon_cache.last_poll_timestamp = Some(200);
         let node_page = Menu::Vault(menu::VaultSubMenu::Settings(Some(
@@ -14252,7 +14253,8 @@ mod local_node_sync_tests {
         drop(app.update(progress(&app, Some(VaultHistory::TrackedLocally))));
         assert!(
             app.daemon_switch_in_progress,
-            "explicit parked-node switch was not completed"
+            "explicit parked-node switch was not completed; hold={:?}",
+            app.local_switch_hold
         );
         app.daemon_switch_in_progress = false;
         app.cache.daemon_switch_in_progress = false;
