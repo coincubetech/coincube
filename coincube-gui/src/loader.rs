@@ -919,6 +919,7 @@ pub async fn load_application(
         app_generation: crate::app::cache::AppGeneration::next(),
         unswept_notice: None,
         node_history: crate::app::node_history::Status::default(),
+        node_history_switch_requested: false,
         connect_transport_key: None,
         cube_encryption_key: None,
         datadir_path: config.datadir_path,
