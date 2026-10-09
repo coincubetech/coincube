@@ -37,6 +37,7 @@ pub struct Status {
     pub policy: Option<retention::Policy>,
     pub error: Option<String>,
     pub busy: bool,
+    pub cancel_queued: bool,
     pub reconciled: bool,
 }
 

@@ -855,6 +855,7 @@ fn split_step2_production_admits_the_connect_and_node_routes_only() {
         let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(AdmissionDaemon { config, embedded });
         let mut client = CoincubeClient::new();
         client.base_url = base.into();
+        client.set_token("synthetic");
         SplitStep2Production::new(&client, daemon, 7, watch::channel(7).1)
     };
     let connect = || Some(BitcoinBackend::Esplora(esplora(endpoint)));
@@ -862,6 +863,17 @@ fn split_step2_production_admits_the_connect_and_node_routes_only() {
     let admitted = admit(config(ChainId::BitcoinBlake2b, connect()), true, origin).unwrap();
     assert_eq!(admitted.origin(), origin);
     assert_eq!(admitted.descriptor(), &vault());
+    let mut token = esplora(endpoint);
+    token.token = Some("synthetic".into());
+    assert!(admit(
+        config(
+            ChainId::BitcoinBlake2b,
+            Some(BitcoinBackend::Esplora(token.clone()))
+        ),
+        true,
+        origin
+    )
+    .is_ok());
     assert!(admit(
         config(ChainId::BitcoinBlake2b, Some(node.clone())),
         true,
@@ -871,8 +883,7 @@ fn split_step2_production_admits_the_connect_and_node_routes_only() {
     // Refused.
     let mut fallback = config(ChainId::BitcoinBlake2b, connect());
     fallback.fallback_esplora = Some(esplora("https://mempool.example/api"));
-    let mut token = esplora(endpoint);
-    token.token = Some("synthetic".into());
+    token.token = Some("another-session".into());
     let mut secondary = esplora(endpoint);
     secondary.fallback_addr = Some("https://other.example/api".into());
     for (config, embedded, base) in [

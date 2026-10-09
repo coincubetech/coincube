@@ -950,6 +950,29 @@ async fn production_admission_preserves_chain_network_and_daemon_constraints() {
             chain,
         )
     };
+    let mut default_connect = cfg.clone();
+    if let Some(BitcoinBackend::Esplora(selection)) = default_connect.bitcoin_backend.as_mut() {
+        selection.token = Some("synthetic-test-token".into());
+        selection.fallback_addr = Some("https://mempool.space/api".into());
+        selection.secondary_fallback_addr = Some("https://blockstream.info/api".into());
+    }
+    let admitted = construct(default_connect.clone(), true, ChainId::Bitcoin).unwrap();
+    assert!(admitted.bound_transport);
+    let (_, verified) = artifact(ChainId::Bitcoin, false, 7);
+    let (gate, _revoker) = SubmissionGate::new(&verified, Instant::now() + Duration::from_secs(30));
+    assert!(matches!(
+        admitted
+            .submit(VerifiedStep1::OpReturn(Arc::new(verified)), Arc::new(gate))
+            .await,
+        Err(DaemonError::ClientNotSupported)
+    ));
+    if let Some(BitcoinBackend::Esplora(selection)) = default_connect.bitcoin_backend.as_mut() {
+        selection.fallback_addr = Some("https://other.example/api".into());
+    }
+    assert!(matches!(
+        construct(default_connect, true, ChainId::Bitcoin),
+        Err(Error::Unsupported)
+    ));
     for backend in [
         BitcoinBackend::Bitcoind(BitcoindConfig {
             addr: "127.0.0.1:8332".parse().unwrap(),
