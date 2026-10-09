@@ -305,6 +305,20 @@ pub fn broadcast_action<'a>(
     )
 }
 
+/// What the success screen says became of the amount it shows.
+///
+/// A self-transfer that replaces a pending transaction is a cancel: the coins
+/// that transaction spent come back to the wallet, minus the new fee, so saying
+/// they were "transferred" reads as if they had left it. They only come back if
+/// the cancellation confirms, though: the original can still be mined first.
+fn broadcast_outcome(is_self_transfer: bool, replaces_pending: bool) -> &'static str {
+    match (is_self_transfer, replaces_pending) {
+        (true, true) => "will return to your wallet once the cancellation confirms.",
+        (true, false) => "has been transferred.",
+        (false, _) => "has been sent successfully.",
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn broadcast_action_with_identity_review<'a>(
     conflicting_txids: &HashSet<Txid>,
@@ -318,17 +332,12 @@ pub fn broadcast_action_with_identity_review<'a>(
     identity_review: Option<Element<'a, Message>>,
 ) -> Element<'a, Message> {
     if saved {
-        let verb_suffix = if is_self_transfer {
-            "has been transferred."
-        } else {
-            "has been sent successfully."
-        };
         coincube_ui::component::sent_celebration_page(
             "bitcoin-send",
             spend_amount_display,
             sent_quote,
             sent_image_handle,
-            verb_suffix,
+            broadcast_outcome(is_self_transfer, !conflicting_txids.is_empty()),
             Message::Spend(super::super::SpendTxMessage::Cancel),
         )
     } else {
@@ -2569,5 +2578,25 @@ mod tests {
         let _ = update_spend_view("original-psbt".to_string(), &valid, true);
         let _ = update_spend_view("original-psbt".to_string(), &invalid, false);
         let _ = update_spend_success_view();
+    }
+
+    /// A cancel shows the whole amount coming back, which must not read as if
+    /// it had left the wallet, nor as if it were back before the cancellation
+    /// confirms.
+    #[test]
+    fn a_cancel_says_the_coins_come_back_once_it_confirms() {
+        assert_eq!(
+            broadcast_outcome(true, true),
+            "will return to your wallet once the cancellation confirms."
+        );
+        assert_eq!(broadcast_outcome(true, false), "has been transferred.");
+        assert_eq!(
+            broadcast_outcome(false, true),
+            "has been sent successfully."
+        );
+        assert_eq!(
+            broadcast_outcome(false, false),
+            "has been sent successfully."
+        );
     }
 }

@@ -79,6 +79,12 @@ fn map_spend_command_error(error: CommandError) -> DaemonError {
             }
             .to_string(),
         ),
+        // Reported exactly as an external daemon reports it over JSON-RPC, so a
+        // refused broadcast reads the same whichever daemon the GUI talks to.
+        error @ CommandError::TxBroadcast(_) => DaemonError::Rpc(
+            coincubed::commands::TX_BROADCAST_ERROR as i32,
+            error.to_string(),
+        ),
         other => DaemonError::Unexpected(other.to_string()),
     }
 }
@@ -1214,5 +1220,23 @@ mod local_drop_tests {
         assert!(abort.load(Ordering::SeqCst));
         assert!(shutdown.load(Ordering::SeqCst));
         std::fs::remove_dir_all(path).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod spend_command_error_tests {
+    use super::*;
+
+    /// A refused broadcast must reach the GUI as the external daemon reports it
+    /// over JSON-RPC, not as an unexpected failure: that is what lets the GUI tell
+    /// the user why, and whether trying again can help.
+    #[test]
+    fn a_refused_broadcast_keeps_its_rpc_code() {
+        assert!(matches!(
+            map_spend_command_error(CommandError::TxBroadcast("insufficient fee".to_string())),
+            DaemonError::Rpc(code, message)
+                if i64::from(code) == coincubed::commands::TX_BROADCAST_ERROR
+                    && message == "Failed to broadcast transaction: insufficient fee"
+        ));
     }
 }

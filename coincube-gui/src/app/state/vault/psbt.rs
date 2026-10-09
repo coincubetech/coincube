@@ -1302,7 +1302,10 @@ impl Modal for BroadcastModal {
                 &self.conflicting_txids,
                 self.broadcast,
                 self.broadcasting,
-                self.error.as_ref().map(|e| e.to_string()),
+                // The same copy as the toast, never the daemon's own message.
+                self.error
+                    .as_ref()
+                    .map(|e| crate::user_error::UserError::from(e).toast()),
                 &self.spend_amount_display,
                 &self.sent_quote,
                 &self.sent_image_handle,

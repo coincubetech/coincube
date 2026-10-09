@@ -365,6 +365,11 @@ will be used as a change address in the replacement and the others will be treat
 If `feerate` is not passed to the command, the target feerate of the replacement will be set to the minimum value
 allowed in order to replace this transaction using RBF (see https://github.com/bitcoin/bitcoin/blob/master/doc/policy/mempool-replacements.md#current-replace-by-fee-policy for further details about this and other conditions that must be satisfied when using RBF).
 
+How that minimum, and the fees the replacement must exceed, are found depends on the backend. bitcoind and
+Electrum read them from the mempool: if the transaction already left it, nothing is left to outbid. Esplora cannot
+see the mempool, so they are worked out from the wallet's own records instead, taking every transaction those show
+spending the same coins to still be in the mempool, along with the wallet's own transactions spending from them.
+
 #### Request
 
 | Field       | Type              | Description                                                 |

@@ -48,8 +48,6 @@ pub struct Request {
     pub id: ReqId,
 }
 
-/// A failure to broadcast a transaction to the P2P network.
-const BROADCAST_ERROR: i64 = 1_000;
 /// A transient change-allocation race; the complete command may be retried.
 const CHANGE_RESERVATION_BUSY_ERROR: i64 = 1_001;
 
@@ -189,9 +187,10 @@ impl From<commands::CommandError> for Error {
                 crate::database::ReservationError::Storage
                 | crate::database::ReservationError::Unsupported,
             ) => Error::new(ErrorCode::InternalError, e.to_string()),
-            commands::CommandError::TxBroadcast(_) => {
-                Error::new(ErrorCode::ServerError(BROADCAST_ERROR), e.to_string())
-            }
+            commands::CommandError::TxBroadcast(_) => Error::new(
+                ErrorCode::ServerError(commands::TX_BROADCAST_ERROR),
+                e.to_string(),
+            ),
             commands::CommandError::ChangeReservationContended => Error::new(
                 ErrorCode::ServerError(CHANGE_RESERVATION_BUSY_ERROR),
                 e.to_string(),
