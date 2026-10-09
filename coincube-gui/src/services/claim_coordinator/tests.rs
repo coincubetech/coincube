@@ -958,6 +958,14 @@ async fn production_admission_preserves_chain_network_and_daemon_constraints() {
     }
     let admitted = construct(default_connect.clone(), true, ChainId::Bitcoin).unwrap();
     assert!(admitted.bound_transport);
+    // A new login rotates the account token without changing the selected
+    // Bitcoin Connect provider. Claim evidence uses the current client; the
+    // daemon's older token must not make the fixed route appear unsupported.
+    let mut refreshed_session = default_connect.clone();
+    if let Some(BitcoinBackend::Esplora(selection)) = refreshed_session.bitcoin_backend.as_mut() {
+        selection.token = Some("previous-session-token".into());
+    }
+    assert!(construct(refreshed_session, true, ChainId::Bitcoin).is_ok());
     let (_, verified) = artifact(ChainId::Bitcoin, false, 7);
     let (gate, _revoker) = SubmissionGate::new(&verified, Instant::now() + Duration::from_secs(30));
     assert!(matches!(

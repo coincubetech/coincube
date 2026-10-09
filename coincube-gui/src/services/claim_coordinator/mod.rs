@@ -47,7 +47,10 @@ use tokio::sync::watch;
 
 /// Claim submission uses a bound Connect transport even when ordinary wallet
 /// reads have public fallbacks. Admit only the exact default provider layout
-/// (or the legacy single anonymous endpoint), with this session's JWT.
+/// (or the legacy single anonymous endpoint). For the Bitcoin step, the
+/// daemon's saved JWT can be older than the current Connect session after a
+/// refresh or sign-in; claim observations use the current authenticated client,
+/// while submission uses the fixed endpoint and frozen backend binding.
 pub(crate) fn admitted_connect_esplora(
     selection: &coincubed::config::EsploraConfig,
     fallback: Option<&coincubed::config::EsploraConfig>,
@@ -66,14 +69,15 @@ pub(crate) fn admitted_connect_esplora(
     if anonymous {
         return true;
     }
-    if selection.token.as_deref() != session_token || session_token.is_none() {
-        return false;
-    }
     if chain == ChainId::BitcoinBlake2b {
-        return selection.fallback_addr.is_none()
+        return selection.token.as_deref() == session_token
+            && selection.fallback_addr.is_none()
             && selection.fallback_token.is_none()
             && selection.secondary_fallback_addr.is_none()
             && selection.secondary_fallback_token.is_none();
+    }
+    if selection.token.is_none() || session_token.is_none_or(str::is_empty) {
+        return false;
     }
     chain == ChainId::Bitcoin
         && selection.fallback_addr.as_deref()
