@@ -793,7 +793,7 @@ impl SplitStep2Production {
     /// Refused before anything is reviewed: a non-embedded daemon, any chain
     /// but BTCB2 mainnet, a Connect origin that is not exactly
     /// `scheme://host[:port]/`, and any backend other than exactly Connect's
-    /// BTCB2 Esplora at that origin (no token, no fallback) or a bound
+    /// BTCB2 Esplora at that origin (including the admitted session JWT) or a bound
     /// Bitcoind node.
     pub fn new(
         client: &CoincubeClient,
@@ -825,13 +825,13 @@ impl SplitStep2Production {
         );
         let route = match config.bitcoin_backend.as_ref() {
             Some(coincubed::config::BitcoinBackend::Esplora(selection))
-                if selection.addr.trim_end_matches('/') == endpoint
-                    && selection.token.is_none()
-                    && selection.fallback_addr.is_none()
-                    && selection.fallback_token.is_none()
-                    && selection.secondary_fallback_addr.is_none()
-                    && selection.secondary_fallback_token.is_none()
-                    && config.fallback_esplora.is_none() =>
+                if crate::services::claim_coordinator::admitted_connect_esplora(
+                    selection,
+                    config.fallback_esplora.as_ref(),
+                    &endpoint,
+                    ChainId::BitcoinBlake2b,
+                    client.token(),
+                ) =>
             {
                 Step2Route::Connect
             }

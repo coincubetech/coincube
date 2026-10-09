@@ -235,8 +235,15 @@ impl GUI {
                             tab::State::Home(home) => Some(home.connect_account.auth_epoch()),
                             _ => None,
                         });
+                    let same_fork_session = self
+                        .panes
+                        .get(*pane_id)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                        .is_some_and(|tab| {
+                            matches!(&tab.state, tab::State::App(app) if app.matches_admitted_connect_session(login))
+                        });
                     match origin_epoch {
-                        Some(current) if *epoch >= current => Some((
+                        Some(current) if *epoch >= current && !same_fork_session => Some((
                             tab::AuthChange::SignIn {
                                 user_id: login.user.id,
                             },
@@ -268,8 +275,32 @@ impl GUI {
         };
         let mut auth_tasks = Vec::new();
         if let Some((change, origin_pane, origin_tab)) = auth_change {
+            let completed_login = match &message {
+                Message::Pane(
+                    _,
+                    pane::Message::Tab(
+                        _,
+                        tab::Message::Launch(home::Message::View(
+                            home::ViewMessage::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::SetSession(login, _),
+                            ),
+                        ))
+                        | tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::SetSession(login, _),
+                            ),
+                        )),
+                    ),
+                ) => Some(login),
+                _ => None,
+            };
             for (&pane_id, pane) in self.panes.iter_mut() {
                 for tab in &mut pane.tabs {
+                    if completed_login.is_some_and(|login| {
+                        matches!(&tab.state, tab::State::App(app) if app.matches_admitted_connect_session(login))
+                    }) {
+                        continue;
+                    }
                     let tab_id = tab.id;
                     let originated = pane_id == origin_pane && tab_id == origin_tab;
                     auth_tasks.push(

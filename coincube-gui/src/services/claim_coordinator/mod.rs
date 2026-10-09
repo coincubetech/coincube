@@ -45,6 +45,53 @@ use std::{
 };
 use tokio::sync::watch;
 
+/// Claim submission uses a bound Connect transport even when ordinary wallet
+/// reads have public fallbacks. Admit only the exact default provider layout
+/// (or the legacy single anonymous endpoint), with this session's JWT.
+pub(crate) fn admitted_connect_esplora(
+    selection: &coincubed::config::EsploraConfig,
+    fallback: Option<&coincubed::config::EsploraConfig>,
+    endpoint: &str,
+    chain: ChainId,
+    session_token: Option<&str>,
+) -> bool {
+    if selection.addr.trim_end_matches('/') != endpoint || fallback.is_some() {
+        return false;
+    }
+    let anonymous = selection.token.is_none()
+        && selection.fallback_addr.is_none()
+        && selection.fallback_token.is_none()
+        && selection.secondary_fallback_addr.is_none()
+        && selection.secondary_fallback_token.is_none();
+    if anonymous {
+        return true;
+    }
+    if selection.token.as_deref() != session_token || session_token.is_none() {
+        return false;
+    }
+    if chain == ChainId::BitcoinBlake2b {
+        return selection.fallback_addr.is_none()
+            && selection.fallback_token.is_none()
+            && selection.secondary_fallback_addr.is_none()
+            && selection.secondary_fallback_token.is_none();
+    }
+    chain == ChainId::Bitcoin
+        && selection.fallback_addr.as_deref()
+            == Some(
+                crate::installer::public_esplora_url(
+                    coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                )
+                .as_str(),
+            )
+        && selection.fallback_token.is_none()
+        && selection.secondary_fallback_addr.as_deref()
+            == crate::installer::public_esplora_fallback_url(
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            )
+            .as_deref()
+        && selection.secondary_fallback_token.is_none()
+}
+
 #[derive(Debug)]
 pub enum Error {
     Unsupported,
@@ -186,7 +233,7 @@ pub struct Production {
     daemon: Arc<dyn Daemon + Send + Sync>,
     bound_node: Option<route::BoundNode>,
     connect_origin: String,
-    /// Node/Electrum sessions use the dedicated bound transports.
+    /// Claim sessions use the dedicated bound transports.
     bound_transport: bool,
     backend_binding: std::sync::OnceLock<coincubed::poison_broadcast::ClaimBackendBinding>,
     context: Context,
@@ -254,17 +301,16 @@ impl Production {
         }
         let bound_transport = match config.bitcoin_backend.as_ref() {
             Some(coincubed::config::BitcoinBackend::Esplora(selection)) => {
-                if selection.addr.trim_end_matches('/') != endpoint
-                    || selection.token.is_some()
-                    || selection.fallback_addr.is_some()
-                    || selection.fallback_token.is_some()
-                    || selection.secondary_fallback_addr.is_some()
-                    || selection.secondary_fallback_token.is_some()
-                    || config.fallback_esplora.is_some()
-                {
+                if !admitted_connect_esplora(
+                    selection,
+                    config.fallback_esplora.as_ref(),
+                    &endpoint,
+                    chain,
+                    client.token(),
+                ) {
                     return Err(Error::Unsupported);
                 }
-                false
+                true
             }
             Some(
                 coincubed::config::BitcoinBackend::Bitcoind(_)

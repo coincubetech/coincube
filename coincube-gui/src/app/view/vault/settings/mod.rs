@@ -1450,6 +1450,7 @@ pub fn node_backend_status<'a>(
     pending_bitcoind_log: Option<&'a str>,
     can_switch_to_connect: bool,
     can_switch_to_bitcoind: bool,
+    recovery_in_progress: bool,
     can_setup_local_node: bool,
     auto_switch_to_pending: bool,
     processing: bool,
@@ -1554,6 +1555,8 @@ pub fn node_backend_status<'a>(
             format!("{name} is syncing the blockchain. {next}{pace}")
         } else if switch_in_progress {
             format!("{name} has finished initial blockchain sync. The wallet backend switch is still in progress.")
+        } else if pending && recovery_in_progress {
+            format!("{name} is synced. Finish or cancel wallet history recovery before switching.")
         } else if pending {
             format!("{name} has finished initial blockchain sync and is ready to use.")
         } else {
@@ -1628,14 +1631,12 @@ pub fn node_backend_status<'a>(
             btn.on_press(NodeSettingsMessage::SwitchToConnect)
         });
     }
-    // While the pending local node is still in IBD the auto-switch on the
-    // App side will flip the backend the moment it completes; surfacing a
-    // "Switch to local node" button here just produces a "still syncing"
-    // warning and adds no value. When IBD status is still unknown (the
-    // first sync probe hasn't returned yet) we keep the button visible —
-    // the defensive guard in `SwitchToBitcoind` will warn cleanly if the
-    // user clicks before the probe lands.
-    let show_switch_to_bitcoind_btn = can_switch_to_bitcoind && pending_ibd != Some(true);
+    // A switch cannot run during wallet history recovery or while the pending
+    // node is in IBD, so omit its button in those states. When IBD status is
+    // still unknown, keep the button visible: the action guard can explain
+    // why switching is not yet available.
+    let show_switch_to_bitcoind_btn =
+        can_switch_to_bitcoind && pending_ibd != Some(true) && !recovery_in_progress;
     if show_switch_to_bitcoind_btn {
         let btn = button::secondary(None, "Switch to local node").padding([8, 15]);
         btn_row = btn_row.push(if processing {
@@ -2321,7 +2322,7 @@ pub fn wallet_history_section<'a>(
         .push(text("Recover history to switch to your local node").bold().size(18))
         .push(text("Your local wallet is missing some history. Import what Connect has already found, then check it against your node before switching.").size(14))
         .push(text("Recommended: Import Connect history").bold())
-        .push(text("Usually the quickest option. If more history is needed, Tenshu downloads and scans the missing blocks.").size(14));
+        .push(text("Usually the quickest option. If history is still missing, Tenshu must download and scan old blocks, which can take hours or longer.").size(14));
     let mut import = button::primary(None, "Import Connect history");
     if !status.busy
         && status.job.as_ref().is_none_or(|job| {
@@ -2379,24 +2380,33 @@ pub fn wallet_history_section<'a>(
                 job.progress() * 100.0
             )))
             .push(ProgressBar::new(0.0..=1.0, job.progress()));
-        if matches!(
-            job.phase,
-            Phase::FetchingForLoad | Phase::Downloading | Phase::Scanning | Phase::Reconciling
-        ) {
+        if !status.cancel_queued
+            && matches!(
+                job.phase,
+                Phase::FetchingForLoad | Phase::Downloading | Phase::Scanning | Phase::Reconciling
+            )
+        {
             content = content.push(
                 button::secondary(None, "Pause after this batch")
                     .on_press(NodeSettingsMessage::RecoveryPause),
             );
-        } else if job.phase == Phase::Paused {
+        } else if !status.cancel_queued && job.phase == Phase::Paused {
             content = content.push(
                 button::secondary(None, "Resume recovery")
                     .on_press(NodeSettingsMessage::RecoveryResume),
             );
         }
-        if !matches!(job.phase, Phase::Complete | Phase::Cancelled) {
+        if !status.cancel_queued && !matches!(job.phase, Phase::Complete | Phase::Cancelled) {
             content = content.push(
-                button::secondary(None, "Cancel recovery")
-                    .on_press(NodeSettingsMessage::RecoveryCancel),
+                button::secondary(
+                    None,
+                    if status.busy {
+                        "Cancel after this batch"
+                    } else {
+                        "Cancel recovery"
+                    },
+                )
+                .on_press(NodeSettingsMessage::RecoveryCancel),
             );
         }
         if let Some(error) = &job.last_error {
@@ -2408,7 +2418,9 @@ pub fn wallet_history_section<'a>(
             ));
         }
     }
-    if status.busy {
+    if status.cancel_queued {
+        content = content.push(text("Cancellation requested. Tenshu will finish the current batch, then stop recovery. This can take a while.").size(12));
+    } else if status.busy {
         content = content.push(text("Processing the current batch…").size(12));
     }
     if let Some(error) = &status.error {
@@ -2785,6 +2797,7 @@ mod tests {
             Some("UpdateTip: headers progress"),
             true,
             true,
+            false,
             true,
             true,
             false,
@@ -2803,6 +2816,7 @@ mod tests {
             false,
             true,
             false,
+            false,
             true,
             false,
             true,
@@ -2814,7 +2828,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn local_node_sync_status_stays_visible_during_backend_switch() {
+    async fn local_node_sync_status_stays_visible_and_recovery_hides_switch() {
         use iced::advanced::{
             layout,
             renderer::Headless,
@@ -2838,12 +2852,13 @@ mod tests {
         )
         .await
         .expect("software renderer");
-        for (progress, ibd, switching, pending, blocks, expected) in [
+        for (progress, ibd, switching, pending, recovery, blocks, expected) in [
             (
                 Some(0.975),
                 Some(true),
                 false,
                 true,
+                false,
                 890000,
                 "Progress 97.5%",
             ),
@@ -2852,6 +2867,7 @@ mod tests {
                 Some(false),
                 true,
                 true,
+                false,
                 900000,
                 "Initial blockchain sync complete",
             ),
@@ -2860,12 +2876,14 @@ mod tests {
                 Some(true),
                 false,
                 false,
+                false,
                 890000,
                 "Progress 97.5%",
             ),
             (
                 Some(0.999),
                 Some(false),
+                false,
                 false,
                 false,
                 899990,
@@ -2876,8 +2894,18 @@ mod tests {
                 None,
                 true,
                 true,
+                false,
                 0,
                 "Waiting for the local node to report sync progress…",
+            ),
+            (
+                Some(0.999),
+                Some(false),
+                false,
+                true,
+                true,
+                900000,
+                "Initial blockchain sync complete",
             ),
         ] {
             let mut element = node_backend_status(
@@ -2894,6 +2922,7 @@ mod tests {
                 None,
                 false,
                 pending,
+                recovery,
                 false,
                 true,
                 false,
@@ -2939,6 +2968,15 @@ mod tests {
                     .0
                     .iter()
                     .any(|text| text.contains("automatically switch")));
+            }
+            assert_eq!(
+                labels.0.iter().any(|text| text == "Switch to local node"),
+                pending && ibd != Some(true) && !recovery
+            );
+            if recovery {
+                assert!(labels.0.iter().any(|text| {
+                    text.contains("Finish or cancel wallet history recovery before switching")
+                }));
             }
         }
     }

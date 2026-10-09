@@ -1234,6 +1234,7 @@ impl State for BitcoindSettingsState {
     }
 
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        let recovery_in_progress = wallet_history_recovery_in_progress(cache);
         if cache.chain().is_blake2b() {
             let cfg = self.full_config.as_ref();
             let local = cfg.is_some_and(|cfg| {
@@ -1252,7 +1253,7 @@ impl State for BitcoindSettingsState {
                     cache.node_bitcoind_ibd, cache.node_bitcoind_subversion.as_deref(),
                     cache.node_bitcoind_last_log.as_deref(),
                     local && cfg.is_some_and(|cfg| cfg.fallback_esplora.is_some()),
-                    !local && pending, false,
+                    !local && pending, recovery_in_progress, false,
                     cfg.is_some_and(|cfg| cfg.auto_switch_to_pending != Some(false)),
                     self.node_switch_processing, cache.daemon_switch_in_progress,
                     self.warning.as_ref().map(|e| e.to_string()),
@@ -1399,6 +1400,7 @@ impl State for BitcoindSettingsState {
                         cache.node_bitcoind_last_log.as_deref(),
                         can_switch_to_connect,
                         can_switch_to_bitcoind,
+                        recovery_in_progress,
                         can_setup_local_node,
                         self.full_config
                             .as_ref()
@@ -1638,15 +1640,18 @@ impl From<BitcoindSettingsState> for Box<dyn State> {
 /// Whether the pending local node can show this Vault's coins, judged from
 /// what the node probe last read into the cache. `Err` carries the copy to
 /// show; an unknown answer refuses for now rather than guessing.
-fn local_node_serves_vault(cache: &Cache) -> Result<(), String> {
-    if cache.node_history.busy
+fn wallet_history_recovery_in_progress(cache: &Cache) -> bool {
+    cache.node_history.busy
         || cache.node_history.job.as_ref().is_some_and(|job| {
             !matches!(
                 job.phase,
                 crate::node::history::Phase::Complete | crate::node::history::Phase::Cancelled
             )
         })
-    {
+}
+
+fn local_node_serves_vault(cache: &Cache) -> Result<(), String> {
+    if wallet_history_recovery_in_progress(cache) {
         return Err(
             "Finish or cancel wallet history recovery before switching to the local node".into(),
         );

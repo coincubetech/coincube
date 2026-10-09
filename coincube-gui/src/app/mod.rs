@@ -3855,6 +3855,25 @@ impl App {
         self.panels.connect.account.authenticated_client()
     }
 
+    /// An account-panel completion for the same admitted fork session is not
+    /// a global auth change. A new token or account still crosses that boundary.
+    pub(crate) fn matches_admitted_connect_session(
+        &self,
+        login: &crate::services::coincube::LoginResponse,
+    ) -> bool {
+        self.requires_connect()
+            && self.fork_connect_client.as_ref().is_some_and(|bound| {
+                bound.token() == Some(login.token.as_str())
+                    && self
+                        .panels
+                        .connect
+                        .account
+                        .user
+                        .as_ref()
+                        .is_none_or(|user| user.id == login.user.id)
+            })
+    }
+
     /// Refresh positive, session-bound recovery display evidence after sync.
     fn unswept_notice_task(&mut self) -> Task<Message> {
         self.cache.unswept_notice = None;
@@ -6631,6 +6650,8 @@ impl App {
                 }
                 if self.node_history_in_progress {
                     if !matches!(action, node_history::Action::Poll) {
+                        self.cache.node_history.cancel_queued =
+                            matches!(action, node_history::Action::Cancel);
                         self.node_history_pending = Some(action);
                     }
                     return Task::none();
@@ -6706,6 +6727,7 @@ impl App {
                         != Some(&config)
                 {
                     self.node_history_pending = None;
+                    self.cache.node_history.cancel_queued = false;
                     return Task::none();
                 }
                 match result {
@@ -6717,7 +6739,12 @@ impl App {
                     }
                     Err(error) => self.cache.node_history.error = Some(error),
                 }
+                let cancel_queued = matches!(
+                    self.node_history_pending.as_ref(),
+                    Some(node_history::Action::Cancel)
+                );
                 let queued = self.node_history_pending.take().map(Message::NodeHistory);
+                self.cache.node_history.cancel_queued = cancel_queued;
                 return Task::batch([
                     Task::done(Message::CacheUpdated),
                     Task::done(Message::PollBitcoindSync),
@@ -10876,6 +10903,34 @@ mod tests {
     }
 
     #[test]
+    fn admitted_fork_session_does_not_invalidate_itself_on_same_session_completion() {
+        let root = std::env::temp_dir().join(format!(
+            "coincube-fork-same-session-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let app = split_app(&root, false, true);
+        let login = crate::services::coincube::LoginResponse {
+            requires_2fa: false,
+            token: "synthetic-test-token".into(),
+            refresh_token: "synthetic-refresh".into(),
+            user: crate::services::coincube::User {
+                id: 7,
+                email: "synthetic@example.invalid".into(),
+                email_verified: Some(true),
+            },
+        };
+        assert!(app.matches_admitted_connect_session(&login));
+        let mut changed = login.clone();
+        changed.token = "replacement".into();
+        assert!(!app.matches_admitted_connect_session(&changed));
+        changed = login;
+        changed.user.id = 8;
+        assert!(!app.matches_admitted_connect_session(&changed));
+        drop(app);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
     fn global_beta_gate_closes_a_fork_when_the_current_server_grant_is_removed() {
         let root =
             std::env::temp_dir().join(format!("coincube-beta-revoke-{}", uuid::Uuid::new_v4()));
@@ -14268,6 +14323,24 @@ mod local_node_sync_tests {
             !app.daemon_switch_in_progress,
             "dismissal must withdraw promotion consent"
         );
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn cancel_during_history_batch_is_queued_and_acknowledged() {
+        let root = std::env::temp_dir().join(format!("history-cancel-{}", uuid::Uuid::new_v4()));
+        let _guard = crate::app::session::test_guard();
+        let (mut app, _) = super::claim_step1_tests::bitcoin_app(&root);
+        app.node_history_in_progress = true;
+        app.cache.node_history.busy = true;
+
+        drop(app.update(Message::NodeHistory(node_history::Action::Cancel)));
+
+        assert!(matches!(
+            app.node_history_pending,
+            Some(node_history::Action::Cancel)
+        ));
+        assert!(app.cache.node_history.cancel_queued);
         let _ = std::fs::remove_dir_all(root);
     }
 
