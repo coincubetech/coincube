@@ -184,6 +184,19 @@ int32_t coincube_unified_psbt_verify(
     CcErrorDetail *error_out,
     uint8_t *message_out, size_t message_cap);
 
+/*
+ * Entry 2d — verify every signature. Delegates directly to
+ * coincube_core::unified_finalize::verify_all_signatures. unified_out and
+ * legacy_out independently receive the number of verified signatures of each
+ * kind; both outputs are optional. Zero counts mean the PSBT validated but do
+ * not mean it is sufficiently signed or finalizable.
+ */
+int32_t coincube_unified_psbt_verify_all(
+    const uint8_t *psbt, size_t psbt_len,
+    size_t *unified_out, size_t *legacy_out,
+    CcErrorDetail *error_out,
+    uint8_t *message_out, size_t message_cap);
+
 #ifdef __cplusplus
 } /* extern "C" */
 #endif

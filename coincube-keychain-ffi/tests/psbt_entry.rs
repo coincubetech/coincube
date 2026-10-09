@@ -16,13 +16,15 @@ use coincube_core::{
         bitcoin::{
             self, absolute,
             bip32::{self, DerivationPath},
+            ecdsa,
             psbt::Psbt,
-            secp256k1, transaction, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction,
-            TxIn, TxOut,
+            secp256k1,
+            sighash::EcdsaSighashType,
+            transaction, Amount, Network, OutPoint, ScriptBuf, Sequence, Transaction, TxIn, TxOut,
         },
         descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorPublicKey, Wildcard},
     },
-    psbt_unified::{export_standard, UnifiedPsbt},
+    psbt_unified::{export_standard, import_standard, UnifiedPsbt},
     signer::MasterSigner,
     unified_sighash::{UnifiedSighashCache, SCRIPT_TYPE_WITNESS_V0},
 };
@@ -269,6 +271,46 @@ fn verify_through_ffi(bytes: &[u8]) -> (FfiResult, usize) {
     )
 }
 
+fn verify_all_through_ffi(bytes: &[u8]) -> (FfiResult, usize, usize) {
+    let mut unified = 0usize;
+    let mut legacy = 0usize;
+    let mut detail = CcErrorDetail::default();
+    let mut message = [0u8; 512];
+    // Safety: all pointers come from live locals and the lengths match.
+    let code = unsafe {
+        coincube_unified_psbt_verify_all(
+            bytes.as_ptr(),
+            bytes.len(),
+            &mut unified,
+            &mut legacy,
+            &mut detail,
+            message.as_mut_ptr(),
+            message.len(),
+        )
+    };
+    let text =
+        String::from_utf8_lossy(&message[..detail.message_len.min(message.len())]).to_string();
+    (
+        FfiResult {
+            code,
+            detail,
+            message: text,
+        },
+        unified,
+        legacy,
+    )
+}
+
+fn add_legacy(psbt: &UnifiedPsbt, signer: &MasterSigner) -> UnifiedPsbt {
+    let secp = secp256k1::Secp256k1::new();
+    let signed = signer.sign_psbt(psbt.psbt().clone(), &secp).unwrap();
+    let mut out = psbt.clone();
+    for (destination, source) in out.psbt_mut().inputs.iter_mut().zip(signed.inputs) {
+        destination.partial_sigs.extend(source.partial_sigs);
+    }
+    out
+}
+
 /// Sign through the ABI using the two-call length protocol.
 fn sign_through_ffi(bytes: &[u8], signer: &MasterSigner, account: u32) -> (FfiResult, Vec<u8>) {
     let secp = secp256k1::Secp256k1::new();
@@ -474,6 +516,104 @@ fn sign_then_verify_through_the_ffi() {
         "one signer holding a key in both inputs produces two unified \
          signatures"
     );
+}
+
+#[test]
+fn verify_all_counts_unsigned_unified_legacy_and_mixed_psbts() {
+    let fixture = fixture(2);
+    let unsigned = export_standard(&fixture.psbt).unwrap();
+    let (result, unified, legacy) = verify_all_through_ffi(&unsigned);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!((unified, legacy), (0, 0));
+
+    let (result, unified_only) = sign_through_ffi(&unsigned, &fixture.signers[0], 0);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    let (result, unified, legacy) = verify_all_through_ffi(&unified_only);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!((unified, legacy), (2, 0));
+
+    let legacy_only = add_legacy(&fixture.psbt, &fixture.signers[0]);
+    let legacy_only = export_standard(&legacy_only).unwrap();
+    let (result, unified, legacy) = verify_all_through_ffi(&legacy_only);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!((unified, legacy), (0, 2));
+
+    let unified_internal = import_standard(&unified_only).unwrap();
+    let mixed = add_legacy(&unified_internal, &fixture.signers[1]);
+    let mixed = export_standard(&mixed).unwrap();
+    let (result, unified, legacy) = verify_all_through_ffi(&mixed);
+    assert_eq!(result.code, CC_OK, "{}", result.message);
+    assert_eq!((unified, legacy), (2, 2));
+}
+
+#[test]
+fn verify_all_accepts_null_optional_count_outputs() {
+    let fixture = fixture(1);
+    let bytes = export_standard(&fixture.psbt).unwrap();
+    let mut detail = CcErrorDetail::default();
+    // Safety: both count outputs and both message outputs are documented as
+    // optional; the PSBT pointer and length match.
+    let code = unsafe {
+        coincube_unified_psbt_verify_all(
+            bytes.as_ptr(),
+            bytes.len(),
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            &mut detail,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    assert_eq!(code, CC_OK);
+    assert_eq!(detail.message_len, 0);
+}
+
+#[test]
+fn verify_all_refuses_invalid_and_wrong_transaction_legacy_signatures() {
+    let base_fixture = fixture(1);
+
+    let mut invalid = add_legacy(&base_fixture.psbt, &base_fixture.signers[0]);
+    let (key, signature) = invalid.psbt().inputs[0]
+        .partial_sigs
+        .iter()
+        .next()
+        .map(|(key, signature)| (*key, *signature))
+        .unwrap();
+    invalid.psbt_mut().inputs[0].partial_sigs.insert(
+        key,
+        ecdsa::Signature {
+            signature: secp256k1::ecdsa::Signature::from_compact(&[1u8; 64]).unwrap(),
+            sighash_type: signature.sighash_type,
+        },
+    );
+    let invalid = export_standard(&invalid).unwrap();
+    let (result, _, _) = verify_all_through_ffi(&invalid);
+    assert_eq!(result.code, CC_ERR_PSBT_VALIDATION);
+    assert!(result.message.contains("legacy signature"));
+
+    let mut other = fixture(1);
+    other.psbt.psbt_mut().unsigned_tx.output[0].value = Amount::from_sat(1);
+    let other = add_legacy(&other.psbt, &other.signers[0]);
+    let mut wrong_transaction = base_fixture.psbt.clone();
+    wrong_transaction.psbt_mut().inputs[0].partial_sigs =
+        other.psbt().inputs[0].partial_sigs.clone();
+    let wrong_transaction = export_standard(&wrong_transaction).unwrap();
+    let (result, _, _) = verify_all_through_ffi(&wrong_transaction);
+    assert_eq!(result.code, CC_ERR_PSBT_VALIDATION);
+    assert!(result.message.contains("legacy signature"));
+}
+
+#[test]
+fn verify_all_refuses_non_all_legacy_signatures() {
+    let fixture = fixture(1);
+    let mut unsupported = add_legacy(&fixture.psbt, &fixture.signers[0]);
+    for signature in unsupported.psbt_mut().inputs[0].partial_sigs.values_mut() {
+        signature.sighash_type = EcdsaSighashType::AllPlusAnyoneCanPay;
+    }
+    let bytes = unsupported.psbt().serialize();
+    let (result, _, _) = verify_all_through_ffi(&bytes);
+    assert_eq!(result.code, CC_ERR_INVALID_PSBT);
+    assert!(result.message.contains("sighash 0x81"));
 }
 
 /// A second signer's signatures accumulate rather than replacing the first's.
@@ -862,7 +1002,7 @@ fn malformed_or_authority_expanding_targets_are_refused_before_signing() {
 /// The ABI reports its own revision and digest length.
 #[test]
 fn abi_metadata_is_exported() {
-    assert_eq!(coincube_keychain_ffi_abi_version(), 2);
+    assert_eq!(coincube_keychain_ffi_abi_version(), 3);
     assert_eq!(coincube_keychain_ffi_digest_len(), 32);
     assert_eq!(CC_DIGEST_LEN, 32);
 }
