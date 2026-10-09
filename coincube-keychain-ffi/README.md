@@ -16,7 +16,7 @@ consensus types.
 ## Surface
 
 `include/coincube_keychain_ffi.h` is the contract and is hand-written; read it
-first. Four entries:
+first. Five entries:
 
 | Entry | What it is |
 |---|---|
@@ -24,6 +24,7 @@ first. Four entries:
 | `coincube_unified_psbt_digest` | The production digest: one native-P2WSH input of a standard PSBT, at `SIGHASH_ALL\|SIGHASH_UNIFIED`. |
 | `coincube_unified_psbt_sign` | Signs only the authenticated account path+xpub target; native P2WSH accepts either PSBT prevout form. |
 | `coincube_unified_psbt_verify` | Verifies the Keychain native-P2WSH contract, including witness-only inputs. |
+| `coincube_unified_psbt_verify_all` | Verifies and separately counts every unified and legacy signature. |
 
 The signing target must be the exact hardened native-P2WSH account path
 `m/48'/<coin>'/<account>'/2'`. Its coin type and xpub network must match the
@@ -102,17 +103,18 @@ size of an empty C binary built the same way, which is the closest honest proxy
 for what the staticlib adds to an iOS binary. The dylib row is the proxy for what
 Android packages per ABI.
 
-Six symbols are exported and nothing else:
+Seven symbols are exported and nothing else:
 
 ```
 coincube_keychain_ffi_abi_version   coincube_unified_psbt_digest
 coincube_keychain_ffi_digest_len    coincube_unified_psbt_sign
 coincube_unified_sighash_digest     coincube_unified_psbt_verify
+                                    coincube_unified_psbt_verify_all
 ```
 
-Marginal cost added to the root `cargo test` that CI runs: **1.0 s** to compile
+Marginal cost added to the root `cargo test` that CI runs: **1.4 s** to compile
 this crate and its four test binaries with every shared dependency already
-cached, plus **1.3 s** to run the 17 tests.
+cached, plus **2.7 s** to run the 22 PSBT-entry tests.
 
 Most of the ~2 MB is `coincube-core`'s own graph — `secp256k1`, `miniscript`,
 `bitcoin`, and also `argon2`/`aes-gcm`/`bip39`, which the phone does not need
@@ -149,7 +151,7 @@ is Lane B3.1b. All three crate types export the same symbols, so the tests in
 ## Tests
 
 ```sh
-cargo test -p coincube-keychain-ffi         # 38 tests across five binaries
+cargo test -p coincube-keychain-ffi         # 44 tests across five binaries
 cargo fmt -- --check
 cargo clippy -p coincube-keychain-ffi --all-targets -- -D warnings
 ```

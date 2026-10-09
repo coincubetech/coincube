@@ -16,8 +16,9 @@
 //!   every row is refused by `unified_signing`'s P2WSH gates before any digest
 //!   is computed. This entry is what the known-answer test drives.
 //! * [`coincube_unified_psbt_digest`], [`coincube_unified_psbt_sign`] and
-//!   [`coincube_unified_psbt_verify`] are the production shape: real PSBT bytes
-//!   off the wire, a real Vault P2WSH input.
+//!   [`coincube_unified_psbt_verify`] and
+//!   [`coincube_unified_psbt_verify_all`] are the production shape: real PSBT
+//!   bytes off the wire, a real Vault P2WSH input.
 //!
 //! # What this boundary deliberately does not do
 //!
@@ -71,6 +72,7 @@ use coincube_core::{
     },
     psbt_unified::{export_standard, import_standard},
     signer::MasterSigner,
+    unified_finalize::verify_all_signatures,
     unified_sighash::{unified_sighash, UnifiedSighashError},
     unified_signing::{
         keychain_p2wsh_all_unified_digest, sign_p2wsh_all_unified_for_target,
@@ -82,7 +84,7 @@ use coincube_core::{
 pub const CC_DIGEST_LEN: usize = 32;
 
 /// ABI revision. Bump on any change to a signature or a code's meaning.
-const ABI_VERSION: i32 = 2;
+const ABI_VERSION: i32 = 3;
 
 // ---------------------------------------------------------------------------
 // Status codes
@@ -483,6 +485,49 @@ pub unsafe extern "C" fn coincube_unified_psbt_verify(
             .map_err(|err| Failure::with_message(CC_ERR_PSBT_VALIDATION, err.to_string()))?;
         if !verified_out.is_null() {
             *verified_out = verified;
+        }
+        Ok(())
+    })
+}
+
+/// Verify every unified and legacy signature a standard PSBT carries.
+///
+/// Delegates directly to [`coincube_core::unified_finalize::verify_all_signatures`].
+/// `unified_out` and `legacy_out` independently receive the number of
+/// signatures verified. Both are optional. Zero counts mean the PSBT validated
+/// but carried no signatures of that kind; they do **not** mean it is
+/// sufficiently signed or finalizable.
+///
+/// # Safety
+///
+/// `psbt` must have a zero length or point to that many readable bytes. Each
+/// optional count output must be null or point to a writable `usize`. The error
+/// outputs follow the same rule as on [`coincube_unified_psbt_verify`].
+#[no_mangle]
+pub unsafe extern "C" fn coincube_unified_psbt_verify_all(
+    psbt: *const u8,
+    psbt_len: usize,
+    unified_out: *mut usize,
+    legacy_out: *mut usize,
+    error_out: *mut CcErrorDetail,
+    message_out: *mut u8,
+    message_cap: usize,
+) -> i32 {
+    guard(error_out, message_out, message_cap, || {
+        let bytes = match borrow(psbt, psbt_len) {
+            Some(bytes) => bytes,
+            None => return Err(Failure::code(CC_ERR_NULL_ARGUMENT)),
+        };
+        let unified = import_standard(bytes)
+            .map_err(|err| Failure::with_message(CC_ERR_INVALID_PSBT, err.to_string()))?;
+        let secp = secp256k1::Secp256k1::verification_only();
+        let verified = verify_all_signatures(&unified, &secp)
+            .map_err(|err| Failure::with_message(CC_ERR_PSBT_VALIDATION, err.to_string()))?;
+        if !unified_out.is_null() {
+            *unified_out = verified.unified;
+        }
+        if !legacy_out.is_null() {
+            *legacy_out = verified.legacy;
         }
         Ok(())
     })
