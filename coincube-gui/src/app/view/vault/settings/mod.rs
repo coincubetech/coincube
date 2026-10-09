@@ -1160,7 +1160,7 @@ pub fn wallet_settings<'a>(
             .push(
                 Row::new()
                     .spacing(10)
-                    .push(Column::new().width(Length::Fill))
+                    .width(Length::Fill)
                     .push(back_up_encrypted_descriptor)
                     .push(
                         button::secondary(Some(icon::clipboard_icon()), "Copy")
@@ -1169,7 +1169,10 @@ pub fn wallet_settings<'a>(
                     .push_maybe(hardware_registration_allowed.then(|| {
                         button::secondary(Some(icon::chip_icon()), "Register on hardware device")
                             .on_press(Message::Settings(SettingsMessage::RegisterWallet))
-                    })),
+                    }))
+                    .wrap()
+                    .vertical_spacing(10)
+                    .align_x(Alignment::End),
             )
             .spacing(10),
     )
