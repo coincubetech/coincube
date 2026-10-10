@@ -13,12 +13,14 @@ or reopening a Cube creates a different generation; old replies are ignored.
 A BTCB2 quote never seeds the Bitcoin/USD cache used for stablecoin conversion.
 
 The typed quote preserves price, fiat, source names/prices/timestamps, median,
-stale and updated_at. Fiat display requires the matching currency, two distinct
-approved sources (nonkyc/neoxa), finite positive prices, matching arithmetic
-median, source spread at most 10%, and timestamps at most 300 seconds old and
+stale and updated_at. Fiat display requires the matching currency, one or two
+distinct approved sources (nonkyc/neoxa), finite positive prices, the matching
+median (the source's own price when only one is fresh), and timestamps at most 300 seconds old and
 never in the future. The 300-second limit matches the Connect API's default
 `FRESH_FOR` of 5 minutes, which Robert set on 2026-09-30 (coincube-api#298). Cached quotes also expire against the request's monotonic
-clock, so a frozen wall clock cannot keep a quote indefinitely. updated_at must equal the oldest source timestamp. These
+clock, so a frozen wall clock cannot keep a quote indefinitely. With two
+sources, their spread must be at most 10%. updated_at must equal the oldest
+source timestamp. These
 are conservative desktop limits; the server's stale flag always refuses a
 quote even if these checks pass. Wider/older server policy cannot weaken them.
 

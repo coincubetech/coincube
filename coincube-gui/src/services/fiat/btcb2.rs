@@ -59,30 +59,42 @@ impl Btcb2Quote {
             || self.fiat != currency.to_string()
             || !self.price.is_finite()
             || self.price <= 0.0
-            || self.sources.len() != 2
+            || !(1..=2).contains(&self.sources.len())
             || !timestamp_fresh(self.updated_at, now)
         {
             return Err(unusable());
         }
-        let first = &self.sources[0];
-        let second = &self.sources[1];
-        if first.name == second.name
-            || self.sources.iter().any(|source| {
-                !matches!(source.name.as_str(), "nonkyc" | "neoxa")
-                    || !source.price.is_finite()
-                    || source.price <= 0.0
-                    || !timestamp_fresh(source.at, now)
-            })
-            || self.updated_at != first.at.min(second.at)
+        if self.sources.iter().any(|source| {
+            !matches!(source.name.as_str(), "nonkyc" | "neoxa")
+                || !source.price.is_finite()
+                || source.price <= 0.0
+                || !timestamp_fresh(source.at, now)
+        }) || self.updated_at
+            != self
+                .sources
+                .iter()
+                .map(|source| source.at)
+                .min()
+                .unwrap_or(0)
         {
             return Err(unusable());
         }
-        // Half-sums avoid overflowing two otherwise finite prices.
-        let median = first.price / 2.0 + second.price / 2.0;
-        if !median.is_finite()
-            || (self.price - median).abs() > median * 1e-12
-            || (first.price - second.price).abs() / median > 0.10
-        {
+        let expected = if self.sources.len() == 1 {
+            self.sources[0].price
+        } else {
+            let first = &self.sources[0];
+            let second = &self.sources[1];
+            if first.name == second.name {
+                return Err(unusable());
+            }
+            // Half-sums avoid overflowing two otherwise finite prices.
+            let midpoint = first.price / 2.0 + second.price / 2.0;
+            if !midpoint.is_finite() || (first.price - second.price).abs() / midpoint > 0.10 {
+                return Err(unusable());
+            }
+            midpoint
+        };
+        if (self.price - expected).abs() > expected * 1e-12 {
             return Err(unusable());
         }
         Ok(GetPriceResult {
@@ -154,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_matrix_requires_both_sources_and_fresh_matching_aggregate() {
+    fn quote_matrix_requires_fresh_matching_aggregate() {
         assert_eq!(
             quote().usable_price(Currency::USD, 1300).unwrap().value,
             102.0
@@ -190,6 +202,30 @@ mod tests {
                 "accepted {:?}",
                 q
             );
+        }
+    }
+
+    #[test]
+    fn either_approved_market_can_supply_a_fresh_quote() {
+        for name in ["nonkyc", "neoxa"] {
+            let mut q = quote();
+            q.sources.retain(|source| source.name == name);
+            q.price = q.sources[0].price;
+            q.updated_at = q.sources[0].at;
+            assert_eq!(
+                q.usable_price(Currency::USD, q.updated_at).unwrap().value,
+                q.price
+            );
+
+            let mut invalid = q.clone();
+            invalid.price += 1.0;
+            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            let mut invalid = q.clone();
+            invalid.sources[0].at = q.updated_at - 301;
+            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            let mut invalid = q.clone();
+            invalid.stale = true;
+            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
         }
     }
 
