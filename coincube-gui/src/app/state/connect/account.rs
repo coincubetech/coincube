@@ -1158,6 +1158,15 @@ impl ConnectAccountPanel {
         !self.admitted_reopen_required && matches!(self.step, ConnectFlowStep::Dashboard)
     }
 
+    /// A Home tab may reuse a sibling's accepted session only before it owns
+    /// a client or starts its own refresh. Replacing an in-flight refresh with
+    /// an older sibling token would create another rotation race.
+    pub(crate) fn can_adopt_shared_session(&self) -> bool {
+        !self.admitted_reopen_required
+            && self.authenticated_client().is_none()
+            && !matches!(self.step, ConnectFlowStep::Login { loading: true, .. })
+    }
+
     /// Returns `true` if a Connect session is stored in the OS keyring
     /// under the shared global key AND parses as a valid `StoredSession`.
     /// Mirrors `Init`'s restoration check so callers (e.g.

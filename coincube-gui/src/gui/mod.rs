@@ -195,6 +195,54 @@ impl GUI {
             }
             message => message,
         };
+        // A newly opened Home must not rotate the shared keyring session while
+        // another tab's fork daemon is bound to it. Reuse an active in-memory
+        // client; the admitted-user load still checks it with Connect.
+        let home_init = match &message {
+            Message::Pane(
+                pane_id,
+                pane::Message::Tab(
+                    tab_id,
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        crate::app::view::ConnectAccountMessage::Init,
+                    ))),
+                ),
+            ) => Some((*pane_id, *tab_id)),
+            _ => None,
+        };
+        if let Some((origin_pane, origin_tab)) = home_init {
+            let active_client = self.panes.iter().find_map(|(&pane_id, pane)| {
+                pane.tabs.iter().find_map(|tab| {
+                    if pane_id == origin_pane && tab.id == origin_tab {
+                        return None;
+                    }
+                    (match &tab.state {
+                        tab::State::App(app) => app.authenticated_coincube_client(),
+                        tab::State::Home(home) => home.connect_account.authenticated_client(),
+                        _ => None,
+                    })
+                    .filter(|client| client.token().is_some_and(|token| !token.is_empty()))
+                })
+            });
+            if let Some(client) = active_client {
+                if let Some(tab) = self
+                    .panes
+                    .get_mut(origin_pane)
+                    .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin_tab))
+                {
+                    if let tab::State::Home(home) = &mut tab.state {
+                        if home.connect_account.can_adopt_shared_session() {
+                            return home.adopt_connect_client(client).map(move |message| {
+                                Message::Pane(
+                                    origin_pane,
+                                    pane::Message::Tab(origin_tab, tab::Message::Launch(message)),
+                                )
+                            });
+                        }
+                    }
+                }
+            }
+        }
         // A log-out or a sign-in from any tab reaches every tab, with its kind
         // and where it came from (`Tab::invalidate_fork_session`). A
         // `SetSession` counts as a sign-in only if the tab it came from will
@@ -246,6 +294,7 @@ impl GUI {
                         Some(current) if *epoch >= current && !same_fork_session => Some((
                             tab::AuthChange::SignIn {
                                 user_id: login.user.id,
+                                token: zeroize::Zeroizing::new(login.token.clone()),
                             },
                             *pane_id,
                             *tab_id,
@@ -304,7 +353,7 @@ impl GUI {
                     let tab_id = tab.id;
                     let originated = pane_id == origin_pane && tab_id == origin_tab;
                     auth_tasks.push(
-                        tab.invalidate_fork_session(change, originated)
+                        tab.invalidate_fork_session(change.clone(), originated)
                             .map(move |msg| {
                                 Message::Pane(pane_id, pane::Message::Tab(tab_id, msg))
                             }),
@@ -1067,6 +1116,54 @@ mod fork_auth_dispatch_tests {
     }
 
     #[test]
+    fn new_home_reuses_connect_client_while_sibling_is_being_admitted() {
+        let root_path =
+            std::env::temp_dir().join(format!("connect-home-reuse-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let (mut first, first_startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(first_startup);
+        let mut client = crate::services::coincube::CoincubeClient::new();
+        client.set_token("shared-bearer");
+        drop(first.adopt_connect_client(client));
+        let (second, second_startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(second_startup);
+        let mut pane = pane::Pane::new_with_tab(tab::State::Home(first));
+        pane.tabs.push(tab::Tab::new(2, tab::State::Home(second)));
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        let mut gui = GUI {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root, None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        };
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::Tab(
+                2,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::Init,
+                ))),
+            ),
+        )));
+        let tab::State::Home(second) = &gui.panes.get(pane_id).unwrap().tabs[1].state else {
+            panic!("second tab should remain Home");
+        };
+        assert_eq!(
+            second
+                .connect_account
+                .authenticated_client()
+                .and_then(|client| client.token().map(str::to_owned)),
+            Some("shared-bearer".into()),
+            "opening Home should use its sibling's session instead of refreshing it"
+        );
+        let _ = std::fs::remove_dir_all(root_path);
+    }
+
+    #[test]
     fn app_auth_dispatch_runs_home_startup_for_every_invalidated_installer() {
         // Like the completion fixture, keep large inline GUI states off the
         // default libtest stack without changing the runner configuration.
@@ -1359,6 +1456,32 @@ mod fork_auth_revocation_tests {
                 global_cache: GlobalCache::default(),
                 theme_mode: Default::default(),
             };
+            let (home, home_startup) =
+                home::Home::new_for_chain(gui.config.coincube_directory.clone(), None);
+            drop(home_startup);
+            gui.panes
+                .get_mut(pane_id)
+                .unwrap()
+                .tabs
+                .push(tab::Tab::new(2, tab::State::Home(home)));
+            drop(gui.update(Message::Pane(
+                pane_id,
+                pane::Message::Tab(
+                    2,
+                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                        ConnectAccountMessage::Init,
+                    ))),
+                ),
+            )));
+            assert!(matches!(
+                gui.panes.get(pane_id).unwrap().tabs[0].state,
+                tab::State::App(_)
+            ));
+            let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[1].state else {
+                unreachable!()
+            };
+            assert_eq!(home.connect_account.client.token(), Some("synthetic-login"));
+            gui.panes.get_mut(pane_id).unwrap().tabs.pop();
             app::session::open(cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
             let select = || {
                 tab::Message::Run(AppMessage::View(view::Message::Spend(
@@ -1393,6 +1516,16 @@ mod fork_auth_revocation_tests {
             assert!(outputs(pending).await.is_empty());
             let tab = &mut gui.panes.get_mut(pane_id).unwrap().tabs[0];
             assert!(matches!(tab.state, tab::State::Home(_)));
+            if replace {
+                let tab::State::Home(home) = &tab.state else {
+                    unreachable!()
+                };
+                assert_eq!(
+                    home.connect_account.client.token(),
+                    Some("replacement"),
+                    "the replacement Home must receive the completed login"
+                );
+            }
             assert!(tab.wallet().is_none());
             assert!(app::session::pin_for(&cube_id).is_none());
             assert!(weak_wallet.upgrade().is_none());
