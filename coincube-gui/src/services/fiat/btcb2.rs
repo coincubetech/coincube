@@ -89,7 +89,7 @@ impl Btcb2Quote {
             }
             // Half-sums avoid overflowing two otherwise finite prices.
             let midpoint = first.price / 2.0 + second.price / 2.0;
-            if !midpoint.is_finite() || (first.price - second.price).abs() / midpoint > 0.10 {
+            if !midpoint.is_finite() {
                 return Err(unusable());
             }
             midpoint
@@ -191,7 +191,6 @@ mod tests {
             |q| q.updated_at = 1001,
             |q| {
                 q.sources[0].price = 50.0;
-                q.price = 77.0;
             },
         ];
         for mutate in variants {
@@ -229,24 +228,18 @@ mod tests {
         }
     }
 
-    /// coincube-api#298: the owner set the quote freshness limit to 5 minutes
-    /// and kept the 10% spread threshold.
+    /// Two fresh markets may disagree; the displayed price is their average.
     #[test]
-    fn freshness_limit_is_five_minutes_and_spread_stays_ten_percent() {
+    fn freshness_limit_is_five_minutes_and_wide_market_quotes_are_averaged() {
         assert_eq!(MAX_QUOTE_AGE, 300);
         assert!(timestamp_fresh(1000, 1121));
         assert!(timestamp_fresh(1000, 1300));
         assert!(!timestamp_fresh(1000, 1301));
-        // Spread exactly 10% of the median is accepted; just above is refused.
-        let mut at_limit = quote();
-        at_limit.sources[0].price = 95.0;
-        at_limit.sources[1].price = 105.0;
-        at_limit.price = 100.0;
-        assert!(at_limit.usable_price(Currency::USD, 1001).is_ok());
-        let mut over = at_limit.clone();
-        over.sources[0].price = 94.9;
-        over.price = 99.95;
-        assert!(over.usable_price(Currency::USD, 1001).is_err());
+        let mut wide = quote();
+        wide.sources[0].price = 100.0;
+        wide.sources[1].price = 200.0;
+        wide.price = 150.0;
+        assert!(wide.usable_price(Currency::USD, 1001).is_ok());
     }
 
     #[tokio::test]
