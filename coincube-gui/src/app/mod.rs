@@ -4986,7 +4986,7 @@ impl App {
             AuthChange::LogOut => self.invalidate_claim_session(),
             AuthChange::SignIn { .. } if originated => {}
             AuthChange::SignIn { .. } if self.claim_session_invalidated => {}
-            AuthChange::SignIn { user_id } => {
+            AuthChange::SignIn { user_id, .. } => {
                 let mine = self.panels.connect.account.user.as_ref().map(|u| u.id);
                 if mine == Some(user_id) {
                     if let Some(panel) = &mut self.panels.claim {
