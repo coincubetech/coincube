@@ -532,13 +532,29 @@ fn vault_settings_for_cube(
 }
 
 /// A Connect authentication change `GUI::update` broadcasts to every tab.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Clone)]
 pub enum AuthChange {
     /// A log-out from any tab.
     LogOut,
     /// A login or refresh result (`SetSession`) from any tab, for this
     /// Connect user.
-    SignIn { user_id: u32 },
+    SignIn {
+        user_id: u32,
+        token: zeroize::Zeroizing<String>,
+    },
+}
+
+impl std::fmt::Debug for AuthChange {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::LogOut => f.write_str("LogOut"),
+            Self::SignIn { user_id, .. } => f
+                .debug_struct("SignIn")
+                .field("user_id", user_id)
+                .field("token", &"<redacted>")
+                .finish(),
+        }
+    }
 }
 
 pub struct Tab {
@@ -815,17 +831,35 @@ impl Tab {
                 // wallet. EmbeddedDaemon Drop uses fork-scoped safe cleanup;
                 // App::stop would also stop unrelated globally managed Tor.
                 let (mut home, startup) = Home::new_for_chain(datadir, Some(cube.network));
+                let adopted = match &change {
+                    AuthChange::SignIn { token, .. } if !capability_revoked && !originated => {
+                        home.adopt_connect_session(token)
+                    }
+                    _ => Task::none(),
+                };
                 home.set_error(if capability_revoked {
                     "Bitcoin Blake2b is disabled or its availability could not be verified. Check Global Settings before reopening this Cube."
-                } else { "Connect session changed. Sign in again to reopen this Cube." });
-                command = startup.map(Message::Launch);
+                } else { "Connect session changed. Reopen this Cube after the account check finishes." });
+                command = Task::batch([startup, adopted]).map(Message::Launch);
                 replacement = Some(State::Home(home));
             }
             // A Bitcoin App stays open across a Connect change — its wallet
             // does not depend on the session — but a claim in flight does.
             // The App decides from the kind of change and who made it: see
             // `App::on_global_auth_change`.
-            State::App(app) => app.on_global_auth_change(change, originated),
+            State::App(app) => app.on_global_auth_change(change.clone(), originated),
+            State::Home(home) => match &change {
+                AuthChange::SignIn { token, .. } if !originated => {
+                    command = home.adopt_connect_session(token).map(Message::Launch);
+                }
+                AuthChange::LogOut if !originated => {
+                    command = home.on_global_connect_logout().map(Message::Launch);
+                }
+                AuthChange::LogOut => {
+                    home.connect_account.invalidate_auth();
+                }
+                _ => {}
+            },
             State::Loader(loader) if loader.cube_settings.network.is_blake2b() => {
                 loader.invalidate_fork_session();
                 if capability_revoked {
@@ -5710,6 +5744,38 @@ mod fork_completion_tests {
     use super::*;
     use crate::app::settings::CubeSettings;
     use crate::chain::ChainId;
+
+    #[test]
+    fn sibling_connect_refresh_is_adopted_without_another_keyring_refresh() {
+        let root_path =
+            std::env::temp_dir().join(format!("coincube-sibling-refresh-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let (home, startup) = Home::new_for_chain(root, Some(ChainId::BitcoinBlake2b));
+        drop(startup);
+        let mut tab = Tab::new(2, State::Home(home));
+        let previous_epoch = match &tab.state {
+            State::Home(home) => home.connect_account.auth_epoch(),
+            _ => unreachable!(),
+        };
+        drop(tab.invalidate_fork_session(
+            AuthChange::SignIn {
+                user_id: 7,
+                token: zeroize::Zeroizing::new("fresh-bearer".into()),
+            },
+            false,
+        ));
+        let State::Home(home) = &tab.state else {
+            panic!("the sibling Home should stay open");
+        };
+        assert!(home.connect_account.auth_epoch() > previous_epoch);
+        assert_eq!(
+            home.connect_account
+                .authenticated_client()
+                .and_then(|client| client.token().map(str::to_owned)),
+            Some("fresh-bearer".into())
+        );
+        let _ = std::fs::remove_dir_all(root_path);
+    }
 
     #[test]
     fn cancelling_the_split_prerequisite_installer_discards_the_pending_intent() {

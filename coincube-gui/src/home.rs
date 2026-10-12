@@ -505,6 +505,32 @@ impl Home {
         !matches!(self.state, State::Unchecked)
     }
 
+    /// A sibling tab has just accepted a Connect login or token refresh.
+    /// Reuse that accepted bearer instead of starting another keyring refresh:
+    /// concurrent refreshes can rotate the token while a Cube is opening.
+    pub(crate) fn adopt_connect_session(&mut self, token: &str) -> Task<Message> {
+        let mut client = self.connect_account.client.clone();
+        client.set_token(token);
+        self.adopt_connect_client(client)
+    }
+
+    pub(crate) fn adopt_connect_client(&mut self, client: CoincubeClient) -> Task<Message> {
+        self.connect_account.invalidate_auth();
+        self.connect_account.install_admitted_client(client);
+        map_connect_task(
+            self.connect_account
+                .update_message(ConnectAccountMessage::Init),
+        )
+    }
+
+    pub(crate) fn on_global_connect_logout(&mut self) -> Task<Message> {
+        self.connect_account.invalidate_auth();
+        map_connect_task(
+            self.connect_account
+                .update_message(ConnectAccountMessage::LogOut),
+        )
+    }
+
     /// Refresh persisted completion/reorg changes when returning to the list,
     /// without replacing an in-progress creation, recovery, or account screen.
     pub fn on_focus(&self) -> Task<Message> {
