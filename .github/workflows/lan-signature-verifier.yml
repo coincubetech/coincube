@@ -12,6 +12,7 @@ on:
       - "coincube-core/**"
       - "coincube-gui/Cargo.toml"
       - "coincube-gui/build.rs"
+      - "coincube-gui/src/lib.rs"
       - "coincube-gui/src/dir.rs"
       - "coincube-gui/src/phone_signer/**"
       - "coincube-gui/src/services/connect/crypto/**"
@@ -39,6 +40,7 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@stable
         with:
