@@ -1,8 +1,8 @@
 use super::{NavContext, SubItem};
 use crate::app::menu::{Menu, VaultSubMenu};
 use coincube_ui::icon::{
-    coins_outline_icon, home_icon, receipt_icon, receive_icon, recovery_icon, send_icon,
-    settings_icon,
+    claim_icon, coins_outline_icon, home_icon, receipt_icon, receive_icon, recovery_icon,
+    send_icon, settings_icon,
 };
 
 /// Secondary-rail items for the Vault wallet section.
@@ -74,7 +74,7 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
                 } else {
                     "Claim BTCB2"
                 },
-                recovery_icon,
+                claim_icon,
                 Menu::Vault(VaultSubMenu::Claim),
                 |m| matches!(m, Menu::Vault(VaultSubMenu::Claim)),
             ),
