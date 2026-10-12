@@ -619,7 +619,7 @@ fn review_view<'a>(
                 .width(Length::Fill),
         )
         .push(p1_regular(
-            "Submitting broadcasts this transaction on Bitcoin. It cannot be taken back. The review \
+            "Broadcasting sends this transaction to the Bitcoin network. It cannot be taken back. The review \
              above is what you are confirming; if the chains move first, you will be asked to review again.",
         ))
         .push(
@@ -630,7 +630,7 @@ fn review_view<'a>(
                         .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
                 )
                 .push(
-                    button::primary(None, "Submit to Bitcoin")
+                    button::primary(None, "Broadcast Transaction")
                         .on_press_maybe(
                             (!busy && destination_valid)
                                 .then_some(Message::Claim(ClaimMessage::Confirm)),
