@@ -630,7 +630,7 @@ fn review_view<'a>(
                         .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
                 )
                 .push(
-                    button::primary(None, "Broadcast Transaction")
+                    button::primary(None, "Broadcast")
                         .on_press_maybe(
                             (!busy && destination_valid)
                                 .then_some(Message::Claim(ClaimMessage::Confirm)),
