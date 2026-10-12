@@ -62,6 +62,34 @@ impl PoisonSelfTransfer {
     pub fn change_index(&self) -> ChildNumber {
         self.change_index
     }
+    /// Re-derive the return address and match it to the sole spendable output
+    /// in the unsigned transaction. This is an ownership check, not permission
+    /// to sign or broadcast the claim.
+    pub fn verified_return_address(&self) -> Result<bitcoin::Address, Error> {
+        let secp = secp256k1::Secp256k1::verification_only();
+        let destination = self
+            .descriptor
+            .change_descriptor()
+            .derive(self.change_index, &secp);
+        let mut spendable = self
+            .psbt
+            .unsigned_tx
+            .output
+            .iter()
+            .filter(|output| !output.script_pubkey.is_op_return());
+        let Some(output) = spendable.next() else {
+            return Err(Error::InvalidRequest("Claim has no return output"));
+        };
+        if spendable.next().is_some()
+            || output.value == bitcoin::Amount::ZERO
+            || output.script_pubkey != destination.script_pubkey()
+        {
+            return Err(Error::InvalidRequest(
+                "Claim return output does not match this Vault's change address",
+            ));
+        }
+        Ok(destination.address(self.chain.bitcoin_network()))
+    }
     pub fn warnings(&self) -> &[spend::CreateSpendWarning] {
         &self.warnings
     }
@@ -219,6 +247,9 @@ impl AncestrySelfTransfer {
     }
     pub fn change_index(&self) -> ChildNumber {
         self.transfer.change_index()
+    }
+    pub fn verified_return_address(&self) -> Result<bitcoin::Address, Error> {
+        self.transfer.verified_return_address()
     }
     pub fn warnings(&self) -> &[spend::CreateSpendWarning] {
         self.transfer.warnings()
@@ -1096,6 +1127,10 @@ mod tests {
             let index = ChildNumber::from_normal_idx(10).unwrap();
             let destination = desc.change_descriptor().derive(index, &secp);
             assert_eq!(tx.output[1].script_pubkey, destination.script_pubkey());
+            assert_eq!(
+                built.verified_return_address().unwrap(),
+                destination.address(chain.bitcoin_network())
+            );
             assert!(!built.psbt.outputs[1].bip32_derivation.is_empty());
             assert!(built
                 .psbt
@@ -1144,6 +1179,14 @@ mod tests {
                     .psbt
             );
         }
+    }
+
+    #[test]
+    fn return_address_check_rejects_a_redirected_output() {
+        let (desc, coins, mut getter) = fixture();
+        let mut built = build(ChainId::Bitcoin, &desc, &coins, &mut getter, 10, 5).unwrap();
+        built.psbt.unsigned_tx.output[1].script_pubkey = bitcoin::ScriptBuf::new();
+        assert!(built.verified_return_address().is_err());
     }
     #[test]
     fn fork_sweep_uses_original_inputs_and_fresh_owned_output_on_matching_chain() {

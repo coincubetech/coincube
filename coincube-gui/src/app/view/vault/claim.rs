@@ -3,7 +3,7 @@
 //! re-checks, never a permission.
 
 use iced::{
-    widget::{Column, Container, Row, Space},
+    widget::{scrollable, Column, Container, Row, Space},
     Alignment, Length,
 };
 
@@ -20,7 +20,7 @@ use coincube_ui::{
 use crate::{
     app::{
         cache::Cache,
-        menu::Menu,
+        menu::{Menu, VaultSubMenu},
         state::vault::{
             claim::{
                 describe_duration, ClaimStep1Panel, CoinSet, ForkWindow, Preconditions, Refusal,
@@ -308,6 +308,8 @@ fn plan_view<'a>(
         .find(|o| o.script_pubkey.is_op_return())
         .map(|o| o.script_pubkey.len())
         .unwrap_or(0);
+    let return_address = built.verified_return_address(panel.wallet());
+    let change_index = built.change_index();
     let mut summary = Column::new()
         .spacing(10)
         .push(row(
@@ -321,7 +323,44 @@ fn plan_view<'a>(
         .push(row(
             "Back to this Vault",
             p1_regular(format_amount(outputs, cache)),
-        ))
+        ));
+    match &return_address {
+        Ok(address) => {
+            summary = summary
+                .push(p1_regular("Return address").bold())
+                .push(
+                    scrollable(p2_regular(address.clone()).style(theme::text::secondary))
+                        .direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::new().width(2).scroller_width(2),
+                        )),
+                )
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                        .push(icon::check_icon().style(theme::text::success))
+                        .push(p2_regular(format!(
+                            "Matches this Vault's change branch, index {change_index}."
+                        )))
+                        .push(
+                            button::secondary(None, "Copy address")
+                                .on_press(Message::Clipboard(address.clone())),
+                        ),
+                );
+        }
+        Err(error) => {
+            summary = summary.push(
+                Row::new()
+                    .spacing(5)
+                    .push(icon::warning_icon().style(theme::text::warning))
+                    .push(
+                        p1_regular(format!("Return address verification failed: {error}"))
+                            .style(theme::text::warning),
+                    ),
+            );
+        }
+    }
+    summary = summary
         .push(row(
             if built.selected_ancestry_input().is_some() {
                 "Bitcoin-only input"
@@ -361,6 +400,14 @@ fn plan_view<'a>(
             "Signing uses the same flow as any Vault spend. Nothing is broadcast until you confirm the \
              final review.",
         ))
+        .push(p2_regular(
+            "For an independent check, compare the return address and change index in a separate watch-only copy of this Vault before signing.",
+        ).style(theme::text::secondary))
+        .push(p2_regular(
+            "To test with a small amount first, use Receive to get a fresh address and send Bitcoin from another wallet. Once confirmed, use Coins to select only that test coin and spend it back. Check the selected input before signing. This does not split the claim coins or verify this exact return address.",
+        ).style(theme::text::secondary))
+        .push(button::secondary(None, "Get test receive address")
+            .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Receive))))
         .push(
             Row::new()
                 .spacing(15)
@@ -369,7 +416,7 @@ fn plan_view<'a>(
                 )
                 .push(
                     button::primary(None, "Sign")
-                        .on_press(Message::Claim(ClaimMessage::Sign))
+                        .on_press_maybe(return_address.is_ok().then_some(Message::Claim(ClaimMessage::Sign)))
                         .width(Length::Fixed(200.0)),
                 ),
         )

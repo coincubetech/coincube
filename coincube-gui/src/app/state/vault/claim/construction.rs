@@ -35,6 +35,25 @@ impl Verified {
 }
 
 impl Construction {
+    /// Verify the actual return output against the open Vault, not only the
+    /// descriptor carried by the construction artifact.
+    pub fn verified_return_address(&self, wallet: &Wallet) -> Result<String, String> {
+        let (descriptor, chain) = match self {
+            Self::OpReturn(transfer) => (transfer.descriptor(), transfer.chain()),
+            Self::Ancestry { transfer, .. } => (transfer.descriptor(), transfer.chain()),
+        };
+        if descriptor != &wallet.main_descriptor || chain != wallet.chain {
+            return Err("Claim return address belongs to a different Vault.".into());
+        }
+        let address = match self {
+            Self::OpReturn(transfer) => transfer.verified_return_address(),
+            Self::Ancestry { transfer, .. } => transfer.verified_return_address(),
+        };
+        address
+            .map(|address| address.to_string())
+            .map_err(|error| error.to_string())
+    }
+
     pub fn change_index(&self) -> ChildNumber {
         match self {
             Self::OpReturn(transfer) => transfer.change_index(),
