@@ -20,7 +20,7 @@ use coincube_ui::{
 use crate::{
     app::{
         cache::Cache,
-        menu::{Menu, VaultSubMenu},
+        menu::Menu,
         state::vault::{
             claim::{
                 describe_duration, ClaimStep1Panel, CoinSet, ForkWindow, Preconditions, Refusal,
@@ -403,11 +403,27 @@ fn plan_view<'a>(
         .push(p2_regular(
             "For an independent check, compare the return address and change index in a separate watch-only copy of this Vault before signing.",
         ).style(theme::text::secondary))
-        .push(p2_regular(
-            "To test with a small amount first, use Receive to get a fresh address and send Bitcoin from another wallet. Once confirmed, use Coins to select only that test coin and spend it back. Check the selected input before signing. This does not split the claim coins or verify this exact return address.",
-        ).style(theme::text::secondary))
-        .push(button::secondary(None, "Get test receive address")
-            .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Receive))))
+        .push(
+            Container::new(
+                Column::new()
+                    .spacing(10)
+                    .push(p1_regular("Test this return address first (optional)").bold())
+                    .push(p2_regular(
+                        "Copy this return address and send a small amount of Bitcoin to it from another wallet. Keep this review open while the test confirms. Copying the address does not sign or send this claim.",
+                    ))
+                    .push(button::secondary(None, "Copy return address for test")
+                        .on_press_maybe(return_address.as_ref().ok().map(|address| Message::Clipboard(address.clone()))))
+                    .push(p2_regular(
+                        "Check that the confirmed test transaction pays the exact return address shown above. This checks receipt at that address; it does not test spending from it or complete either claim step. The claim shown here still spends the full amount listed above.",
+                    ).style(theme::text::secondary))
+                    .push(p2_regular(
+                        "If you leave this review or rebuild the claim, the return address may change. Compare it with your test transaction again before signing.",
+                    ).style(theme::text::secondary)),
+            )
+            .padding(20)
+            .style(theme::card::simple)
+            .width(Length::Fill),
+        )
         .push(
             Row::new()
                 .spacing(15)
