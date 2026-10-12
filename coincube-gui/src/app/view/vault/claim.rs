@@ -68,7 +68,11 @@ pub fn view<'a>(
             snapshot,
             busy,
             error,
-        } => dashboard(menu, cache, review_view(cache, snapshot, busy, error)),
+        } => dashboard(
+            menu,
+            cache,
+            review_view(cache, panel.wallet().chain, snapshot, busy, error),
+        ),
         StageView::Track {
             outcome,
             phase,
@@ -515,16 +519,63 @@ fn sign_view<'a>(
     }
 }
 
+/// Step 1 has exactly one spendable return output (with an optional zero-value
+/// marker). Read it from the coordinator's verified signed transaction.
+fn review_destination(
+    tx: &coincube_core::miniscript::bitcoin::Transaction,
+    chain: coincube_core::chain::ChainId,
+) -> Result<(String, Amount), ()> {
+    use coincube_core::{chain::ChainId, miniscript::bitcoin::Address};
+    if !matches!(chain, ChainId::Bitcoin | ChainId::Testnet4) {
+        return Err(());
+    }
+    let mut destination = None;
+    for output in &tx.output {
+        if output.script_pubkey.is_op_return() {
+            if output.value != Amount::ZERO {
+                return Err(());
+            }
+            continue;
+        }
+        if destination.is_some() || output.value == Amount::ZERO {
+            return Err(());
+        }
+        let address =
+            Address::from_script(&output.script_pubkey, chain.bitcoin_network()).map_err(|_| ())?;
+        destination = Some((address.to_string(), output.value));
+    }
+    destination.ok_or(())
+}
+
 fn review_view<'a>(
     cache: &'a Cache,
+    chain: coincube_core::chain::ChainId,
     snapshot: Option<&'a ReviewSnapshot>,
     busy: bool,
     error: Option<&'a str>,
 ) -> Element<'a, Message> {
+    let destination = snapshot.map(|snapshot| review_destination(&snapshot.transaction, chain));
+    let destination_valid = matches!(&destination, Some(Ok(_)));
     let body: Element<'a, Message> = match snapshot {
         Some(snapshot) => Column::new()
             .spacing(10)
             .push(row("Transaction", p2_regular(snapshot.txid.to_string())))
+            .push(match &destination {
+                Some(Ok((address, amount))) => Column::new()
+                    .spacing(10)
+                    .push(row("Back to this Vault", p1_regular(format_amount(*amount, cache))))
+                    .push(p1_regular("Return address").bold())
+                    .push(scrollable(p2_regular(address.clone())).direction(
+                        scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::new().width(2).scroller_width(2),
+                        ),
+                    ))
+                    .push(button::secondary(None, "Copy address")
+                        .on_press(Message::Clipboard(address.clone()))),
+                _ => Column::new().push(card::warning(
+                    "Cannot display the return address for this transaction. Review again before submitting.".to_string(),
+                )),
+            })
             .push(row("Broadcast via", p2_regular(snapshot.route.label())))
             .push(row(
                 "Fee",
@@ -581,7 +632,7 @@ fn review_view<'a>(
                 .push(
                     button::primary(None, "Submit to Bitcoin")
                         .on_press_maybe(
-                            (!busy && snapshot.is_some())
+                            (!busy && destination_valid)
                                 .then_some(Message::Claim(ClaimMessage::Confirm)),
                         )
                         .width(Length::Fixed(240.0)),
@@ -731,6 +782,71 @@ fn track_view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn broadcast_review_reads_the_actual_return_output() {
+        use coincube_core::{
+            chain::ChainId,
+            miniscript::bitcoin::{
+                absolute, hashes::Hash, transaction, Address, ScriptBuf, Transaction, TxOut,
+                WScriptHash,
+            },
+        };
+        let script = ScriptBuf::new_p2wsh(&WScriptHash::from_byte_array([1; 32]));
+        let mut tx = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: Vec::new(),
+            output: vec![TxOut {
+                value: Amount::from_sat(12345),
+                script_pubkey: script.clone(),
+            }],
+        };
+        for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+            assert_eq!(
+                review_destination(&tx, chain),
+                Ok((
+                    Address::from_script(&script, chain.bitcoin_network())
+                        .unwrap()
+                        .to_string(),
+                    Amount::from_sat(12345),
+                ))
+            );
+        }
+        // OP_RETURN and ancestry routes both show the same spendable output.
+        tx.output.insert(
+            0,
+            TxOut {
+                value: Amount::ZERO,
+                script_pubkey: ScriptBuf::new_op_return([]),
+            },
+        );
+        assert_eq!(
+            review_destination(&tx, ChainId::Bitcoin)
+                .unwrap()
+                .1
+                .to_sat(),
+            12345
+        );
+        tx.output[1].value = Amount::from_sat(54321);
+        assert_eq!(
+            review_destination(&tx, ChainId::Bitcoin)
+                .unwrap()
+                .1
+                .to_sat(),
+            54321
+        );
+        tx.output.push(tx.output[1].clone());
+        assert!(review_destination(&tx, ChainId::Bitcoin).is_err());
+        tx.output.pop();
+        tx.output[0].value = Amount::from_sat(1);
+        assert!(review_destination(&tx, ChainId::Bitcoin).is_err());
+        tx.output.remove(0);
+        tx.output[0].script_pubkey = ScriptBuf::new();
+        assert!(review_destination(&tx, ChainId::Bitcoin).is_err());
+        tx.output.clear();
+        assert!(review_destination(&tx, ChainId::Bitcoin).is_err());
+    }
 
     /// #547: with post-fork coins and the ancestry gate closed, the panel says
     /// input poison is unavailable; with none, or with discovery open, it
