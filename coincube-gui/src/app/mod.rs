@@ -7895,6 +7895,19 @@ impl App {
                         view::ConnectAccountMessage::FeaturesLoaded(_, generation)
                     )) if *generation == self.panels.connect.account.session_generation()
                 );
+                // Features and the post-login account check complete independently.
+                // The claim gate stays closed until both finish, but a pending
+                // account check is not a revocation of this admitted Cube.
+                let current_features_denied = matches!(
+                    &msg,
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::FeaturesLoaded(features, generation)
+                    )) if *generation == self.panels.connect.account.session_generation()
+                        && !crate::app::features::bitcoin_blake2b_enabled(
+                            features.as_ref().and_then(|f| f.bitcoin_blake2b_enabled).unwrap_or(false),
+                            self.panels.connect.account.bitcoin_blake2b_opt_in,
+                        )
+                );
                 let previous_claim_session = self.claim_connect_session();
                 let task = self
                     .panels
@@ -7929,10 +7942,7 @@ impl App {
                 if current_features_result && !self.cache.btcb2_server_enabled {
                     self.pending_claim = false;
                 }
-                if self.requires_connect()
-                    && current_features_result
-                    && !self.cache.btcb2_server_enabled
-                {
+                if self.requires_connect() && current_features_denied {
                     self.invalidate_fork_session();
                     return Task::none();
                 }
@@ -10928,6 +10938,64 @@ mod tests {
         assert!(!app.matches_admitted_connect_session(&changed));
         drop(app);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn admitted_fork_survives_features_arriving_before_account_check() {
+        let _guard = crate::app::session::test_guard();
+        for features_first in [true, false] {
+            let root = std::env::temp_dir().join(format!(
+                "coincube-fork-account-order-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let mut app = split_app(&root, false, true);
+            app.panels.connect.account.features = None;
+            app.panels.connect.account.step =
+                state::connect::account::ConnectFlowStep::CheckingDuress {
+                    status: state::connect::account::DuressGateStatus::Checking,
+                };
+            let generation = app.panels.connect.account.session_generation();
+            let features = view::ConnectAccountMessage::FeaturesLoaded(
+                Some(
+                    serde_json::from_value(serde_json::json!({
+                        "plans": [], "bitcoinBlake2bEnabled": true,
+                    }))
+                    .unwrap(),
+                ),
+                generation,
+            );
+            let checked = view::ConnectAccountMessage::DuressStateChecked(
+                crate::services::coincube::DuressCheckOutcome::Ok(
+                    crate::services::coincube::DuressState {
+                        active: false,
+                        unlock_at: None,
+                        enrolled: false,
+                        this_device_registered: false,
+                    },
+                ),
+                generation,
+                0,
+            );
+            let messages = if features_first {
+                [features, checked]
+            } else {
+                [checked, features]
+            };
+            for (index, message) in IntoIterator::into_iter(messages).enumerate() {
+                drop(app.update(Message::View(view::Message::ConnectAccount(message))));
+                assert!(
+                    app.authenticated_coincube_client().is_some(),
+                    "an admitted Cube must survive either completion order"
+                );
+                assert_eq!(
+                    app.cache.btcb2_server_enabled,
+                    index == 1,
+                    "claim access stays closed until both checks finish"
+                );
+            }
+            drop(app);
+            let _ = std::fs::remove_dir_all(root);
+        }
     }
 
     #[test]
