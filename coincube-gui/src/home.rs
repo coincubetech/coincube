@@ -1313,6 +1313,7 @@ impl Home {
             ));
         }
         match message {
+            Message::View(ViewMessage::Check) => self.on_focus(),
             Message::View(ViewMessage::ImportWallet) => {
                 let datadir_path = self.datadir_path.clone();
                 let network = self.network;
@@ -3233,7 +3234,11 @@ impl Home {
 
                 // On first login: catch-up sync unsynced cubes + fetch limits
                 if !was_authenticated && now_authenticated {
-                    let mut tasks = vec![task];
+                    // The startup probe may precede Connect's session restore
+                    // and its local settings updates. Refresh the visible list
+                    // even when every Cube is already synced (so catch-up has
+                    // nothing to do). FocusedCubes preserves an in-progress form.
+                    let mut tasks = vec![task, self.on_focus()];
 
                     // Tell the pane so it can rebroadcast the session
                     // check to every other open Cube tab — those panels
@@ -10192,6 +10197,90 @@ mod chain_identity_open_tests {
             let _ = home.update(m);
         }
         home
+    }
+
+    #[test]
+    fn connect_cube_recheck_refreshes_startup_snapshot_without_network_switch() {
+        let local = record("local", ChainId::Bitcoin);
+        let dir = bitcoin_datadir_with(vec![local.clone()]);
+        let mut home = loaded_home(&dir);
+        let mut connected = record("connected", ChainId::Bitcoin);
+        connected.remote_synced = true;
+        std::fs::write(
+            dir.join("bitcoin").join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![local, connected],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+
+        let messages = drain(home.update(Message::View(ViewMessage::Check)));
+        assert_eq!(messages.len(), 1, "recheck must run the directory probe");
+        for message in messages {
+            let _ = home.update(message);
+        }
+        assert_eq!(home.network, ChainId::Bitcoin);
+        let State::Cubes { cubes, .. } = &home.state else {
+            panic!("expected the Cube list");
+        };
+        assert_eq!(cubes.len(), 2);
+        assert!(cubes.iter().any(|cube| cube.id == "connected"));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn connect_startup_completion_refreshes_list_and_preserves_creation_form() {
+        use crate::app::view::ConnectAccountMessage;
+        use crate::services::coincube::{DuressCheckOutcome, DuressState};
+
+        for editing in [false, true] {
+            let mut connected = record("connected", ChainId::Bitcoin);
+            connected.remote_synced = true;
+            let dir = bitcoin_datadir_with(vec![connected]);
+            let mut home = loaded_home(&dir);
+            // Model a list read before startup's settings reconciliation.
+            home.state = State::Cubes {
+                cubes: vec![],
+                create_cube: editing,
+                source: ChainId::Bitcoin,
+            };
+            home.create_cube_name.value = "In progress".into();
+            let generation = home.connect_account.session_generation();
+            // No client/user is installed: exercise the dashboard transition
+            // without making network requests or accessing account storage.
+            let messages = drain(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::DuressStateChecked(
+                    DuressCheckOutcome::Ok(DuressState {
+                        active: false,
+                        unlock_at: None,
+                        enrolled: false,
+                        this_device_registered: false,
+                    }),
+                    generation,
+                    0,
+                ),
+            ))));
+            let refreshes: Vec<_> = messages
+                .into_iter()
+                .filter(|message| matches!(message, Message::FocusedCubes { .. }))
+                .collect();
+            assert_eq!(refreshes.len(), usize::from(!editing));
+            for message in refreshes {
+                let _ = home.update(message);
+            }
+            let State::Cubes {
+                cubes, create_cube, ..
+            } = &home.state
+            else {
+                panic!("expected Cube state");
+            };
+            assert_eq!(*create_cube, editing);
+            assert_eq!(cubes.len(), usize::from(!editing));
+            assert_eq!(home.create_cube_name.value, "In progress");
+            std::fs::remove_dir_all(dir).unwrap();
+        }
     }
 
     /// Click record `index`: the messages the click emitted, and the home
