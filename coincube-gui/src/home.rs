@@ -65,6 +65,20 @@ fn pending_advisory_notice(
 
 const NETWORKS: [ChainId; 5] = ChainId::LAUNCHER;
 
+/// Connect registration and remote-Cube matching must inspect every chain's
+/// settings directory, including BTCB2. `NETWORKS` is only the baseline
+/// launcher selector and intentionally excludes the two fork identities.
+fn locally_stored_cubes(datadir: &CoincubeDirectory) -> Vec<CubeSettings> {
+    ChainId::ALL
+        .iter()
+        .flat_map(|chain| {
+            settings::Settings::from_file(&datadir.network_directory(*chain))
+                .map(|settings| settings.cubes)
+                .unwrap_or_default()
+        })
+        .collect()
+}
+
 #[derive(Debug, Clone)]
 pub enum State {
     Unchecked,
@@ -591,13 +605,8 @@ impl Home {
 
                 // Collect local cube UUIDs across all networks
                 let mut local_uuids = std::collections::HashSet::new();
-                for net in &NETWORKS {
-                    let nd = datadir.network_directory(*net);
-                    if let Ok(s) = settings::Settings::from_file(&nd) {
-                        for cube in &s.cubes {
-                            local_uuids.insert(cube.id.clone());
-                        }
-                    }
+                for cube in locally_stored_cubes(&datadir) {
+                    local_uuids.insert(cube.id);
                 }
 
                 // Keep only server cubes with no local counterpart
@@ -3269,17 +3278,10 @@ impl Home {
                     if let Some(client) = self.connect_account.authenticated_client() {
                         let datadir = self.datadir_path.clone();
                         let owner = self.connect_owner();
-                        let mut unsynced: Vec<CubeSettings> = Vec::new();
-                        for net in &NETWORKS {
-                            let nd = datadir.network_directory(*net);
-                            if let Ok(s) = settings::Settings::from_file(&nd) {
-                                for cube in s.cubes {
-                                    if !cube.remote_synced {
-                                        unsynced.push(cube);
-                                    }
-                                }
-                            }
-                        }
+                        let unsynced: Vec<CubeSettings> = locally_stored_cubes(&datadir)
+                            .into_iter()
+                            .filter(|cube| !cube.remote_synced)
+                            .collect();
                         if !unsynced.is_empty() {
                             tasks.push(Task::perform(
                                 async move {
@@ -7116,6 +7118,39 @@ mod tests {
         path.push(format!("coincube-test-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&path).expect("mkdir tempdir");
         CoincubeDirectory::new(path)
+    }
+
+    #[test]
+    fn connect_catch_up_and_remote_matching_include_btcb2_cubes() {
+        let datadir = fresh_datadir();
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let mut cube = CubeSettings::new(chain.api_str().to_string(), chain);
+            cube.remote_synced = chain == ChainId::Bitcoin;
+            let directory = datadir.network_directory(chain);
+            std::fs::create_dir_all(directory.path()).unwrap();
+            std::fs::write(
+                directory.path().join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&settings::Settings {
+                    cubes: vec![cube],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+
+        let cubes = locally_stored_cubes(&datadir);
+        assert_eq!(cubes.len(), 2, "remote matching must see both chains");
+        assert_eq!(
+            cubes
+                .iter()
+                .filter(|cube| !cube.remote_synced)
+                .map(|cube| cube.network)
+                .collect::<Vec<_>>(),
+            vec![ChainId::BitcoinBlake2b],
+            "catch-up must register the unsynced BTCB2 Cube",
+        );
+        std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 
     #[test]
