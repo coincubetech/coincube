@@ -59,30 +59,42 @@ impl Btcb2Quote {
             || self.fiat != currency.to_string()
             || !self.price.is_finite()
             || self.price <= 0.0
-            || self.sources.len() != 2
+            || !(1..=2).contains(&self.sources.len())
             || !timestamp_fresh(self.updated_at, now)
         {
             return Err(unusable());
         }
-        let first = &self.sources[0];
-        let second = &self.sources[1];
-        if first.name == second.name
-            || self.sources.iter().any(|source| {
-                !matches!(source.name.as_str(), "nonkyc" | "neoxa")
-                    || !source.price.is_finite()
-                    || source.price <= 0.0
-                    || !timestamp_fresh(source.at, now)
-            })
-            || self.updated_at != first.at.min(second.at)
+        if self.sources.iter().any(|source| {
+            !matches!(source.name.as_str(), "nonkyc" | "neoxa")
+                || !source.price.is_finite()
+                || source.price <= 0.0
+                || !timestamp_fresh(source.at, now)
+        }) || self.updated_at
+            != self
+                .sources
+                .iter()
+                .map(|source| source.at)
+                .min()
+                .unwrap_or(0)
         {
             return Err(unusable());
         }
-        // Half-sums avoid overflowing two otherwise finite prices.
-        let median = first.price / 2.0 + second.price / 2.0;
-        if !median.is_finite()
-            || (self.price - median).abs() > median * 1e-12
-            || (first.price - second.price).abs() / median > 0.10
-        {
+        let expected = if self.sources.len() == 1 {
+            self.sources[0].price
+        } else {
+            let first = &self.sources[0];
+            let second = &self.sources[1];
+            if first.name == second.name {
+                return Err(unusable());
+            }
+            // Half-sums avoid overflowing two otherwise finite prices.
+            let midpoint = first.price / 2.0 + second.price / 2.0;
+            if !midpoint.is_finite() {
+                return Err(unusable());
+            }
+            midpoint
+        };
+        if (self.price - expected).abs() > expected * 1e-12 {
             return Err(unusable());
         }
         Ok(GetPriceResult {
@@ -154,7 +166,7 @@ mod tests {
     }
 
     #[test]
-    fn quote_matrix_requires_both_sources_and_fresh_matching_aggregate() {
+    fn quote_matrix_requires_fresh_matching_aggregate() {
         assert_eq!(
             quote().usable_price(Currency::USD, 1300).unwrap().value,
             102.0
@@ -179,7 +191,6 @@ mod tests {
             |q| q.updated_at = 1001,
             |q| {
                 q.sources[0].price = 50.0;
-                q.price = 77.0;
             },
         ];
         for mutate in variants {
@@ -193,24 +204,42 @@ mod tests {
         }
     }
 
-    /// coincube-api#298: the owner set the quote freshness limit to 5 minutes
-    /// and kept the 10% spread threshold.
     #[test]
-    fn freshness_limit_is_five_minutes_and_spread_stays_ten_percent() {
+    fn either_approved_market_can_supply_a_fresh_quote() {
+        for name in ["nonkyc", "neoxa"] {
+            let mut q = quote();
+            q.sources.retain(|source| source.name == name);
+            q.price = q.sources[0].price;
+            q.updated_at = q.sources[0].at;
+            assert_eq!(
+                q.usable_price(Currency::USD, q.updated_at).unwrap().value,
+                q.price
+            );
+
+            let mut invalid = q.clone();
+            invalid.price += 1.0;
+            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            let mut invalid = q.clone();
+            invalid.sources[0].at = q.updated_at - 301;
+            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            let mut invalid = q.clone();
+            invalid.stale = true;
+            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+        }
+    }
+
+    /// Two fresh markets may disagree; the displayed price is their average.
+    #[test]
+    fn freshness_limit_is_five_minutes_and_wide_market_quotes_are_averaged() {
         assert_eq!(MAX_QUOTE_AGE, 300);
         assert!(timestamp_fresh(1000, 1121));
         assert!(timestamp_fresh(1000, 1300));
         assert!(!timestamp_fresh(1000, 1301));
-        // Spread exactly 10% of the median is accepted; just above is refused.
-        let mut at_limit = quote();
-        at_limit.sources[0].price = 95.0;
-        at_limit.sources[1].price = 105.0;
-        at_limit.price = 100.0;
-        assert!(at_limit.usable_price(Currency::USD, 1001).is_ok());
-        let mut over = at_limit.clone();
-        over.sources[0].price = 94.9;
-        over.price = 99.95;
-        assert!(over.usable_price(Currency::USD, 1001).is_err());
+        let mut wide = quote();
+        wide.sources[0].price = 100.0;
+        wide.sources[1].price = 200.0;
+        wide.price = 150.0;
+        assert!(wide.usable_price(Currency::USD, 1001).is_ok());
     }
 
     #[tokio::test]
