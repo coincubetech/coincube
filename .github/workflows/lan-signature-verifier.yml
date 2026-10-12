@@ -1,0 +1,57 @@
+name: LAN signature verifier
+
+on:
+  push:
+    branches:
+      - master
+  pull_request:
+    paths:
+      - ".github/workflows/lan-signature-verifier.yml"
+      - "Cargo.lock"
+      - "Cargo.toml"
+      - "coincube-core/**"
+      - "coincube-gui/Cargo.toml"
+      - "coincube-gui/build.rs"
+      - "coincube-gui/src/dir.rs"
+      - "coincube-gui/src/phone_signer/**"
+      - "coincube-gui/src/services/connect/crypto/**"
+      - "coincube-gui/src/services/inheritance/**"
+      - "grpc/**"
+      - "rust-toolchain.toml"
+
+concurrency:
+  group: lan-signature-verifier-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  COINCUBE_ENABLE_PASSKEY: ${{ vars.COINCUBE_ENABLE_PASSKEY }}
+  COINCUBE_PASSKEY_RP_ID: ${{ vars.COINCUBE_PASSKEY_RP_ID }}
+
+jobs:
+  # Explicit package/filter: default workspace members must not determine this
+  # security boundary's coverage. No OS credentials or repository secrets.
+  lan_signature_verifier:
+    # macOS-only by design: it is the security boundary the shipped Apple
+    # binary crosses. Relevant PR heads run so downstream consumers can pin an
+    # exact reviewed revision; unrelated PRs do not spend the 10x macOS rate.
+    runs-on: macos-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - run: brew install protobuf
+      - name: Exact returned ECDSA and Schnorr signatures
+        env:
+          PROTOC: /opt/homebrew/bin/protoc
+          BREEZ_API_KEY: DUMMY_BREEZ_API_KEY
+        run: |
+          cargo test --locked -p coincube-gui --lib phone_signer::signature_tests -- --list > verifier-tests.txt
+          grep -q 'extra_valid_second_key_signature_is_rejected: test' verifier-tests.txt
+          grep -q 'owner_and_recovery_signatures_are_verified_for_tr_and_wsh: test' verifier-tests.txt
+          grep -q 'wrong_path_invalid_signature_and_empty_delta_are_refused: test' verifier-tests.txt
+          grep -q 'preexisting_signatures_cannot_be_removed_or_replaced: test' verifier-tests.txt
+          cargo test --locked -p coincube-gui --lib phone_signer::signature_tests -- --nocapture
