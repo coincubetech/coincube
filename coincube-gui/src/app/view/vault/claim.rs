@@ -425,14 +425,17 @@ fn plan_view<'a>(
         ).style(theme::text::secondary))
         .push(
             Row::new()
-                .spacing(15)
+                .spacing(20)
+                .push(Space::new().width(Length::Fill))
                 .push(
-                    button::secondary(None, "Cancel").on_press(Message::Claim(ClaimMessage::Cancel)),
+                    button::secondary(None, "Cancel")
+                        .on_press(Message::Claim(ClaimMessage::Cancel))
+                        .width(Length::Fixed(150.0)),
                 )
                 .push(
                     button::primary(None, "Sign")
                         .on_press_maybe(return_address.is_ok().then_some(Message::Claim(ClaimMessage::Sign)))
-                        .width(Length::Fixed(200.0)),
+                        .width(Length::Fixed(150.0)),
                 ),
         )
         .into()
@@ -492,7 +495,7 @@ fn sign_view<'a>(
                 "Sign with this Vault's keys"
             }))
             .push_maybe(error.map(|reason| card::warning(reason.to_string())))
-            .push(psbt::spend_overview_view(
+            .push(psbt::spend_overview_with_cancel(
                 &state.tx,
                 &state.desc_policy,
                 &state.wallet.keys_aliases,
@@ -500,10 +503,8 @@ fn sign_view<'a>(
                 state.saved,
                 None,
                 state.broadcast_ready(cache),
-            ))
-            .push_maybe((!finalizing).then(|| {
-                button::secondary(None, "Cancel").on_press(Message::Claim(ClaimMessage::Cancel))
-            })),
+                (!finalizing).then_some(Message::Claim(ClaimMessage::Cancel)),
+            )),
     );
     match &state.modal {
         Some(modal) => {

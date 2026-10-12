@@ -621,6 +621,29 @@ pub fn spend_overview_view<'a>(
     replay: Option<ReplayPill<'a>>,
     broadcast_ready: bool,
 ) -> Element<'a, Message> {
+    spend_overview_with_cancel(
+        tx,
+        desc_info,
+        key_aliases,
+        currently_signing,
+        saved,
+        replay,
+        broadcast_ready,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn spend_overview_with_cancel<'a>(
+    tx: &'a SpendTx,
+    desc_info: &'a CoincubePolicy,
+    key_aliases: &'a HashMap<Fingerprint, String>,
+    currently_signing: bool,
+    saved: bool,
+    replay: Option<ReplayPill<'a>>,
+    broadcast_ready: bool,
+    cancel: Option<Message>,
+) -> Element<'a, Message> {
     // The state supplies cryptographically verified readiness. Claimed
     // signature counts below are progress hints only.
     let sign_or_broadcast = match &replay {
@@ -707,11 +730,15 @@ pub fn spend_overview_view<'a>(
             )
             .style(theme::card::simple),
         )
-        .push(if tx.status == SpendStatus::Pending {
+        .push(if tx.status == SpendStatus::Pending || cancel.is_some() {
             Some(
                 Row::new()
                     .push(Space::new().width(Length::Fill))
-                    .push(if sign_or_broadcast {
+                    .push_maybe(cancel.map(|message| button::secondary(None, "Cancel")
+                        .on_press(message).width(Length::Fixed(150.0))))
+                    .push(if tx.status != SpendStatus::Pending {
+                        None
+                    } else if sign_or_broadcast {
                         // A single "Sign" entry point opens the unified
                         // picker, which lists every signer — local (HW,
                         // master, border) and Keychain (contacts' phones) —
