@@ -40,9 +40,9 @@ pub fn recovery_icon<'a>() -> Text<'a> {
     bootstrap_icon('\u{F467}')
 }
 
-/// The original Bitcoin path branching into Bitcoin and BTCB2.
+/// Bootstrap `diagram-2`: the Bitcoin path branching into Bitcoin and BTCB2.
 pub fn claim_icon<'a>() -> Text<'a> {
-    bootstrap_icon('\u{F52E}')
+    bootstrap_icon('\u{F2EC}')
 }
 
 pub fn plug_icon<'a>() -> Text<'a> {
