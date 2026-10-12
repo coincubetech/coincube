@@ -12,7 +12,7 @@ use coincube_core::{
     miniscript::bitcoin::Amount,
 };
 use coincube_ui::{
-    component::{amount::*, button, card, text::*},
+    component::{amount::*, button, card, collapse::Collapse, text::*},
     icon, theme,
     widget::{ColumnExt, Element},
 };
@@ -379,6 +379,23 @@ fn plan_view<'a>(
                 None => format_amount(fee, cache),
             }),
         ));
+    if let Some(output) = tx.output.iter().find(|o| o.script_pubkey.is_op_return()) {
+        summary = summary.push(Collapse::new(
+            || {
+                button::secondary(
+                    Some(icon::collapse_icon()),
+                    "Replay-protection marker details",
+                )
+            },
+            || {
+                button::secondary(
+                    Some(icon::collapsed_icon()),
+                    "Replay-protection marker details",
+                )
+            },
+            move || marker_details(&output.script_pubkey),
+        ));
+    }
     for warning in built.warnings() {
         summary = summary.push(
             Row::new()
@@ -418,6 +435,41 @@ fn plan_view<'a>(
                         .width(Length::Fixed(200.0)),
                 ),
         )
+        .into()
+}
+
+/// Inspect the actual output, rather than reconstructing labels from UI state.
+fn marker_details<'a>(script: &coincube_core::miniscript::bitcoin::Script) -> Element<'a, Message> {
+    use coincube_core::{chain::ChainId, split_poison::split_poison_details};
+    let mut content = Column::new().spacing(10).padding(10);
+    match split_poison_details(script) {
+        Some(details) => {
+            let network = match details.chain {
+                ChainId::Bitcoin => "Bitcoin mainnet",
+                ChainId::Testnet4 => "Bitcoin testnet4",
+                _ => unreachable!("marker decoder accepts only Bitcoin networks"),
+            };
+            content = content
+                .push(row("Format", p2_regular(format!("REPLAY-PROTECT v{}", details.version))))
+                .push(row("Network", p2_regular(network)))
+                .push(p2_regular(format!("Fork anchor: {}", details.fork_marker)))
+                .push(p2_regular(format!("Selected-input commitment (SHA-256): {}", details.input_commitment)))
+                .push(p2_regular("87 bytes of data, including 7 zero padding bytes; 3 bytes of script overhead."))
+                .push(p2_regular("These public labels identify the intended fork and selected inputs. They do not independently prove chain state. No personal message is included.").style(theme::text::secondary));
+        }
+        None => {
+            content = content.push(
+                p2_regular("Unrecognized replay-protection marker.").style(theme::text::warning),
+            );
+        }
+    }
+    content
+        .push(p2_regular("Raw output script (hex)"))
+        .push(scrollable(p2_regular(script.to_hex_string())).direction(
+            scrollable::Direction::Horizontal(
+                scrollable::Scrollbar::new().width(2).scroller_width(2),
+            ),
+        ))
         .into()
 }
 
