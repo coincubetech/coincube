@@ -20,7 +20,7 @@ use coincube_ui::{
 use crate::{
     app::{
         cache::Cache,
-        menu::{Menu, VaultSubMenu},
+        menu::Menu,
         state::vault::{
             claim::{
                 describe_duration, ClaimStep1Panel, CoinSet, ForkWindow, Preconditions, Refusal,
@@ -404,10 +404,8 @@ fn plan_view<'a>(
             "For an independent check, compare the return address and change index in a separate watch-only copy of this Vault before signing.",
         ).style(theme::text::secondary))
         .push(p2_regular(
-            "To test with a small amount first, use Receive to get a fresh address and send Bitcoin from another wallet. Once confirmed, use Coins to select only that test coin and spend it back. Check the selected input before signing. This does not split the claim coins or verify this exact return address.",
+            "To test receipt first, use Copy address and send a small amount of BTC from another wallet to the return address above. Wait for confirmation before the full replay-protection transaction. This verifies receipt only. If you rebuild the claim, check the return address again before signing.",
         ).style(theme::text::secondary))
-        .push(button::secondary(None, "Get test receive address")
-            .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Receive))))
         .push(
             Row::new()
                 .spacing(15)
