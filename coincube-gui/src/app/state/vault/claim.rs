@@ -1097,6 +1097,11 @@ impl ClaimStep1Panel {
         let Stage::Plan { built } = &self.stage else {
             return Task::none();
         };
+        if let Err(error) = built.verified_return_address(&self.wallet) {
+            return Task::done(Message::View(view::Message::ShowError(format!(
+                "Cannot sign: the return address could not be verified against this Vault. {error}"
+            ))));
+        }
         if built.selected_ancestry_input().is_none() {
             self.start_signing();
             return Task::none();

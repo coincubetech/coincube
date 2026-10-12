@@ -1207,18 +1207,22 @@ mod flow {
         assert_eq!(produced.len(), 1);
         let _ = p.update(Some(dyn_daemon.clone()), &cache, produced.remove(0));
         let (unsigned_txid, marker_len, change_index) = match &p.stage {
-            Stage::Plan { built } => (
-                built.psbt().unsigned_tx.compute_txid(),
-                built
-                    .psbt()
-                    .unsigned_tx
-                    .output
-                    .iter()
-                    .find(|o| o.script_pubkey.is_op_return())
-                    .map(|o| o.script_pubkey.len())
-                    .unwrap(),
-                built.change_index(),
-            ),
+            Stage::Plan { built } => {
+                let address = built.verified_return_address(&wallet).unwrap();
+                assert!(address.starts_with("bc1"));
+                (
+                    built.psbt().unsigned_tx.compute_txid(),
+                    built
+                        .psbt()
+                        .unsigned_tx
+                        .output
+                        .iter()
+                        .find(|o| o.script_pubkey.is_op_return())
+                        .map(|o| o.script_pubkey.len())
+                        .unwrap(),
+                    built.change_index(),
+                )
+            }
             _ => panic!("expected the plan stage"),
         };
         assert_eq!(change_index, ChildNumber::from_normal_idx(12).unwrap());
