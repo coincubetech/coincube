@@ -70,7 +70,7 @@ SIGHASH_ALL = 1
 # The poison payload (`coincube-core/src/split_poison.rs`), parsed here
 # independently of the Rust decoder: tag, version, chain byte (0 = Bitcoin
 # mainnet), fork marker, outpoint commitment, zero padding.
-POISON_TAG = b"COINCUBE-SPLIT"
+POISON_TAG = b"REPLAY-PROTECT"
 POISON_VERSION = 1
 POISON_CHAIN_BITCOIN = 0
 # Step-2 target kind per shape: one P2TR, the rest P2WSH (the Vault types).

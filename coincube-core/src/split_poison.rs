@@ -13,13 +13,12 @@ use std::{collections::BTreeSet, convert::TryFrom};
 use miniscript::bitcoin::{
     self,
     hashes::{sha256, Hash},
-    script::Instruction,
     BlockHash, OutPoint, ScriptBuf,
 };
 
 use crate::chain::ChainId;
 
-const TAG: &[u8; 14] = b"COINCUBE-SPLIT";
+const TAG: &[u8; 14] = b"REPLAY-PROTECT";
 const PAYLOAD_VERSION: u8 = 1;
 const PAYLOAD_LEN: usize = 87;
 /// Total scriptPubKey length: OP_RETURN, OP_PUSHDATA1, length byte, payload.
@@ -67,23 +66,44 @@ pub fn split_poison_script(
     Some(poison)
 }
 
-/// Read the fork label from a recorded poison script, or `None` if the script
-/// is not exactly OP_RETURN followed by one 87-byte push. Only the shape is
-/// checked here; a rebuild through [`split_poison_script`] must then reproduce
-/// the whole script, which checks the tag, version, chain byte and input
-/// commitment.
-pub fn split_poison_fork_marker(script: &bitcoin::Script) -> Option<BlockHash> {
-    let mut instructions = script.instructions();
-    if instructions.next() != Some(Ok(Instruction::Op(bitcoin::opcodes::all::OP_RETURN))) {
+/// Decoded labels from the canonical neutral marker. These are not proof of
+/// chain state or input ownership; callers still authenticate/rebuild the spend.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SplitPoisonDetails {
+    pub version: u8,
+    pub chain: ChainId,
+    pub fork_marker: BlockHash,
+    pub input_commitment: sha256::Hash,
+}
+
+/// Decode only the canonical format: OP_RETURN, PUSHDATA1, 87-byte payload,
+/// neutral tag, supported version/network, and zero padding. The input
+/// commitment is verified against the actual inputs by rebuilding the spend.
+pub fn split_poison_details(script: &bitcoin::Script) -> Option<SplitPoisonDetails> {
+    let bytes = script.as_bytes();
+    if bytes.len() != SCRIPT_LEN || bytes[..3] != [0x6a, 0x4c, PAYLOAD_LEN as u8] {
         return None;
     }
-    let Some(Ok(Instruction::PushBytes(payload))) = instructions.next() else {
+    let payload = &bytes[3..];
+    if &payload[..14] != TAG || payload[14] != PAYLOAD_VERSION || payload[80..] != [0; 7] {
         return None;
+    }
+    let chain = match payload[15] {
+        0 => ChainId::Bitcoin,
+        1 => ChainId::Testnet4,
+        _ => return None,
     };
-    if payload.len() != PAYLOAD_LEN || instructions.next().is_some() {
-        return None;
-    }
-    BlockHash::from_slice(&payload.as_bytes()[16..48]).ok()
+    Some(SplitPoisonDetails {
+        version: payload[14],
+        chain,
+        fork_marker: BlockHash::from_slice(&payload[16..48]).ok()?,
+        input_commitment: sha256::Hash::from_slice(&payload[48..80]).ok()?,
+    })
+}
+
+/// Read the fork label only from a canonical neutral marker.
+pub fn split_poison_fork_marker(script: &bitcoin::Script) -> Option<BlockHash> {
+    split_poison_details(script).map(|details| details.fork_marker)
 }
 
 #[cfg(test)]
@@ -117,6 +137,53 @@ mod tests {
                 assert_eq!(split_poison_fork_marker(&script), Some(marker));
             }
         }
+    }
+
+    #[test]
+    fn details_match_the_actual_payload_and_inputs() {
+        let marker = BlockHash::from_byte_array([7; 32]);
+        for chain in [ChainId::Bitcoin, ChainId::Testnet4] {
+            let script = split_poison_script(chain, marker, &outpoints()).unwrap();
+            let details = split_poison_details(&script).unwrap();
+            assert_eq!(details.version, 1);
+            assert_eq!(details.chain, chain);
+            assert_eq!(details.fork_marker, marker);
+            let serialized: Vec<_> = outpoints()
+                .iter()
+                .flat_map(bitcoin::consensus::serialize)
+                .collect();
+            assert_eq!(details.input_commitment, sha256::Hash::hash(&serialized));
+            assert_eq!(&script.as_bytes()[3..17], b"REPLAY-PROTECT");
+            let changed = split_poison_script(chain, marker, &BTreeSet::new()).unwrap();
+            assert_ne!(
+                split_poison_details(&changed).unwrap().input_commitment,
+                details.input_commitment
+            );
+        }
+    }
+
+    #[test]
+    fn parser_rejects_legacy_and_noncanonical_markers() {
+        let good = split_poison_script(
+            ChainId::Bitcoin,
+            BlockHash::from_byte_array([7; 32]),
+            &outpoints(),
+        )
+        .unwrap();
+        for offset in [0, 1, 2, 3, 17, 18, 83, 89] {
+            let mut bytes = good.to_bytes();
+            bytes[offset] = 0xff;
+            let bad = ScriptBuf::from_bytes(bytes);
+            assert!(split_poison_details(&bad).is_none(), "offset {}", offset);
+            assert!(split_poison_fork_marker(&bad).is_none());
+        }
+        let mut legacy = good.to_bytes();
+        legacy[3..17].copy_from_slice(b"COINCUBE-SPLIT");
+        assert!(split_poison_details(&ScriptBuf::from_bytes(legacy)).is_none());
+        let bytes = good.as_bytes();
+        let mut nonminimal = vec![0x6a, 0x4d, 87, 0];
+        nonminimal.extend_from_slice(&bytes[3..]);
+        assert!(split_poison_details(&ScriptBuf::from_bytes(nonminimal)).is_none());
     }
 
     #[test]

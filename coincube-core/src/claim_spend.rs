@@ -1532,6 +1532,11 @@ mod tests {
             assert_eq!(restored.change_index(), index);
             assert_eq!(restored.chain(), chain);
             let mut mutations = Vec::new();
+            let mut legacy = built.psbt.unsigned_tx.clone();
+            let mut legacy_script = legacy.output[0].script_pubkey.to_bytes();
+            legacy_script[3..17].copy_from_slice(b"COINCUBE-SPLIT");
+            legacy.output[0].script_pubkey = bitcoin::ScriptBuf::from_bytes(legacy_script);
+            mutations.push(legacy);
             let mut tx = built.psbt.unsigned_tx.clone();
             tx.output[1].script_pubkey = desc
                 .receive_descriptor()
@@ -1684,21 +1689,20 @@ mod tests {
             Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
         ));
     }
-    /// Golden bytes pinned before the OP_RETURN builder was shared with
-    /// Split step 1. Any change to Claim's poison payload, output order,
-    /// economics or PSBT metadata fails here.
+    /// Golden bytes for the neutral marker shared with Split step 1. Any change
+    /// to Claim's poison payload, output order, economics or PSBT metadata fails here.
     #[test]
     fn claim_poison_bytes_are_pinned() {
         for (chain, script_hex, psbt_digest) in [
             (
                 ChainId::Bitcoin,
-                "6a4c57434f494e435542452d53504c495401002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a749deaf27f2caf93c571f4cbe3c4450d6eb6ac07fc0885c8a9948bd32bb5c0d500000000000000",
-                "2d2675c76bd4b96aa57fa42c6476a1d1def276775dd281bbdab9a1d3a22f19ba",
+                "6a4c575245504c41592d50524f5445435401002a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a749deaf27f2caf93c571f4cbe3c4450d6eb6ac07fc0885c8a9948bd32bb5c0d500000000000000",
+                "4c7590b13ea6a34be279d38bbd9e5861775e6c50a44a13f730292990c25fab5f",
             ),
             (
                 ChainId::Testnet4,
-                "6a4c57434f494e435542452d53504c495401012a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a749deaf27f2caf93c571f4cbe3c4450d6eb6ac07fc0885c8a9948bd32bb5c0d500000000000000",
-                "207980e684e5c252d2a15ec66b38f88d1fb5ece762d2df0fcb0d20ef415f7e94",
+                "6a4c575245504c41592d50524f5445435401012a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a749deaf27f2caf93c571f4cbe3c4450d6eb6ac07fc0885c8a9948bd32bb5c0d500000000000000",
+                "801d86cb981e6af06c62232a7b9a4e3dd4149a5deece258264a684ae747158bb",
             ),
         ] {
             let (desc, coins, mut getter) = fixture();
