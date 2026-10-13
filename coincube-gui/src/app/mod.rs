@@ -8305,6 +8305,21 @@ impl App {
                 }
             }
             Message::View(view::Message::Clipboard(text)) => return clipboard::write(text),
+            Message::View(view::Message::CopyWithToast(text, notice)) => {
+                return clipboard::write(text.clone()).chain(clipboard::read().map(
+                    move |copied| {
+                        let (level, message) = if copied.as_deref() == Some(text.as_str()) {
+                            (log::Level::Info, notice.clone())
+                        } else {
+                            (
+                                log::Level::Error,
+                                "Could not copy to clipboard. Please try again.".to_string(),
+                            )
+                        };
+                        Message::View(view::Message::ShowToast(level, message))
+                    },
+                ));
+            }
             msg @ Message::View(view::Message::Home(_)) => {
                 return self
                     .panels

@@ -139,6 +139,8 @@ pub enum Message {
     Scroll(f32),
     Reload,
     Clipboard(String),
+    /// Copy text and show confirmation after the clipboard write is requested.
+    CopyWithToast(String, String),
     Menu(Menu),
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
@@ -188,6 +190,8 @@ pub enum Message {
     Next,
     Previous,
     SelectHardwareWallet(usize),
+    /// Sign a PSBT with the matching device even if device enumeration changes.
+    SelectPsbtHardwareWallet(Fingerprint),
     CreateRbf(CreateRbfMessage),
     ShowQrCode(usize),
     ImportExport(ImportExportMessage),

@@ -1182,7 +1182,8 @@ impl ClaimStep1Panel {
             &secp,
             self.wallet.chain.bitcoin_network(),
         );
-        let psbt = PsbtState::new(self.wallet.clone(), tx, false);
+        let mut psbt = PsbtState::new(self.wallet.clone(), tx, false);
+        psbt.disable_keychain_signing();
         self.stage = Stage::Sign {
             built: Some(built),
             psbt: Box::new(psbt),

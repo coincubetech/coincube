@@ -127,6 +127,7 @@ pub(crate) fn claim_signing_dispatch(message: &Message) -> bool {
     matches!(
         message,
         Message::View(view::Message::SelectHardwareWallet(_))
+            | Message::View(view::Message::SelectPsbtHardwareWallet(_))
             | Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectMasterSigner
                     | view::SpendTxMessage::SelectKeychainSigner(_)
@@ -155,6 +156,8 @@ pub struct PsbtState {
     /// the Claim coordinator. Each signer dispatch consumes a fresh check.
     claim_signing: bool,
     claim_dispatch: Option<Arc<replay::SplitEvidence>>,
+    /// A claim signed with local devices has no Connect Keychain vault to fetch.
+    keychain_signing_enabled: bool,
     /// The spend screen's own re-check of a replayable spend's inputs
     /// against the twin chain (`#276` I13, cache lifecycle): a sync-time
     /// *not entangled* has a shelf life, so it is asked again at the moment
@@ -227,6 +230,7 @@ impl PsbtState {
             replay,
             claim_signing: false,
             claim_dispatch: None,
+            keychain_signing_enabled: true,
             entangled_check: EntangledCheck::Idle,
             revalidated_for: None,
             bitcoin_finalization: std::sync::Mutex::new(None),
@@ -470,6 +474,11 @@ impl PsbtState {
         self.claim_signing = true;
         self.claim_dispatch = None;
         true
+    }
+
+    /// Keep the ordinary hardware picker while omitting Connect Keychain lookups.
+    pub fn disable_keychain_signing(&mut self) {
+        self.keychain_signing_enabled = false;
     }
 
     pub(crate) fn consume_claim_signing_permit(&mut self) -> bool {
@@ -813,8 +822,11 @@ impl PsbtState {
                 // labels by the time the user reads the picker. When Connect
                 // isn't ready this is `None` and the picker shows keychain
                 // rows derived from the descriptor, disabled with a hint.
-                let (keychain, kc_launch) =
-                    build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt);
+                let (keychain, kc_launch) = if self.keychain_signing_enabled {
+                    build_keychain_if_ready(cache, &self.wallet, &self.tx.psbt)
+                } else {
+                    (None, Task::none())
+                };
                 let modal = SignModal::new(
                     self.tx.signers(),
                     self.wallet.clone(),
@@ -823,7 +835,7 @@ impl PsbtState {
                     self.saved,
                     self.tx.recovery_timelock(),
                     keychain,
-                    true,
+                    self.keychain_signing_enabled,
                 )
                 .with_connect_account(ConnectAccountStatus::from_cache(cache));
                 let cmd = modal.load(daemon);
@@ -1732,6 +1744,8 @@ pub struct SignModal {
     hws: HardwareWallets,
     network: Network,
     error: Option<Error>,
+    /// A signer-specific limitation that should be visible inside the picker.
+    signer_notice: Option<String>,
     signing: HashSet<Fingerprint>,
     signed: HashSet<Fingerprint>,
     is_saved: bool,
@@ -1783,6 +1797,7 @@ impl SignModal {
             wallet,
             network,
             error: None,
+            signer_notice: None,
             signed,
             is_saved,
             display_modal: true,
@@ -2419,36 +2434,69 @@ impl Modal for SignModal {
                 if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
                     return refused;
                 }
-                if let Some(
-                    hw @ HardwareWallet::Supported {
-                        fingerprint,
-                        device,
-                        ..
-                    },
-                ) = self.hws.list.get(i)
+                if let Some(fingerprint) =
+                    self.hws.list.get(i).and_then(HardwareWallet::fingerprint)
                 {
+                    return self.update(
+                        daemon,
+                        Message::View(view::Message::SelectPsbtHardwareWallet(fingerprint)),
+                        tx,
+                    );
+                }
+                let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+                self.signer_notice = Some(reason.to_string());
+                return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
+            }
+            Message::View(view::Message::SelectPsbtHardwareWallet(requested_fp)) => {
+                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                    return refused;
+                }
+                self.error = None;
+                self.signer_notice = None;
+                let selected = self
+                    .hws
+                    .list
+                    .iter()
+                    .find(|hw| hw.fingerprint() == Some(requested_fp) && !hw.is_lan_phone())
+                    .or_else(|| {
+                        self.hws
+                            .list
+                            .iter()
+                            .find(|hw| hw.fingerprint() == Some(requested_fp))
+                    })
+                    .and_then(|hw| match hw {
+                        HardwareWallet::Supported {
+                            fingerprint,
+                            device,
+                            ..
+                        } => Some((*fingerprint, device.clone(), hw.is_lan_phone())),
+                        _ => None,
+                    });
+                if let Some((fingerprint, device, over_lan)) = selected {
                     // A fresh attempt over the local network supersedes the
                     // last failure; the row goes back to "Signing…". Recorded
                     // here rather than looked up when the result lands: a
                     // phone whose connection died has usually left the device
                     // list by then, and its failure is still a Wi-Fi one.
-                    if hw.is_lan_phone() {
-                        self.lan_failures.remove(fingerprint);
-                        self.lan_signing.insert(*fingerprint);
+                    if over_lan {
+                        self.lan_failures.remove(&fingerprint);
+                        self.lan_signing.insert(fingerprint);
                     }
                     // Keep the modal open (as the master-signer path below
                     // does) so the selected device shows its "Processing… /
                     // Please check your device" state while we wait for the
                     // signature, rather than the modal vanishing with no
                     // indication that the device is awaiting confirmation.
-                    self.signing.insert(*fingerprint);
+                    self.signing.insert(fingerprint);
                     let psbt = tx.psbt.clone();
-                    let fingerprint = *fingerprint;
                     return Task::perform(
-                        sign_psbt(self.wallet.clone(), device.clone(), psbt),
+                        sign_psbt(self.wallet.clone(), device, psbt),
                         move |res| Message::Signed(fingerprint, res),
                     );
                 }
+                let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+                self.signer_notice = Some(reason.to_string());
+                return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
                 if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
@@ -2556,6 +2604,7 @@ impl Modal for SignModal {
                     }
                     Ok(psbt) => {
                         self.error = None;
+                        self.signer_notice = None;
                         // Bring the picker back into view after a local sign
                         // (the border-wallet path hides it during the async
                         // reconstruction). The picker now closes only when the
@@ -2708,9 +2757,16 @@ impl Modal for SignModal {
             } else {
                 let paths = self.signing_paths();
                 let notices = self.sign_notices(&paths);
-                modal::Modal::new(content, view::vault::psbt::sign_action(paths, notices))
-                    .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
-                    .into()
+                let error = self
+                    .signer_notice
+                    .clone()
+                    .or_else(|| self.error.as_ref().map(crate::user_error::report));
+                modal::Modal::new(
+                    content,
+                    view::vault::psbt::sign_action(paths, notices, error),
+                )
+                .on_blur(Some(view::Message::Spend(view::SpendTxMessage::Cancel)))
+                .into()
             }
         } else {
             content
@@ -3040,6 +3096,43 @@ mod tests {
         };
         let (modal, _task) = build_keychain_if_ready(&ready, &wallet, &psbt);
         assert!(modal.is_some());
+    }
+
+    #[test]
+    fn claim_signing_does_not_fetch_a_connect_keychain_vault() {
+        let fixture = crate::app::state::vault::test_support::unified::fixture();
+        let wallet = Arc::new(Wallet::new(fixture.descriptor.clone()));
+        let tx = SpendTx::new(
+            None,
+            fixture.psbt,
+            Vec::new(),
+            &wallet.main_descriptor,
+            &secp256k1::Secp256k1::verification_only(),
+            Network::Signet,
+        );
+        let mut state = PsbtState::new(wallet, tx, false);
+        state.disable_keychain_signing();
+        let ready = Cache {
+            connect_grpc_url: Some("https://grpc.example.test".to_string()),
+            connect_tokens: Some(tokens()),
+            connect_device_id: Some("device-1".to_string()),
+            current_cube_server_id: Some(42),
+            cube_id: "cube-local".to_string(),
+            ..Cache::default()
+        };
+        assert!(keychain_connect_missing(&ready).is_empty());
+        let daemon: Arc<dyn crate::daemon::Daemon + Sync + Send> =
+            Arc::new(Coincubed::new(Daemon::new(vec![]).run()));
+        let _ = state.update(
+            daemon,
+            &ready,
+            Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
+        );
+        let Some(PsbtModal::Sign(sign)) = state.modal.as_ref() else {
+            panic!("claim signing picker should open");
+        };
+        assert!(!sign.keychain_enabled);
+        assert!(sign.keychain.is_none());
     }
 
     #[test]
@@ -3730,6 +3823,35 @@ mod tests {
             device("ledger-usb-1", fingerprint(USB_FP)),
         ];
         modal
+    }
+
+    #[test]
+    fn psbt_device_selection_uses_fingerprint_after_list_reorders() {
+        let mut modal = picker_with_phone(None);
+        modal.hws.list.swap(0, 1);
+        let (daemon, mut tx) = update_args();
+        let request = Message::View(view::Message::SelectPsbtHardwareWallet(fingerprint(USB_FP)));
+        let _ = modal.update(daemon, request, &mut tx);
+        assert!(modal.signing.contains(&fingerprint(USB_FP)));
+        assert!(!modal.signing.contains(&fingerprint(PHONE_FP)));
+    }
+
+    #[test]
+    fn missing_signing_device_keeps_the_explanation_in_the_modal() {
+        for request in [
+            view::Message::SelectHardwareWallet(0),
+            view::Message::SelectPsbtHardwareWallet(fingerprint(USB_FP)),
+        ] {
+            let mut modal = picker_with_phone(None);
+            modal.hws.list.clear();
+            let (daemon, mut tx) = update_args();
+            let _ = modal.update(daemon, Message::View(request), &mut tx);
+            assert!(modal
+                .signer_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Reconnect or unlock it")));
+            assert!(modal.signing.is_empty());
+        }
     }
 
     /// HW-1 item 7: on a Bitcoin Blake2b Vault, the picker shows the Split
