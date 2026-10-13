@@ -2466,20 +2466,11 @@ impl Modal for SignModal {
                         HardwareWallet::Supported {
                             fingerprint,
                             device,
-                            kind,
                             ..
-                        } => Some((*fingerprint, device.clone(), *kind, hw.is_lan_phone())),
+                        } => Some((*fingerprint, device.clone(), hw.is_lan_phone())),
                         _ => None,
                     });
-                if let Some((fingerprint, device, kind, over_lan)) = selected {
-                    if bitbox_rejects_transaction_output(&kind, &tx.psbt) {
-                        self.signer_notice = Some(if self.wallet.chain.is_blake2b() {
-                            "Tenshu's BitBox signing support cannot sign this transaction because it contains a replay-protection marker. No signature was added. Keep the marker in place and use another signing device enrolled in this Vault."
-                        } else {
-                            "Tenshu's BitBox signing support cannot sign this transaction because it contains an OP_RETURN output. No signature was added. Use another signing device enrolled in this Vault."
-                        }.to_string());
-                        return Task::none();
-                    }
+                if let Some((fingerprint, device, over_lan)) = selected {
                     // A fresh attempt over the local network supersedes the
                     // last failure; the row goes back to "Signing…". Recorded
                     // here rather than looked up when the result lands: a
@@ -2937,18 +2928,6 @@ async fn sign_psbt_with_master_signer(
             Err(WalletError::MasterSigner("Master signer not loaded".to_string()).into()),
         )
     }
-}
-
-/// bitbox-api 0.9 only converts address outputs to its signing protocol.
-/// It rejects OP_RETURN before asking the device to sign; keep the marker
-/// intact and explain the limitation before starting a doomed attempt.
-fn bitbox_rejects_transaction_output(kind: &async_hwi::DeviceKind, psbt: &Psbt) -> bool {
-    *kind == async_hwi::DeviceKind::BitBox02
-        && psbt
-            .unsigned_tx
-            .output
-            .iter()
-            .any(|output| output.script_pubkey.is_op_return())
 }
 
 async fn sign_psbt(
@@ -3852,26 +3831,6 @@ mod tests {
         let _ = modal.update(daemon, request, &mut tx);
         assert!(modal.signing.contains(&fingerprint(USB_FP)));
         assert!(!modal.signing.contains(&fingerprint(PHONE_FP)));
-    }
-
-    #[test]
-    fn bitbox_refuses_op_return_before_dispatch() {
-        use coincube_core::miniscript::bitcoin::ScriptBuf;
-
-        let mut psbt = crate::app::state::vault::test_support::unified::fixture().psbt;
-        assert!(!bitbox_rejects_transaction_output(
-            &async_hwi::DeviceKind::BitBox02,
-            &psbt
-        ));
-        psbt.unsigned_tx.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x6a, 0x01, 0x00]);
-        assert!(bitbox_rejects_transaction_output(
-            &async_hwi::DeviceKind::BitBox02,
-            &psbt
-        ));
-        assert!(!bitbox_rejects_transaction_output(
-            &async_hwi::DeviceKind::Ledger,
-            &psbt
-        ));
     }
 
     /// HW-1 item 7: on a Bitcoin Blake2b Vault, the picker shows the Split
