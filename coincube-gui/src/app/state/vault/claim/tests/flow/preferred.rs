@@ -114,6 +114,7 @@ fn flow_daemon(fixture: &Fixture, base_url: &str, selected: &Coin) -> Arc<FlowDa
     let root = std::env::temp_dir().join(format!("claim-preferred-{}", uuid::Uuid::new_v4()));
     let config = toml::from_str(&format!("main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n", fixture.descriptor, root.display(), base_url)).unwrap();
     Arc::new(FlowDaemon {
+        binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&config),
         config,
         coin: fixture.coin.clone(),
         previous: fixture.previous.clone(),
@@ -139,6 +140,7 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
     let mut fork_position = Some(fork_position);
     let config = toml::from_str(&format!("main_descriptor = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n", fixture.descriptor, server.base_url())).unwrap();
     let daemon = Arc::new(FlowDaemon {
+        binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&config),
         config,
         coin: fixture.coin.clone(),
         previous: fixture.previous,
@@ -364,6 +366,7 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
     let mut immature = selected.clone();
     immature.is_immature = true;
     let changed = Arc::new(FlowDaemon {
+        binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&daemon.config),
         config: daemon.config.clone(),
         coin: daemon.coin.clone(),
         previous: daemon.previous.clone(),
@@ -408,6 +411,7 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         let mut bad_coin = selected.clone();
         bad_coin.derivation_index = derivation;
         let bad = Arc::new(FlowDaemon {
+            binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&daemon.config),
             config: daemon.config.clone(),
             coin: daemon.coin.clone(),
             previous: daemon.previous.clone(),

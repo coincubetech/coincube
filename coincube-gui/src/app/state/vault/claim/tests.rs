@@ -615,6 +615,7 @@ mod flow {
     #[derive(Debug)]
     struct FlowDaemon {
         config: coincubed::config::Config,
+        binding: coincubed::poison_broadcast::ClaimBackendBinding,
         coin: Coin,
         previous: Transaction,
         submitted: Mutex<Option<Transaction>>,
@@ -776,16 +777,14 @@ mod flow {
             self.hit("reserve_change");
             Ok(ChildNumber::from_normal_idx(12).unwrap())
         }
-        #[cfg(feature = "regtest-harness")]
         async fn claim_backend_binding(
             &self,
         ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {
-            self.live
-                .as_ref()
-                .and_then(|live| live.bound.as_ref())
-                .ok_or(DaemonError::ClientNotSupported)?
-                .claim_backend_binding()
-                .await
+            #[cfg(feature = "regtest-harness")]
+            if let Some(bound) = self.live.as_ref().and_then(|live| live.bound.as_ref()) {
+                return bound.claim_backend_binding().await;
+            }
+            Ok(self.binding.clone())
         }
         #[cfg(feature = "regtest-harness")]
         async fn submit_verified_poison_to_node(
@@ -806,7 +805,6 @@ mod flow {
             *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
             Ok(outcome)
         }
-        #[cfg(feature = "regtest-harness")]
         async fn submit_verified_poison_to_connect(
             &self,
             verified: Arc<coincube_core::claim_finalize::VerifiedPoisonTransfer>,
@@ -814,17 +812,22 @@ mod flow {
             binding: coincubed::poison_broadcast::ClaimBackendBinding,
             gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
-            self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(bound) = self.live.as_ref().and_then(|live| live.bound.as_ref()) {
+                self.hit("submit_verified_poison");
+                self.hit("submit_verified_poison_to_connect");
+                let outcome = bound
+                    .submit_verified_poison_to_connect(verified.clone(), origin, binding, gate)
+                    .await?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
+            let _ = origin;
+            if binding != self.binding {
+                return Err(DaemonError::ClientNotSupported);
+            }
             self.hit("submit_verified_poison_to_connect");
-            let outcome = self
-                .live
-                .as_ref()
-                .and_then(|live| live.bound.as_ref())
-                .ok_or(DaemonError::ClientNotSupported)?
-                .submit_verified_poison_to_connect(verified.clone(), origin, binding, gate)
-                .await?;
-            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
-            Ok(outcome)
+            self.submit_verified_poison(verified, gate).await
         }
         async fn submit_verified_poison(
             &self,
@@ -866,7 +869,6 @@ mod flow {
             *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
             Ok(outcome)
         }
-        #[cfg(feature = "regtest-harness")]
         async fn submit_verified_ancestry_to_connect(
             &self,
             verified: Arc<coincube_core::claim_finalize::VerifiedAncestryTransfer>,
@@ -874,17 +876,22 @@ mod flow {
             binding: coincubed::poison_broadcast::ClaimBackendBinding,
             gate: Arc<SubmissionGate>,
         ) -> Result<SubmissionOutcome, DaemonError> {
-            self.hit("submit_verified_poison");
+            #[cfg(feature = "regtest-harness")]
+            if let Some(bound) = self.live.as_ref().and_then(|live| live.bound.as_ref()) {
+                self.hit("submit_verified_poison");
+                self.hit("submit_verified_poison_to_connect");
+                let outcome = bound
+                    .submit_verified_ancestry_to_connect(verified.clone(), origin, binding, gate)
+                    .await?;
+                *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
+                return Ok(outcome);
+            }
+            let _ = origin;
+            if binding != self.binding {
+                return Err(DaemonError::ClientNotSupported);
+            }
             self.hit("submit_verified_poison_to_connect");
-            let outcome = self
-                .live
-                .as_ref()
-                .and_then(|live| live.bound.as_ref())
-                .ok_or(DaemonError::ClientNotSupported)?
-                .submit_verified_ancestry_to_connect(verified.clone(), origin, binding, gate)
-                .await?;
-            *self.submitted.lock().unwrap() = Some(verified.transaction().clone());
-            Ok(outcome)
+            self.submit_verified_ancestry(verified, gate).await
         }
         async fn submit_verified_ancestry(
             &self,
@@ -1142,6 +1149,7 @@ mod flow {
         ))
         .unwrap();
         let daemon = Arc::new(FlowDaemon {
+            binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&config),
             config,
             coin: f.coin.clone(),
             previous: f.previous.clone(),
@@ -1859,6 +1867,7 @@ mod flow {
             );
         }
         let daemon = Arc::new(FlowDaemon {
+            binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&config),
             config,
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
@@ -3398,6 +3407,7 @@ mod flow {
 
         // The switch settles: a new daemon on the same (admitted) backend.
         let installed = Arc::new(FlowDaemon {
+            binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&f.daemon.config),
             config: f.daemon.config.clone(),
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
@@ -3662,6 +3672,7 @@ mod flow {
         let mut app = reviewer_app(&mut f, blank);
         drop(app.spawn_daemon_switch(replacement_config(&f)));
         let installed = Arc::new(FlowDaemon {
+            binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&f.daemon.config),
             config: f.daemon.config.clone(),
             coin: f.daemon.coin.clone(),
             previous: f.daemon.previous.clone(),
