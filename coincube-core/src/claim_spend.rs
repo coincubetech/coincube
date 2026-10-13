@@ -337,6 +337,7 @@ pub struct ClaimForkSweep {
     psbt: bitcoin::psbt::Psbt,
     chain: ChainId,
     bitcoin_step1: bitcoin::Txid,
+    fork_marker: Option<bitcoin::OutPoint>,
     descriptor: CoincubeDescriptor,
     change_index: ChildNumber,
     warnings: Vec<spend::CreateSpendWarning>,
@@ -350,6 +351,9 @@ impl ClaimForkSweep {
     }
     pub fn bitcoin_step1(&self) -> bitcoin::Txid {
         self.bitcoin_step1
+    }
+    pub fn fork_marker(&self) -> Option<bitcoin::OutPoint> {
+        self.fork_marker
     }
     pub fn descriptor(&self) -> &CoincubeDescriptor {
         &self.descriptor
@@ -386,6 +390,7 @@ pub fn create_claim_fork_sweep(
     create_fork_sweep(
         source,
         None,
+        None,
         fork_chain,
         secp,
         tx_getter,
@@ -413,6 +418,38 @@ pub fn create_ancestry_fork_sweep(
     create_fork_sweep(
         &source.transfer,
         Some(source.poison_input),
+        None,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        feerate_vb,
+        locktime,
+    )
+}
+
+/// Build an ordinary fork transaction from the shared inputs plus a distinct
+/// BTCB2-only input. The dependency supplies the selected outpoint, but is
+/// only structural: the caller must separately verify its canonical BTCB2
+/// ancestry, absence on Bitcoin, ownership, depth and current unspent status.
+/// No signing or broadcast authority follows from this constructor.
+#[allow(clippy::too_many_arguments)]
+pub fn create_ancestry_fork_sweep_with_marker(
+    source: &AncestrySelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    feerate_vb: u64,
+    locktime: LockTime,
+    fork_dependency: &crate::claim_ancestry::CoinbaseDependency,
+) -> Result<ClaimForkSweep, Error> {
+    create_fork_sweep(
+        &source.transfer,
+        Some(source.poison_input),
+        Some(fork_dependency.selected()),
         fork_chain,
         secp,
         tx_getter,
@@ -427,6 +464,7 @@ pub fn create_ancestry_fork_sweep(
 fn create_fork_sweep(
     source: &PoisonSelfTransfer,
     excluded_input: Option<bitcoin::OutPoint>,
+    added_input: Option<bitcoin::OutPoint>,
     fork_chain: ChainId,
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     tx_getter: &mut impl TxGetter,
@@ -446,14 +484,29 @@ fn create_fork_sweep(
         ));
     }
     let original = source.psbt();
+    if added_input.is_some_and(|marker| {
+        marker.is_null()
+            || original
+                .unsigned_tx
+                .input
+                .iter()
+                .any(|input| input.previous_output == marker)
+    }) {
+        return Err(Error::InvalidRequest(
+            "Fork marker must be distinct from every Bitcoin input",
+        ));
+    }
     let selected: BTreeSet<_> = coins.iter().map(|coin| coin.outpoint).collect();
-    let claimed: BTreeSet<_> = original
+    let mut claimed: BTreeSet<_> = original
         .unsigned_tx
         .input
         .iter()
         .map(|input| input.previous_output)
         .filter(|outpoint| Some(*outpoint) != excluded_input)
         .collect();
+    if let Some(marker) = added_input {
+        claimed.insert(marker);
+    }
     if coins.is_empty() || selected.len() != coins.len() || selected != claimed {
         return Err(Error::InvalidRequest(
             "Fork sweep must spend exactly the original claimed inputs",
@@ -462,31 +515,31 @@ fn create_fork_sweep(
     let descriptor = source.descriptor();
     let destination = descriptor.change_descriptor().derive(change_index, secp);
     for coin in coins {
-        let source_index = original
-            .unsigned_tx
-            .input
-            .iter()
-            .position(|input| input.previous_output == coin.outpoint)
-            .ok_or(Error::InvalidRequest("Unclaimed fork input"))?;
-        let prevout =
-            original.inputs[source_index]
-                .witness_utxo
-                .as_ref()
-                .ok_or(Error::InvalidRequest(
-                    "Missing authenticated source prevout",
-                ))?;
-        if coin.deriv_index.is_hardened() || coin.amount != prevout.value {
-            return Err(Error::InvalidRequest(
-                "Fork input metadata differs from Bitcoin construction",
-            ));
+        let source_prevout = if Some(coin.outpoint) == added_input {
+            None
+        } else {
+            let source_index = original
+                .unsigned_tx
+                .input
+                .iter()
+                .position(|input| input.previous_output == coin.outpoint)
+                .ok_or(Error::InvalidRequest("Unclaimed fork input"))?;
+            Some(original.inputs[source_index].witness_utxo.as_ref().ok_or(
+                Error::InvalidRequest("Missing authenticated source prevout"),
+            )?)
+        };
+        if coin.deriv_index.is_hardened() {
+            return Err(Error::InvalidRequest("Hardened fork input index"));
         }
         let branch = if coin.is_change {
             descriptor.change_descriptor()
         } else {
             descriptor.receive_descriptor()
         };
-        if branch.derive(coin.deriv_index, secp).script_pubkey() != prevout.script_pubkey
-            || destination.script_pubkey() == prevout.script_pubkey
+        let script = branch.derive(coin.deriv_index, secp).script_pubkey();
+        if source_prevout
+            .is_some_and(|prevout| coin.amount != prevout.value || script != prevout.script_pubkey)
+            || destination.script_pubkey() == script
         {
             return Err(Error::InvalidRequest(
                 "Fork input ownership or fresh destination mismatch",
@@ -520,6 +573,7 @@ fn create_fork_sweep(
         psbt: built.psbt,
         chain: fork_chain,
         bitcoin_step1: original.unsigned_tx.compute_txid(),
+        fork_marker: added_input,
         descriptor: descriptor.clone(),
         change_index,
         warnings: built.warnings,
@@ -545,6 +599,7 @@ pub fn reconstruct_claim_fork_sweep(
     reconstruct_fork_sweep(
         source,
         None,
+        None,
         fork_chain,
         secp,
         tx_getter,
@@ -569,6 +624,35 @@ pub fn reconstruct_ancestry_fork_sweep(
     reconstruct_fork_sweep(
         &source.transfer,
         Some(source.poison_input),
+        None,
+        fork_chain,
+        secp,
+        tx_getter,
+        coins,
+        change_index,
+        recorded,
+    )
+}
+
+/// Reconstruct the exact recorded `S + F` fork transaction from authenticated
+/// owned coins and a reverified structural path to the designated `F` input.
+/// The caller still needs fresh two-chain exclusivity and UTXO checks before
+/// signing or submission.
+#[allow(clippy::too_many_arguments)]
+pub fn reconstruct_ancestry_fork_sweep_with_marker(
+    source: &AncestrySelfTransfer,
+    fork_chain: ChainId,
+    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    tx_getter: &mut impl TxGetter,
+    coins: &[CandidateCoin],
+    change_index: ChildNumber,
+    fork_dependency: &crate::claim_ancestry::CoinbaseDependency,
+    recorded: &bitcoin::Transaction,
+) -> Result<ClaimForkSweep, Error> {
+    reconstruct_fork_sweep(
+        &source.transfer,
+        Some(source.poison_input),
+        Some(fork_dependency.selected()),
         fork_chain,
         secp,
         tx_getter,
@@ -582,6 +666,7 @@ pub fn reconstruct_ancestry_fork_sweep(
 fn reconstruct_fork_sweep(
     source: &PoisonSelfTransfer,
     excluded_input: Option<bitcoin::OutPoint>,
+    added_input: Option<bitcoin::OutPoint>,
     fork_chain: ChainId,
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     tx_getter: &mut impl TxGetter,
@@ -597,6 +682,7 @@ fn reconstruct_fork_sweep(
     let mut rebuilt = create_fork_sweep(
         source,
         excluded_input,
+        added_input,
         fork_chain,
         secp,
         tx_getter,
@@ -974,6 +1060,179 @@ mod tests {
                 Err(Error::Spend(SpendCreationError::InputAuthentication(..)))
             ));
         }
+    }
+
+    #[test]
+    fn fork_ancestry_marker_is_required_beside_every_shared_input() {
+        let (desc, coins, mut getter) = fixture();
+        let bitcoin_raw =
+            bitcoin::consensus::serialize(getter.0.get(&coins[0].outpoint.txid).unwrap());
+        let bitcoin_dependency = crate::claim_ancestry::verify(
+            coins[0].outpoint,
+            &[crate::claim_ancestry::Link {
+                transaction: &bitcoin_raw,
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let destination = ChildNumber::from_normal_idx(10).unwrap();
+        let source = create_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            &desc,
+            &secp,
+            &mut getter,
+            &coins,
+            destination,
+            5,
+            LockTime::ZERO,
+            &bitcoin_dependency,
+        )
+        .unwrap();
+        let index = ChildNumber::from_normal_idx(2).unwrap();
+        let funding = Transaction {
+            version: bitcoin::transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: desc
+                    .receive_descriptor()
+                    .derive(index, &secp)
+                    .script_pubkey(),
+            }],
+        };
+        let marker = CandidateCoin {
+            outpoint: OutPoint::new(funding.compute_txid(), 0),
+            amount: funding.output[0].value,
+            deriv_index: index,
+            is_change: false,
+            must_select: false,
+            sequence: None,
+            ancestor_info: None,
+        };
+        let fork_raw = bitcoin::consensus::serialize(&funding);
+        let fork_dependency = crate::claim_ancestry::verify(
+            marker.outpoint,
+            &[crate::claim_ancestry::Link {
+                transaction: &fork_raw,
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        // The Bitcoin-only funding transaction is absent from the fork getter.
+        getter.0.remove(&coins[0].outpoint.txid);
+        getter.0.insert(funding.compute_txid(), funding);
+        let selected = [coins[1], marker];
+        let fork = create_ancestry_fork_sweep_with_marker(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &selected,
+            destination,
+            5,
+            LockTime::ZERO,
+            &fork_dependency,
+        )
+        .unwrap();
+        assert_eq!(fork.fork_marker(), Some(marker.outpoint));
+        assert_eq!(fork.psbt().unsigned_tx.output.len(), 1);
+        assert!(!fork.psbt().unsigned_tx.output[0]
+            .script_pubkey
+            .is_op_return());
+        assert_eq!(
+            fork.psbt()
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<BTreeSet<_>>(),
+            selected.iter().map(|coin| coin.outpoint).collect()
+        );
+        spend::reverify_spend_before_broadcast(&desc, fork.psbt()).unwrap();
+        let recorded = fork.psbt().unsigned_tx.clone();
+        let rebuilt = reconstruct_ancestry_fork_sweep_with_marker(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &selected,
+            destination,
+            &fork_dependency,
+            &recorded,
+        )
+        .unwrap();
+        assert_eq!(rebuilt.psbt(), fork.psbt());
+        for invalid in [
+            vec![coins[1]],
+            vec![marker],
+            vec![coins[1], marker, coins[0]],
+            vec![coins[1], marker, marker],
+        ] {
+            assert!(create_ancestry_fork_sweep_with_marker(
+                &source,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &invalid,
+                destination,
+                5,
+                LockTime::ZERO,
+                &fork_dependency,
+            )
+            .is_err());
+        }
+        for corrupt in [
+            CandidateCoin {
+                amount: Amount::from_sat(49_999),
+                ..marker
+            },
+            CandidateCoin {
+                deriv_index: ChildNumber::from_normal_idx(3).unwrap(),
+                ..marker
+            },
+        ] {
+            assert!(create_ancestry_fork_sweep_with_marker(
+                &source,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut getter,
+                &[coins[1], corrupt],
+                destination,
+                5,
+                LockTime::ZERO,
+                &fork_dependency,
+            )
+            .is_err());
+        }
+        let mut missing_marker = recorded.clone();
+        missing_marker
+            .input
+            .retain(|input| input.previous_output != marker.outpoint);
+        assert!(reconstruct_ancestry_fork_sweep_with_marker(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &selected,
+            destination,
+            &fork_dependency,
+            &missing_marker,
+        )
+        .is_err());
+        assert!(create_ancestry_fork_sweep_with_marker(
+            &source,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            &mut getter,
+            &selected,
+            destination,
+            5,
+            LockTime::ZERO,
+            &bitcoin_dependency,
+        )
+        .is_err());
     }
 
     #[test]

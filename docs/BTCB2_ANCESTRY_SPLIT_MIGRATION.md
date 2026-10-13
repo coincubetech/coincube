@@ -48,12 +48,15 @@ a replayable spend.
    BTCB2-only candidates and promote neither to proof without the ancestry
    collector. Bind both proofs to one account/session, source descriptor,
    source UTXO set and current two-chain tips.
-2. **Owned Claim transactions.** `create_ancestry_self_transfer` already makes
-   a one-output Bitcoin self-transfer with `B`, but production discovery and
-   signer dispatch are gated in `claim_ancestry_gate`. Extend
-   `create_ancestry_fork_sweep` to spend `S + F` instead of `S` alone, with a
-   separately typed BTCB2 proof. Preserve exact unsigned-PSBT and finalized
-   witness checks. Version the Claim journal to retain both *structural* paths
+2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
+   one-output Bitcoin self-transfer with `B`.
+   `create_ancestry_fork_sweep_with_marker` now constructs and exactly
+   reconstructs the ordinary `S + F` fork transaction, requiring the
+   designated `F` input. These builders establish structure and wallet
+   ownership, not live chain exclusivity. Production discovery and signer
+   dispatch remain gated in `claim_ancestry_gate`. Add a separately typed
+   BTCB2 live proof and preserve exact unsigned-PSBT and finalized witness
+   checks. Version the Claim journal to retain both *structural* paths
    and marker outpoints, never cached spend authority. On restart, reconstruct
    both transactions and recollect live proofs before sign, broadcast or
    completion. Keep legacy reconstruction and verification only for recorded
