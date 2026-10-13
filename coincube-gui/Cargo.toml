@@ -235,6 +235,9 @@ libc = "0.2"
 iced = { version = "0.14.0", features = ["x11", "wayland"] }
 
 [dev-dependencies]
+# Claim flow mocks need a non-submitting backend binding to exercise the
+# production review guard without starting a real node.
+coincubed = { path = "../coincubed", default-features = false, features = ["nonblocking_shutdown", "test-utils"] }
 # Keep widget regression tests independent of a GPU on every platform.
 iced = { version = "0.14.0", default-features = false, features = ["tiny-skia"] }
 # `test-util` gives us `#[tokio::test(start_paused = true)]` for the

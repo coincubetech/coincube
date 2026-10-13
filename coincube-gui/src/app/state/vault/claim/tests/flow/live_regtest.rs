@@ -176,6 +176,7 @@ async fn claim_gui_regtest_driver() {
         None
     };
     let daemon = Arc::new(FlowDaemon {
+        binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&config),
         config,
         coin: fixture.coin,
         previous: fixture.previous,
@@ -229,6 +230,7 @@ async fn claim_gui_regtest_driver() {
         .unwrap(),
     ));
     let fork_daemon = Arc::new(FlowDaemon {
+        binding: coincubed::poison_broadcast::ClaimBackendBinding::for_test(&fork_config),
         config: fork_config,
         coin: daemon.coin.clone(),
         previous: daemon.previous.clone(),

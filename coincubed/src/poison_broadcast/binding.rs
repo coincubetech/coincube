@@ -43,6 +43,24 @@ impl ClaimBackendBinding {
     pub(super) fn matches(&self, control: &DaemonControl) -> bool {
         self == &control.claim_backend_binding()
     }
+
+    /// Synthetic identity for a GUI flow mock. Its empty weak backend cannot
+    /// pass a real daemon's submission check. Production bindings must always
+    /// come from the live daemon controller.
+    #[cfg(feature = "test-utils")]
+    #[doc(hidden)]
+    pub fn for_test(config: &crate::config::Config) -> Self {
+        let backend: Weak<Mutex<dyn BitcoinInterface>> =
+            Weak::<Mutex<crate::bitcoin::d::BitcoinD>>::new();
+        Self {
+            backend,
+            chain: config.bitcoin_config.chain,
+            network: config.bitcoin_config.network,
+            descriptor: config.main_descriptor.clone(),
+            selection: config.bitcoin_backend.clone(),
+            fallback: config.fallback_esplora.clone(),
+        }
+    }
 }
 impl DaemonControl {
     /// Capture this controller's backend instance and configuration for review.

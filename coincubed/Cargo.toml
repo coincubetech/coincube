@@ -28,6 +28,8 @@ path = "src/bin/cli.rs"
 nonblocking_shutdown = []
 # Local synthetic Claim integration only; excluded from normal builds.
 regtest-harness = ["dep:minreq"]
+# Synthetic backend identity for GUI unit fixtures; never enabled by normal builds.
+test-utils = []
 
 [dependencies]
 # Claim submission needs retry::never (absent from Breez's exact 0.12.18 pin).
