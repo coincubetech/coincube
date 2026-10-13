@@ -46,6 +46,7 @@ impl HttpObservationSource {
 #[derive(Debug)]
 pub struct CoinbasePair {
     selected: OutPoint,
+    root_chain: ChainId,
     bitcoin: CanonicalCoinbase,
     fork: CanonicalCoinbase,
     anchor: super::super::super::NetworkAnchor,
@@ -55,6 +56,9 @@ pub struct CoinbasePair {
 impl CoinbasePair {
     pub fn selected(&self) -> OutPoint {
         self.selected
+    }
+    pub fn root_chain(&self) -> ChainId {
+        self.root_chain
     }
     pub fn bitcoin(&self) -> &CanonicalCoinbase {
         &self.bitcoin
@@ -82,6 +86,30 @@ impl HttpObservationSource {
         dependency: &claim_ancestry::CoinbaseDependency,
         height: u32,
         policy: Policy,
+    ) -> Result<CoinbasePair, FailureKind> {
+        self.coinbase_pair_for(dependency, height, policy, ChainId::Bitcoin)
+            .await
+    }
+
+    /// The same positive two-chain root comparison for a dependency whose
+    /// canonical coinbase must be on BTCB2. This does not establish current
+    /// UTXO spendability, ownership or permission to sign.
+    pub async fn fork_coinbase_pair(
+        &self,
+        dependency: &claim_ancestry::CoinbaseDependency,
+        height: u32,
+        policy: Policy,
+    ) -> Result<CoinbasePair, FailureKind> {
+        self.coinbase_pair_for(dependency, height, policy, ChainId::BitcoinBlake2b)
+            .await
+    }
+
+    async fn coinbase_pair_for(
+        &self,
+        dependency: &claim_ancestry::CoinbaseDependency,
+        height: u32,
+        policy: Policy,
+        root_chain: ChainId,
     ) -> Result<CoinbasePair, FailureKind> {
         let history = self.ancestry_history()?;
         if !(history.first_fork_height..history.historical_limit).contains(&height) {
@@ -176,7 +204,12 @@ impl HttpObservationSource {
             // tips and the authenticated anchor stayed unchanged across the
             // complete fresh collection. A provider error or bracket race must
             // remain indeterminate and cannot revoke durable completion.
-            if bitcoin.value.txid != dependency.root().txid {
+            let selected_root = match root_chain {
+                ChainId::Bitcoin => bitcoin.value.txid,
+                ChainId::BitcoinBlake2b => fork.value.txid,
+                _ => return Err(FailureKind::WrongChain),
+            };
+            if selected_root != dependency.root().txid {
                 return Err(FailureKind::AncestryRootChanged {
                     observed_at: oldest,
                 });
@@ -188,6 +221,7 @@ impl HttpObservationSource {
             }
             Ok(CoinbasePair {
                 selected: dependency.selected(),
+                root_chain,
                 bitcoin: bitcoin.value,
                 fork: fork.value,
                 anchor: after,
@@ -265,6 +299,8 @@ mod tests {
     async fn paired_roots_bind_history_anchor_identity_and_current_views() {
         for case in [
             "valid",
+            "fork-valid",
+            "fork-wrong-root",
             "upper",
             "bitcoin-history",
             "revoked",
@@ -304,10 +340,18 @@ mod tests {
                 assert_ne!(serialize(&fork), serialize(&bitcoin));
             }
             let bitcoin_raw = serialize(&bitcoin);
-            let mut selected_tx = bitcoin.clone();
+            let mut selected_tx = if case.starts_with("fork-") {
+                fork.clone()
+            } else {
+                bitcoin.clone()
+            };
             if matches!(
                 case,
-                "root" | "root-stale" | "root-anchor-change" | "root-bitcoin-reorg"
+                "root"
+                    | "root-stale"
+                    | "root-anchor-change"
+                    | "root-bitcoin-reorg"
+                    | "fork-wrong-root"
             ) {
                 selected_tx.output[0].value = Amount::from_sat(3000);
             }
@@ -422,7 +466,15 @@ mod tests {
             };
             let root_status = fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
                 json!({"txid":bitcoin.compute_txid(),"status":{"confirmed":true,"block_height":root_height,"block_hash":bitcoin_block}}).to_string());
-            let collect = source.coinbase_pair(&dependency, root_height, policy);
+            let collect = async {
+                if case.starts_with("fork-") {
+                    source
+                        .fork_coinbase_pair(&dependency, root_height, policy)
+                        .await
+                } else {
+                    source.coinbase_pair(&dependency, root_height, policy).await
+                }
+            };
             let result = if matches!(
                 case,
                 "anchor-change"
@@ -469,9 +521,17 @@ mod tests {
                 collect.await
             };
             match case {
-                "valid" | "upper" => {
+                "valid" | "upper" | "fork-valid" => {
                     let pair = result.unwrap();
                     assert_eq!(pair.selected(), dependency.selected());
+                    assert_eq!(
+                        pair.root_chain(),
+                        if case == "fork-valid" {
+                            ChainId::BitcoinBlake2b
+                        } else {
+                            ChainId::Bitcoin
+                        }
+                    );
                     assert_eq!(pair.bitcoin().txid, bitcoin.compute_txid());
                     assert_eq!(pair.fork().txid, fork.compute_txid());
                     assert_eq!(
@@ -857,7 +917,7 @@ mod tests {
                 "revoked" | "shared-revoked" => {
                     assert_eq!(result.unwrap_err(), FailureKind::Cancelled)
                 }
-                "root" => assert!(matches!(
+                "root" | "fork-wrong-root" => assert!(matches!(
                     result.unwrap_err(),
                     FailureKind::AncestryRootChanged { observed_at } if observed_at <= source.now()
                 )),

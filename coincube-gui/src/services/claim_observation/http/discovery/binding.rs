@@ -52,6 +52,9 @@ impl DiscoveredAncestry {
         if plan.bitcoin_chain != ChainId::Bitcoin || plan.fork_chain != ChainId::BitcoinBlake2b {
             return Err(FailureKind::WrongChain);
         }
+        if self.pair.root_chain() != ChainId::Bitcoin {
+            return Err(FailureKind::WrongChain);
+        }
         if path.selected() != self.pair.selected()
             || path.links().len() != self.links.len()
             || path

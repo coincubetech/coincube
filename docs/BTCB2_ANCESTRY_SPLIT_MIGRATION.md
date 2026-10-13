@@ -38,7 +38,11 @@ a replayable spend.
 ## Existing pieces and required work
 
 1. **Proof and inventory.** Reuse `claim_ancestry`, its bounded coinbase path,
-   retained proof and `claim_observation/http/ancestry` for Bitcoin. Generalize
+   retained proof and `claim_observation/http/ancestry` for Bitcoin. The
+   canonical two-chain coinbase comparison now accepts either chain as the
+   dependency root, with an explicit root-chain label. Bounded BTCB2 path
+   discovery and proof refresh are wired, but the BTCB2 candidate inventory
+   and live spend admission still need to be wired. Generalize
    the authenticated observation collector to BTCB2 without weakening its
    post-fork, BIP34 height, coinbase maturity, canonical block, tip-bracketing
    or current-UTXO checks. At the dependency's root height, read the canonical

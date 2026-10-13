@@ -9,11 +9,32 @@ impl HttpObservationSource {
     ///
     /// None means no candidate qualified, not proof that any coin is replay-safe.
     /// A transient error or exhausted bound aborts rather than masquerading as
-    /// an empty search. The caller must assess OP_RETURN independently for fallback.
+    /// an empty search.
     pub async fn discover_preferred_ancestry(
         &self,
         candidates: &[OutPoint],
         policy: Policy,
+    ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
+        self.discover_preferred_ancestry_for(candidates, policy, ChainId::Bitcoin)
+            .await
+    }
+
+    /// Search caller-supplied BTCB2 candidates under the same bounded budget.
+    /// The caller must separately verify ownership and current spendability.
+    pub async fn discover_preferred_fork_ancestry(
+        &self,
+        candidates: &[OutPoint],
+        policy: Policy,
+    ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
+        self.discover_preferred_ancestry_for(candidates, policy, ChainId::BitcoinBlake2b)
+            .await
+    }
+
+    async fn discover_preferred_ancestry_for(
+        &self,
+        candidates: &[OutPoint],
+        policy: Policy,
+        root_chain: ChainId,
     ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
         let observation = DiscoveryError::Observation;
         if candidates.len() > MAX_ANCESTRY_CANDIDATES {
@@ -32,7 +53,10 @@ impl HttpObservationSource {
         let snapshot = self.discovery_snapshot();
         let result = tokio::time::timeout(MAX_COLLECTION_TIME, async {
             for candidate in candidates {
-                if let Some(proof) = snapshot.discover_ancestry(*candidate, policy).await? {
+                if let Some(proof) = snapshot
+                    .discover_ancestry_for(*candidate, policy, root_chain)
+                    .await?
+                {
                     return Ok(Some(proof));
                 }
             }
