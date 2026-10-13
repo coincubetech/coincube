@@ -89,6 +89,39 @@ a replayable spend.
    silently reinterpreted as ancestry. Update the in-repo workflow and safety
    docs, which currently describe the ancestry path as unsupported.
 
+## Wizard coin review
+
+Use the Send screen's coin-row hierarchy as a visual reference: a compact
+label, status badge and right-aligned amount, with the full outpoint available
+on expansion. Do **not** reuse its coin-selection checkbox or its "Expires in"
+badge. The split builder determines the required inputs; the review is
+read-only and must be generated from the exact PSBT inputs being signed.
+
+- Show the shared pre-fork coins together, with a subtotal and a clear
+  "Before fork · present on both chains" label. Every shared coin in this
+  attempt appears in both transaction reviews.
+- Show a Bitcoin funding coin under the Bitcoin transaction and a BTCB2
+  funding coin under the BTCB2 transaction. Before proof, label each
+  "Post-fork candidate · checking"; only a fresh, complete two-chain proof
+  earns "Bitcoin-only · verified" or "BTCB2-only · verified". Amount,
+  confirmations and outpoint remain visible. A missing or invalid marker
+  keeps Sign unavailable.
+- At each signing review, display a compact equation such as "2 shared coins
+  + 1 Bitcoin-only coin → your source wallet" (and the corresponding BTCB2
+  version with its actual destination), followed by the full address and fee.
+  State that these inputs must be spent together to separate the chains.
+  There is no "select all" action, unchecked row, or way to omit the marker.
+- Keep unrelated post-fork coins outside the transaction review. If useful,
+  show a separate "Not part of this split" count, without implying that all
+  post-fork coins are automatically safe or that the split covers unrelated
+  wallet activity.
+
+Build this as a reusable *read-only* coin summary for Claim and foreign Split,
+using the existing amount formatting and badge components. Keep the normal
+Send selector unchanged. Test the row mapping against the actual unsigned PSBT
+and re-render it after any fee, tip or proof change so stale input labels cannot
+survive a rebuilt transaction.
+
 ## Acceptance checks before enabling signing
 
 - Core unit tests prove exact `S + B` and `S + F` input sets, one owned output,
