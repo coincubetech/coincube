@@ -12,7 +12,7 @@ use coincube_core::{
     miniscript::bitcoin::Amount,
 };
 use coincube_ui::{
-    component::{amount::*, button, card, collapse::Collapse, text::*},
+    component::{amount::*, button, card, text::*},
     icon, theme,
     widget::{ColumnExt, Element},
 };
@@ -22,10 +22,7 @@ use crate::{
         cache::Cache,
         menu::Menu,
         state::vault::{
-            claim::{
-                describe_duration, ClaimStep1Panel, CoinSet, ForkWindow, Preconditions, Refusal,
-                StageView,
-            },
+            claim::{ClaimStep1Panel, CoinSet, Preconditions, Refusal, StageView},
             psbt::{PsbtModal, PsbtState},
         },
         view::{dashboard, message::*, vault::psbt},
@@ -63,7 +60,18 @@ pub fn view<'a>(
             psbt: state,
             finalizing,
             error,
-        } => sign_view(menu, cache, state, finalizing, error),
+        } if panel.can_sign_or_submit() => sign_view(menu, cache, state, finalizing, error),
+        StageView::Sign { .. } => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Recorded claim"))
+                .push(p1_regular("This claim remains recorded on this device."))
+                .push(
+                    button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel)),
+                ),
+        ),
         StageView::Review {
             snapshot,
             busy,
@@ -71,7 +79,14 @@ pub fn view<'a>(
         } => dashboard(
             menu,
             cache,
-            review_view(cache, panel.wallet().chain, snapshot, busy, error),
+            review_view(
+                cache,
+                panel.wallet().chain,
+                snapshot,
+                busy,
+                error,
+                panel.can_broadcast_review(),
+            ),
         ),
         StageView::Track {
             outcome,
@@ -158,7 +173,6 @@ fn preconditions_view<'a>(
     refusal: Option<Refusal>,
 ) -> Element<'a, Message> {
     let checked = pre.checked.as_ref();
-    let window = panel.window();
     let coins = panel.coins();
     let checklist = Column::new()
         .spacing(10)
@@ -188,14 +202,9 @@ fn preconditions_view<'a>(
             },
         ))
         .push(check_row(
-            "OP_RETURN fallback",
-            window.map(|w| w.rdts.is_ok()),
-            match (checked.map(|c| &c.window), window) {
-                (None, _) => "Checking Bitcoin Blake2b…".to_string(),
-                (Some(Err(_)), _) => "Couldn't read Bitcoin Blake2b's status.".to_string(),
-                (_, Some(w)) => rdts_detail(w),
-                (Some(Ok(_)), None) => String::new(),
-            },
+            "Replay protection",
+            Some(false),
+            "Waiting for the new two-chain funding and proof flow.".to_string(),
         ))
         .push(check_row(
             "Coins to split",
@@ -203,7 +212,7 @@ fn preconditions_view<'a>(
             match (checked.map(|c| &c.coins), coins) {
                 (None, _) => "Reading this Vault's coins…".to_string(),
                 (Some(Err(_)), _) => "Couldn't read this Vault's coins.".to_string(),
-                (_, Some(c)) => coins_detail(c, cache, panel.ancestry_discovery_open()),
+                (_, Some(c)) => coins_detail(c, cache),
                 (Some(Ok(_)), None) => String::new(),
             },
         ))
@@ -249,11 +258,9 @@ fn preconditions_view<'a>(
     Column::new()
         .spacing(20)
         .push(header("Step 1 of 2 — split on Bitcoin"))
-        .push(p1_regular("Your paired Blake2b Cube is set up. Now check the coins and network fee, then review and sign the Bitcoin transfer. Creating the Cube alone did not split or claim coins."))
+        .push(p1_regular("Your paired Blake2b Cube is set up, but creating the Cube alone did not split or claim coins."))
         .push(p1_regular(
-            "Step 1 sends every coin this Vault held before the fork back to itself, with a small marker \
-             that Bitcoin Blake2b rejects while its replay protection is active. Nothing leaves the Vault. \
-             After this transaction has six Bitcoin confirmations, continue in the paired Bitcoin Blake2b Cube to review and sign step 2.",
+            "Claim requires one confirmed Bitcoin-only coin and one confirmed Bitcoin Blake2b-only coin in this Vault. Both must be verified before either transfer can be signed.",
         ))
         .push(
             Container::new(checklist)
@@ -265,24 +272,7 @@ fn preconditions_view<'a>(
         .into()
 }
 
-fn rdts_detail(window: &ForkWindow) -> String {
-    let left = window
-        .expires_at
-        .saturating_sub(window.median_time_past)
-        .max(0);
-    match window.rdts {
-        Ok(()) => format!(
-            "Active on Bitcoin Blake2b; about {} until it expires.",
-            describe_duration(left)
-        ),
-        Err(Assessment::ExpiryMargin) => format!("Expires in about {}.", describe_duration(left)),
-        Err(Assessment::RdtsExpired) => "Expired.".to_string(),
-        Err(Assessment::RdtsScheduled | Assessment::RdtsInactive) => "Not active yet.".to_string(),
-        Err(other) => format!("{other:?}."),
-    }
-}
-
-fn coins_detail(coins: &CoinSet, cache: &Cache, ancestry_discovery: bool) -> String {
+fn coins_detail(coins: &CoinSet, cache: &Cache) -> String {
     let total: Amount = coins.pre_fork.iter().map(|c| c.amount).sum();
     let mut detail = format!(
         "{} coin{} from before the fork, {}.",
@@ -300,11 +290,6 @@ fn coins_detail(coins: &CoinSet, cache: &Cache, ancestry_discovery: bool) -> Str
             if coins.post_fork == 1 { "" } else { "s" },
             if coins.post_fork == 1 { "is" } else { "are" },
         ));
-        if !ancestry_discovery {
-            // #547: while the ancestry gate is closed this step never
-            // searches for a Bitcoin-only input; it splits with OP_RETURN.
-            detail.push_str(" Input poison is not available yet, so this step uses OP_RETURN.");
-        }
     }
     detail
 }
@@ -330,12 +315,6 @@ fn plan_view<'a>(
         .sum();
     let outputs: Amount = tx.output.iter().map(|o| o.value).sum();
     let fee = inputs.checked_sub(outputs).unwrap_or(Amount::ZERO);
-    let marker = tx
-        .output
-        .iter()
-        .find(|o| o.script_pubkey.is_op_return())
-        .map(|o| o.script_pubkey.len())
-        .unwrap_or(0);
     let return_address = built.verified_return_address(panel.wallet());
     let change_index = built.change_index();
     let mut summary = Column::new()
@@ -379,42 +358,16 @@ fn plan_view<'a>(
             );
         }
     }
-    summary = summary
-        .push(row(
-            if built.selected_ancestry_input().is_some() {
-                "Bitcoin-only input"
-            } else {
-                "Marker output"
-            },
-            p1_regular(match built.selected_ancestry_input() {
-                Some(outpoint) => format!("{outpoint} — excluded from the Bitcoin Blake2b sweep"),
-                None => format!("{marker}-byte OP_RETURN, zero value"),
-            }),
-        ))
-        .push(row(
-            "Fee",
-            p1_regular(match panel.feerate_vb() {
-                Some(rate) => format!("{} at {} sat/vB", format_amount(fee, cache), rate),
-                None => format_amount(fee, cache),
-            }),
-        ));
-    if let Some(output) = tx.output.iter().find(|o| o.script_pubkey.is_op_return()) {
-        summary = summary.push(Collapse::new(
-            || {
-                button::secondary(
-                    Some(icon::collapse_icon()),
-                    "Replay-protection marker details",
-                )
-            },
-            || {
-                button::secondary(
-                    Some(icon::collapsed_icon()),
-                    "Replay-protection marker details",
-                )
-            },
-            move || marker_details(&output.script_pubkey),
-        ));
+    if let Some(outpoint) = built.selected_ancestry_input() {
+        summary = summary.push(row("Bitcoin-only input", p1_regular(format!("{outpoint}"))));
     }
+    summary = summary.push(row(
+        "Fee",
+        p1_regular(match panel.feerate_vb() {
+            Some(rate) => format!("{} at {} sat/vB", format_amount(fee, cache), rate),
+            None => format_amount(fee, cache),
+        }),
+    ));
     for warning in built.warnings() {
         summary = summary.push(
             Row::new()
@@ -425,7 +378,8 @@ fn plan_view<'a>(
     }
     Column::new()
         .spacing(20)
-        .push(header(if panel.is_resuming() { "Review this recorded claim, then sign it again to continue" } else { "Review the transaction, then sign it with this Vault's keys" }))
+        .push(header(if panel.is_resuming() { "Review this recorded claim" } else { "Review the transaction, then sign it with this Vault's keys" }))
+        .push_maybe(built.selected_ancestry_input().is_none().then(|| card::warning(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.to_string())))
         .push(
             Container::new(summary)
                 .padding(20)
@@ -439,9 +393,6 @@ fn plan_view<'a>(
         .push(p2_regular(
             "For an independent check, compare the return address and change index in a separate watch-only copy of this Vault before signing.",
         ).style(theme::text::secondary))
-        .push(p2_regular(
-            "To test receipt first, use Copy address and send a small amount of BTC from another wallet to the return address above. Wait for confirmation before the full replay-protection transaction. This verifies receipt only. If you rebuild the claim, check the return address again before signing.",
-        ).style(theme::text::secondary))
         .push(
             Row::new()
                 .spacing(20)
@@ -453,45 +404,10 @@ fn plan_view<'a>(
                 )
                 .push(
                     button::primary(None, "Sign")
-                        .on_press_maybe(return_address.is_ok().then_some(Message::Claim(ClaimMessage::Sign)))
+                        .on_press_maybe((panel.can_sign_or_submit() && return_address.is_ok() && built.selected_ancestry_input().is_some()).then_some(Message::Claim(ClaimMessage::Sign)))
                         .width(Length::Fixed(150.0)),
                 ),
         )
-        .into()
-}
-
-/// Inspect the actual output, rather than reconstructing labels from UI state.
-fn marker_details<'a>(script: &coincube_core::miniscript::bitcoin::Script) -> Element<'a, Message> {
-    use coincube_core::{chain::ChainId, split_poison::split_poison_details};
-    let mut content = Column::new().spacing(10).padding(10);
-    match split_poison_details(script) {
-        Some(details) => {
-            let network = match details.chain {
-                ChainId::Bitcoin => "Bitcoin mainnet",
-                ChainId::Testnet4 => "Bitcoin testnet4",
-                _ => unreachable!("marker decoder accepts only Bitcoin networks"),
-            };
-            content = content
-                .push(row("Format", p2_regular(format!("REPLAY-PROTECT v{}", details.version))))
-                .push(row("Network", p2_regular(network)))
-                .push(p2_regular(format!("Fork anchor: {}", details.fork_marker)))
-                .push(p2_regular(format!("Selected-input commitment (SHA-256): {}", details.input_commitment)))
-                .push(p2_regular("87 bytes of data, including 7 zero padding bytes; 3 bytes of script overhead."))
-                .push(p2_regular("These public labels identify the intended fork and selected inputs. They do not independently prove chain state. No personal message is included.").style(theme::text::secondary));
-        }
-        None => {
-            content = content.push(
-                p2_regular("Unrecognized replay-protection marker.").style(theme::text::warning),
-            );
-        }
-    }
-    content
-        .push(p2_regular("Raw output script (hex)"))
-        .push(scrollable(p2_regular(script.to_hex_string())).direction(
-            scrollable::Direction::Horizontal(
-                scrollable::Scrollbar::new().width(2).scroller_width(2),
-            ),
-        ))
         .into()
 }
 
@@ -568,6 +484,7 @@ fn review_view<'a>(
     snapshot: Option<&'a ReviewSnapshot>,
     busy: bool,
     error: Option<&'a str>,
+    can_broadcast: bool,
 ) -> Element<'a, Message> {
     let destination = snapshot.map(|snapshot| review_destination(&snapshot.transaction, chain));
     let destination_valid = matches!(&destination, Some(Ok(_)));
@@ -604,10 +521,14 @@ fn review_view<'a>(
             ))
             .push(row(
                 "Bitcoin Blake2b tip",
-                p1_regular(format!(
-                    "height {} — replay protection active, transaction not seen there",
-                    snapshot.observations.fork.tip.height
-                )),
+                p1_regular(if can_broadcast {
+                    format!(
+                        "height {} — transaction not seen there",
+                        snapshot.observations.fork.tip.height
+                    )
+                } else {
+                    format!("height {}", snapshot.observations.fork.tip.height)
+                }),
             ))
             .into(),
         None if busy => p1_regular("Reading both chains…")
@@ -617,9 +538,26 @@ fn review_view<'a>(
             .style(theme::text::secondary)
             .into(),
     };
+    let mut actions = Row::new().spacing(15).push(
+        button::secondary(Some(icon::reload_icon()), "Review again")
+            .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
+    );
+    if can_broadcast {
+        actions = actions.push(
+            button::primary(None, "Broadcast")
+                .on_press_maybe(
+                    (!busy && destination_valid).then_some(Message::Claim(ClaimMessage::Confirm)),
+                )
+                .width(Length::Fixed(240.0)),
+        );
+    }
     Column::new()
         .spacing(20)
-        .push(header("Final review — this is the last step before broadcast"))
+        .push(header(if can_broadcast {
+            "Final review — this is the last step before broadcast"
+        } else {
+            "Recorded claim review"
+        }))
         .push_maybe(error.map(|reason| card::warning(reason.to_string())))
         .push(
             Container::new(body)
@@ -627,26 +565,12 @@ fn review_view<'a>(
                 .style(theme::card::simple)
                 .width(Length::Fill),
         )
-        .push(p1_regular(
-            "Broadcasting sends this transaction to the Bitcoin network. It cannot be taken back. The review \
-             above is what you are confirming; if the chains move first, you will be asked to review again.",
-        ))
-        .push(
-            Row::new()
-                .spacing(15)
-                .push(
-                    button::secondary(Some(icon::reload_icon()), "Review again")
-                        .on_press_maybe((!busy).then_some(Message::Claim(ClaimMessage::Refresh))),
-                )
-                .push(
-                    button::primary(None, "Broadcast")
-                        .on_press_maybe(
-                            (!busy && destination_valid)
-                                .then_some(Message::Claim(ClaimMessage::Confirm)),
-                        )
-                        .width(Length::Fixed(240.0)),
-                ),
-        )
+        .push(p1_regular(if can_broadcast {
+            "Broadcasting sends this transaction to the Bitcoin network. It cannot be taken back. The review above is what you are confirming; if the chains move first, you will be asked to review again."
+        } else {
+            "This recorded transaction remains available for review and tracking."
+        }))
+        .push(actions)
         .into()
 }
 
@@ -857,9 +781,8 @@ mod tests {
         assert!(review_destination(&tx, ChainId::Bitcoin).is_err());
     }
 
-    /// #547: with post-fork coins and the ancestry gate closed, the panel says
-    /// input poison is unavailable; with none, or with discovery open, it
-    /// says nothing about it.
+    /// Post-fork coins remain excluded from the shared-coin count; there is
+    /// no wording that suggests OP_RETURN is a usable fallback.
     #[test]
     fn post_fork_coins_say_input_poison_is_not_available_while_closed() {
         let cache = Cache::default();
@@ -869,12 +792,11 @@ mod tests {
             ancestry_candidates: Vec::new(),
             tip_height: 0,
         };
-        let notice = "Input poison is not available yet, so this step uses OP_RETURN.";
-        let closed = coins_detail(&coins(2), &cache, false);
+        let closed = coins_detail(&coins(2), &cache);
         assert!(closed.contains("2 newer coins are left out"), "{}", closed);
-        assert!(closed.ends_with(notice), "{}", closed);
-        assert!(!coins_detail(&coins(0), &cache, false).contains("Input poison"));
-        assert!(!coins_detail(&coins(2), &cache, true).contains("Input poison"));
+        assert!(!closed.contains("OP_RETURN"), "{}", closed);
+        assert!(!coins_detail(&coins(0), &cache).contains("Input poison"));
+        assert!(!coins_detail(&coins(2), &cache).contains("Input poison"));
     }
 
     #[test]

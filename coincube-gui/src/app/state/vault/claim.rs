@@ -1,4 +1,5 @@
-//! Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5, slice 1).
+//! Claim step 1 on Bitcoin. New transactions wait for the two-chain
+//! ancestry-funded construction; recorded claims remain readable.
 //!
 //! One panel, five stages: preconditions → build → sign → review → track.
 //! The panel owns **no signing code and no broadcaster**: signing is the
@@ -13,10 +14,9 @@
 //! journal under the new context (`Coordinator::resume`, the same account and
 //! provider) on the next sign-in or return to the panel.
 //!
-//! What this slice does *not* do: input poison (the journal only represents
-//! `Poison::OpReturn`) or step 2 (`Step2Authorization` stays uninhabited).
-//! Reopening a recorded step-one intent requires
-//! re-signing; a recorded submission is recovered only for tracking.
+//! New marker transactions cannot be built, signed or submitted. An
+//! unbroadcast recorded intent stays readable but cannot be signed; a
+//! recorded submission is recovered only for tracking.
 
 pub mod construction;
 use construction::Construction;
@@ -42,12 +42,10 @@ use coincube_core::{
     chain::ChainId,
     claim::{self, Assessment, ForkTransactionPresence, Policy},
     claim_finalize::{finalize_poison_transfer, verify_poison_transaction},
-    claim_spend::{
-        create_poison_self_transfer, reconstruct_poison_self_transfer, PoisonSelfTransfer,
-    },
+    claim_spend::{reconstruct_poison_self_transfer, PoisonSelfTransfer},
     miniscript::bitcoin::{
-        absolute::LockTime, address, bip32::ChildNumber, hashes::Hash, psbt::Psbt, secp256k1,
-        Address, BlockHash, Network, OutPoint, Transaction, Txid,
+        address, bip32::ChildNumber, hashes::Hash, psbt::Psbt, secp256k1, Address, BlockHash,
+        Network, OutPoint, Transaction, Txid,
     },
     spend::{CandidateCoin, TxGetter},
 };
@@ -86,13 +84,8 @@ use crate::{
     },
 };
 
-/// How long before BIP-110's expiry the OP_RETURN poison stops being offered
-/// (invariant I11). Step 1 must confirm on Bitcoin, then step 2 must be
-/// built, signed and confirmed on the fork, all while the fork still
-/// enforces the rule that makes step 1 invalid there; a day and a half
-/// covers a slow confirmation, a reorg and a night's sleep. The comparison
-/// itself is [`coincube_core::claim::assess_deployment`]'s, against the
-/// fork's median-time-past — this constant only sets the margin.
+/// Legacy deployment margin retained for authenticating recorded claims.
+/// New chain-specific input proofs do not depend on the OP_RETURN window.
 pub const EXPIRY_MARGIN_SECONDS: i64 = 36 * 60 * 60;
 
 /// The observation policy step 1 runs under. Anchor and Esplora reads older
@@ -179,8 +172,7 @@ pub struct ForkWindow {
     /// First block under the fork's rules: coins confirmed below it exist on
     /// both chains and are what step 1 splits.
     pub fork_height: u64,
-    /// The fork block's hash on the fork chain, carried in the OP_RETURN
-    /// payload as a label (never as evidence).
+    /// The fork block's hash on the fork chain; retained for recorded plans.
     pub fork_hash: BlockHash,
     pub tip_height: u64,
     pub median_time_past: i64,
@@ -455,6 +447,8 @@ pub struct ClaimStep1Panel {
     restarting: Option<FinalizeAttempt>,
     restart_error: Option<String>,
     resuming: bool,
+    #[cfg(test)]
+    legacy_flow_fixture: bool,
 }
 
 impl ClaimStep1Panel {
@@ -489,6 +483,8 @@ impl ClaimStep1Panel {
             restarting: None,
             restart_error: None,
             resuming: false,
+            #[cfg(test)]
+            legacy_flow_fixture: false,
         };
         panel.refresh_static_preconditions();
         panel
@@ -498,6 +494,23 @@ impl ClaimStep1Panel {
     pub fn with_feerate_source(mut self, feerate: FeerateSource) -> Self {
         self.feerate = feerate;
         self
+    }
+
+    fn legacy_flow_fixture(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.legacy_flow_fixture
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    /// New Claim signing remains closed until the two-chain funding flow is ready.
+    pub fn can_sign_or_submit(&self) -> bool {
+        self.legacy_flow_fixture()
+            || crate::services::claim_ancestry_gate::authorization().is_some()
     }
 
     /// The App's hook for a Connect session change. Returns whether a
@@ -899,11 +912,21 @@ impl ClaimStep1Panel {
         if let Err(reason) = &checked.feerate_vb {
             return refuse(&format!("Couldn't fetch a fee rate: {reason}"), true);
         }
+        // Existing records may still be reconciled; fresh transactions wait
+        // for both chain-specific funding inputs and their proof path.
+        if crate::services::claim_ancestry_gate::authorization().is_none()
+            && !self.legacy_flow_fixture()
+        {
+            return refuse(
+                crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE,
+                false,
+            );
+        }
         None
     }
 
     /// Whether a build may search for a Bitcoin-only input. While the
-    /// production ancestry gate is closed it never does: OP_RETURN only.
+    /// production ancestry gate is closed it never does.
     pub fn ancestry_discovery_open(&self) -> bool {
         self.connect
             .as_ref()
@@ -929,7 +952,9 @@ impl ClaimStep1Panel {
     }
 
     pub fn can_continue_on_fork(&self) -> bool {
-        !self.revoked
+        (self.legacy_flow_fixture()
+            || crate::services::claim_ancestry_gate::authorization().is_some())
+            && !self.revoked
             && !self.handoff_pending
             && self.backend_ready()
             && self.connect.is_some()
@@ -1074,6 +1099,7 @@ impl ClaimStep1Panel {
         };
         let expected = *self.generation.borrow();
         let generation = self.generation.clone();
+        let legacy_fixture = self.legacy_flow_fixture();
         self.finalize_attempts = self.finalize_attempts.wrapping_add(1);
         let id = self.finalize_attempts;
         self.building = Some(FinalizeAttempt {
@@ -1084,6 +1110,18 @@ impl ClaimStep1Panel {
         self.pre.checking = true;
         Task::perform(
             async move {
+                #[cfg(test)]
+                if legacy_fixture {
+                    return build_legacy_for_test(
+                        daemon,
+                        wallet,
+                        coins,
+                        feerate_vb,
+                        window.fork_hash,
+                    )
+                    .await;
+                }
+                let _ = legacy_fixture;
                 preferred::build_preferred(
                     daemon, wallet, coins, feerate_vb, window, connect, expected, generation,
                 )
@@ -1094,6 +1132,13 @@ impl ClaimStep1Panel {
     }
 
     fn request_signing(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
+        if crate::services::claim_ancestry_gate::authorization().is_none()
+            && !self.legacy_flow_fixture()
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into(),
+            )));
+        }
         let Stage::Plan { built } = &self.stage else {
             return Task::none();
         };
@@ -1102,9 +1147,15 @@ impl ClaimStep1Panel {
                 "Cannot sign: the return address could not be verified against this Vault. {error}"
             ))));
         }
-        if built.selected_ancestry_input().is_none() {
+        #[cfg(test)]
+        if self.legacy_flow_fixture() && built.selected_ancestry_input().is_none() {
             self.start_signing();
             return Task::none();
+        }
+        if built.selected_ancestry_input().is_none() && !self.legacy_flow_fixture() {
+            return Task::done(Message::View(view::Message::ShowError(
+                crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into(),
+            )));
         }
         let Some(connect) = self.connect.clone() else {
             return Task::none();
@@ -1144,6 +1195,7 @@ impl ClaimStep1Panel {
         )
     }
 
+    #[cfg(test)]
     fn start_signing(&mut self) {
         let Stage::Plan { .. } = &self.stage else {
             return;
@@ -1196,6 +1248,10 @@ impl ClaimStep1Panel {
     /// satisfied and the picker has closed, finalise and journal. The
     /// construction leaves with the task and comes back if anything refuses.
     fn maybe_finalize(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        let legacy_fixture = self.legacy_flow_fixture();
+        if crate::services::claim_ancestry_gate::authorization().is_none() && !legacy_fixture {
+            return Task::none();
+        }
         // A finalisation binds the daemon it is given: not one being
         // replaced. The construction and its signatures wait.
         if let Some(copy) = self.backend.copy() {
@@ -1232,6 +1288,14 @@ impl ClaimStep1Panel {
         else {
             return Task::none();
         };
+        if !legacy_fixture
+            && built
+                .as_ref()
+                .is_some_and(|construction| construction.selected_ancestry_input().is_none())
+        {
+            *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
+            return Task::none();
+        }
         if finalizing.is_some()
             || built.is_none()
             || psbt.modal.is_some()
@@ -1324,6 +1388,24 @@ impl ClaimStep1Panel {
     }
 
     fn confirm(&mut self) -> Task<Message> {
+        let legacy_fixture = self.legacy_flow_fixture();
+        if crate::services::claim_ancestry_gate::authorization().is_none() && !legacy_fixture {
+            if let Stage::Review { error, .. } = &mut self.stage {
+                *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
+            }
+            return Task::none();
+        }
+        if let Stage::Review {
+            session: Some(session),
+            error,
+            ..
+        } = &mut self.stage
+        {
+            if session.built.selected_ancestry_input().is_none() && !legacy_fixture {
+                *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
+                return Task::none();
+            }
+        }
         // A review is confirmed under the session it was prepared under; a
         // sign-out withdraws it (`note_session_ended`), so this is the guard
         // for a session that went missing some other way.
@@ -1391,15 +1473,45 @@ impl ClaimStep1Panel {
                 session: Some(session),
                 busy: false,
                 ..
-            } => session
-                .resubmission
-                .as_ref()
-                .map(|review| (review.snapshot().clone(), review.previous_attempts())),
+            } if self.legacy_flow_fixture()
+                || (session.built.selected_ancestry_input().is_some()
+                    && crate::services::claim_ancestry_gate::authorization().is_some()) =>
+            {
+                session
+                    .resubmission
+                    .as_ref()
+                    .map(|review| (review.snapshot().clone(), review.previous_attempts()))
+            }
             _ => None,
         }
     }
 
+    pub fn can_broadcast_review(&self) -> bool {
+        matches!(&self.stage, Stage::Review { session: Some(session), .. }
+            if self.legacy_flow_fixture()
+                || (session.built.selected_ancestry_input().is_some()
+                    && crate::services::claim_ancestry_gate::authorization().is_some()))
+    }
+
     fn resubmit(&mut self, confirm: bool) -> Task<Message> {
+        let legacy_fixture = self.legacy_flow_fixture();
+        if crate::services::claim_ancestry_gate::authorization().is_none() && !legacy_fixture {
+            if let Stage::Track { error, .. } = &mut self.stage {
+                *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
+            }
+            return Task::none();
+        }
+        if let Stage::Track {
+            session: Some(session),
+            error,
+            ..
+        } = &mut self.stage
+        {
+            if session.built.selected_ancestry_input().is_none() && !legacy_fixture {
+                *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
+                return Task::none();
+            }
+        }
         if self.revoked
             || self.reconfirmation().is_some()
             || self.connect.is_none()
@@ -2196,32 +2308,10 @@ pub fn vault_shape_refusal(wallet: &Wallet) -> Option<String> {
     })
 }
 
-/// Copy for an RDTS window that refuses the OP_RETURN poison.
-fn rdts_refusal(assessment: Assessment, window: &ForkWindow) -> String {
-    match assessment {
-        Assessment::RdtsExpired => {
-            "Bitcoin Blake2b's replay protection has expired, so an OP_RETURN split is no longer possible."
-                .to_string()
-        }
-        Assessment::ExpiryMargin => {
-            let left = window
-                .expires_at
-                .saturating_sub(window.median_time_past)
-                .max(0);
-            format!(
-                "Bitcoin Blake2b's replay protection expires too soon for a safe split: about {} left, {} needed.",
-                describe_duration(left),
-                describe_duration(EXPIRY_MARGIN_SECONDS)
-            )
-        }
-        Assessment::RdtsScheduled | Assessment::RdtsInactive => {
-            "Bitcoin Blake2b's replay protection isn't active yet.".to_string()
-        }
-        Assessment::Deployment(state) => {
-            format!("Bitcoin Blake2b's status isn't usable right now ({state:?}).")
-        }
-        other => format!("Bitcoin Blake2b's status couldn't be assessed ({other:?})."),
-    }
+/// The replacement claim uses chain-specific funding rather than the old
+/// deployment window. Until it is ready, do not surface that obsolete check.
+fn rdts_refusal(_assessment: Assessment, _window: &ForkWindow) -> String {
+    crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.to_string()
 }
 
 pub fn describe_duration(seconds: i64) -> String {
@@ -2411,13 +2501,20 @@ impl TxGetter for TxMap {
     }
 }
 
-async fn build(
+// Historical workflow fixtures still construct the retired transaction so
+// journal recovery and revocation assertions keep exercising exact bytes.
+// This function is absent from production builds.
+#[cfg(test)]
+async fn build_legacy_for_test(
     daemon: Arc<dyn Daemon + Sync + Send>,
     wallet: Arc<Wallet>,
     coins: CoinSet,
     feerate_vb: u64,
     fork_hash: BlockHash,
 ) -> Result<Box<Construction>, String> {
+    use coincube_core::{
+        claim_spend::create_poison_self_transfer, miniscript::bitcoin::absolute::LockTime,
+    };
     let change_index = daemon
         .reserve_change()
         .await
@@ -2457,11 +2554,10 @@ async fn build(
         .ok()
         .and_then(|height| LockTime::from_height(height).ok())
         .unwrap_or(LockTime::ZERO);
-    let secp = secp256k1::Secp256k1::verification_only();
     create_poison_self_transfer(
         wallet.chain,
         &wallet.main_descriptor,
-        &secp,
+        &secp256k1::Secp256k1::verification_only(),
         &mut getter,
         &candidates,
         change_index,

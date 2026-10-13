@@ -13,6 +13,9 @@
 
 /// User-facing refusal retained while production ancestry is awaiting approval.
 pub(crate) const CLOSED_MESSAGE: &str = "Bitcoin-only input signing is not available yet.";
+/// No new claim may use the old 90-byte OP_RETURN construction. The replacement
+/// needs independently verified Bitcoin-only and BTCB2-only funding coins.
+pub(crate) const NEW_CLAIM_MESSAGE: &str = "Claim will require confirmed Bitcoin-only and Bitcoin Blake2b-only funding coins in this Vault. This transaction cannot be signed until both funding coins can be verified.";
 
 // This is the only production switch for ancestry signer dispatch and durable
 // completion. Changing it requires the acceptance evidence documented above.
@@ -28,9 +31,8 @@ pub(crate) fn authorization() -> Option<Authorization> {
 /// Whether a Claim build may search for a Bitcoin-only input (#547).
 ///
 /// A construction found while the gate is closed could never be signed, so a
-/// closed gate means no ancestry discovery at all: the build uses OP_RETURN,
-/// whose timing refusals then apply unchanged. Tests may open discovery on a
-/// specific client; that never grants [`authorization`].
+/// closed gate means no ancestry discovery at all. Tests may open discovery on
+/// a specific client; that never grants [`authorization`].
 pub(crate) fn discovery_open(client: &crate::services::coincube::CoincubeClient) -> bool {
     #[cfg(test)]
     if client.ancestry_discovery_opened_for_test() {

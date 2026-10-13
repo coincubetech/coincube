@@ -296,6 +296,7 @@ fn message(message: UnifiedMessage) -> SplitMessage {
 }
 
 async fn send(panel: &mut SplitPanel, m: UnifiedMessage) {
+    panel.legacy_flow_fixture = true;
     let task = panel.update(message(m));
     drive(panel, task).await;
 }
@@ -521,7 +522,10 @@ async fn hardware_single_step_route_is_blocked() {
     assert!(!panel.unified().holds_seeds());
     // The view offers no hardware single step.
     let labels = crate::app::state::vault::split::device::tests::rendered_labels(&panel).await;
-    assert!(labels.iter().any(|l| l == "One step with recovery phrases"));
+    assert!(!labels.iter().any(|l| l == "One step with recovery phrases"));
+    assert!(labels
+        .iter()
+        .any(|l| l == super::super::step1::RETIRED_MARKER));
     assert!(labels.iter().any(|l| l == P1_HARDWARE));
     assert!(
         !labels

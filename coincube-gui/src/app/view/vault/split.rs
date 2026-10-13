@@ -21,7 +21,7 @@ use crate::{
             device::{self, DeviceMessage, DeviceStep},
             step1::{self, describe_route},
             step2,
-            unified::{self, Route, SeedText, UnifiedMessage, UnifiedStage},
+            unified::{self, SeedText, UnifiedMessage, UnifiedStage},
             SplitMessage, SplitPanel, Stage, Step2Stage, Work,
         },
         view::Message,
@@ -136,6 +136,15 @@ fn unified_body<'a>(
     coincube_ui::widget::Row<'a, Message>,
 ) {
     let state = panel.unified();
+    if !panel.can_sign_or_submit() {
+        body = body.push(p1_regular(
+            "This recorded split remains available for inspection.",
+        ));
+        if matches!(stage, UnifiedStage::Submitted | UnifiedStage::Reconcile) {
+            actions = actions.push(unified_action("Refresh", UnifiedMessage::Reconcile));
+        }
+        return (body, actions);
+    }
     match stage {
         UnifiedStage::EnterSeeds => {
             body = body
@@ -283,6 +292,17 @@ fn step2_body<'a>(
     coincube_ui::widget::Column<'a, Message>,
     coincube_ui::widget::Row<'a, Message>,
 ) {
+    if !panel.can_sign_or_submit()
+        && matches!(
+            stage,
+            Step2Stage::Ready | Step2Stage::Sign | Step2Stage::Signed | Step2Stage::Review
+        )
+    {
+        body = body.push(p1_regular(
+            "This recorded split can be inspected, but no new transaction can be signed or sent from it.",
+        ));
+        return (body, actions);
+    }
     if let Some(label) = panel.replay_label() {
         body = body.push(p1_bold(label).style(theme::text::success));
     }
@@ -377,7 +397,10 @@ fn step2_body<'a>(
             }
             // P3-3: a resend of exactly the recorded step 2, only from a
             // live review.
-            if let Some(resend) = panel.step2_resend_review() {
+            if let Some(resend) = panel
+                .step2_resend_review()
+                .filter(|_| panel.can_sign_or_submit())
+            {
                 body = body
                     .push(p1_bold(format!("Send step 2 ({}) again", resend.txid)))
                     .push(p1_regular(format!(
@@ -394,7 +417,7 @@ fn step2_body<'a>(
                 actions = actions
                     .push(primary("Send again", SplitMessage::Step2ConfirmResend))
                     .push(action("Review again", SplitMessage::Step2ReviewResend));
-            } else if panel.can_review_resend() {
+            } else if panel.can_sign_or_submit() && panel.can_review_resend() {
                 actions = actions.push(action("Review resend", SplitMessage::Step2ReviewResend));
             }
             // #568 S4b, O1: step 1 re-mined in another Bitcoin block; a live
@@ -480,7 +503,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     } else {
         body.push(h3("Split: step 1 on Bitcoin")).push(
             p1_regular(
-                "Step 1 moves the foreign wallet's pre-fork coins to a fresh address of the same wallet on Bitcoin, with an output Bitcoin Blake2b refuses. Nothing here holds keys; signatures come back in PSBT files.",
+                "A recorded step 1 can be checked here. New splits require confirmed funding coins specific to each chain before signing.",
             )
             .style(theme::text::secondary),
         )
@@ -489,20 +512,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
 
     match panel.stage() {
         Stage::ChooseRoute => {
-            body = body.push(p1_regular(unified::ROUTE_TWO_STEP));
-            actions = actions.push(primary(
-                "Two steps",
-                SplitMessage::Unified(UnifiedMessage::Choose(Route::TwoStep)),
-            ));
-            if panel.seed_route_offered() {
-                body = body.push(p1_regular(unified::ROUTE_SEEDS));
-                actions = actions.push(action(
-                    "One step with recovery phrases",
-                    SplitMessage::Unified(UnifiedMessage::Choose(Route::Seeds)),
-                ));
-            }
-            // P1: the single step is never offered for a hardware wallet.
-            body = body.push(caption(unified::P1_HARDWARE).style(theme::text::secondary));
+            body = body.push(p1_regular(step1::RETIRED_MARKER).style(theme::text::warning));
         }
         Stage::Unified(stage) => {
             (body, actions) = unified_body(panel, *stage, body, actions);
@@ -517,49 +527,61 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             body = body.push(p1_bold(working(*work)));
         }
         Stage::Sign => {
-            if let Some(construction) = panel.construction() {
-                body = body
-                    .push(p1_regular(format!(
-                        "{} input(s) · fee {} sats · at most {} vB",
-                        construction.claimed_prevouts().len(),
-                        construction.fee().to_sat(),
-                        construction.maximum_signed_vbytes()
-                    )))
-                    .push(caption(format!("Unsigned txid {}", construction.txid())));
-            }
-            if let Some(prepared) = panel.prepared() {
-                body = body.push(caption(format!(
-                    "Fresh destination (receive index {}): {}",
-                    prepared.destination, prepared.address
-                )));
-            }
-            body = body.push(p1_regular(match panel.exported() {
+            if !panel.can_sign_or_submit() {
+                body = body.push(p1_regular(
+                    "This recorded split remains available for inspection.",
+                ));
+            } else {
+                if let Some(construction) = panel.construction() {
+                    body = body
+                        .push(p1_regular(format!(
+                            "{} input(s) · fee {} sats · at most {} vB",
+                            construction.claimed_prevouts().len(),
+                            construction.fee().to_sat(),
+                            construction.maximum_signed_vbytes()
+                        )))
+                        .push(caption(format!("Unsigned txid {}", construction.txid())));
+                }
+                if let Some(prepared) = panel.prepared() {
+                    body = body.push(caption(format!(
+                        "Fresh destination (receive index {}): {}",
+                        prepared.destination, prepared.address
+                    )));
+                }
+                body = body.push(p1_regular(match panel.exported() {
                 Some(path) => format!(
                     "Saved to {}. Sign it in the wallet that holds the keys (SIGHASH_ALL, without finalizing), then import the signed file(s).",
                     path.display()
                 ),
                 None => "Save the unsigned PSBT, sign it in the wallet that holds the keys, then import the signed file(s).".to_string(),
             }));
-            if panel.files() > 0 {
-                body = body.push(caption(format!("{} signed file(s) loaded", panel.files())));
+                if panel.files() > 0 {
+                    body = body.push(caption(format!("{} signed file(s) loaded", panel.files())));
+                }
+                actions = actions
+                    .push(action(
+                        "Save PSBT",
+                        SplitMessage::ExportUnsigned(Encoding::Binary),
+                    ))
+                    .push(action(
+                        "Save as text",
+                        SplitMessage::ExportUnsigned(Encoding::Base64),
+                    ))
+                    .push(primary("Import signed", SplitMessage::ImportSigned));
+                (body, actions) = device_section(panel, DeviceStep::Step1, body, actions);
             }
-            actions = actions
-                .push(action(
-                    "Save PSBT",
-                    SplitMessage::ExportUnsigned(Encoding::Binary),
-                ))
-                .push(action(
-                    "Save as text",
-                    SplitMessage::ExportUnsigned(Encoding::Base64),
-                ))
-                .push(primary("Import signed", SplitMessage::ImportSigned));
-            (body, actions) = device_section(panel, DeviceStep::Step1, body, actions);
         }
         Stage::Ready => {
-            body = body.push(p1_regular(
+            if panel.can_sign_or_submit() {
+                body = body.push(p1_regular(
                 "Step 1 is signed and recorded on this device. Nothing has been sent. Review it to submit through Connect.",
             ));
-            actions = actions.push(primary("Review", SplitMessage::Review));
+                actions = actions.push(primary("Review", SplitMessage::Review));
+            } else {
+                body = body.push(p1_regular(
+                    "This signed split remains recorded on this device.",
+                ));
+            }
         }
         Stage::Review => {
             if let Some(review) = panel.review() {
@@ -582,9 +604,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     )));
                 }
             }
-            actions = actions
-                .push(primary("Submit", SplitMessage::Confirm))
-                .push(action("Review again", SplitMessage::Review));
+            if panel.can_sign_or_submit() {
+                actions = actions
+                    .push(primary("Submit", SplitMessage::Confirm))
+                    .push(action("Review again", SplitMessage::Review));
+            }
         }
         Stage::Tracking => {
             body = body.push(p1_regular(match (panel.phase(), panel.outcome()) {
@@ -650,7 +674,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             if let Some(review) = panel.review() {
                 body = body
                     .push(p1_regular(format!(
-                        "Send exactly the same signed step 1 again ({}): fee {} sats · {} vB · route {}. A fresh preflight accepted it.",
+                        "Recorded step 1 ({}): fee {} sats · {} vB · route {}.",
                         review.txid,
                         review.fee_sats,
                         review.vsize,
@@ -661,9 +685,10 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         review.bitcoin_tip, review.fork_tip
                     )));
             }
-            actions = actions
-                .push(primary("Send again", SplitMessage::ConfirmResend))
-                .push(action("Refresh", SplitMessage::Reconcile));
+            if panel.can_sign_or_submit() {
+                actions = actions.push(primary("Send again", SplitMessage::ConfirmResend));
+            }
+            actions = actions.push(action("Refresh", SplitMessage::Reconcile));
         }
         Stage::Refused(refusal) => {
             body = body.push(p1_regular(refusal.reason.clone()).style(theme::text::warning));
@@ -695,7 +720,8 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         body = body.push(p1_regular(line).style(theme::text::warning));
     }
     // A completed split offers only Refresh and Close.
-    if panel.signed().is_some()
+    if panel.can_sign_or_submit()
+        && panel.signed().is_some()
         && !matches!(
             panel.stage(),
             Stage::Working(_) | Stage::Step2(Step2Stage::Completed)

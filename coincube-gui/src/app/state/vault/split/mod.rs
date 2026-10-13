@@ -594,6 +594,8 @@ pub struct SplitPanel {
     device: device::DeviceSigner,
     /// B4b-3c: the single-step route, its port and its seeds.
     unified: unified::UnifiedState,
+    #[cfg(test)]
+    legacy_flow_fixture: bool,
 }
 
 impl fmt::Debug for SplitPanel {
@@ -666,7 +668,26 @@ impl SplitPanel {
             deadline_epoch: 0,
             device: device::DeviceSigner::default(),
             unified: unified::UnifiedState::default(),
+            #[cfg(test)]
+            legacy_flow_fixture: false,
         }
+    }
+
+    fn legacy_flow_fixture(&self) -> bool {
+        #[cfg(test)]
+        {
+            self.legacy_flow_fixture
+        }
+        #[cfg(not(test))]
+        {
+            false
+        }
+    }
+
+    /// Until the two-chain funding transaction is implemented, recorded
+    /// legacy splits are inspectable but cannot create or send another step.
+    pub fn can_sign_or_submit(&self) -> bool {
+        self.legacy_flow_fixture()
     }
 
     /// A fresh split of the scanned wallet into `target_cube`'s Vault. The
@@ -937,10 +958,12 @@ impl SplitPanel {
             );
         }
         if self.construction.is_some() {
-            // A session ended before recording: the construction and any
-            // signatures are kept; continue signing or record again.
-            self.stage = Stage::Sign;
-            return self.maybe_record();
+            if self.legacy_flow_fixture() {
+                self.stage = Stage::Sign;
+                return self.maybe_record();
+            }
+            self.stage = Stage::Refused(Refusal::final_(step1::RETIRED_MARKER));
+            return Task::none();
         }
         let Some(intent) = self.intent.clone() else {
             return Task::none();
@@ -948,6 +971,10 @@ impl SplitPanel {
         // B4b-3c: a started panel chooses its route first.
         if self.unified.route() != Some(unified::Route::TwoStep) {
             self.stage = Stage::ChooseRoute;
+            return Task::none();
+        }
+        if !self.legacy_flow_fixture() {
+            self.stage = Stage::Refused(Refusal::final_(step1::RETIRED_MARKER));
             return Task::none();
         }
         self.stage = Stage::Working(Work::Checking);
@@ -1054,6 +1081,10 @@ impl SplitPanel {
 
     /// Record the verified step 1 once the imported files satisfy it.
     fn maybe_record(&mut self) -> Task<Message> {
+        if self.construction.is_some() && !self.legacy_flow_fixture() {
+            self.stage = Stage::Refused(Refusal::final_(step1::RETIRED_MARKER));
+            return Task::none();
+        }
         let (Some(construction), Some(connect)) = (self.construction.clone(), self.connect.clone())
         else {
             return Task::none();
@@ -1123,6 +1154,19 @@ impl SplitPanel {
     }
 
     pub fn update(&mut self, message: SplitMessage) -> Task<Message> {
+        if !self.can_sign_or_submit()
+            && matches!(
+                &message,
+                SplitMessage::ExportUnsigned(_)
+                    | SplitMessage::ImportSigned
+                    | SplitMessage::ExportSigned
+                    | SplitMessage::Confirm
+                    | SplitMessage::ConfirmResend
+            )
+        {
+            self.notice = Some(step1::RETIRED_MARKER.to_string());
+            return Task::none();
+        }
         let seq = self.seq;
         match message {
             SplitMessage::Retry => {
@@ -1383,12 +1427,20 @@ impl SplitPanel {
             SplitEvent::Checked(_, Ok(prepared)) => {
                 self.stage = Stage::Working(Work::Building);
                 let for_build = prepared.clone();
+                let legacy_fixture = self.legacy_flow_fixture();
                 self.prepared = Some(prepared);
                 self.spawn(
                     async move {
-                        tokio::task::spawn_blocking(move || step1::build(&for_build).map(Box::new))
-                            .await
-                            .map_err(|_| "Building step 1 was interrupted.".to_string())?
+                        tokio::task::spawn_blocking(move || {
+                            #[cfg(test)]
+                            if legacy_fixture {
+                                return step1::build_legacy_for_test(&for_build).map(Box::new);
+                            }
+                            let _ = legacy_fixture;
+                            step1::build(&for_build).map(Box::new)
+                        })
+                        .await
+                        .map_err(|_| "Building step 1 was interrupted.".to_string())?
                     },
                     SplitEvent::Built,
                 )

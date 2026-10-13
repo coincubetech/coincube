@@ -373,7 +373,8 @@ impl SplitPanel {
     /// Step 2 may be entered: step 1 tracked at six confirmations, the
     /// step-1 driver bound, a step-2 port and a Connect session.
     pub fn can_enter_step2(&self) -> bool {
-        self.stage == Stage::Tracking
+        self.legacy_flow_fixture()
+            && self.stage == Stage::Tracking
             && self.confirmations() == Some(MIN_CONFIRMATIONS)
             && !self.reorged()
             && self.driver.is_some()
@@ -470,6 +471,25 @@ impl SplitPanel {
     }
 
     pub(super) fn update_step2(&mut self, message: SplitMessage) -> Task<Message> {
+        if !self.can_sign_or_submit()
+            && matches!(
+                &message,
+                SplitMessage::EnterStep2
+                    | SplitMessage::Step2Check
+                    | SplitMessage::Step2Reserve
+                    | SplitMessage::Step2Build
+                    | SplitMessage::Step2Export(_)
+                    | SplitMessage::Step2Import
+                    | SplitMessage::Step2RetryHandoff
+                    | SplitMessage::Step2Review
+                    | SplitMessage::Step2Confirm
+                    | SplitMessage::Step2ReviewResend
+                    | SplitMessage::Step2ConfirmResend
+            )
+        {
+            self.notice = Some(super::step1::RETIRED_MARKER.to_string());
+            return Task::none();
+        }
         let seq = self.seq;
         match message {
             SplitMessage::EnterStep2 if self.can_enter_step2() => {

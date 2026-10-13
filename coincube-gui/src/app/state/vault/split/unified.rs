@@ -1286,22 +1286,33 @@ impl SplitPanel {
             {
                 match route {
                     Route::TwoStep => {
-                        self.unified.route = Some(Route::TwoStep);
-                        self.notice = None;
-                        match self.connect.clone() {
-                            Some(connect) => self.resume_journal(connect),
-                            None => {
-                                self.stage = Stage::NeedsSession;
-                                Task::none()
-                            }
+                        if self.legacy_flow_fixture() {
+                            self.unified.route = Some(Route::TwoStep);
+                            self.notice = None;
+                            return match self.connect.clone() {
+                                Some(connect) => self.resume_journal(connect),
+                                None => {
+                                    self.stage = Stage::NeedsSession;
+                                    Task::none()
+                                }
+                            };
                         }
+                        self.notice = Some(super::step1::RETIRED_MARKER.to_string());
+                        Task::none()
                     }
                     // P1: never offered; asking for it only says why.
                     Route::Hardware => {
                         self.notice = Some(P1_HARDWARE.to_string());
                         Task::none()
                     }
-                    Route::Seeds => self.choose_seeds(),
+                    Route::Seeds => {
+                        if self.legacy_flow_fixture() {
+                            self.choose_seeds()
+                        } else {
+                            self.notice = Some(super::step1::RETIRED_MARKER.to_string());
+                            Task::none()
+                        }
+                    }
                 }
             }
             UnifiedMessage::Words(text)

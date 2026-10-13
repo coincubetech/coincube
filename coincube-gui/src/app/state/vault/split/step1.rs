@@ -44,12 +44,12 @@ use coincube_core::{
     chain::ChainId,
     claim::{Assessment, BlockRef, DeploymentState},
     foreign_split::{
-        create_split_step1, finalize_split_step1, reconstruct_split_step1,
-        verify_split_step1_transaction, FinalizeError, SplitBranch, SplitCoin, SplitInputs,
-        SplitSource, SplitStep1, VerifiedSplitStep1,
+        finalize_split_step1, reconstruct_split_step1, verify_split_step1_transaction,
+        FinalizeError, SplitBranch, SplitCoin, SplitInputs, SplitSource, SplitStep1,
+        VerifiedSplitStep1,
     },
     miniscript::bitcoin::{
-        absolute::LockTime, hashes::sha256, psbt::Psbt, secp256k1, Address, Network, OutPoint, Txid,
+        hashes::sha256, psbt::Psbt, secp256k1, Address, Network, OutPoint, Txid,
     },
 };
 
@@ -94,6 +94,8 @@ pub const WATCH_ONLY_DEFERRED: &str = "Tenshu could not prove a fresh receive ad
 /// P7: a fixed (non-ranged) wallet has one address and no fresh one.
 pub const FIXED_WALLET: &str = "This wallet has a single fixed address, so Split has no fresh address of the same wallet to send step 1 to. Wallets with one address can't be split in this version.";
 pub const NO_PRE_FORK_COINS: &str = "No coins confirmed before the fork on both chains were found, so there is nothing to split. Coins confirmed after the fork are not part of a split.";
+/// No new two-step split may build the retired 90-byte marker transaction.
+pub const RETIRED_MARKER: &str = "This split requires confirmed Bitcoin-only and Bitcoin Blake2b-only funding coins in the source wallet. Signing is unavailable until both coins can be verified.";
 pub const STALE_ANCHOR: &str = "The Bitcoin Blake2b fork height Connect reports now differs from the one this split was built against. Nothing was built or sent; scan the wallet again.";
 pub const DESTINATION_USED: &str = "The fresh address Split chose has been used since the scan, so it is no longer fresh. Nothing was built; scan the wallet again.";
 pub const COMPLETED: &str = "This split's recorded wallet details were already removed after completion. There is nothing left to resume.";
@@ -643,20 +645,9 @@ fn review_view(snapshot: &claim_coordinator::ReviewSnapshot) -> ReviewView {
     }
 }
 
-/// Copy for an RDTS window that refuses the OP_RETURN poison (D3: 36 h).
-pub fn rdts_refusal(assessment: Assessment, window: &ForkWindow) -> String {
-    match assessment {
-        Assessment::RdtsExpired => "Bitcoin Blake2b's replay protection has expired, so an OP_RETURN split is no longer possible.".to_string(),
-        Assessment::ExpiryMargin => format!(
-            "Bitcoin Blake2b's replay protection expires too soon for a safe split: about {} left, {} needed. Nothing was built.",
-            describe_duration(window.expires_at.saturating_sub(window.median_time_past).max(0)),
-            describe_duration(EXPIRY_MARGIN_SECONDS)
-        ),
-        Assessment::RdtsScheduled | Assessment::RdtsInactive => {
-            "Bitcoin Blake2b's replay protection isn't active yet.".to_string()
-        }
-        other => format!("Bitcoin Blake2b's status couldn't be assessed ({other:?})."),
-    }
+/// Obsolete deployment timing cannot authorize a new split.
+pub fn rdts_refusal(_assessment: Assessment, _window: &ForkWindow) -> String {
+    RETIRED_MARKER.to_string()
 }
 
 /// The fresh receive address step 1 pays.
@@ -759,6 +750,17 @@ fn chain_name(chain: ChainId) -> &'static str {
 
 /// The core construction. CPU-bound: run off the UI thread.
 pub fn build(prepared: &Prepared) -> Result<SplitStep1, String> {
+    let _ = prepared;
+    Err(RETIRED_MARKER.to_string())
+}
+
+/// Legacy fixture builder for journal and reconciliation tests only. New UI
+/// paths call `build`, which cannot create an OP_RETURN transaction.
+#[cfg(test)]
+pub(crate) fn build_legacy_for_test(prepared: &Prepared) -> Result<SplitStep1, String> {
+    use coincube_core::{
+        foreign_split::create_split_step1, miniscript::bitcoin::absolute::LockTime,
+    };
     let tip = prepared.bitcoin_tip_height;
     let locktime = LockTime::from_height(tip)
         .map_err(|_| "The Bitcoin tip height is not a valid locktime.".to_string())?;
@@ -775,7 +777,7 @@ pub fn build(prepared: &Prepared) -> Result<SplitStep1, String> {
         tip,
         prepared.window.fork_hash,
     )
-    .map_err(|error| format!("Split couldn't build step 1: {error}"))
+    .map_err(|error| format!("Legacy split fixture could not build step 1: {error}"))
 }
 
 /// Combining every returned file so far.

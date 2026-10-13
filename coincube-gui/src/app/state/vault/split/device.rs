@@ -272,7 +272,8 @@ impl SplitPanel {
     /// Whether a device listing may be opened here: only for a wallet whose
     /// descriptors give the in-app hardware route (#653 F4).
     pub fn can_open_device(&self) -> bool {
-        self.device_step().is_some()
+        self.can_sign_or_submit()
+            && self.device_step().is_some()
             && self.device.datadir.is_some()
             && !self.device.is_open()
             && self
@@ -302,6 +303,9 @@ impl SplitPanel {
     }
 
     pub(super) fn update_device(&mut self, message: DeviceMessage) -> Task<Message> {
+        if !self.can_sign_or_submit() {
+            return Task::none();
+        }
         match message {
             DeviceMessage::Open if self.can_open_device() => {
                 let (Some(step), Some(datadir), Some(construction)) = (

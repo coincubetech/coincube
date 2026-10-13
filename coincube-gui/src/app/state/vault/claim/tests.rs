@@ -257,8 +257,11 @@ fn refusals_come_in_actionable_order() {
 
     let now = 1_000_000;
     p.pre.checked = Some(checked_ok(now));
-    assert_eq!(p.refusal(), None);
-    assert!(p.can_build());
+    assert_eq!(
+        p.refusal().unwrap().reason,
+        crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
+    );
+    assert!(!p.can_build());
 
     let mut backend = checked_ok(now);
     backend.backend = Err("wrong backend".into());
@@ -275,15 +278,9 @@ fn refusals_come_in_actionable_order() {
     );
     p.pre.checked = Some(margin);
     let refused = p.refusal().unwrap();
-    assert!(
-        refused.reason.contains("expires too soon"),
-        "{}",
-        refused.reason
-    );
-    assert!(
-        refused.reason.contains("36 hours needed"),
-        "{}",
-        refused.reason
+    assert_eq!(
+        refused.reason,
+        crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
     );
     assert!(!refused.retry);
 
@@ -1185,6 +1182,7 @@ mod flow {
             }),
         )
         .with_feerate_source(FeerateSource::Fixed(5));
+        p.legacy_flow_fixture = true;
         // The target, as the installer leaves it on disk: a Bitcoin Blake2b
         // Cube in the fork chain's settings file reusing this descriptor. The
         // probe re-reads it on every entry, so a poked field would not do.
@@ -1481,13 +1479,14 @@ mod flow {
     }
 
     async fn reopen(f: &mut Flow) {
-        let panel = ClaimStep1Panel::new(
+        let mut panel = ClaimStep1Panel::new(
             f.wallet.clone(),
             f.datadir.clone(),
             "bitcoin-cube".into(),
             f.sender.subscribe(),
             f.p.connect.clone(),
         );
+        panel.legacy_flow_fixture = true;
         f.p = panel;
         let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
         for event in outputs(task).await {
@@ -1496,6 +1495,30 @@ mod flow {
                 let _ = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, event);
             }
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn production_refuses_submission_of_a_retired_recorded_claim() {
+        let mut f = reach_review().await;
+        f.p.legacy_flow_fixture = false;
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 0);
+        assert!(matches!(
+            &f.p.stage,
+            Stage::Review { error: Some(reason), .. }
+                if reason == crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
+        ));
+        assert!(journal_directory(&f.datadir, &f.wallet)
+            .join("intent.json")
+            .is_file());
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(&f.root);
     }
 
     #[cfg(any(unix, windows))]
@@ -1603,6 +1626,7 @@ mod flow {
             f.sender.subscribe(),
             f.p.connect.clone(),
         );
+        f.p.legacy_flow_fixture = true;
         assert!(outputs(f.p.reload(None, None)).await.is_empty());
         assert!(!f.p.can_build());
         let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
@@ -4811,7 +4835,7 @@ mod flow {
 }
 
 #[test]
-fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observations() {
+fn ancestry_candidates_do_not_authorize_an_incomplete_two_chain_claim() {
     let mut p = panel(SINGLE_WSH);
     p.pre.target = Some("fork-cube".into());
     // Discovery opened for the test; the closed-gate case is the next test.
@@ -4840,10 +4864,10 @@ fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observat
             .unwrap()
             .ancestry_candidates
             .push(coin(Some(95), false, false, 2));
-        assert!(
-            p.can_build(),
-            "candidate search should be possible: {:?}",
-            assessment
+        assert!(!p.can_build(), "one-chain discovery is insufficient");
+        assert_eq!(
+            p.refusal().unwrap().reason,
+            crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
         );
         assert!(matches!(p.stage, Stage::Preconditions));
     }

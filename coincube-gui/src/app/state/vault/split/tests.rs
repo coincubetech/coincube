@@ -576,6 +576,7 @@ use std::path::Path;
 /// A started panel's begin, choosing the two-step route (#568 B4b-3c: a
 /// started panel chooses its route first).
 async fn begin_two_step(panel: &mut SplitPanel) {
+    panel.legacy_flow_fixture = true;
     let task = panel.begin();
     drive(panel, task).await;
     assert_eq!(panel.stage(), &Stage::ChooseRoute);
@@ -583,6 +584,55 @@ async fn begin_two_step(panel: &mut SplitPanel) {
         unified::Route::TwoStep,
     )));
     drive(panel, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_split_routes_cannot_create_the_retired_transactions() {
+    for route in [unified::Route::TwoStep, unified::Route::Seeds] {
+        let scan = Scan::new(Shape::Wpkh);
+        let connect = FakeConnect::new(&scan.coins);
+        let temp = Temp::new();
+        let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+        panel.set_connect(Some(connect as Arc<dyn SplitConnect>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::ChooseRoute);
+        let task = panel.update(SplitMessage::Unified(unified::UnifiedMessage::Choose(
+            route,
+        )));
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::ChooseRoute);
+        assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+        assert!(panel.construction().is_none());
+        assert!(!temp.root().exists());
+    }
+}
+
+#[test]
+fn recorded_legacy_split_cannot_export_sign_or_submit_again() {
+    let mut panel = SplitPanel::empty(TARGET.into(), PathBuf::from("unused-split-journals"));
+    panel.stage = Stage::Sign;
+    for message in [
+        SplitMessage::ExportUnsigned(Encoding::Binary),
+        SplitMessage::ImportSigned,
+        SplitMessage::ExportSigned,
+    ] {
+        let _ = panel.update(message);
+        assert_eq!(panel.stage(), &Stage::Sign);
+        assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+    }
+    panel.stage = Stage::Review;
+    let _ = panel.update(SplitMessage::Confirm);
+    assert_eq!(panel.stage(), &Stage::Review);
+    assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+    panel.stage = Stage::Resend;
+    let _ = panel.update(SplitMessage::ConfirmResend);
+    assert_eq!(panel.stage(), &Stage::Resend);
+    assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+    panel.stage = Stage::Step2(Step2Stage::Ready);
+    let _ = panel.update(SplitMessage::Step2Build);
+    assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Ready));
+    assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
 }
 
 /// Fresh flow up to a recorded, unsubmitted step 1.
@@ -821,7 +871,7 @@ async fn split_preconditions_refuse_before_building() {
                 *c.window.lock().unwrap() = Ok(w);
             }),
             None,
-            "expires too soon",
+            step1::RETIRED_MARKER,
         ),
         (
             "stale anchor",
@@ -939,6 +989,7 @@ async fn resumed(connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
     assert_eq!(found.len(), 1);
     let (digest, directory) = found.into_iter().next().unwrap();
     let mut panel = SplitPanel::resume(TARGET.into(), temp.root(), digest, directory);
+    panel.legacy_flow_fixture = true;
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
     let task = panel.begin();
     drive(&mut panel, task).await;
@@ -2023,7 +2074,7 @@ async fn split_production_connect_reads_freshness_and_opens_the_real_coordinator
     refused.assert_hits(0);
 
     // Record, release, resume: the real coordinator over a real journal.
-    let construction = step1::build(&step1::Prepared {
+    let construction = step1::build_legacy_for_test(&step1::Prepared {
         source,
         coins: intent.inventory.splittable_coins(),
         destination: index,

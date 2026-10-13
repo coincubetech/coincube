@@ -17,6 +17,18 @@ use crate::services::split_psbt_file;
 use iced::{futures::StreamExt, Task};
 use std::sync::Mutex;
 
+// Historical step-two tests explicitly exercise recorded transactions.
+fn legacy_resume(
+    target_cube: String,
+    journal_root: std::path::PathBuf,
+    digest: sha256::Hash,
+    directory: std::path::PathBuf,
+) -> SplitPanel {
+    let mut panel = SplitPanel::resume(target_cube, journal_root, digest, directory);
+    panel.legacy_flow_fixture = true;
+    panel
+}
+
 #[derive(Default)]
 struct Counts {
     step1_dropped: usize,
@@ -630,7 +642,7 @@ impl ReconPort for PanelReconPort {
 /// A resumed panel tracking step 1 at six confirmations, with a step-2 port.
 fn tracked_panel(journal: &Journal) -> (SplitPanel, Shared) {
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -826,7 +838,7 @@ async fn panel_restart_after_a_recorded_step2_only_reconciles() {
     let journal = Journal::new(true);
     for daemon in [false, true] {
         let shared: Shared = Arc::default();
-        let mut panel = SplitPanel::resume(
+        let mut panel = legacy_resume(
             TARGET.into(),
             journal.temp.0.parent().unwrap().to_path_buf(),
             journal.digest(),
@@ -886,7 +898,7 @@ async fn panel_restart_after_a_recorded_step2_only_reconciles() {
 async fn panel_restart_without_a_reconciler_refuses_instead_of_step1() {
     let journal = Journal::new(true);
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -938,7 +950,7 @@ async fn panel_restart_of_a_step1_journal_resumes_step1_without_a_daemon() {
     let journal = Journal::new(false);
     for (step2_port, recon_port) in [(false, false), (false, true), (true, true)] {
         let shared: Shared = Arc::default();
-        let mut panel = SplitPanel::resume(
+        let mut panel = legacy_resume(
             TARGET.into(),
             journal.temp.0.parent().unwrap().to_path_buf(),
             journal.digest(),
@@ -988,7 +1000,7 @@ async fn panel_restart_reconciles_through_the_production_ports_without_a_daemon(
     let connect = step1::ProductionConnect::new(session(ORIGIN), generation.clone()).unwrap();
     assert_eq!(ReconPort::context(&recon), SplitConnect::context(&connect));
     let journal = Journal::under(true, &ReconPort::context(&recon));
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -1050,7 +1062,7 @@ async fn panel_keeps_its_reconciler_across_an_equivalent_recon_port() {
     }
     let journal = Journal::new(true);
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -1434,7 +1446,7 @@ async fn step2_reconcile_warning_has_one_case_per_outcome_and_never_the_replay_l
     ];
     let journal = Journal::new(true);
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -1536,7 +1548,7 @@ async fn panel_reconciler_warns_when_step1_loses_bitcoin_confirmation() {
     use crate::app::state::vault::split::step2::STEP1_REORGED_AFTER_STEP2;
     let journal = Journal::new(true);
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -2184,7 +2196,7 @@ async fn panel_terminal_handoff_blocks_import_and_retry() {
 /// port and, with `step2_port`, the Vault's step-2 port, restarted.
 async fn restarted(journal: &Journal, step2_port: bool) -> (SplitPanel, Shared) {
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -2663,7 +2675,7 @@ async fn port_change_during_an_in_flight_step2_task_revokes_it() {
     // A restart still deciding, when the Vault's port goes away.
     let journal = Journal::returned(false);
     let shared: Shared = Arc::default();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -3673,7 +3685,7 @@ async fn restarted_recorded(
 ) -> (SplitPanel, Shared) {
     let shared: Shared = Arc::default();
     shared.lock().unwrap().recheck_results = rechecks.into();
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),
@@ -3821,7 +3833,7 @@ async fn restart_opens_a_recorded_completion_in_completed_and_checks_it() {
 async fn port_build_failure_leaves_terminal_stages_and_a_held_session() {
     let journal = Journal::new(true);
     let resumed = || {
-        SplitPanel::resume(
+        legacy_resume(
             TARGET.into(),
             journal.temp.0.parent().unwrap().to_path_buf(),
             journal.digest(),
@@ -4137,7 +4149,7 @@ async fn restart_never_opens_a_terminal_conflict_as_completed() {
 #[tokio::test(flavor = "multi_thread")]
 async fn close_labels_and_closed_stage_name_no_step() {
     let journal = Journal::new(true);
-    let mut panel = SplitPanel::resume(
+    let mut panel = legacy_resume(
         TARGET.into(),
         journal.temp.0.parent().unwrap().to_path_buf(),
         journal.digest(),

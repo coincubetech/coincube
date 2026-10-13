@@ -1,9 +1,8 @@
 # BTCB2 split migration: chain-specific inputs
 
-Status: implementation plan. The current Claim transaction still uses the
-90-byte OP_RETURN output; Split's transaction path is not yet wired into its
-desktop wizard. Do not use this document as evidence that either new flow is
-live.
+Status: migration in progress. New Claim and two-step Split transactions using
+the 90-byte OP_RETURN are disabled. Existing records remain readable for
+reconciliation. The replacement input-ancestry flow is not yet live.
 
 ## Decision and safety invariant
 
@@ -57,8 +56,9 @@ a replayable spend.
    witness checks. Version the Claim journal to retain both *structural* paths
    and marker outpoints, never cached spend authority. On restart, reconstruct
    both transactions and recollect live proofs before sign, broadcast or
-   completion. Remove the OP_RETURN constructor and finalizer only when this
-   replacement passes the full two-chain suite.
+   completion. Keep legacy reconstruction and verification only for recorded
+   intents and possibly broadcast transactions. Remove them after journal
+   migration and reconciliation are complete.
 3. **Foreign Split transactions.** The existing `foreign_split::SplitStep1`
    always writes OP_RETURN output 0 and treats every input as a shared claim.
    Replace it with a typed ancestry construction containing `S + B`, one
@@ -80,7 +80,9 @@ a replayable spend.
    action. If a deposit is too small, unconfirmed, spent, entangled, outside
    scanner coverage or cannot be traced to a chain-specific coinbase, explain
    that state without enabling Sign. Do not call the deposit itself a split.
-5. **Remove the old route atomically.** Remove `split_poison` payload building,
+5. **Retire the old route now.** New builds, signing, first submission and
+   resubmission of the 90-byte OP_RETURN transaction are disabled before the
+   replacement goes live. Next remove `split_poison` payload building,
    `Poison::OpReturn` production selection, RDTS expiry checks that exist only
    for the 90-byte output, OP_RETURN review details and the transport path for
    newly created claims. Migrate or explicitly refuse any persisted,
