@@ -391,7 +391,10 @@ pub fn broadcast_action_with_identity_review<'a>(
                                                 icon::clipboard_icon()
                                                     .style(theme::text::secondary),
                                             )
-                                            .on_press(Message::Clipboard(txid.to_string()))
+                                            .on_press(Message::CopyWithToast(
+                                                txid.to_string(),
+                                                "Copied transaction ID to clipboard".to_string(),
+                                            ))
                                             .style(theme::button::transparent_border),
                                         ),
                                 )
@@ -714,8 +717,9 @@ pub fn spend_overview_with_cancel<'a>(
                                         Button::new(
                                             icon::clipboard_icon().style(theme::text::secondary),
                                         )
-                                        .on_press(Message::Clipboard(
+                                        .on_press(Message::CopyWithToast(
                                             tx.psbt.unsigned_tx.compute_txid().to_string(),
+                                            "Copied transaction ID to clipboard".to_string(),
                                         ))
                                         .style(theme::button::transparent_border),
                                     )
@@ -1628,10 +1632,10 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                     Message::Spend(SpendTxMessage::SelectKeychainSigner(row.fingerprint)),
                 ));
             }
-            if let Some(i) = retry {
+            if retry.is_some() {
                 col = col.push(
                     button::secondary(Some(icon::reload_icon()), "Try Wi-Fi again")
-                        .on_press(Message::SelectHardwareWallet(*i)),
+                        .on_press(Message::SelectPsbtHardwareWallet(row.fingerprint)),
                 );
             }
             col.into()
@@ -1641,7 +1645,9 @@ fn signing_key_row(row: &SigningKeyRow, color: iced::Color) -> Element<'static, 
                 SigningKeyAction::Master => {
                     (Message::Spend(SpendTxMessage::SelectMasterSigner), "Sign")
                 }
-                SigningKeyAction::Hardware(i) => (Message::SelectHardwareWallet(*i), "Sign"),
+                SigningKeyAction::Hardware(_) => {
+                    (Message::SelectPsbtHardwareWallet(row.fingerprint), "Sign")
+                }
                 SigningKeyAction::BorderWallet => (
                     Message::Spend(SpendTxMessage::SelectBorderWallet(row.fingerprint)),
                     "Sign",
@@ -1804,8 +1810,12 @@ fn signing_path_card(path: SigningPath) -> Element<'static, Message> {
 pub fn sign_action<'a>(
     paths: Vec<SigningPath>,
     keychain_notices: Vec<String>,
+    error: Option<String>,
 ) -> Element<'a, Message> {
     let mut col = Column::new().spacing(15).width(Length::Fill);
+    if let Some(error) = error {
+        col = col.push(card::warning(error));
+    }
     for notice in &keychain_notices {
         col = col.push(p1_regular(notice.clone()).style(theme::text::secondary));
     }
@@ -2513,6 +2523,7 @@ mod tests {
         let _ = sign_action(
             vec![active, inactive_collapsed, inactive_expanded],
             vec!["Connect is not ready yet.".to_string()],
+            Some("Signing device unavailable.".to_string()),
         );
     }
 

@@ -8305,6 +8305,15 @@ impl App {
                 }
             }
             Message::View(view::Message::Clipboard(text)) => return clipboard::write(text),
+            Message::View(view::Message::CopyWithToast(text, notice)) => {
+                return Task::batch([
+                    clipboard::write(text),
+                    Task::done(Message::View(view::Message::ShowToast(
+                        log::Level::Info,
+                        notice,
+                    ))),
+                ]);
+            }
             msg @ Message::View(view::Message::Home(_)) => {
                 return self
                     .panels

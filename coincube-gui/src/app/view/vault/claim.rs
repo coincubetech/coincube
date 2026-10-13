@@ -112,6 +112,30 @@ fn row<'a>(label: &'static str, value: impl Into<Element<'a, Message>>) -> Eleme
         .into()
 }
 
+fn return_address_row<'a>(address: String) -> Element<'a, Message> {
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(
+            Container::new(
+                scrollable(p2_regular(address.clone()).style(theme::text::secondary))
+                    .width(Length::Fill)
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(2).scroller_width(2),
+                    )),
+            )
+            .width(Length::Fill)
+            .max_width(750.0),
+        )
+        .push(
+            button::secondary_compact(None, "Copy address").on_press(Message::CopyWithToast(
+                address,
+                "Copied return address to clipboard".to_string(),
+            )),
+        )
+        .into()
+}
+
 fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Element<'a, Message> {
     let mark = match ok {
         Some(true) => icon::check_icon().style(theme::text::success),
@@ -332,12 +356,7 @@ fn plan_view<'a>(
         Ok(address) => {
             summary = summary
                 .push(p1_regular("Return address").bold())
-                .push(
-                    scrollable(p2_regular(address.clone()).style(theme::text::secondary))
-                        .direction(scrollable::Direction::Horizontal(
-                            scrollable::Scrollbar::new().width(2).scroller_width(2),
-                        )),
-                )
+                .push(return_address_row(address.clone()))
                 .push(
                     Row::new()
                         .spacing(10)
@@ -345,11 +364,7 @@ fn plan_view<'a>(
                         .push(icon::check_icon().style(theme::text::success))
                         .push(p2_regular(format!(
                             "Matches this Vault's change branch, index {change_index}."
-                        )))
-                        .push(
-                            button::secondary(None, "Copy address")
-                                .on_press(Message::Clipboard(address.clone())),
-                        ),
+                        ))),
                 );
         }
         Err(error) => {
@@ -565,13 +580,7 @@ fn review_view<'a>(
                     .spacing(10)
                     .push(row("Back to this Vault", p1_regular(format_amount(*amount, cache))))
                     .push(p1_regular("Return address").bold())
-                    .push(scrollable(p2_regular(address.clone())).direction(
-                        scrollable::Direction::Horizontal(
-                            scrollable::Scrollbar::new().width(2).scroller_width(2),
-                        ),
-                    ))
-                    .push(button::secondary(None, "Copy address")
-                        .on_press(Message::Clipboard(address.clone()))),
+                    .push(return_address_row(address.clone())),
                 _ => Column::new().push(card::warning(
                     "Cannot display the return address for this transaction. Review again before submitting.".to_string(),
                 )),
