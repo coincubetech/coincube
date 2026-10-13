@@ -2431,6 +2431,9 @@ impl Modal for SignModal {
     ) -> Task<Message> {
         match message {
             Message::View(view::Message::SelectHardwareWallet(i)) => {
+                if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
+                    return refused;
+                }
                 if let Some(fingerprint) =
                     self.hws.list.get(i).and_then(HardwareWallet::fingerprint)
                 {
@@ -2440,10 +2443,9 @@ impl Modal for SignModal {
                         tx,
                     );
                 }
-                return Task::done(Message::View(view::Message::ShowError(
-                    "This signing device is no longer ready. Reconnect or unlock it, then try again."
-                        .to_string(),
-                )));
+                let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+                self.signer_notice = Some(reason.to_string());
+                return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
             }
             Message::View(view::Message::SelectPsbtHardwareWallet(requested_fp)) => {
                 if let Some(refused) = self.refuse_before_dispatch(&tx.psbt) {
@@ -2493,6 +2495,7 @@ impl Modal for SignModal {
                     );
                 }
                 let reason = "This signing device is no longer ready. Reconnect or unlock it, then try again.";
+                self.signer_notice = Some(reason.to_string());
                 return Task::done(Message::View(view::Message::ShowError(reason.to_string())));
             }
             Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
@@ -3831,6 +3834,24 @@ mod tests {
         let _ = modal.update(daemon, request, &mut tx);
         assert!(modal.signing.contains(&fingerprint(USB_FP)));
         assert!(!modal.signing.contains(&fingerprint(PHONE_FP)));
+    }
+
+    #[test]
+    fn missing_signing_device_keeps_the_explanation_in_the_modal() {
+        for request in [
+            view::Message::SelectHardwareWallet(0),
+            view::Message::SelectPsbtHardwareWallet(fingerprint(USB_FP)),
+        ] {
+            let mut modal = picker_with_phone(None);
+            modal.hws.list.clear();
+            let (daemon, mut tx) = update_args();
+            let _ = modal.update(daemon, Message::View(request), &mut tx);
+            assert!(modal
+                .signer_notice
+                .as_deref()
+                .is_some_and(|notice| notice.contains("Reconnect or unlock it")));
+            assert!(modal.signing.is_empty());
+        }
     }
 
     /// HW-1 item 7: on a Bitcoin Blake2b Vault, the picker shows the Split
