@@ -126,7 +126,12 @@ a replayable spend.
    Bitcoin self-transfer return. These are read-only hints, not reservations;
    the wizard must durably reserve the exact addresses and recheck their
    history before displaying them. A scan with room for only one fresh address
-   cannot start the two-deposit flow.
+   cannot start the two-deposit flow. An immutable private pre-deposit record
+   now persists the source descriptor, target Cube, Connect account/provider
+   and those three indices under the Split journal lock. Restart reloads the
+   exact same addresses and refuses a changed selection or identity. This
+   record alone does not prove freshness or authorize a spend; the wizard still
+   needs to recheck both chains' address history before showing it.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,

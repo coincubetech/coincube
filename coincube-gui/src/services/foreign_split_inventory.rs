@@ -111,7 +111,7 @@ pub enum FreshIndex {
 /// Three distinct addresses proved unused inside both complete source-wallet
 /// scans. These indices are hints until a durable wizard record reserves them
 /// and Connect rechecks their history immediately before showing deposits.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct FreshFundingAddresses {
     pub bitcoin_deposit: u32,
     pub btcb2_deposit: u32,

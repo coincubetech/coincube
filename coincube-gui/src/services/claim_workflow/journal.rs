@@ -29,6 +29,8 @@ fn intent_limit(intent: &Intent) -> u64 {
     }
 }
 static NEXT: AtomicU64 = AtomicU64::new(0);
+const SPLIT_FUNDING_FILE: &str = "split-funding.json";
+const SPLIT_FUNDING_MAX_BYTES: u64 = 64 * 1024;
 
 /// Stable lock inode is never renamed or unlinked. All cooperating owners hold
 /// this handle for the complete controller lifetime, including observation I/O.
@@ -179,6 +181,80 @@ impl Journal {
                 Ok(intent)
             })
             .transpose()
+    }
+    pub(super) fn load_split_funding_reservation(
+        &self,
+    ) -> Result<Option<super::split_funding::SplitFundingReservation>, Error> {
+        let mut file = match private_file(&self.directory.join(SPLIT_FUNDING_FILE), false) {
+            Ok(file) => file,
+            Err(Error::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => {
+                return Ok(None)
+            }
+            Err(error) => return Err(error),
+        };
+        if file.metadata()?.len() > SPLIT_FUNDING_MAX_BYTES {
+            return Err(Error::InvalidJournal);
+        }
+        let mut bytes = Vec::new();
+        (&mut file)
+            .take(SPLIT_FUNDING_MAX_BYTES + 1)
+            .read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > SPLIT_FUNDING_MAX_BYTES {
+            return Err(Error::InvalidJournal);
+        }
+        let saved: super::split_funding::SplitFundingReservation =
+            serde_json::from_slice(&bytes).map_err(|_| Error::InvalidJournal)?;
+        saved.validate().map_err(|_| Error::InvalidJournal)?;
+        Ok(Some(saved))
+    }
+    pub(super) fn store_split_funding_reservation(
+        &mut self,
+        reservation: &super::split_funding::SplitFundingReservation,
+    ) -> Result<(), Error> {
+        self.ensure_current()?;
+        if self.load_split_funding_reservation()?.is_some() {
+            return Err(Error::Conflict);
+        }
+        let bytes = serde_json::to_vec(reservation).map_err(|_| Error::InvalidPlan)?;
+        if bytes.len() as u64 > SPLIT_FUNDING_MAX_BYTES {
+            return Err(Error::InvalidPlan);
+        }
+        let path = self.directory.join(format!(
+            ".split-funding-{}-{}.tmp",
+            std::process::id(),
+            NEXT.fetch_add(1, Ordering::Relaxed)
+        ));
+        let result = (|| -> Result<(), Error> {
+            #[cfg(not(windows))]
+            let mut file = {
+                let mut options = OpenOptions::new();
+                options.write(true).create_new(true);
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::OpenOptionsExt;
+                    options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+                }
+                options.open(&path)?
+            };
+            #[cfg(windows)]
+            let mut file = windows::temporary(&path)?;
+            file.write_all(&bytes)?;
+            file.sync_all()?;
+            drop(file);
+            #[cfg(windows)]
+            windows::replace(&path, &self.directory.join(SPLIT_FUNDING_FILE))?;
+            #[cfg(not(windows))]
+            {
+                fs::rename(&path, self.directory.join(SPLIT_FUNDING_FILE))?;
+                File::open(&self.directory)?.sync_all()?;
+            }
+            Ok(())
+        })();
+        if result.is_err() {
+            self.poisoned = true;
+            let _ = fs::remove_file(path);
+        }
+        result
     }
     pub(super) fn ensure_current(&mut self) -> Result<(), Error> {
         if self.poisoned {
