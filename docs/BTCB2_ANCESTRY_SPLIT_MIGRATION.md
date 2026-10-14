@@ -682,6 +682,16 @@ marker spend cases remain.
    attempt. The wizard does not yet expose either review or broadcast action;
    the post-Bitcoin coordinator must still join fresh source and target checks
    to this review and both paths need GUI and end-to-end tests.
+   Initial Claim and Split requalification now each have a typed handoff that
+   rechecks the exact saved signatures and prepares a first-send review under
+   the same live controller. The desktop still needs to invoke that handoff
+   after a new paired scan and show an explicit broadcast review; loading
+   signed bytes from disk remains read-only.
+   The corresponding stage-two Claim and Split handoffs now also join their
+   recovered exact signed pair, new post-Bitcoin source check and canonical
+   six-confirmation token to a one-use BTCB2 review in the same controller.
+   The raw re-verification and proof producers are private to these handoffs;
+   neither route has a desktop broadcast action yet.
    The Claim and Split signed-pair recovery screens now also display the exact
    one-output destination and amount decoded from each retained signed
    transaction, including immediately after Claim signs. These are read-only

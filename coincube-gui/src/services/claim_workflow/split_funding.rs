@@ -91,6 +91,29 @@ pub(crate) struct RequalifiedInitialSplit {
 
 #[allow(dead_code)] // Used by the staged paired Split signer transition.
 impl RequalifiedInitialSplit {
+    /// Build a one-use first-send review from a new full source scan and the
+    /// exact saved witnesses under the same live controller.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The paired wizard will consume this boundary.
+    pub(crate) fn prepare_recorded_pair_review(
+        &self,
+        controller: &mut Controller,
+        target: &CoincubeDescriptor,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        policy: Policy,
+        now: i64,
+    ) -> Result<super::paired_submission::InitialPairReview, Error> {
+        let (pair, proof) =
+            self.reverify_recorded_pair_for_review(controller, target, bitcoin, fork, policy, now)?;
+        controller.prepare_initial_pair_review(
+            &self.context,
+            super::paired_submission::InitialSignedPair::Split(pair),
+            proof,
+            now,
+        )
+    }
+
     pub(crate) fn funding(&self) -> &OwnedSplitFunding {
         &self.funding
     }
@@ -282,8 +305,7 @@ impl RequalifiedInitialSplit {
     /// PSBTs. The result is evidence only; policy, approval and a durable
     /// possible-attempt record are still required before transport.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // The paired submission review will consume this boundary.
-    pub(crate) fn reverify_recorded_pair_for_review(
+    fn reverify_recorded_pair_for_review(
         &self,
         controller: &mut Controller,
         target: &CoincubeDescriptor,

@@ -957,8 +957,7 @@ impl Controller {
     /// Only a Claim requalification that checked the saved funding reservation
     /// and complete BTCB2 Vault may enter the version-10 stage-two boundary.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // Stage-two coordinator remains gated.
-    pub(crate) fn post_bitcoin_claim_proof(
+    fn post_bitcoin_claim_proof(
         &mut self,
         current: &Context,
         requalified: &RequalifiedPostBitcoinClaim,
@@ -982,10 +981,32 @@ impl Controller {
         Ok((pair, proof))
     }
 
+    /// Keep the post-Bitcoin wallet check, recovered signed pair, canonical
+    /// confirmation and second-send review in one live controller session.
+    /// Reopening a journal alone cannot produce this review.
+    #[allow(dead_code)] // The paired Claim wizard will consume this boundary.
+    pub(crate) fn prepare_post_bitcoin_claim_review(
+        &mut self,
+        current: &Context,
+        requalified: &RequalifiedPostBitcoinClaim,
+        confirmation: BitcoinConfirmation,
+        policy: Policy,
+        now: i64,
+    ) -> Result<PostBitcoinPairReview, Error> {
+        let (pair, proof) =
+            self.post_bitcoin_claim_proof(current, requalified, &confirmation, policy, now)?;
+        self.prepare_post_bitcoin_pair_review(
+            current,
+            InitialSignedPair::Claim(pair),
+            proof,
+            confirmation,
+            now,
+        )
+    }
+
     /// Only a Split requalification that checked the saved source and target
     /// reservation may enter the version-11 stage-two boundary.
-    #[allow(dead_code)] // Stage-two coordinator remains gated.
-    pub(crate) fn post_bitcoin_split_proof(
+    fn post_bitcoin_split_proof(
         &mut self,
         current: &Context,
         requalified: &RequalifiedPostBitcoinSplit,
@@ -1007,6 +1028,28 @@ impl Controller {
             requalified.tips(),
         )?;
         Ok((pair, proof))
+    }
+
+    /// Keep the refreshed source and target checks bound to the recorded
+    /// version-11 witnesses through second-send review preparation.
+    #[allow(dead_code)] // The paired Split wizard will consume this boundary.
+    pub(crate) fn prepare_post_bitcoin_split_review(
+        &mut self,
+        current: &Context,
+        requalified: &RequalifiedPostBitcoinSplit,
+        confirmation: BitcoinConfirmation,
+        policy: Policy,
+        now: i64,
+    ) -> Result<PostBitcoinPairReview, Error> {
+        let (pair, proof) =
+            self.post_bitcoin_split_proof(current, requalified, &confirmation, policy, now)?;
+        self.prepare_post_bitcoin_pair_review(
+            current,
+            InitialSignedPair::Split(pair),
+            proof,
+            confirmation,
+            now,
+        )
     }
 
     /// Recheck post-Bitcoin evidence against the saved signed pair and

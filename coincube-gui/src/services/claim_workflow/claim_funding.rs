@@ -72,11 +72,32 @@ pub(crate) struct RequalifiedInitialClaim {
 }
 
 impl RequalifiedInitialClaim {
+    /// Build a one-use first-send review from the fresh, exact journaled pair.
+    /// Requalification and review preparation share the same controller so a
+    /// caller cannot carry a proof across journal reopen or identity changes.
+    #[allow(dead_code)] // The paired wizard will consume this boundary.
+    pub(crate) fn prepare_recorded_pair_review(
+        &self,
+        controller: &mut Controller,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        policy: Policy,
+        now: i64,
+    ) -> Result<super::paired_submission::InitialPairReview, Error> {
+        let (pair, proof) =
+            self.reverify_recorded_pair_for_review(controller, bitcoin, fork, policy, now)?;
+        controller.prepare_initial_pair_review(
+            &self.context,
+            super::paired_submission::InitialSignedPair::Claim(pair),
+            proof,
+            now,
+        )
+    }
+
     /// Reauthenticate the journaled Claim witnesses after a fresh complete
     /// wallet and two-chain scan. The result can populate a new broadcast
     /// review, but is not policy acceptance, approval or a transport gate.
-    #[allow(dead_code)] // The paired submission review will consume this boundary.
-    pub(crate) fn reverify_recorded_pair_for_review(
+    fn reverify_recorded_pair_for_review(
         &self,
         controller: &mut Controller,
         bitcoin: &AncestrySelfTransfer,
