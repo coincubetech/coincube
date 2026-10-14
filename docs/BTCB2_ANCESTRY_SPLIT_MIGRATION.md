@@ -507,7 +507,10 @@ marker spend cases remain.
    Gate constructors now accept the finalized Claim or Split pair directly
    and bind separately to its Bitcoin or BTCB2 witness; the coordinator must
    still issue them only after the corresponding durable possible-attempt
-   record and one-use user approval.
+   record and one-use user approval. A successful possible-attempt journal
+   write now returns a non-restorable, one-use token that can create only the
+   matching finalized pair's chain gate. No token is returned on a failed
+   write, and a reopened journal still has no transport authority.
    Paired Connect preflight also accepts the typed, signature-verified Claim
    or Split pair directly, observes both exact witnesses under one session,
    and refuses non-mainnet pairs; it remains read-only evidence.

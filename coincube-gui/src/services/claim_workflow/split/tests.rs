@@ -748,7 +748,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         hash(7),
         100,
     );
-    reopened
+    let bitcoin_attempt = reopened
         .record_possible_ancestry_bitcoin_attempt(
             &context(),
             &initial_proof,
@@ -757,6 +757,20 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             100,
         )
         .unwrap();
+    let (bitcoin_gate, bitcoin_revoker) = bitcoin_attempt
+        .into_split_gate(
+            &signed,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    assert_eq!(
+        bitcoin_gate.state(),
+        coincubed::poison_broadcast::SubmissionState::Pending
+    );
+    assert_eq!(
+        bitcoin_revoker.revoke(),
+        coincubed::poison_broadcast::SubmissionState::Revoked
+    );
     drop(reopened);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
     assert!(reopened
@@ -897,7 +911,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         ),
         Err(Error::LateObservation)
     ));
-    reopened
+    let fork_attempt = reopened
         .record_possible_ancestry_fork_attempt(
             &context(),
             &refreshed_post_proof,
@@ -907,6 +921,20 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             200,
         )
         .unwrap();
+    let (fork_gate, fork_revoker) = fork_attempt
+        .into_split_gate(
+            &signed,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    assert_eq!(
+        fork_gate.state(),
+        coincubed::poison_broadcast::SubmissionState::Pending
+    );
+    assert_eq!(
+        fork_revoker.revoke(),
+        coincubed::poison_broadcast::SubmissionState::Revoked
+    );
     assert!(reopened
         .recorded_signed_ancestry_pair()
         .unwrap()

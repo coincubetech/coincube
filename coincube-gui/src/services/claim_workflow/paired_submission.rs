@@ -18,7 +18,9 @@ use coincube_core::{
     foreign_split::VerifiedAncestrySplitPair,
     miniscript::bitcoin::{psbt::Psbt, BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
 };
+use coincubed::poison_broadcast::{SubmissionGate, SubmissionRevoker};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 const MAX_PROOF_AGE_SECONDS: i64 = 30;
 
@@ -212,6 +214,55 @@ impl PossibleAttempt {
     #[allow(dead_code)] // For reconciliation display only, never proof reuse.
     pub(crate) fn preflight(self) -> (BlockHash, i64) {
         (self.preflight_tip, self.preflight_observed_at)
+    }
+}
+
+/// One-use handoff created only after a possible send has been durably saved.
+/// It binds a gate to the exact finalized witness and cannot be restored from
+/// the journal. User approval and a short evidence-derived deadline remain
+/// the paired coordinator's responsibility.
+#[allow(dead_code)] // The production paired coordinator remains gated.
+pub(crate) struct DurableAncestryAttempt {
+    chain: ChainId,
+    bitcoin: (Txid, Wtxid),
+    fork: (Txid, Wtxid),
+}
+
+#[allow(dead_code)] // Consumed by the future paired coordinator.
+impl DurableAncestryAttempt {
+    fn matches(&self, bitcoin: &Transaction, fork: &Transaction) -> bool {
+        self.bitcoin == (bitcoin.compute_txid(), bitcoin.compute_wtxid())
+            && self.fork == (fork.compute_txid(), fork.compute_wtxid())
+    }
+
+    pub(crate) fn into_claim_gate(
+        self,
+        pair: &VerifiedAncestryClaimPair,
+        not_after: Instant,
+    ) -> Result<(SubmissionGate, SubmissionRevoker), Error> {
+        if !self.matches(pair.bitcoin().transaction(), pair.fork().transaction()) {
+            return Err(Error::WrongIdentity);
+        }
+        match self.chain {
+            ChainId::Bitcoin => Ok(SubmissionGate::for_ancestry_claim_bitcoin(pair, not_after)),
+            ChainId::BitcoinBlake2b => Ok(SubmissionGate::for_ancestry_claim_fork(pair, not_after)),
+            _ => Err(Error::WrongIdentity),
+        }
+    }
+
+    pub(crate) fn into_split_gate(
+        self,
+        pair: &VerifiedAncestrySplitPair,
+        not_after: Instant,
+    ) -> Result<(SubmissionGate, SubmissionRevoker), Error> {
+        if !self.matches(pair.bitcoin().transaction(), pair.fork().transaction()) {
+            return Err(Error::WrongIdentity);
+        }
+        match self.chain {
+            ChainId::Bitcoin => Ok(SubmissionGate::for_ancestry_split_bitcoin(pair, not_after)),
+            ChainId::BitcoinBlake2b => Ok(SubmissionGate::for_ancestry_split_fork(pair, not_after)),
+            _ => Err(Error::WrongIdentity),
+        }
     }
 }
 
@@ -508,7 +559,7 @@ impl Controller {
         preflight: &PairEvidence,
         policy: FreshnessPolicy,
         now: i64,
-    ) -> Result<(), Error> {
+    ) -> Result<DurableAncestryAttempt, Error> {
         self.ensure_context(current)?;
         self.clear_check();
         let saved = self
@@ -551,7 +602,7 @@ impl Controller {
         confirmation: &BitcoinConfirmation,
         policy: FreshnessPolicy,
         now: i64,
-    ) -> Result<(), Error> {
+    ) -> Result<DurableAncestryAttempt, Error> {
         self.ensure_context(current)?;
         self.clear_check();
         let saved = self
@@ -583,7 +634,7 @@ impl Controller {
         evidence: &Evidence,
         policy: FreshnessPolicy,
         now: i64,
-    ) -> Result<(), Error> {
+    ) -> Result<DurableAncestryAttempt, Error> {
         self.ensure_context(current)?;
         self.clear_check();
         if self.intent.plan.bitcoin_chain != ChainId::Bitcoin
@@ -624,9 +675,15 @@ impl Controller {
             ChainId::BitcoinBlake2b => record.fork_attempt = Some(attempt),
             _ => unreachable!(),
         }
+        let bitcoin = record.bitcoin_identity();
+        let fork = record.fork_identity();
         validate_intent(&next)?;
         self.journal.store(&next)?;
         self.intent = next;
-        Ok(())
+        Ok(DurableAncestryAttempt {
+            chain,
+            bitcoin,
+            fork,
+        })
     }
 }
