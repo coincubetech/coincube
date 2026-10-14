@@ -42,6 +42,16 @@ fn coin(height: Option<i32>, spent: bool, immature: bool, n: u32) -> Coin {
 }
 
 #[test]
+fn deposit_proof_refusals_distinguish_shared_roots_reorgs_and_missing_fresh_reads() {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    let message = |kind| funding_proof_refusal(DiscoveryError::Observation(kind));
+    assert!(message(FailureKind::AncestryRootShared { observed_at: 1 })
+        .contains("present on both chains"));
+    assert!(message(FailureKind::AncestryRootChanged { observed_at: 1 }).contains("reorganized"));
+    assert!(message(FailureKind::FreshnessUnverified).contains("Fresh data"));
+}
+
+#[test]
 fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
     let fork = 90;
     let set = partition_coins(

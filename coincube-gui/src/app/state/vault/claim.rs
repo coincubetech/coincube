@@ -284,6 +284,39 @@ pub struct ClaimDepositProgress {
     pub both_verified: bool,
 }
 
+pub(crate) fn funding_proof_refusal(
+    error: crate::services::claim_observation::http::DiscoveryError,
+) -> &'static str {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    match error {
+        DiscoveryError::Observation(FailureKind::AncestryRootShared { .. }) => {
+            "A deposit's coinbase ancestry is present on both chains. It cannot prove a Bitcoin-only or BTCB2-only input."
+        }
+        DiscoveryError::Observation(FailureKind::AncestryRootChanged { .. }) => {
+            "A chain reorganized during the ancestry check. Wait for confirmations and check both deposits again."
+        }
+        DiscoveryError::Observation(FailureKind::Changed) => {
+            "A deposit or shared coin changed, was spent, or is not sufficiently confirmed. Check both chains again after confirmation."
+        }
+        DiscoveryError::Observation(
+            FailureKind::Unavailable
+            | FailureKind::Http(_)
+            | FailureKind::Stale
+            | FailureKind::FreshnessUnverified,
+        ) => "Fresh data from both chains is unavailable. Retry when both nodes and indexers are current.",
+        DiscoveryError::Observation(FailureKind::Deadline | FailureKind::CollectionLimit) => {
+            "The bounded two-chain ancestry check could not finish. Retry after the services recover."
+        }
+        DiscoveryError::Observation(FailureKind::Cancelled) => {
+            "The Connect session changed during the ancestry check. Sign in and retry."
+        }
+        DiscoveryError::Structural(_) => {
+            "A deposit's path to a chain-specific post-fork coinbase could not be authenticated."
+        }
+        _ => "The deposits do not yet have a complete two-chain ancestry proof.",
+    }
+}
+
 /// Results of the panel's async work. Every variant that carries the
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
@@ -1359,7 +1392,14 @@ impl ClaimStep1Panel {
                         btcb2_candidate,
                         both_verified: proof.is_some() && bitcoin_candidate && btcb2_candidate,
                     })
-                    .map_err(|_| "The deposits could not both be verified against the current chains and Vault.".to_string())
+                    .map_err(|error| match error {
+                        claim_workflow::ClaimFundingDiscoveryError::Discovery(error) =>
+                            funding_proof_refusal(error).to_string(),
+                        claim_workflow::ClaimFundingDiscoveryError::WalletState(_) =>
+                            "The Bitcoin Vault's coins or sync state changed. Reopen it and check deposits again.".to_string(),
+                        claim_workflow::ClaimFundingDiscoveryError::InvalidReservation(_) =>
+                            "The saved deposit reservation no longer matches this Vault and Connect session.".to_string(),
+                    })
             },
             move |result| {
                 Message::Claim(ClaimEvent::FundingChecked(

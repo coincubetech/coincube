@@ -854,7 +854,14 @@ impl SplitConnect for ProductionConnect {
                     CHECK_POLICY.observations,
                 )
                 .await
-                .map_err(|error| format!("The paired deposit proof did not complete: {error:?}"))?;
+                .map_err(|error| match error {
+                    claim_workflow::SplitFundingDiscoveryError::Discovery(error) =>
+                        crate::app::state::vault::claim::funding_proof_refusal(error).to_string(),
+                    claim_workflow::SplitFundingDiscoveryError::Changed =>
+                        "The saved deposit addresses, source wallet or Connect session changed. Reopen this split and check again.".to_string(),
+                    claim_workflow::SplitFundingDiscoveryError::InvalidReservation(_) =>
+                        "The saved deposit reservation no longer matches this source and target Cube.".to_string(),
+                })?;
             if let Some(found) = found {
                 let target_script = reservation
                     .target_binding
