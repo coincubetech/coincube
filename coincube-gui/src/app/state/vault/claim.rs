@@ -1366,6 +1366,39 @@ impl ClaimStep1Panel {
                         "The saved deposit addresses no longer match this Vault and account."
                             .to_string()
                     })?;
+                let minimums = if bitcoin_candidate && btcb2_candidate {
+                    claim_workflow::quote_claim_deposit_minimums(
+                        &descriptor,
+                        saved.indices,
+                        inventory.shared().len(),
+                        connect.client.clone(),
+                    )
+                    .await
+                    .map_err(|_| {
+                        "Current Bitcoin and BTCB2 fee quotes are needed to check the deposits."
+                            .to_string()
+                    })?
+                } else {
+                    (0, 0)
+                };
+                if generation.has_changed().is_err() || *generation.borrow() != expected {
+                    return Err("The Connect session changed during the deposit check.".into());
+                }
+                let (bitcoin_eligible, btcb2_eligible) = saved
+                    .fee_eligible_candidate_presence(&inventory, &identity, &context, minimums)
+                    .map_err(|_| "The saved deposit reservation changed.".to_string())?;
+                if bitcoin_candidate && !bitcoin_eligible {
+                    return Err(format!(
+                        "No Bitcoin deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+                        minimums.0
+                    ));
+                }
+                if btcb2_candidate && !btcb2_eligible {
+                    return Err(format!(
+                        "No BTCB2 deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+                        minimums.1
+                    ));
+                }
                 let source = HttpObservationSource::new(
                     connect.client,
                     ChainId::Bitcoin,
@@ -1385,6 +1418,7 @@ impl ClaimStep1Panel {
                         &*daemon,
                         &source,
                         CHECK_POLICY.observations,
+                        minimums,
                     )
                     .await
                     .map(|proof| ClaimDepositProgress {

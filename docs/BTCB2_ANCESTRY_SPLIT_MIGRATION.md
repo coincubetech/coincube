@@ -215,7 +215,10 @@ a replayable spend.
    UTXO set, and runs the bounded two-chain ancestry collector; it displays
    only a transient status and does not retain spend authority. Its status
    distinguishes candidate presence at the Bitcoin and BTCB2 reserved addresses
-   from a successful paired ancestry proof. An unreleased reservation cannot
+   from a successful paired ancestry proof. The read-only Claim check now
+   refreshes both fee quotes and filters each reserved address's candidates
+   by that chain's current estimated fee, so a later sufficient deposit can
+   be considered after a smaller one. An unreleased reservation cannot
    enter discovery. Ordinary transaction admission remains. Claim now durably marks
    its saved reservation released only after both addresses were checked
    unused and the Bitcoin daemon accepted their receive indices. Reopening

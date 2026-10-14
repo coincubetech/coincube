@@ -60,6 +60,63 @@ fn select_reserved_candidates(
     )
 }
 
+fn fee_eligible_candidates(
+    candidates: Vec<CandidateCoin>,
+    minimum_sats: u64,
+) -> Vec<CandidateCoin> {
+    candidates
+        .into_iter()
+        .filter(|coin| coin.amount.to_sat() >= minimum_sats)
+        .collect()
+}
+
+fn minimum_claim_deposits(
+    descriptor: &CoincubeDescriptor,
+    indices: FreshDepositAddresses,
+    shared_count: usize,
+    bitcoin_rate: u64,
+    btcb2_rate: u64,
+) -> Result<(u64, u64), ClaimAddressError> {
+    let size = coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes(
+        descriptor,
+        shared_count,
+    )
+    .map_err(|_| ClaimAddressError::FeeUnavailable)?;
+    let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+    let minimum = |index: u32, rate: u64| {
+        let script = descriptor
+            .receive_descriptor()
+            .derive(ChildNumber::Normal { index }, &secp)
+            .script_pubkey();
+        size.checked_mul(rate)
+            .map(|fee| fee.max(script.minimal_non_dust().to_sat()))
+            .ok_or(ClaimAddressError::FeeUnavailable)
+    };
+    Ok((
+        minimum(indices.bitcoin_deposit, bitcoin_rate)?,
+        minimum(indices.btcb2_deposit, btcb2_rate)?,
+    ))
+}
+
+/// Fresh fee floors for the two saved receive indices. These only filter
+/// read-only deposit candidates; exact construction still checks the fee.
+pub async fn quote_claim_deposit_minimums(
+    descriptor: &CoincubeDescriptor,
+    indices: FreshDepositAddresses,
+    shared_count: usize,
+    client: CoincubeClient,
+) -> Result<(u64, u64), ClaimAddressError> {
+    let bitcoin_fees = ConnectBitcoinFees::new(&client).ok_or(ClaimAddressError::FeeUnavailable)?;
+    let bitcoin_rate = bitcoin_step1_feerate(&bitcoin_fees)
+        .await
+        .ok_or(ClaimAddressError::FeeUnavailable)?;
+    let btcb2_fees = btcb2_fee_source(Some(client));
+    let btcb2_rate = btcb2_sweep_feerate(&*btcb2_fees)
+        .await
+        .ok_or(ClaimAddressError::FeeUnavailable)?;
+    minimum_claim_deposits(descriptor, indices, shared_count, bitcoin_rate, btcb2_rate)
+}
+
 fn ensure_claim_wallet_ready(
     info: &model::GetInfoResult,
     saved: &ClaimFundingReservation,
@@ -336,6 +393,24 @@ impl ClaimFundingReservation {
         Ok((!bitcoin.is_empty(), !fork.is_empty()))
     }
 
+    /// Whether either reserved address has a coin large enough to cover the
+    /// current estimated fee. This is still only a scan-time display hint.
+    pub fn fee_eligible_candidate_presence(
+        &self,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+        minimums: (u64, u64),
+    ) -> Result<(bool, bool), Error> {
+        let (bitcoin, fork) = self.reserved_candidates(inventory, identity, context)?;
+        Ok((
+            bitcoin
+                .iter()
+                .any(|coin| coin.amount.to_sat() >= minimums.0),
+            fork.iter().any(|coin| coin.amount.to_sat() >= minimums.1),
+        ))
+    }
+
     /// Search only the exact two receive addresses reserved before deposits.
     /// Other post-fork Vault outputs cannot silently replace the user's
     /// funding plan. The returned pair is still read-only: source-wallet
@@ -349,6 +424,7 @@ impl ClaimFundingReservation {
         daemon: &(dyn Daemon + Send + Sync),
         source: &HttpObservationSource,
         policy: Policy,
+        minimums: (u64, u64),
     ) -> Result<Option<OwnedClaimFunding>, ClaimFundingDiscoveryError> {
         let descriptor = inventory.descriptor().clone();
         let owner = identity.clone();
@@ -370,6 +446,8 @@ impl ClaimFundingReservation {
         let (bitcoin, fork) = self
             .reserved_candidates(inventory, identity, context)
             .map_err(ClaimFundingDiscoveryError::InvalidReservation)?;
+        let bitcoin = fee_eligible_candidates(bitcoin, minimums.0);
+        let fork = fee_eligible_candidates(fork, minimums.1);
         tokio::time::timeout(
             ADDRESS_CHECK_BUDGET,
             inventory.reconcile_daemon(daemon, self.indices.bitcoin_deposit),
@@ -587,11 +665,6 @@ pub async fn prepare_claim_deposit_instructions(
         }
         checked
     };
-    let size = coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes(
-        &descriptor,
-        shared_count,
-    )
-    .map_err(|_| ClaimAddressError::FeeUnavailable)?;
     let bitcoin_fees = ConnectBitcoinFees::new(&client).ok_or(ClaimAddressError::FeeUnavailable)?;
     let bitcoin_rate = bitcoin_step1_feerate(&bitcoin_fees)
         .await
@@ -603,21 +676,18 @@ pub async fn prepare_claim_deposit_instructions(
     if !current(&generation, expected) {
         return Err(ClaimAddressError::ChangedSession);
     }
-    let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
-    let minimum = |index: u32, rate: u64| {
-        let script = descriptor
-            .receive_descriptor()
-            .derive(ChildNumber::Normal { index }, &secp)
-            .script_pubkey();
-        size.checked_mul(rate)
-            .map(|fee| fee.max(script.minimal_non_dust().to_sat()))
-            .ok_or(ClaimAddressError::FeeUnavailable)
-    };
+    let (bitcoin_minimum_sats, btcb2_minimum_sats) = minimum_claim_deposits(
+        &descriptor,
+        saved.indices,
+        shared_count,
+        bitcoin_rate,
+        btcb2_rate,
+    )?;
     let quoted = CheckedClaimFundingAddresses {
         bitcoin_deposit: checked.bitcoin_deposit,
         btcb2_deposit: checked.btcb2_deposit,
-        bitcoin_minimum_sats: minimum(saved.indices.bitcoin_deposit, bitcoin_rate)?,
-        btcb2_minimum_sats: minimum(saved.indices.btcb2_deposit, btcb2_rate)?,
+        bitcoin_minimum_sats,
+        btcb2_minimum_sats,
         bitcoin_rate_sat_vb: bitcoin_rate,
         btcb2_rate_sat_vb: btcb2_rate,
     };
@@ -700,6 +770,14 @@ mod tests {
         assert_eq!(bitcoin[0].deriv_index, ChildNumber::Normal { index: 4 });
         assert_eq!(fork.len(), 1);
         assert_eq!(fork[0].deriv_index, ChildNumber::Normal { index: 5 });
+        let small = CandidateCoin {
+            amount: Amount::from_sat(500),
+            ..coin
+        };
+        assert_eq!(
+            fee_eligible_candidates(vec![small, coin], 1_000),
+            vec![coin]
+        );
     }
 
     struct FakeHistory {

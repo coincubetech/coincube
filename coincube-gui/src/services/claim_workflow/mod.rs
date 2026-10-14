@@ -9,9 +9,9 @@ mod split;
 mod split_funding;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
 pub use claim_funding::{
-    load_claim_funding, prepare_claim_deposit_instructions, reserve_claim_funding,
-    CheckedClaimFundingAddresses, ClaimAddressError, ClaimFundingDiscoveryError,
-    ClaimFundingReservation,
+    load_claim_funding, prepare_claim_deposit_instructions, quote_claim_deposit_minimums,
+    reserve_claim_funding, CheckedClaimFundingAddresses, ClaimAddressError,
+    ClaimFundingDiscoveryError, ClaimFundingReservation,
 };
 use coincube_core::{
     chain::ChainId,
