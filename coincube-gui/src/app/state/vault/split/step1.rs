@@ -431,6 +431,23 @@ pub trait SplitConnect: Send + Sync {
     ) -> Result<SplitDepositProgress, String> {
         Err("Two-chain funding checks are unavailable for this session.".into())
     }
+    /// Recheck the retained ordinary pair from a newly completed scan and
+    /// create or reopen only its exact version-11 journal. This is a
+    /// prerequisite, never cached signing authority; each later export or
+    /// hardware dispatch must run it again. Other transports fail closed.
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_exact_pair_intent(
+        &self,
+        _directory: PathBuf,
+        _source: &SplitSource,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _bitcoin: &AncestrySplitStep1,
+        _fork: &AncestrySplitStep2,
+        _rates: (u64, u64),
+    ) -> Result<(), String> {
+        Err("Two-chain Split signer preparation is unavailable for this session.".into())
+    }
     /// Opens or creates the journal. Blocking: callers use `spawn_blocking`.
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error>;
 }
@@ -1076,6 +1093,136 @@ impl SplitConnect for ProductionConnect {
             review,
             prepared,
         })
+    }
+    async fn prepare_exact_pair_intent(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        rates: (u64, u64),
+    ) -> Result<(), String> {
+        if !self.session_current() {
+            return Err("The Connect session changed before preparing this split.".into());
+        }
+        let context = self.context();
+        let (wallet_id, descriptor) = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let scan = foreign_split_inventory::scan(
+            self.session.client.clone(),
+            split_funding_scan_plan(source)?,
+            self.expected,
+            self.generation.clone(),
+        )
+        .await
+        .map_err(|error| format!("The two-chain wallet scan did not complete: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during the split scan.".into());
+        }
+        let saved_directory = directory.clone();
+        let saved_source = source.clone();
+        let saved_target = target_cube.to_owned();
+        let saved_context = context.clone();
+        let reservation = tokio::task::spawn_blocking(move || {
+            claim_workflow::load_split_funding(
+                &saved_directory,
+                &saved_source,
+                &saved_target,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| "Reading the saved split funding plan was interrupted.".to_string())?
+        .map_err(|_| "The saved split funding plan could not be verified.".to_string())?
+        .ok_or_else(|| "No saved split funding plan was found for this wallet.".to_string())?;
+        if !reservation.is_released() {
+            return Err("The deposit addresses were not checked before release.".into());
+        }
+        let binding = reservation
+            .target_binding
+            .as_ref()
+            .filter(|binding| binding.matches_vault(wallet_id, descriptor))
+            .ok_or_else(|| "The target BTCB2 Vault changed since deposit setup.".to_string())?;
+        let target_script = binding
+            .script_pubkey()
+            .map_err(|_| "The saved BTCB2 destination is invalid.".to_string())?;
+        let target_index = binding.receive_index();
+        let bitcoin_rate = self
+            .bitcoin_feerate()
+            .await
+            .ok_or_else(|| "The current Bitcoin fee quote is unavailable.".to_string())?;
+        let fork_fees =
+            crate::services::split_fees::btcb2_fee_source(Some(self.session.client.clone()));
+        let fork_rate = crate::services::foreign_psbt::btcb2_sweep_feerate(&*fork_fees)
+            .await
+            .ok_or_else(|| "The current BTCB2 fee quote is unavailable.".to_string())?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during the split fee check.".into());
+        }
+        if rates != (bitcoin_rate, fork_rate) {
+            return Err(
+                "The split fees changed. Check both deposits and review the transactions again."
+                    .into(),
+            );
+        }
+        let quote = split_funding_quote_for_inventory(
+            source,
+            &reservation,
+            &scan.inventory,
+            target_script.as_script(),
+            bitcoin_rate,
+            fork_rate,
+        )?;
+        let funding = reservation
+            .requalify_exact_pair(
+                directory.clone(),
+                source,
+                target_cube,
+                (wallet_id, descriptor),
+                &context,
+                &scan.inventory,
+                &self.observation,
+                CHECK_POLICY.observations,
+                (quote.bitcoin_minimum_sats, quote.btcb2_minimum_sats),
+                bitcoin,
+                fork,
+                rates,
+            )
+            .await
+            .map_err(|error| format!("The exact split pair is no longer verified: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during split verification.".into());
+        }
+        let descriptor = descriptor.clone();
+        let bitcoin = bitcoin.clone();
+        let fork = fork.clone();
+        let target_cube = target_cube.to_owned();
+        let result = tokio::task::spawn_blocking(move || {
+            let controller = Controller::create_or_reopen_ancestry_split(
+                &directory,
+                target_cube,
+                &descriptor,
+                target_index,
+                &bitcoin,
+                &funding.bitcoin_path,
+                &fork,
+                &funding.fork_path,
+                context,
+            )?;
+            // The controller owns the journal lock. Release it before the
+            // next independent proof or signing transition.
+            drop(controller);
+            Ok::<(), claim_workflow::Error>(())
+        })
+        .await
+        .map_err(|_| "Recording the exact split intent was interrupted.".to_string())?
+        .map_err(|error| format!("The exact split intent could not be recorded: {error:?}"));
+        if !self.session_current() {
+            return Err("The Connect session changed while recording the split intent.".into());
+        }
+        result
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
         let production = SplitProduction::new(

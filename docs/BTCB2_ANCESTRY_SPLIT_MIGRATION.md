@@ -85,9 +85,12 @@ a replayable spend.
    paired proof to the exact two outpoints in the retained PSBT pair. It
    reloads the source and target address reservation, verifies the current
    target Vault binding, reconstructs and compares both complete PSBTs, then
-   refreshes both tips, proof age and Connect generation. This operation is
-   not yet called by signer dispatch and does not reconcile a full source
-   wallet or permit a send.
+   refreshes both tips, proof age and Connect generation. The production
+   Connect implementation can run this against a new two-chain source scan,
+   reject a changed fee quote and create or reopen only the exact version-11
+   intent under the saved journal lock. This operation is not yet called by
+   signer dispatch and does not reconcile a full source wallet or permit a
+   send.
    Claim now has an equivalent read-only paired search that binds the selected
    Bitcoin and BTCB2 funding outputs and every shared output to its Vault
    descriptor. A Cube-specific entry point to the bounded two-chain scanner

@@ -47,7 +47,6 @@ pub enum SplitFundingDiscoveryError {
 /// re-run this against a freshly completed two-chain source scan and apply
 /// its own wallet, session and preflight checks before exposing either PSBT.
 #[derive(Debug)]
-#[allow(dead_code)] // The paired signer dispatch is not wired yet.
 pub enum SplitPairRequalificationError {
     Discovery(SplitFundingDiscoveryError),
     Construction(SplitPairError),
@@ -426,7 +425,6 @@ impl SplitFundingReservation {
     /// supply a newly completed two-chain source scan, not a saved preview.
     /// This is a prerequisite for signer admission, not an authorization.
     #[allow(clippy::too_many_arguments)]
-    #[allow(dead_code)] // The paired signer dispatch is not wired yet.
     pub async fn requalify_exact_pair(
         &self,
         directory: PathBuf,
