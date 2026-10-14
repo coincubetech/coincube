@@ -74,6 +74,14 @@ a replayable spend.
    shared coins are rechecked against the source descriptor before the search.
    Selected coins are matched to live paths and confirmation blocks. This is
    still read-only and is not yet invoked by the production Split panel.
+   Claim now has an equivalent read-only paired search that binds the selected
+   Bitcoin and BTCB2 funding outputs and every shared output to its Vault
+   descriptor. Its caller must still supply a current BTCB2 wallet inventory;
+   that production scan and signer admission are not yet wired. A review-only
+   Claim pair constructor builds the exact ordinary Bitcoin and BTCB2 PSBTs
+   from that paired result, current shared wallet coins, previous transactions
+   and separately reserved change indices. It refuses a changed shared set or
+   output before returning the pair. No production route invokes it yet.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly

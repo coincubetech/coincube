@@ -7,7 +7,10 @@ use crate::services::foreign_split_inventory::{FreshIndex, SplitInventory};
 use coincube_core::{
     claim::{PreflightTips, MIN_CONFIRMATIONS},
     claim_ancestry::retained::RetainedPath,
-    claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
+    claim_spend::{
+        create_ancestry_fork_sweep_with_marker, create_ancestry_self_transfer,
+        AncestrySelfTransfer, ClaimForkSweep,
+    },
     descriptors::CoincubeDescriptor,
     foreign_split::{
         create_ancestry_split_step1, create_ancestry_split_step2, AncestrySplitInputs,
@@ -15,9 +18,10 @@ use coincube_core::{
         SplitSource,
     },
     miniscript::bitcoin::{
-        absolute::LockTime, consensus::deserialize, psbt::Psbt, Script, Transaction, TxOut,
+        absolute::LockTime, bip32::ChildNumber, consensus::deserialize, psbt::Psbt, Script,
+        Transaction, TxOut,
     },
-    spend::CandidateCoin,
+    spend::{CandidateCoin, TxGetter},
 };
 use std::collections::BTreeSet;
 
@@ -120,6 +124,9 @@ impl CollectedFundingCoin {
         coin: &CandidateCoin,
         descriptor: &CoincubeDescriptor,
     ) -> Result<(), FailureKind> {
+        if coin.deriv_index.is_hardened() {
+            return Err(FailureKind::Changed);
+        }
         let raw = path.links().first().ok_or(FailureKind::Malformed)?;
         let previous: Transaction =
             deserialize(&raw.transaction).map_err(|_| FailureKind::Malformed)?;
@@ -198,6 +205,233 @@ pub struct OwnedSplitFunding {
     pub bitcoin_path: RetainedPath,
     pub fork_path: RetainedPath,
     pub inputs: CollectedSpendInputs,
+}
+
+/// Read-only Claim discovery with both funding inputs and every shared coin
+/// bound to the same Vault descriptor. It is not a coin reservation or signer
+/// capability; the daemon and paired BTCB2 inventory must be refreshed at
+/// admission and after restart.
+#[derive(Debug)]
+pub struct OwnedClaimFunding {
+    pub bitcoin: CandidateCoin,
+    pub fork: CandidateCoin,
+    pub bitcoin_path: RetainedPath,
+    pub fork_path: RetainedPath,
+    pub inputs: CollectedSpendInputs,
+}
+
+#[derive(Debug)]
+pub enum ClaimPairError {
+    Changed,
+    InvalidConstruction(coincube_core::claim_spend::Error),
+    Observation(FailureKind),
+}
+
+fn claim_owns_output(
+    descriptor: &CoincubeDescriptor,
+    coin: &CandidateCoin,
+    output: &TxOut,
+) -> bool {
+    if coin.deriv_index.is_hardened() {
+        return false;
+    }
+    let derived = if coin.is_change {
+        descriptor.change_descriptor()
+    } else {
+        descriptor.receive_descriptor()
+    }
+    .derive(
+        coin.deriv_index,
+        &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+    );
+    coin.amount == output.value && derived.script_pubkey() == output.script_pubkey
+}
+
+impl HttpObservationSource {
+    /// Search both supplied wallet-owned candidate inventories as one bounded
+    /// collection. No partial result is returned if either chain lacks a
+    /// qualifying funding coin. The caller must obtain these inventories from
+    /// current Bitcoin and BTCB2 wallet reads; this method authenticates the
+    /// selected previous transactions and all shared output bytes to the
+    /// descriptor before returning a review-only pair.
+    pub async fn discover_owned_claim_funding(
+        &self,
+        descriptor: &CoincubeDescriptor,
+        bitcoin_candidates: &[CandidateCoin],
+        fork_candidates: &[CandidateCoin],
+        shared: &[CandidateCoin],
+        policy: Policy,
+    ) -> Result<Option<OwnedClaimFunding>, DiscoveryError> {
+        let invalid = || DiscoveryError::Observation(FailureKind::InvalidPlan);
+        let outpoints = |coins: &[CandidateCoin]| coins.iter().map(|coin| coin.outpoint).collect();
+        let bitcoin_outpoints: Vec<_> = outpoints(bitcoin_candidates);
+        let fork_outpoints: Vec<_> = outpoints(fork_candidates);
+        let shared_outpoints: Vec<_> = outpoints(shared);
+        let Some(inputs) = self
+            .discover_spend_inputs(
+                &bitcoin_outpoints,
+                &fork_outpoints,
+                &shared_outpoints,
+                policy,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let bitcoin_selected = inputs.funding().bitcoin().selected();
+        let fork_selected = inputs.funding().fork().selected();
+        let bitcoin = bitcoin_candidates
+            .iter()
+            .find(|coin| coin.outpoint == bitcoin_selected)
+            .copied()
+            .ok_or_else(invalid)?;
+        let fork = fork_candidates
+            .iter()
+            .find(|coin| coin.outpoint == fork_selected)
+            .copied()
+            .ok_or_else(invalid)?;
+        let bitcoin_path = inputs
+            .funding()
+            .bitcoin()
+            .ancestry()
+            .retained_path()
+            .map_err(DiscoveryError::Structural)?;
+        let fork_path = inputs
+            .funding()
+            .fork()
+            .ancestry()
+            .retained_path()
+            .map_err(DiscoveryError::Structural)?;
+        inputs
+            .funding()
+            .bitcoin()
+            .validate_claim_coin(&bitcoin_path, &bitcoin, descriptor)
+            .and_then(|_| {
+                inputs
+                    .funding()
+                    .fork()
+                    .validate_claim_coin(&fork_path, &fork, descriptor)
+            })
+            .map_err(DiscoveryError::Observation)?;
+        if inputs.shared_outputs.len() != shared.len()
+            || inputs.shared_outputs.iter().any(|(outpoint, output)| {
+                !shared.iter().any(|coin| {
+                    coin.outpoint == *outpoint && claim_owns_output(descriptor, coin, output)
+                })
+            })
+        {
+            return Err(invalid());
+        }
+        Ok(Some(OwnedClaimFunding {
+            bitcoin,
+            fork,
+            bitcoin_path,
+            fork_path,
+            inputs,
+        }))
+    }
+}
+
+impl OwnedClaimFunding {
+    /// Build both ordinary, wallet-owned Claim transactions for review from
+    /// this paired observation. The caller supplies current shared wallet
+    /// coins and previous transactions plus two independently reserved change
+    /// indices. A signer must recheck all observations and reservations at
+    /// admission; these PSBTs alone confer no authorization.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_claim_pair(
+        &self,
+        descriptor: &CoincubeDescriptor,
+        tx_getter: &mut impl TxGetter,
+        shared: &[CandidateCoin],
+        bitcoin_change: ChildNumber,
+        fork_change: ChildNumber,
+        bitcoin_feerate_vb: u64,
+        fork_feerate_vb: u64,
+        context: FundingContext<'_>,
+    ) -> Result<(AncestrySelfTransfer, ClaimForkSweep), ClaimPairError> {
+        self.inputs
+            .funding()
+            .validate_session(context)
+            .map_err(ClaimPairError::Observation)?;
+        let expected: BTreeSet<_> = self
+            .inputs
+            .shared()
+            .iter()
+            .map(|(outpoint, _)| *outpoint)
+            .collect();
+        let supplied: BTreeSet<_> = shared.iter().map(|coin| coin.outpoint).collect();
+        if expected.is_empty()
+            || bitcoin_change.is_hardened()
+            || fork_change.is_hardened()
+            || expected.len() != shared.len()
+            || expected != supplied
+            || self.inputs.shared_outputs.iter().any(|(outpoint, output)| {
+                !shared.iter().any(|coin| {
+                    coin.outpoint == *outpoint && claim_owns_output(descriptor, coin, output)
+                })
+            })
+        {
+            return Err(ClaimPairError::Changed);
+        }
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let bitcoin_dependency = self
+            .bitcoin_path
+            .reverify()
+            .map_err(|_| ClaimPairError::Changed)?;
+        let fork_dependency = self
+            .fork_path
+            .reverify()
+            .map_err(|_| ClaimPairError::Changed)?;
+        let bitcoin_locktime = LockTime::from_height(
+            u32::try_from(context.tips.bitcoin.height).map_err(|_| ClaimPairError::Changed)?,
+        )
+        .map_err(|_| ClaimPairError::Changed)?;
+        let fork_locktime = LockTime::from_height(
+            u32::try_from(context.tips.fork.height).map_err(|_| ClaimPairError::Changed)?,
+        )
+        .map_err(|_| ClaimPairError::Changed)?;
+        let mut bitcoin_coins = shared.to_vec();
+        bitcoin_coins.push(self.bitcoin);
+        let bitcoin = create_ancestry_self_transfer(
+            ChainId::Bitcoin,
+            descriptor,
+            &secp,
+            tx_getter,
+            &bitcoin_coins,
+            bitcoin_change,
+            bitcoin_feerate_vb,
+            bitcoin_locktime,
+            &bitcoin_dependency,
+        )
+        .map_err(ClaimPairError::InvalidConstruction)?;
+        let mut fork_coins = shared.to_vec();
+        fork_coins.push(self.fork);
+        let fork = create_ancestry_fork_sweep_with_marker(
+            &bitcoin,
+            ChainId::BitcoinBlake2b,
+            &secp,
+            tx_getter,
+            &fork_coins,
+            fork_change,
+            fork_feerate_vb,
+            fork_locktime,
+            &fork_dependency,
+        )
+        .map_err(ClaimPairError::InvalidConstruction)?;
+        self.inputs
+            .validate_for_claim(
+                &self.bitcoin_path,
+                &self.fork_path,
+                &self.bitcoin,
+                &self.fork,
+                &bitcoin,
+                &fork,
+                context,
+            )
+            .map_err(ClaimPairError::Observation)?;
+        Ok((bitcoin, fork))
+    }
 }
 
 /// Construction from live paired proof is still a review artifact. An
@@ -1038,6 +1272,81 @@ impl HttpObservationSource {
 mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::hashes::Hash;
+
+    #[test]
+    fn claim_funding_output_must_match_owned_branch_index_and_amount() {
+        use coincube_core::{
+            bip39::Mnemonic,
+            descriptors::{CoincubePolicy, PathInfo},
+            miniscript::{
+                bitcoin::{bip32::DerivationPath, secp256k1, Amount, Network},
+                DescriptorPublicKey,
+            },
+            signer::MasterSigner,
+        };
+        use std::str::FromStr;
+
+        let secp = secp256k1::Secp256k1::new();
+        let keys: Vec<_> = [41_u8, 42]
+            .iter()
+            .map(|byte| {
+                let signer = MasterSigner::from_mnemonic(
+                    Network::Bitcoin,
+                    Mnemonic::from_entropy(&[*byte; 16]).unwrap(),
+                )
+                .unwrap();
+                DescriptorPublicKey::from_str(&format!(
+                    "[{}]{}/<0;1>/*",
+                    signer.fingerprint(&secp),
+                    signer.xpub_at(&DerivationPath::default(), &secp)
+                ))
+                .unwrap()
+            })
+            .collect();
+        let descriptor = CoincubeDescriptor::new(
+            CoincubePolicy::new_legacy(
+                PathInfo::Single(keys[0].clone()),
+                std::iter::once((46, PathInfo::Single(keys[1].clone()))).collect(),
+            )
+            .unwrap(),
+        );
+        let script = descriptor
+            .receive_descriptor()
+            .derive(0.into(), &secp256k1::Secp256k1::verification_only())
+            .script_pubkey();
+        let mut output = TxOut {
+            value: Amount::from_sat(50_000),
+            script_pubkey: script,
+        };
+        let mut coin = CandidateCoin {
+            outpoint: OutPoint::new(
+                coincube_core::miniscript::bitcoin::Txid::from_byte_array([7; 32]),
+                0,
+            ),
+            amount: output.value,
+            deriv_index: 0.into(),
+            is_change: false,
+            must_select: true,
+            sequence: None,
+            ancestor_info: None,
+        };
+        assert!(claim_owns_output(&descriptor, &coin, &output));
+        coin.amount = Amount::from_sat(49_999);
+        assert!(!claim_owns_output(&descriptor, &coin, &output));
+        coin.amount = output.value;
+        coin.deriv_index = 1.into();
+        assert!(!claim_owns_output(&descriptor, &coin, &output));
+        coin.deriv_index = 0.into();
+        coin.is_change = true;
+        assert!(!claim_owns_output(&descriptor, &coin, &output));
+        coin.is_change = false;
+        coin.deriv_index =
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::Hardened { index: 0 };
+        assert!(!claim_owns_output(&descriptor, &coin, &output));
+        coin.deriv_index = 0.into();
+        output.script_pubkey = coincube_core::miniscript::bitcoin::ScriptBuf::new();
+        assert!(!claim_owns_output(&descriptor, &coin, &output));
+    }
 
     #[test]
     fn split_funding_must_match_source_descriptor_and_previous_transaction() {
