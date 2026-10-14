@@ -405,6 +405,13 @@ marker spend cases remain.
    verifies the canonical Bitcoin spend and requires the shared and BTCB2-only
    inputs to remain unspent on BTCB2. Reusing the initial collector would make
    a successful second step impossible.
+   A separate read-only collector now requalifies both ancestry roots, checks
+   the exact Bitcoin witness in a canonical block at six confirmations,
+   requires the Bitcoin funding and shared outputs spent there, and requires
+   the BTCB2 funding and shared outputs unspent under stable two-chain tips.
+   Its distinct result type cannot enter the initial signer validator. It
+   still needs wallet ownership, reservation, finalized fork signature and
+   fresh policy checks in the stage-two coordinator.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

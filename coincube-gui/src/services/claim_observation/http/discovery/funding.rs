@@ -18,8 +18,11 @@ use coincube_core::{
         SplitSource,
     },
     miniscript::bitcoin::{
-        absolute::LockTime, bip32::ChildNumber, consensus::deserialize, psbt::Psbt, Script,
-        Transaction, TxOut,
+        absolute::LockTime,
+        bip32::ChildNumber,
+        consensus::{deserialize, serialize},
+        psbt::Psbt,
+        Script, Transaction, TxOut,
     },
     spend::{CandidateCoin, TxGetter},
 };
@@ -34,7 +37,19 @@ fn check_funding_status(
     canonical: BlockHash,
     spent: bool,
 ) -> Result<(), FailureKind> {
-    if block.height < root.height || block.height > tip.height || canonical != block.hash || spent {
+    if spent {
+        return Err(FailureKind::Changed);
+    }
+    check_funding_position(block, root, tip, canonical)
+}
+
+fn check_funding_position(
+    block: BlockRef,
+    root: BlockRef,
+    tip: BlockRef,
+    canonical: BlockHash,
+) -> Result<(), FailureKind> {
+    if block.height < root.height || block.height > tip.height || canonical != block.hash {
         return Err(FailureKind::Changed);
     }
     let depth = tip.height - block.height + 1;
@@ -43,6 +58,50 @@ fn check_funding_status(
         return Err(FailureKind::Changed);
     }
     Ok(())
+}
+
+fn post_bitcoin_input_shape(
+    bitcoin: &Transaction,
+    bitcoin_marker: OutPoint,
+    fork_marker: OutPoint,
+    shared: &BTreeSet<OutPoint>,
+) -> bool {
+    let inputs: BTreeSet<_> = bitcoin
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .collect();
+    let mut expected = shared.clone();
+    expected.insert(bitcoin_marker);
+    !shared.is_empty()
+        && !shared.contains(&bitcoin_marker)
+        && !shared.contains(&fork_marker)
+        && bitcoin_marker != fork_marker
+        && inputs.len() == bitcoin.input.len()
+        && inputs == expected
+        && bitcoin.output.len() == 1
+        && !bitcoin.output[0].script_pubkey.is_op_return()
+}
+
+fn confirmed_bitcoin_step(
+    transaction: &Transaction,
+    status: TransactionObservation,
+    canonical: BlockHash,
+    tip: BlockRef,
+    raw: &[u8],
+) -> Result<BlockRef, FailureKind> {
+    let TransactionObservation::Confirmed { txid, block } = status else {
+        return Err(FailureKind::Changed);
+    };
+    if txid != transaction.compute_txid()
+        || block.hash != canonical
+        || block.height > tip.height
+        || tip.height - block.height + 1 < MIN_CONFIRMATIONS
+        || raw != serialize(transaction)
+    {
+        return Err(FailureKind::Changed);
+    }
+    Ok(block)
 }
 
 #[derive(Debug)]
@@ -192,6 +251,103 @@ pub struct CollectedSpendInputs {
     shared: Vec<(OutPoint, BlockRef)>,
     shared_outputs: Vec<(OutPoint, TxOut)>,
     observed_at: i64,
+}
+
+/// Stage-two observations after the exact Bitcoin transaction is confirmed.
+/// Its shared and Bitcoin-only inputs are necessarily spent on Bitcoin while
+/// the corresponding shared inputs and BTCB2-only coin must remain unspent on
+/// BTCB2. This type is deliberately distinct from `CollectedSpendInputs` so
+/// it cannot accidentally satisfy the pre-broadcast signer validator.
+#[derive(Debug)]
+#[allow(dead_code)] // Stage-two coordinator and signer admission are still gated.
+pub struct CollectedPostBitcoinInputs {
+    signed_bitcoin: Transaction,
+    bitcoin: CollectedFundingCoin,
+    fork: CollectedFundingCoin,
+    bitcoin_confirmation: BlockRef,
+    shared: Vec<(OutPoint, BlockRef)>,
+    shared_outputs: Vec<(OutPoint, TxOut)>,
+    observed_at: i64,
+}
+
+impl CollectedPostBitcoinInputs {
+    /// Bind the post-confirmation observations to the same exact signed
+    /// Bitcoin witness and intended fork input set. Ownership, reservations,
+    /// finalized fork signatures and fresh node policy are separate checks.
+    #[allow(dead_code)] // Consumed by the future stage-two coordinator.
+    pub fn validate_for_transactions(
+        &self,
+        signed_bitcoin: &Transaction,
+        fork: &Transaction,
+        claimed: &[OutPoint],
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        let roots = self.bitcoin.ancestry.pair();
+        if context.max_age_seconds <= 0
+            || !super::super::super::fresh(self.observed_at, context.now, context.max_age_seconds)
+        {
+            return Err(FailureKind::Stale);
+        }
+        if context.provider.trim_end_matches('/') != self.bitcoin.ancestry.provider
+            || self.bitcoin.ancestry.provider != self.fork.ancestry.provider
+            || context.generation != roots.generation()
+            || *self.bitcoin.ancestry.live_generation.borrow() != context.generation
+            || self.bitcoin.ancestry.live_generation.has_changed().is_err()
+            || *self.fork.ancestry.live_generation.borrow() != context.generation
+            || self.fork.ancestry.live_generation.has_changed().is_err()
+        {
+            return Err(FailureKind::Cancelled);
+        }
+        if context.tips.bitcoin != roots.bitcoin().tip
+            || context.tips.fork != roots.fork().tip
+            || self.bitcoin.tip != context.tips.bitcoin
+            || self.fork.tip != context.tips.fork
+            || self.bitcoin_confirmation.height > context.tips.bitcoin.height
+            || context.tips.bitcoin.height - self.bitcoin_confirmation.height + 1
+                < MIN_CONFIRMATIONS
+            || &self.signed_bitcoin != signed_bitcoin
+            || self.bitcoin.chain != ChainId::Bitcoin
+            || self.fork.chain != ChainId::BitcoinBlake2b
+            || roots.root_chain() != ChainId::Bitcoin
+            || self.fork.ancestry.pair().root_chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(FailureKind::Changed);
+        }
+        let shared: BTreeSet<_> = self.shared.iter().map(|(outpoint, _)| *outpoint).collect();
+        let claimed: BTreeSet<_> = claimed.iter().copied().collect();
+        let fork_inputs: BTreeSet<_> = fork
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let mut expected_fork = shared.clone();
+        expected_fork.insert(self.fork.selected);
+        if shared.is_empty()
+            || shared.len() != self.shared.len()
+            || claimed.len() != self.shared.len()
+            || claimed != shared
+            || self.shared_outputs.len() != shared.len()
+            || self
+                .shared_outputs
+                .iter()
+                .map(|(outpoint, _)| *outpoint)
+                .collect::<BTreeSet<_>>()
+                != shared
+            || !post_bitcoin_input_shape(
+                signed_bitcoin,
+                self.bitcoin.selected,
+                self.fork.selected,
+                &shared,
+            )
+            || fork_inputs.len() != fork.input.len()
+            || fork_inputs != expected_fork
+            || fork.output.len() != 1
+            || fork.output[0].script_pubkey.is_op_return()
+        {
+            return Err(FailureKind::Changed);
+        }
+        Ok(())
+    }
 }
 
 /// Read-only foreign Split discovery, joined to the exact scan-derived coins
@@ -1268,10 +1424,388 @@ impl HttpObservationSource {
     }
 }
 
+impl HttpObservationSource {
+    /// Recollect chain-specific ancestry after the exact Bitcoin half has
+    /// confirmed. A canonical Bitcoin transaction spending `S+B` explains why
+    /// those outputs are spent on Bitcoin; `S` and `F` must still be unspent on
+    /// BTCB2. The result is read-only and cannot enter the initial signer path.
+    #[allow(dead_code)] // Paired stage-two coordinator is not enabled yet.
+    pub async fn collect_post_bitcoin_inputs(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        shared: &[OutPoint],
+        signed_bitcoin: &Transaction,
+        policy: Policy,
+    ) -> Result<CollectedPostBitcoinInputs, FailureKind> {
+        let unique: BTreeSet<_> = shared.iter().copied().collect();
+        if unique.len() != shared.len()
+            || unique.iter().any(OutPoint::is_null)
+            || !post_bitcoin_input_shape(
+                signed_bitcoin,
+                bitcoin_path.selected(),
+                fork_path.selected(),
+                &unique,
+            )
+            || policy.max_observation_age_seconds <= 0
+        {
+            return Err(FailureKind::InvalidPlan);
+        }
+        let snapshot = self.discovery_snapshot();
+        tokio::time::timeout(MAX_COLLECTION_TIME, async {
+            let bitcoin_ancestry = snapshot
+                .requalify_ancestry(bitcoin_path, policy)
+                .await
+                .map_err(|error| match error {
+                    DiscoveryError::Structural(_) => FailureKind::Malformed,
+                    DiscoveryError::Observation(kind) => kind,
+                })?;
+            let fork = snapshot
+                .collect_funding_coin(fork_path, ChainId::BitcoinBlake2b, policy)
+                .await?;
+            let roots = bitcoin_ancestry.pair();
+            let fork_roots = fork.ancestry.pair();
+            let anchor_a = roots.anchor();
+            let anchor_b = fork_roots.anchor();
+            if roots.root_chain() != ChainId::Bitcoin
+                || fork_roots.root_chain() != ChainId::BitcoinBlake2b
+                || bitcoin_ancestry.provider != fork.ancestry.provider
+                || roots.generation() != fork_roots.generation()
+                || roots.bitcoin().tip != fork_roots.bitcoin().tip
+                || roots.fork().tip != fork_roots.fork().tip
+                || anchor_a.tip_hash != anchor_b.tip_hash
+                || anchor_a.tip_height != anchor_b.tip_height
+                || anchor_a.tip_median_time_past != anchor_b.tip_median_time_past
+                || anchor_a.observation != anchor_b.observation
+            {
+                return Err(FailureKind::Changed);
+            }
+            let bitcoin_tip = roots.bitcoin().tip;
+            let fork_tip = roots.fork().tip;
+            let (marker_status, marker_stamp) = super::super::super::read(
+                snapshot
+                    .transaction(ChainId::Bitcoin, bitcoin_path.selected().txid)
+                    .await?,
+                ChainId::Bitcoin,
+                &snapshot,
+                policy,
+                Stage::BitcoinInclusion,
+            )
+            .map_err(|error| error.kind)?;
+            let TransactionObservation::Confirmed {
+                block: marker_block,
+                ..
+            } = marker_status
+            else {
+                return Err(FailureKind::Changed);
+            };
+            let (marker_canonical, marker_canonical_stamp) = super::super::super::read(
+                snapshot
+                    .hash_at_height(ChainId::Bitcoin, marker_block.height)
+                    .await?,
+                ChainId::Bitcoin,
+                &snapshot,
+                policy,
+                Stage::BitcoinInclusion,
+            )
+            .map_err(|error| error.kind)?;
+            let (marker_spend, marker_spend_stamp) = super::super::super::read(
+                snapshot
+                    .outspend(ChainId::Bitcoin, bitcoin_path.selected())
+                    .await?,
+                ChainId::Bitcoin,
+                &snapshot,
+                policy,
+                Stage::Preflight,
+            )
+            .map_err(|error| error.kind)?;
+            if !marker_spend.spent {
+                return Err(FailureKind::Changed);
+            }
+            check_funding_position(
+                marker_block,
+                roots.bitcoin().block,
+                bitcoin_tip,
+                marker_canonical,
+            )?;
+            let marker_observed_at = marker_stamp
+                .min(marker_canonical_stamp)
+                .min(marker_spend_stamp);
+
+            let txid = signed_bitcoin.compute_txid();
+            let (status, status_stamp) = super::super::super::read(
+                snapshot.transaction(ChainId::Bitcoin, txid).await?,
+                ChainId::Bitcoin,
+                &snapshot,
+                policy,
+                Stage::BitcoinInclusion,
+            )
+            .map_err(|error| error.kind)?;
+            let TransactionObservation::Confirmed { block, .. } = status else {
+                return Err(FailureKind::Changed);
+            };
+            let (canonical, canonical_stamp) = super::super::super::read(
+                snapshot
+                    .hash_at_height(ChainId::Bitcoin, block.height)
+                    .await?,
+                ChainId::Bitcoin,
+                &snapshot,
+                policy,
+                Stage::BitcoinInclusion,
+            )
+            .map_err(|error| error.kind)?;
+            let raw = snapshot
+                .ancestry_transaction(ChainId::Bitcoin, txid)
+                .await?;
+            let confirmation =
+                confirmed_bitcoin_step(signed_bitcoin, status, canonical, bitcoin_tip, &raw)?;
+
+            let fork_height = roots
+                .anchor()
+                .observation
+                .fork
+                .as_ref()
+                .ok_or(FailureKind::InvalidPlan)?
+                .height;
+            let mut observed_at = bitcoin_ancestry
+                .observed_at()
+                .min(marker_observed_at)
+                .min(fork.observed_at)
+                .min(status_stamp)
+                .min(canonical_stamp);
+            let mut confirmed_shared = Vec::with_capacity(unique.len());
+            let mut shared_outputs = Vec::with_capacity(unique.len());
+            for outpoint in unique {
+                let raw = snapshot
+                    .ancestry_transaction(ChainId::Bitcoin, outpoint.txid)
+                    .await?;
+                let previous: Transaction =
+                    deserialize(&raw).map_err(|_| FailureKind::Malformed)?;
+                if previous.compute_txid() != outpoint.txid {
+                    return Err(FailureKind::Changed);
+                }
+                let output = previous
+                    .output
+                    .get(outpoint.vout as usize)
+                    .ok_or(FailureKind::Changed)?
+                    .clone();
+                let mut blocks = Vec::with_capacity(2);
+                for (chain, tip, expected_spent) in [
+                    (ChainId::Bitcoin, bitcoin_tip, true),
+                    (ChainId::BitcoinBlake2b, fork_tip, false),
+                ] {
+                    let (status, status_stamp) = super::super::super::read(
+                        snapshot.transaction(chain, outpoint.txid).await?,
+                        chain,
+                        &snapshot,
+                        policy,
+                        Stage::BitcoinInclusion,
+                    )
+                    .map_err(|error| error.kind)?;
+                    let TransactionObservation::Confirmed { block, .. } = status else {
+                        return Err(FailureKind::Changed);
+                    };
+                    if block.height >= fork_height || block.height > tip.height {
+                        return Err(FailureKind::Changed);
+                    }
+                    let (canonical, canonical_stamp) = super::super::super::read(
+                        snapshot.hash_at_height(chain, block.height).await?,
+                        chain,
+                        &snapshot,
+                        policy,
+                        Stage::BitcoinInclusion,
+                    )
+                    .map_err(|error| error.kind)?;
+                    let (outspend, outspend_stamp) = super::super::super::read(
+                        snapshot.outspend(chain, outpoint).await?,
+                        chain,
+                        &snapshot,
+                        policy,
+                        Stage::Preflight,
+                    )
+                    .map_err(|error| error.kind)?;
+                    if canonical != block.hash || outspend.spent != expected_spent {
+                        return Err(FailureKind::Changed);
+                    }
+                    observed_at = observed_at
+                        .min(status_stamp)
+                        .min(canonical_stamp)
+                        .min(outspend_stamp);
+                    blocks.push(block);
+                }
+                if blocks[0] != blocks[1] {
+                    return Err(FailureKind::Changed);
+                }
+                confirmed_shared.push((outpoint, blocks[0]));
+                shared_outputs.push((outpoint, output));
+            }
+            let last_bitcoin = snapshot.tip(ChainId::Bitcoin).await?;
+            let last_fork = snapshot.tip(ChainId::BitcoinBlake2b).await?;
+            if last_bitcoin.value() != &bitcoin_tip || last_fork.value() != &fork_tip {
+                return Err(FailureKind::Changed);
+            }
+            observed_at = observed_at
+                .min(last_bitcoin.observed_at())
+                .min(last_fork.observed_at());
+            if !super::super::super::fresh(
+                observed_at,
+                snapshot.now(),
+                policy.max_observation_age_seconds,
+            ) {
+                return Err(FailureKind::Stale);
+            }
+            snapshot.validate_context(&bitcoin_ancestry.provider, roots.generation())?;
+            let bitcoin = CollectedFundingCoin {
+                ancestry: bitcoin_ancestry,
+                chain: ChainId::Bitcoin,
+                selected: bitcoin_path.selected(),
+                block: marker_block,
+                tip: bitcoin_tip,
+                observed_at: marker_observed_at,
+            };
+            Ok(CollectedPostBitcoinInputs {
+                signed_bitcoin: signed_bitcoin.clone(),
+                bitcoin,
+                fork,
+                bitcoin_confirmation: confirmation,
+                shared: confirmed_shared,
+                shared_outputs,
+                observed_at,
+            })
+        })
+        .await
+        .map_err(|_| FailureKind::Deadline)?
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::hashes::Hash;
+
+    #[test]
+    fn confirmed_bitcoin_stage_requires_exact_shared_and_bitcoin_only_inputs() {
+        use coincube_core::miniscript::bitcoin::{
+            absolute::LockTime, transaction::Version, Amount, ScriptBuf, TxIn,
+        };
+        let shared = OutPoint::new(Txid::from_byte_array([1; 32]), 0);
+        let bitcoin_marker = OutPoint::new(Txid::from_byte_array([2; 32]), 0);
+        let fork_marker = OutPoint::new(Txid::from_byte_array([3; 32]), 0);
+        let mut bitcoin = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: [shared, bitcoin_marker]
+                .iter()
+                .copied()
+                .map(|previous_output| TxIn {
+                    previous_output,
+                    ..Default::default()
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0, 20, 1]),
+            }],
+        };
+        let claimed = BTreeSet::from([shared]);
+        assert!(post_bitcoin_input_shape(
+            &bitcoin,
+            bitcoin_marker,
+            fork_marker,
+            &claimed
+        ));
+        bitcoin.input[1].previous_output = fork_marker;
+        assert!(!post_bitcoin_input_shape(
+            &bitcoin,
+            bitcoin_marker,
+            fork_marker,
+            &claimed
+        ));
+        bitcoin.input[1].previous_output = shared;
+        assert!(!post_bitcoin_input_shape(
+            &bitcoin,
+            bitcoin_marker,
+            fork_marker,
+            &claimed
+        ));
+        bitcoin.input[1].previous_output = bitcoin_marker;
+        bitcoin.output[0].script_pubkey = ScriptBuf::from_bytes(vec![0x6a]);
+        assert!(!post_bitcoin_input_shape(
+            &bitcoin,
+            bitcoin_marker,
+            fork_marker,
+            &claimed
+        ));
+    }
+
+    #[test]
+    fn post_bitcoin_confirmation_rejects_reorg_shallow_depth_and_changed_witness() {
+        use coincube_core::miniscript::bitcoin::{
+            absolute::LockTime, transaction::Version, Amount, ScriptBuf, TxIn, Witness,
+        };
+        let transaction = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                witness: Witness::from_slice(&[vec![1]]),
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0, 20, 1]),
+            }],
+        };
+        let block = BlockRef {
+            height: 100,
+            hash: BlockHash::from_byte_array([4; 32]),
+        };
+        let tip = BlockRef {
+            height: 105,
+            hash: BlockHash::from_byte_array([5; 32]),
+        };
+        let status = TransactionObservation::Confirmed {
+            txid: transaction.compute_txid(),
+            block,
+        };
+        let raw = serialize(&transaction);
+        assert_eq!(
+            confirmed_bitcoin_step(&transaction, status, block.hash, tip, &raw),
+            Ok(block)
+        );
+        assert_eq!(
+            confirmed_bitcoin_step(
+                &transaction,
+                status,
+                block.hash,
+                BlockRef { height: 104, ..tip },
+                &raw,
+            ),
+            Err(FailureKind::Changed)
+        );
+        assert_eq!(
+            confirmed_bitcoin_step(&transaction, status, tip.hash, tip, &raw),
+            Err(FailureKind::Changed)
+        );
+        let mut changed_witness = transaction.clone();
+        changed_witness.input[0].witness = Witness::from_slice(&[vec![2]]);
+        assert_eq!(changed_witness.compute_txid(), transaction.compute_txid());
+        assert_eq!(
+            confirmed_bitcoin_step(&changed_witness, status, block.hash, tip, &raw),
+            Err(FailureKind::Changed)
+        );
+        assert_eq!(
+            confirmed_bitcoin_step(
+                &transaction,
+                TransactionObservation::Unconfirmed {
+                    txid: transaction.compute_txid(),
+                },
+                block.hash,
+                tip,
+                &raw,
+            ),
+            Err(FailureKind::Changed)
+        );
+    }
 
     #[test]
     fn claim_funding_output_must_match_owned_branch_index_and_amount() {

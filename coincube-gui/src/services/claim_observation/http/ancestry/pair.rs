@@ -720,6 +720,86 @@ mod tests {
                             ),
                             Err(FailureKind::Changed)
                         );
+                        // Once the exact Bitcoin transaction is six deep,
+                        // Bitcoin's shared and marker outputs are spent. The
+                        // distinct stage-two collector must still require
+                        // their BTCB2 counterparts to be unspent.
+                        unspent.delete_async().await;
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/outspend/0",
+                                bitcoin.compute_txid()
+                            ),
+                            json!({"spent":true}).to_string(),
+                        );
+                        shared_outspends.remove(0).delete_async().await;
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/outspend/0",
+                                shared.txid
+                            ),
+                            json!({"spent":true}).to_string(),
+                        );
+                        let confirmed_height = tip_height - 5;
+                        let confirmed_hash = "55".repeat(32);
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                                bitcoin_spend.compute_txid()
+                            ),
+                            json!({"txid":bitcoin_spend.compute_txid(),"status":{
+                                "confirmed":true,"block_height":confirmed_height,
+                                "block_hash":confirmed_hash}})
+                            .to_string(),
+                        );
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/block-height/{confirmed_height}"
+                            ),
+                            confirmed_hash,
+                        );
+                        server.mock(|when, then| {
+                            when.method(GET).path(format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+                                bitcoin_spend.compute_txid()
+                            ));
+                            then.status(200)
+                                .body(hex::encode(serialize(&bitcoin_spend)));
+                        });
+                        fork_spend.input[0].previous_output = shared;
+                        let post_bitcoin = source
+                            .collect_post_bitcoin_inputs(
+                                &root_path,
+                                &fork_path,
+                                &[shared],
+                                &bitcoin_spend,
+                                policy,
+                            )
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            post_bitcoin.validate_for_transactions(
+                                &bitcoin_spend,
+                                &fork_spend,
+                                &[shared],
+                                funding_context,
+                            ),
+                            Ok(())
+                        );
+                        fork_spend.input[1].previous_output = root_path.selected();
+                        assert_eq!(
+                            post_bitcoin.validate_for_transactions(
+                                &bitcoin_spend,
+                                &fork_spend,
+                                &[shared],
+                                funding_context,
+                            ),
+                            Err(FailureKind::Changed)
+                        );
                         shared_outspends.pop().unwrap().delete_async().await;
                         fresh_mock(
                             &server,
@@ -732,6 +812,18 @@ mod tests {
                         assert!(matches!(
                             source
                                 .collect_spend_inputs(&root_path, &fork_path, &[shared], policy)
+                                .await,
+                            Err(FailureKind::Changed)
+                        ));
+                        assert!(matches!(
+                            source
+                                .collect_post_bitcoin_inputs(
+                                    &root_path,
+                                    &fork_path,
+                                    &[shared],
+                                    &bitcoin_spend,
+                                    policy,
+                                )
                                 .await,
                             Err(FailureKind::Changed)
                         ));
