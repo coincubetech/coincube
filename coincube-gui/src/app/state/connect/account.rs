@@ -1158,6 +1158,22 @@ impl ConnectAccountPanel {
         !self.admitted_reopen_required && matches!(self.step, ConnectFlowStep::Dashboard)
     }
 
+    /// Session outcome not known yet: the initial keyring probe, a refresh or
+    /// login in flight (`Init` parks a stored-session refresh in
+    /// `Login { loading: true }`), or the post-auth duress gate. Terminal duress
+    /// failures and a required reopen are settled, so they read as signed out.
+    pub fn is_checking_session(&self) -> bool {
+        !self.admitted_reopen_required
+            && matches!(
+                self.step,
+                ConnectFlowStep::CheckingSession
+                    | ConnectFlowStep::Login { loading: true, .. }
+                    | ConnectFlowStep::CheckingDuress {
+                        status: DuressGateStatus::Checking
+                    }
+            )
+    }
+
     /// A Home tab may reuse a sibling's accepted session only before it owns
     /// a client or starts its own refresh. Replacing an in-flight refresh with
     /// an older sibling token would create another rotation race.
@@ -7807,6 +7823,38 @@ mod retry_card_tests {
         assert!(
             matches!(panel.step, ConnectFlowStep::Login { loading: true, .. }),
             "an in-flight refresh must not be restarted"
+        );
+    }
+
+    /// The sidebar shows "Checking…" only while the outcome is unknown; settled
+    /// states must read as signed in or signed out, never pending.
+    #[test]
+    fn checking_session_covers_only_in_flight_steps() {
+        let login = |loading| ConnectFlowStep::Login {
+            email: String::new(),
+            loading,
+        };
+        let duress = |status| ConnectFlowStep::CheckingDuress { status };
+        let cases = [
+            (ConnectFlowStep::CheckingSession, true),
+            (login(true), true),
+            (duress(DuressGateStatus::Checking), true),
+            (login(false), false),
+            (duress(DuressGateStatus::Unreachable), false),
+            (duress(DuressGateStatus::Incompatible), false),
+            (ConnectFlowStep::Dashboard, false),
+        ];
+        for (step, checking) in cases {
+            let mut panel = ConnectAccountPanel::new();
+            panel.step = step;
+            assert_eq!(panel.is_checking_session(), checking, "{:?}", panel.step);
+        }
+
+        let mut panel = ConnectAccountPanel::new();
+        panel.admitted_reopen_required = true;
+        assert!(
+            !panel.is_checking_session(),
+            "a required reopen is settled, not pending"
         );
     }
 

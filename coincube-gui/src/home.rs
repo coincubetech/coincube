@@ -5056,7 +5056,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         );
     }
 
-    bottom_col = bottom_col.push(connect_status_row(is_authenticated));
+    bottom_col = bottom_col.push(connect_status_row(&home.connect_account));
 
     // Outer layout: scrollable menu fills, bottom section pinned
     Column::new()
@@ -5066,15 +5066,19 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         .into()
 }
 
-/// Connect session indicator, pinned as the sidebar's last row in both states
+/// Connect session indicator, pinned as the sidebar's last row in every state
 /// so it never moves. Display-only — the Sign In button owns the action. The
 /// label is not optional: red/green alone is unreadable for the most common
 /// colour-vision deficiencies.
-fn connect_status_row<'a>(is_authenticated: bool) -> Element<'a, Message> {
+fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message> {
     use coincube_ui::component::text as txt;
 
+    // A pending check must not read as signed out, or every launch with a
+    // stored session flashes red before turning green.
     let (label, dot_style): (_, fn(&theme::Theme) -> iced::widget::text::Style) =
-        if is_authenticated {
+        if account.is_checking_session() {
+            ("Checking…", theme::text::warning)
+        } else if account.is_authenticated() {
             ("Signed in", theme::text::success)
         } else {
             ("Not signed in", theme::text::error)
