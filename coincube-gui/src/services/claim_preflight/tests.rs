@@ -24,6 +24,19 @@ fn tx() -> Transaction {
         }],
     }
 }
+fn paired_tx(marker: u8) -> Transaction {
+    let mut transaction = tx();
+    transaction.input.push(TxIn {
+        previous_output: OutPoint {
+            txid: Txid::from_byte_array([marker; 32]),
+            vout: 0,
+        },
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::from_slice(&[vec![marker]]),
+    });
+    transaction
+}
 fn tip() -> BlockHash {
     BlockHash::from_byte_array([2; 32])
 }
@@ -40,6 +53,67 @@ fn headers() -> HeaderMap {
 }
 fn response(chain: ChainId, stamp: i64) -> Value {
     json!({"success":true,"error":null,"data":{"network":chain.api_str(),"state":"available","result":{"txid":tx().compute_txid(),"wtxid":tx().compute_wtxid(),"tip_hash":tip(),"observed_at":stamp,"allowed":true}}})
+}
+fn pair_response(chain: ChainId, transaction: &Transaction, allowed: bool) -> Value {
+    let mut body = response(chain, now());
+    body["data"]["result"]["txid"] = json!(transaction.compute_txid());
+    body["data"]["result"]["wtxid"] = json!(transaction.compute_wtxid());
+    body["data"]["result"]["allowed"] = json!(allowed);
+    if !allowed {
+        body["data"]["result"]["reject_reason"] = json!("policy_rejected");
+    }
+    body
+}
+
+#[tokio::test]
+async fn paired_preflight_requires_distinct_markers_and_both_policy_acceptances() {
+    let bitcoin = paired_tx(3);
+    let fork = paired_tx(4);
+    assert!(paired_input_shape(&bitcoin, &fork));
+    assert!(!paired_input_shape(&bitcoin, &bitcoin));
+    let mut missing_shared = fork.clone();
+    missing_shared.input[0].previous_output.txid = Txid::from_byte_array([5; 32]);
+    assert!(!paired_input_shape(&bitcoin, &missing_shared));
+    let mut duplicate = fork.clone();
+    duplicate.input[1].previous_output = duplicate.input[0].previous_output;
+    assert!(!paired_input_shape(&bitcoin, &duplicate));
+
+    for fork_allowed in [true, false] {
+        let server = MockServer::start();
+        let (client, _sender) = client(&server);
+        let bitcoin_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+            then.status(200)
+                .header("Cache-Control", "no-store")
+                .json_body(pair_response(ChainId::Bitcoin, &bitcoin, true));
+        });
+        let fork_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight");
+            then.status(200)
+                .header("Cache-Control", "no-store")
+                .json_body(pair_response(ChainId::BitcoinBlake2b, &fork, fork_allowed));
+        });
+        let observed = client
+            .observe_ancestry_pair(&bitcoin, &fork, tip(), tip(), policy())
+            .await;
+        if fork_allowed {
+            let observed = observed.unwrap();
+            assert_eq!(observed.bitcoin().txid(), bitcoin.compute_txid());
+            assert_eq!(observed.fork().wtxid(), fork.compute_wtxid());
+        } else {
+            assert_eq!(
+                observed,
+                Err(Error::PairedPolicyRejected {
+                    chain: ChainId::BitcoinBlake2b,
+                    reason: "policy_rejected".into(),
+                })
+            );
+        }
+        bitcoin_mock.assert_hits(1);
+        fork_mock.assert_hits(1);
+    }
 }
 fn parse_value(status: StatusCode, body: Value) -> Result<Evidence, Error> {
     parse(

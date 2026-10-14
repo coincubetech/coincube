@@ -12,6 +12,7 @@ use reqwest::{
     StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -46,6 +47,10 @@ pub enum Error {
         connect: String,
     },
     UnsupportedChain,
+    PairedPolicyRejected {
+        chain: ChainId,
+        reason: String,
+    },
     InvalidRequest,
     BackendChanged,
     InvalidResponse,
@@ -104,6 +109,39 @@ impl Evidence {
     pub fn node_policy(&self) -> &NodePolicy {
         &self.policy
     }
+}
+/// Two independently accepted mempool-policy reads for one ordinary ancestry
+/// pair. This is still only short-lived review evidence: wallet ownership,
+/// ancestry and finalized signatures are checked by their own components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairEvidence {
+    bitcoin: Evidence,
+    fork: Evidence,
+}
+
+impl PairEvidence {
+    pub fn bitcoin(&self) -> &Evidence {
+        &self.bitcoin
+    }
+    pub fn fork(&self) -> &Evidence {
+        &self.fork
+    }
+}
+
+fn paired_input_shape(bitcoin: &Transaction, fork: &Transaction) -> bool {
+    let bitcoin_inputs: BTreeSet<_> = bitcoin.input.iter().map(|i| i.previous_output).collect();
+    let fork_inputs: BTreeSet<_> = fork.input.iter().map(|i| i.previous_output).collect();
+    bitcoin.input.len() >= 2
+        && fork.input.len() >= 2
+        && bitcoin_inputs.len() == bitcoin.input.len()
+        && fork_inputs.len() == fork.input.len()
+        && bitcoin_inputs.intersection(&fork_inputs).count() >= 1
+        && bitcoin_inputs.difference(&fork_inputs).count() == 1
+        && fork_inputs.difference(&bitcoin_inputs).count() == 1
+        && bitcoin.output.len() == 1
+        && fork.output.len() == 1
+        && !bitcoin.output[0].script_pubkey.is_op_return()
+        && !fork.output[0].script_pubkey.is_op_return()
 }
 /// Separate anonymous transport: never accepts an authenticated client/token,
 /// never installs default account/device headers, never redirects or retries.
@@ -289,6 +327,38 @@ impl PreflightClient {
             return Err(Error::Cancelled);
         }
         result
+    }
+
+    /// Require positive policy acceptance for both exact signed transactions
+    /// under this one Connect generation. A one-sided acceptance cannot be
+    /// promoted to paired evidence. No transaction is broadcast here.
+    pub async fn observe_ancestry_pair(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        bitcoin_tip: BlockHash,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<PairEvidence, Error> {
+        if !paired_input_shape(bitcoin, fork) {
+            return Err(Error::InvalidRequest);
+        }
+        let (bitcoin, fork) = tokio::try_join!(
+            self.observe(ChainId::Bitcoin, bitcoin, bitcoin_tip, policy),
+            self.observe(ChainId::BitcoinBlake2b, fork, fork_tip, policy),
+        )?;
+        if bitcoin.generation != fork.generation || bitcoin.generation != self.expected {
+            return Err(Error::Cancelled);
+        }
+        for evidence in [&bitcoin, &fork] {
+            if let NodePolicy::Rejected { reason } = evidence.node_policy() {
+                return Err(Error::PairedPolicyRejected {
+                    chain: evidence.chain(),
+                    reason: reason.clone(),
+                });
+            }
+        }
+        Ok(PairEvidence { bitcoin, fork })
     }
 }
 #[allow(clippy::too_many_arguments)]

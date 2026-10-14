@@ -151,9 +151,14 @@ a replayable spend.
    requires the exact BTCB2 target descriptor, receive index and script from
    the saved target reservation; a different destination is refused. It still does
    not grant live proof or signer access.
-   Next update coordinator transport and preflight to carry both typed live
-   proofs. Keep the unified signature fallback separate and labeled with its
-   actual replay properties.
+   The Connect preflight reader now offers a paired operation for finalized
+   ordinary transactions. It requires one common input set with exactly one
+   distinct funding input on each chain and positive, fresh policy acceptance
+   for both exact signed transactions under one Connect generation; one-sided
+   acceptance returns no paired evidence. The coordinator still must bind this
+   read to both typed live ancestry proofs, wallet reservations and finalized
+   signature checks before submission. Keep the unified signature fallback
+   separate and labeled with its actual replay properties.
 4. **Both desktop wizards.** Lead with the two deposits and show separate
    Bitcoin and BTCB2 receive addresses, exact chain labels, expected minimum
    funding for each fee and independent confirmation/proof progress. Clearly
