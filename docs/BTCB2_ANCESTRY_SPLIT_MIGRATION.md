@@ -103,8 +103,8 @@ a replayable spend.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,
-   `Poison::OpReturn` production selection, RDTS expiry checks that exist only
-   for the 90-byte output, OP_RETURN review details and the transport path for
+   `Poison::OpReturn` production selection, the remaining RDTS expiry checks
+   that exist only for the 90-byte output, OP_RETURN review details and the transport path for
    newly created claims. Migrate or explicitly refuse any persisted,
    unbroadcast OP_RETURN intent; a possibly broadcast old intent must remain
    recoverable and reconcilable by exact txid. No historical journal is

@@ -825,8 +825,8 @@ impl ClaimStep1Panel {
 
     /// The first precondition that fails, in the order a user can act on
     /// them: target, Vault shape, Connect session, node backend, the fork's
-    /// observation validity, applicable RDTS window, coins, fee rate. `None`
-    /// when construction may attempt positive ancestry or valid fallback.
+    /// observation validity, coins, fee rate. `None` when construction may
+    /// attempt positive ancestry.
     pub fn refusal(&self) -> Option<Refusal> {
         let refuse = |reason: &str, retry: bool| {
             Some(Refusal {
@@ -866,36 +866,11 @@ impl ClaimStep1Panel {
         if let Err(reason) = &checked.backend {
             return refuse(reason, false);
         }
-        match &checked.window {
-            Err(reason) => {
-                return refuse(
-                    &format!("Couldn't read Bitcoin Blake2b's status: {reason}"),
-                    true,
-                )
-            }
-            Ok(window) => {
-                if let Err(assessment) = window.rdts {
-                    // These timing states only disallow OP_RETURN. Candidates
-                    // permit a bounded proof search, never signing authority;
-                    // build_preferred independently refuses invalid fallback.
-                    // A closed ancestry gate permits no search at all (#547).
-                    let can_search_ancestry = self.ancestry_discovery_open()
-                        && matches!(
-                            assessment,
-                            Assessment::RdtsScheduled
-                                | Assessment::RdtsInactive
-                                | Assessment::RdtsExpired
-                                | Assessment::ExpiryMargin
-                        )
-                        && checked
-                            .coins
-                            .as_ref()
-                            .is_ok_and(|coins| !coins.ancestry_candidates.is_empty());
-                    if !can_search_ancestry {
-                        return refuse(&rdts_refusal(assessment, window), false);
-                    }
-                }
-            }
+        if let Err(reason) = &checked.window {
+            return refuse(
+                &format!("Couldn't read Bitcoin Blake2b's status: {reason}"),
+                true,
+            );
         }
         match &checked.coins {
             Err(reason) => {
@@ -2306,12 +2281,6 @@ pub fn vault_shape_refusal(wallet: &Wallet) -> Option<String> {
     } else {
         "This Vault’s primary spending path is not supported for Claim step 1.".to_string()
     })
-}
-
-/// The replacement claim uses chain-specific funding rather than the old
-/// deployment window. Until it is ready, do not surface that obsolete check.
-fn rdts_refusal(_assessment: Assessment, _window: &ForkWindow) -> String {
-    crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.to_string()
 }
 
 pub fn describe_duration(seconds: i64) -> String {

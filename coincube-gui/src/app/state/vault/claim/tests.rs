@@ -4854,7 +4854,7 @@ fn ancestry_candidates_do_not_authorize_an_incomplete_two_chain_claim() {
         let mut checked = checked_ok(1_000_000);
         checked.window.as_mut().unwrap().rdts = Err(assessment);
         p.pre.checked = Some(checked);
-        assert!(!p.can_build(), "no candidate and no valid fallback");
+        assert!(!p.can_build(), "new Claim is still gated");
         p.pre
             .checked
             .as_mut()
@@ -4884,17 +4884,16 @@ fn ancestry_candidates_do_not_authorize_an_incomplete_two_chain_claim() {
             .as_mut()
             .unwrap()
             .rdts = Err(assessment);
-        assert!(!p.can_build(), "invalid observations remain refused");
+        assert!(!p.can_build(), "new Claim is still gated");
     }
     p.pre.checked.as_mut().unwrap().window = Err("stale anchor".into());
     assert!(!p.can_build());
 }
 
-/// #547 (547-A): while the ancestry gate is closed a candidate never licenses
-/// a search, so an RDTS window that disallows OP_RETURN shows its timing
-/// refusal instead of offering a build that could not be signed.
+/// RDTS affects the retired OP_RETURN route, not the input-ancestry Claim.
+/// The production gate remains the only refusal for a fresh valid precheck.
 #[test]
-fn closed_gate_candidates_never_bypass_the_op_return_timing_refusal() {
+fn closed_gate_candidates_are_refused_independently_of_rdts_window() {
     assert!(crate::services::claim_ancestry_gate::authorization().is_none());
     let mut p = panel(SINGLE_WSH);
     p.pre.target = Some("fork-cube".into());
@@ -4916,15 +4915,17 @@ fn closed_gate_candidates_never_bypass_the_op_return_timing_refusal() {
             .unwrap()
             .ancestry_candidates
             .push(coin(Some(95), false, false, 2));
-        let window = checked.window.clone().unwrap();
         p.pre.checked = Some(checked);
         assert!(
             !p.can_build(),
             "a closed gate cannot search ancestry: {:?}",
             assessment
         );
-        let refusal = p.refusal().expect("the OP_RETURN timing refusal");
-        assert_eq!(refusal.reason, rdts_refusal(assessment, &window));
+        let refusal = p.refusal().expect("the new Claim gate refusal");
+        assert_eq!(
+            refusal.reason,
+            crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
+        );
         assert!(!refusal.retry);
         assert!(matches!(p.stage, Stage::Preconditions));
     }
