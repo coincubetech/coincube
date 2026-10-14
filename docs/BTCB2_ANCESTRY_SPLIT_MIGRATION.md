@@ -173,8 +173,8 @@ a replayable spend.
    reserved address has a confirmed post-fork candidate, and attempts the
    bounded paired ancestry proof. It discards the proof after displaying the
    result and cannot open Sign. Exact per-chain proof failure states, funding
-   minimums, fee review, proof refresh, restart recovery of funding-only records
-   and ordinary signer admission remain to be wired. Claim now independently reserves
+   minimums, fee review, proof refresh and ordinary signer admission remain
+   to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal
    bound to both Cubes, the Vault descriptor and the Connect identity. Its
    pre-display check reloads that exact record and requires fresh unused
@@ -189,8 +189,8 @@ a replayable spend.
    same reservation, reconciles a new paired scan with the full Bitcoin Vault
    UTXO set, and runs the bounded two-chain ancestry collector; it displays
    only a transient status and does not retain spend authority. Per-chain
-   deposit progress, exact funding minimums, the Split funding-only restart
-   route and ordinary transaction admission remain. Claim now durably marks
+   deposit progress, exact funding minimums and ordinary transaction admission
+   remain. Claim now durably marks
    its saved reservation released only after both addresses were checked
    unused and the Bitcoin daemon accepted their receive indices. Reopening
    that same Claim reservation checks identity and wallet state again, then
@@ -214,6 +214,11 @@ a replayable spend.
    daemon comparison now uses the explicit `getinfo` chain identity, so an
    external Coincubed daemon can pass the same positive check as an embedded
    one; an older or unbound remote response cannot.
+   The Cube launcher now discovers a funding-only Split record, which has no
+   transaction intent yet. Reopening under Connect validates its source
+   digest, target Cube and account, then repeats both-chain address checks
+   before showing the same deposit addresses. A resumed deposit screen can
+   run the same read-only "Check deposits" scan.
    The Claim
    wizard does not yet call paired funding discovery or the transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and

@@ -76,7 +76,7 @@ use iced::Task;
 
 use coincube_core::{
     claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
-    foreign_split::{SplitCoin, SplitStep1},
+    foreign_split::{SplitCoin, SplitSource, SplitStep1},
     miniscript::bitcoin::{
         consensus::encode::serialize_hex, hashes::sha256, psbt::Psbt, OutPoint, Transaction, Txid,
     },
@@ -315,6 +315,10 @@ pub type ResumeResult = Result<(Box<Resumed>, Driver), Box<Unresumed>>;
 #[derive(Debug)]
 pub enum SplitEvent {
     FundingPrepared(u64, Result<step1::CheckedFundingAddresses, String>),
+    FundingRecovered(
+        u64,
+        Result<(SplitSource, step1::CheckedFundingAddresses), String>,
+    ),
     FundingChecked(u64, Result<step1::SplitDepositProgress, String>),
     Checked(u64, Result<Box<Prepared>, Refusal>),
     Built(u64, Result<Box<SplitStep1>, String>),
@@ -503,6 +507,9 @@ pub struct SplitPanel {
     hidden: bool,
     /// Fresh start only.
     intent: Option<Arc<SplitIntent>>,
+    /// A deposit-only record without an ancestry transaction intent yet.
+    funding_journal: Option<(sha256::Hash, PathBuf)>,
+    funding_source: Option<SplitSource>,
     funding_addresses: Option<step1::CheckedFundingAddresses>,
     funding_progress: Option<step1::SplitDepositProgress>,
     prepared: Option<Box<Prepared>>,
@@ -628,6 +635,8 @@ impl SplitPanel {
             stage: Stage::NeedsSession,
             hidden: false,
             intent: None,
+            funding_journal: None,
+            funding_source: None,
             funding_addresses: None,
             funding_progress: None,
             prepared: None,
@@ -724,6 +733,17 @@ impl SplitPanel {
         panel
     }
 
+    pub fn resume_funding(
+        target_cube: String,
+        journal_root: PathBuf,
+        digest: sha256::Hash,
+        directory: PathBuf,
+    ) -> Self {
+        let mut panel = Self::empty(target_cube, journal_root);
+        panel.funding_journal = Some((digest, directory));
+        panel
+    }
+
     pub fn stage(&self) -> &Stage {
         &self.stage
     }
@@ -789,7 +809,10 @@ impl SplitPanel {
         self.exported.as_ref()
     }
     pub fn journal_directory(&self) -> Option<&PathBuf> {
-        self.journal.as_ref().map(|(_, directory)| directory)
+        self.journal
+            .as_ref()
+            .or(self.funding_journal.as_ref())
+            .map(|(_, directory)| directory)
     }
     pub fn journal_root(&self) -> &PathBuf {
         &self.journal_root
@@ -883,6 +906,7 @@ impl SplitPanel {
         self.device.close();
         self.funding_addresses = None;
         self.funding_progress = None;
+        self.funding_source = None;
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
@@ -895,7 +919,9 @@ impl SplitPanel {
         }
         self.seq = self.seq.wrapping_add(1);
         self.disarm_deadline();
-        if self.journal.is_some() && !matches!(self.stage, Stage::Abandoned | Stage::Closed) {
+        if (self.journal.is_some() || self.funding_journal.is_some())
+            && !matches!(self.stage, Stage::Abandoned | Stage::Closed)
+        {
             self.stage = Stage::NeedsSession;
             self.notice = Some(
                 "The split session ended. It is recorded on this device and continues after you sign in again.".to_string(),
@@ -919,6 +945,16 @@ impl SplitPanel {
             return Task::none();
         }
         self.notice = None;
+        if let Some((digest, directory)) = self.funding_journal.clone() {
+            self.stage = Stage::Working(Work::ReservingFunding);
+            let target = self.target_cube.clone();
+            return self.spawn(
+                async move {
+                    step1::recover_funding_addresses(&*connect, directory, digest, &target).await
+                },
+                SplitEvent::FundingRecovered,
+            );
+        }
         if let Some((digest, directory)) = self.journal.clone() {
             // A recorded step-2 submission reopens only the reconciler. The
             // decision needs only the session, never the Vault daemon, so a
@@ -1234,21 +1270,13 @@ impl SplitPanel {
         let seq = self.seq;
         match message {
             SplitMessage::CheckDeposits if self.stage == Stage::FundingDeposits => {
-                let (Some(connect), Some(intent)) = (self.connect.clone(), self.intent.clone())
-                else {
+                let (Some(connect), Some(source), Some((_, directory))) = (
+                    self.connect.clone(),
+                    self.funding_source.clone(),
+                    self.funding_journal.clone(),
+                ) else {
                     return Task::none();
                 };
-                let source = match crate::services::split_source::split_source(
-                    &intent.external,
-                    intent.internal.as_ref(),
-                ) {
-                    Ok(source) => source,
-                    Err(error) => {
-                        self.notice = Some(error.to_string());
-                        return Task::none();
-                    }
-                };
-                let directory = step1::journal_directory(&self.journal_root, source.digest());
                 let target = self.target_cube.clone();
                 self.notice = None;
                 self.funding_progress = None;
@@ -1518,12 +1546,41 @@ impl SplitPanel {
         }
         match event {
             SplitEvent::FundingPrepared(_, Ok(addresses)) => {
+                let Some(intent) = self.intent.as_ref() else {
+                    self.stage =
+                        Stage::Refused(Refusal::final_("The source wallet scan was lost."));
+                    return Task::none();
+                };
+                let source = match crate::services::split_source::split_source(
+                    &intent.external,
+                    intent.internal.as_ref(),
+                ) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        self.stage = Stage::Refused(Refusal::final_(error.to_string()));
+                        return Task::none();
+                    }
+                };
+                let directory = step1::journal_directory(&self.journal_root, source.digest());
+                self.funding_journal = Some((source.digest(), directory));
+                self.funding_source = Some(source);
                 self.funding_addresses = Some(addresses);
                 self.funding_progress = None;
                 self.stage = Stage::FundingDeposits;
                 Task::none()
             }
             SplitEvent::FundingPrepared(_, Err(reason)) => {
+                self.stage = Stage::Refused(Refusal::retry(reason));
+                Task::none()
+            }
+            SplitEvent::FundingRecovered(_, Ok((source, addresses))) => {
+                self.funding_source = Some(source);
+                self.funding_addresses = Some(addresses);
+                self.funding_progress = None;
+                self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::FundingRecovered(_, Err(reason)) => {
                 self.stage = Stage::Refused(Refusal::retry(reason));
                 Task::none()
             }
@@ -1893,6 +1950,7 @@ impl SplitEvent {
     fn seq(&self) -> u64 {
         match self {
             Self::FundingPrepared(seq, _)
+            | Self::FundingRecovered(seq, _)
             | Self::FundingChecked(seq, _)
             | Self::Checked(seq, _)
             | Self::Built(seq, _)

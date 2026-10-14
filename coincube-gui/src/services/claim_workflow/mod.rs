@@ -31,8 +31,8 @@ pub use split::{
     Step1Conflict, MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE,
 };
 pub use split_funding::{
-    load_split_funding, release_split_funding, reserve_split_funding, SplitFundingDiscoveryError,
-    SplitFundingReservation,
+    load_split_funding, peek_split_funding, release_split_funding, reserve_split_funding,
+    SplitFundingDiscoveryError, SplitFundingReservation,
 };
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.

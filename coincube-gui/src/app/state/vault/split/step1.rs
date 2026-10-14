@@ -247,6 +247,38 @@ pub fn discover_resumable(
     })
 }
 
+/// Find a checked funding reservation that has not yet produced a transaction
+/// intent. Discovery does not display its addresses: the panel reloads it
+/// under the live Connect account and repeats all six address-history reads.
+pub fn discover_funding(root: &Path, target_cube: &str) -> Option<(sha256::Hash, PathBuf)> {
+    let mut found = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name().into_string().ok()?;
+            let digest = sha256::Hash::from_str(&name).ok()?;
+            if digest.to_string() != name {
+                return None;
+            }
+            let directory = entry.path();
+            if !std::fs::symlink_metadata(&directory).ok()?.is_dir() || is_closed(&directory) {
+                return None;
+            }
+            if !std::fs::symlink_metadata(directory.join("split-funding.json"))
+                .ok()?
+                .is_file()
+            {
+                return None;
+            }
+            let saved = claim_workflow::peek_split_funding(&directory).ok()??;
+            (saved.source_digest == digest && saved.target_cube == target_cube)
+                .then_some((digest, directory))
+        })
+        .collect::<Vec<_>>();
+    found.sort();
+    found.into_iter().next()
+}
+
 /// #568 D15: this source was already split into this Cube's Vault (its
 /// `split_from` records it).
 pub const SOURCE_ALREADY_SPLIT: &str = "This wallet was already split into this Vault, so it can't be split again. Nothing was started.";
@@ -471,6 +503,35 @@ pub async fn check_reserved_funding_addresses(
         btcb2_deposit,
         bitcoin_return,
     })
+}
+
+/// Reopen the funding-only stage after restart. Discovery never reveals the
+/// saved addresses; this call checks the target, source digest and current
+/// Connect account, then repeats both-chain history reads before display.
+pub async fn recover_funding_addresses(
+    connect: &dyn SplitConnect,
+    directory: PathBuf,
+    digest: sha256::Hash,
+    target_cube: &str,
+) -> Result<(SplitSource, CheckedFundingAddresses), String> {
+    if !connect.session_current() {
+        return Err("The Connect session changed before recovering deposit addresses.".into());
+    }
+    let target = target_cube.to_owned();
+    let for_load = directory.clone();
+    let saved = tokio::task::spawn_blocking(move || claim_workflow::peek_split_funding(&for_load))
+        .await
+        .map_err(|_| "Reading the funding record was interrupted.".to_string())?
+        .map_err(|_| "The funding record could not be verified.".to_string())?
+        .ok_or_else(|| "No funding record was found for this split.".to_string())?;
+    let source = saved
+        .source()
+        .map_err(|_| "The saved source wallet is invalid.".to_string())?;
+    if saved.source_digest != digest || !saved.matches(&source, &target, &connect.context()) {
+        return Err("The funding record belongs to another wallet or Connect account.".into());
+    }
+    let addresses = check_reserved_funding_addresses(connect, directory, &source, &target).await?;
+    Ok((source, addresses))
 }
 
 /// The production Connect side: Claim's observation source and anchor, the

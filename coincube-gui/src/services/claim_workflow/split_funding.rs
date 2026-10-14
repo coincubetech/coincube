@@ -292,6 +292,20 @@ pub fn load_split_funding(
     }
 }
 
+/// Read a funding-only reservation under the journal lock before the
+/// account-specific checks. Callers must still compare its target, source and
+/// Connect identity before displaying an address or acting on a deposit.
+pub fn peek_split_funding(directory: &Path) -> Result<Option<SplitFundingReservation>, Error> {
+    let journal = Journal::open(directory)?;
+    if journal.load()?.is_some()
+        || journal.load_claim_funding_reservation()?.is_some()
+        || std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok()
+    {
+        return Err(Error::Conflict);
+    }
+    journal.load_split_funding_reservation()
+}
+
 /// Record that the initial two-chain unused-address check succeeded. The
 /// journal lock compares the exact reservation before atomically replacing it.
 pub fn release_split_funding(

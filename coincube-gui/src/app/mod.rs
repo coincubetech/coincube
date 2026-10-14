@@ -1028,14 +1028,24 @@ fn discover_split_panel(
     let root = step1::journal_root(data_dir, &wallet.id());
     // #568 D19: a completed split this Cube records is passed over, so the
     // Vault can take another source; any other journal is resumed.
-    let (digest, directory) =
-        step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)?;
-    let mut panel = Box::new(SplitPanel::resume(
-        cube_settings.id.clone(),
-        root,
-        digest,
-        directory,
-    ));
+    let mut panel = if let Some((digest, directory)) =
+        step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)
+    {
+        Box::new(SplitPanel::resume(
+            cube_settings.id.clone(),
+            root,
+            digest,
+            directory,
+        ))
+    } else {
+        let (digest, directory) = step1::discover_funding(&root, &cube_settings.id)?;
+        Box::new(SplitPanel::resume_funding(
+            cube_settings.id.clone(),
+            root,
+            digest,
+            directory,
+        ))
+    };
     // B4b-3b: the session-only device listing is rooted here; it writes
     // nothing under it.
     panel.set_device_datadir(data_dir.clone());

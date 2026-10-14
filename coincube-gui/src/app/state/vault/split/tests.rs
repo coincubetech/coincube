@@ -708,6 +708,32 @@ async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn funding_only_split_reopens_same_addresses_after_restart() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
+    let addresses = panel.funding_addresses().unwrap().clone();
+    let (digest, directory) = panel.funding_journal.clone().unwrap();
+    assert_eq!(
+        step1::discover_funding(&temp.root(), TARGET),
+        Some((digest, directory.clone()))
+    );
+
+    let mut reopened = SplitPanel::resume_funding(TARGET.into(), temp.root(), digest, directory);
+    reopened.set_connect(Some(connect as Arc<dyn SplitConnect>));
+    let task = reopened.begin();
+    drive(&mut reopened, task).await;
+    assert_eq!(reopened.stage(), &Stage::FundingDeposits);
+    assert_eq!(reopened.funding_addresses(), Some(&addresses));
+    assert!(reopened.construction().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn used_split_deposit_address_is_never_displayed_or_signed() {
     let scan = Scan::new(Shape::Wpkh);
     let connect = FakeConnect::new(&scan.coins);
