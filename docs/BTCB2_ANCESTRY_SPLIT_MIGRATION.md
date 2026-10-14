@@ -103,11 +103,14 @@ a replayable spend.
    backends to advance their own change branches, checks their explicit chain
    identities and descriptor, then writes both indices under the Claim lock.
    A partial failure burns any already allocated index. Version-10 Claim
-   creation and restart require the exact saved pair. The production wizard
-   does not yet invoke this service because it has no authenticated BTCB2
-   wallet daemon handle, and the current Connect wallet backend cannot
-   atomically reserve change indices; both conditions must be resolved before
-   the preview or signing path is enabled.
+   creation and restart require the exact saved pair. Coincubed now exposes a
+   local RPC reservation that checks the requested chain ID and descriptor
+   before atomically advancing the persisted branch; embedded and local-socket
+   desktop daemons use the same bound operation. The production wizard does
+   not yet invoke this service because it has no authenticated BTCB2 wallet
+   daemon handle. The separate legacy remote-wallet backend still cannot
+   atomically reserve change indices. The source and target daemons must be
+   paired before preview or signing is enabled.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly
@@ -252,15 +255,16 @@ a replayable spend.
    if deposits have since made their
    history nonempty; it never chooses replacements on retry.
    Coincubed `getinfo` now reports an explicit chain ID. The desktop accepts
-   an authenticated `chain_id` on a Connect wallet record, checks its address
-   network, and keeps an omitted field unknown. The Claim deposit probe and
+   an authenticated `chain_id` on a legacy remote-wallet record, checks its
+   address network, and keeps an omitted field unknown. The Claim deposit probe and
    read-only checks now admit a Connect-backed Bitcoin Vault when its wallet
    record positively identifies the Bitcoin chain, matches the Vault
    descriptor and reports a ready wallet state; they no longer require the old
-   embedded-daemon submission adapter. The current remote Connect wallet API
-   does not yet supply `chain_id`, so Connect-backed Claim address preparation
-   still refuses it. The preparation path now advances a Connect-backed
-   Bitcoin Vault's receive branch with durable one-at-a-time new-address
+   embedded-daemon submission adapter. That remote wallet API does not yet
+   supply `chain_id`, so Claim address preparation through it still refuses.
+   COINCUBE | Connect instead uses local Coincubed with an authenticated
+   Esplora backend and has a positive chain ID. The preparation path advances
+   a remote-wallet-backed Bitcoin Vault's receive branch with durable one-at-a-time new-address
    requests, verifies every returned derivation, then reads back both exact
    reserved addresses and repeats the two-chain unused-history check before
    releasing the journal record. It refuses an

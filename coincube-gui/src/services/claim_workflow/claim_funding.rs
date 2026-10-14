@@ -805,16 +805,16 @@ pub async fn reserve_claim_change_indices(
     }
 
     let bitcoin = bitcoin_daemon
-        .reserve_change()
+        .reserve_claim_change(ChainId::Bitcoin, &descriptor)
         .await
         .map_err(|_| ClaimChangeError::WalletState)?;
     let mut fork = fork_daemon
-        .reserve_change()
+        .reserve_claim_change(ChainId::BitcoinBlake2b, &descriptor)
         .await
         .map_err(|_| ClaimChangeError::WalletState)?;
     if bitcoin == fork {
         fork = fork_daemon
-            .reserve_change()
+            .reserve_claim_change(ChainId::BitcoinBlake2b, &descriptor)
             .await
             .map_err(|_| ClaimChangeError::WalletState)?;
     }
