@@ -372,6 +372,14 @@ marker spend cases remain.
    Paired Connect preflight also accepts the typed, signature-verified Claim
    or Split pair directly, observes both exact witnesses under one session,
    and refuses non-mainnet pairs; it remains read-only evidence.
+   Version-10 Claim and version-11 Split intents can now atomically retain the
+   two finalized signed transactions, including each txid and wtxid, before
+   any network attempt. Journal validation requires their unsigned forms to
+   match both saved templates exactly. Restart restores the bytes for
+   reconciliation but leaves the controller unchecked and does not permit
+   signing or broadcast. The journal still needs a separate durable possible
+   submission record for each chain; acceptance on one chain must never imply
+   acceptance on the other.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

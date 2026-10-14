@@ -233,6 +233,15 @@ struct SplitFundingPlan {
     target_descriptor_digest: sha256::Hash,
 }
 
+pub(super) fn ancestry_step2_unsigned(intent: &Intent) -> Option<&Transaction> {
+    intent
+        .split
+        .as_ref()?
+        .funding
+        .as_ref()
+        .map(|funding| &funding.step2_unsigned)
+}
+
 /// #568 S4, O4: the claimed coin fresh Bitcoin reads found missing from
 /// its address's unspent outputs while step 1 was absent, the Bitcoin tip
 /// of the reconcile that first found it, and (S4-D5) the tip at which it
@@ -792,6 +801,7 @@ impl Controller {
             version: ANCESTRY_VERSION,
             ancestry: None,
             funding_plan: None,
+            paired_submission: None,
             identity: split_identity(target_cube.clone(), source_digest),
             plan: ClaimPlan {
                 bitcoin_chain: bitcoin.chain(),
@@ -1106,6 +1116,7 @@ impl Controller {
             version: SplitKind::Split.version(),
             ancestry: None,
             funding_plan: None,
+            paired_submission: None,
             identity: split_identity(target_cube.clone(), source_digest),
             plan: ClaimPlan {
                 bitcoin_chain,
@@ -1188,6 +1199,7 @@ impl Controller {
             version: SplitKind::Unified.version(),
             ancestry: None,
             funding_plan: None,
+            paired_submission: None,
             identity: split_identity(target_cube.clone(), source_digest),
             plan: ClaimPlan {
                 bitcoin_chain,

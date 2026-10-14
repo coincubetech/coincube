@@ -426,6 +426,84 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert_eq!(restored_bitcoin.psbt(), bitcoin.psbt());
     assert_eq!(restored_fork.psbt(), fork.psbt());
     assert!(!reopened.construction_verified);
+    // Both ordinary witnesses remain bound to the exact unsigned journal
+    // pair across restart. This record is only reconciliation data; the
+    // controller remains Unchecked and cannot use the retired signer path.
+    let bitcoin_inputs = AncestrySplitInputs {
+        chain: ChainId::Bitcoin,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &bitcoin_marker,
+        dependency: &bitcoin_path.reverify().unwrap(),
+        fork_height: FORK,
+        destination: 4,
+    };
+    let fork_inputs = AncestrySplitStep2Inputs {
+        chain: ChainId::BitcoinBlake2b,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &fork_marker,
+        dependency: &fork_path.reverify().unwrap(),
+        fork_height: FORK,
+        claimed: bitcoin.claimed_prevouts(),
+        target: &target_script,
+    };
+    let secp = Secp256k1::new();
+    let sign_pair = |psbt: &Psbt| {
+        let mut signed = psbt.clone();
+        for signer in wallet.signers.iter().take(2) {
+            signed.sign(signer, &secp).unwrap();
+        }
+        signed
+    };
+    let signed = coincube_core::foreign_split::finalize_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &sign_pair(bitcoin.psbt()),
+        &fork,
+        &fork_inputs,
+        &sign_pair(fork.psbt()),
+        &Secp256k1::verification_only(),
+    )
+    .unwrap();
+    reopened
+        .record_signed_ancestry_split_pair(&context(), &signed)
+        .unwrap();
+    assert!(matches!(
+        reopened.record_signed_ancestry_split_pair(&context(), &signed),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(reopened.status(), Status::Unchecked);
+    let bitcoin_id = reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .bitcoin_identity();
+    let fork_id = reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .fork_identity();
+    drop(reopened);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    let recorded = reopened.recorded_signed_ancestry_pair().unwrap();
+    assert_eq!(recorded.bitcoin_identity(), bitcoin_id);
+    assert_eq!(recorded.fork_identity(), fork_id);
+    assert_eq!(recorded.bitcoin(), signed.bitcoin().transaction());
+    assert_eq!(recorded.fork(), signed.fork().transaction());
+    assert_eq!(reopened.status(), Status::Unchecked);
+    assert!(!reopened.construction_verified);
+    let mut altered = serde_json::to_value(&reopened.intent).unwrap();
+    let mut changed_fork = recorded.fork().clone();
+    changed_fork.input[0].witness =
+        coincube_core::miniscript::bitcoin::Witness::from_slice(&[vec![0x42]]);
+    assert_ne!(changed_fork.compute_wtxid(), recorded.fork_identity().1);
+    altered["paired_submission"]["fork"] = serde_json::to_value(changed_fork).unwrap();
+    let altered: Intent = serde_json::from_value(altered).unwrap();
+    let validation = super::super::validate(&altered);
+    assert!(
+        matches!(validation, Err(Error::InvalidPlan)),
+        "{:?}",
+        validation
+    );
     let mut wrong_marker = fork_marker.clone();
     wrong_marker.index += 1;
     assert!(matches!(
@@ -476,6 +554,16 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     let mut downgraded = reopened.intent.clone();
     downgraded.version = 8;
     assert!(matches!(validate(&downgraded), Err(Error::InvalidPlan)));
+    drop(reopened);
+    fs::write(
+        temp.0.join("intent.json"),
+        serde_json::to_vec(&altered).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Controller::reopen_settling_blocking(&temp.0, &identity, context()),
+        Err(Error::InvalidPlan)
+    ));
 }
 
 /// Two signers for multisig (the first two keys), one otherwise.

@@ -19,8 +19,14 @@ const MAX_BYTES: u64 =
 const ANCESTRY_PAIR_MAX_BYTES: u64 = LEGACY_MAX_BYTES
     + 4 * coincube_core::claim_ancestry::retained::MAX_ENCODED_BYTES as u64
     + 1024 * 1024;
+// At most two consensus-limited signed transactions, JSON encoded. Only
+// version-10/11 records that actually retain both witnesses receive this
+// allowance; legacy and unsigned ancestry limits stay unchanged.
+const SIGNED_ANCESTRY_PAIR_MAX_BYTES: u64 = ANCESTRY_PAIR_MAX_BYTES + 16 * 1024 * 1024;
 fn intent_limit(intent: &Intent) -> u64 {
-    if (intent.version == 10 && intent.funding_plan.is_some()) || intent.version == 11 {
+    if matches!(intent.version, 10 | 11) && intent.paired_submission.is_some() {
+        SIGNED_ANCESTRY_PAIR_MAX_BYTES
+    } else if (intent.version == 10 && intent.funding_plan.is_some()) || intent.version == 11 {
         ANCESTRY_PAIR_MAX_BYTES
     } else if intent.version == 7 && intent.ancestry.is_some() {
         MAX_BYTES
@@ -159,14 +165,14 @@ impl Journal {
             }
             Err(error) => return Err(error),
         };
-        if file.metadata()?.len() > ANCESTRY_PAIR_MAX_BYTES {
+        if file.metadata()?.len() > SIGNED_ANCESTRY_PAIR_MAX_BYTES {
             return Err(Error::InvalidJournal);
         }
         let mut bytes = Vec::new();
         (&mut file)
-            .take(ANCESTRY_PAIR_MAX_BYTES + 1)
+            .take(SIGNED_ANCESTRY_PAIR_MAX_BYTES + 1)
             .read_to_end(&mut bytes)?;
-        if bytes.len() as u64 > ANCESTRY_PAIR_MAX_BYTES {
+        if bytes.len() as u64 > SIGNED_ANCESTRY_PAIR_MAX_BYTES {
             return Err(Error::InvalidJournal);
         }
         Ok(Some(bytes))

@@ -3,6 +3,7 @@ mod ancestry;
 pub(crate) use ancestry::RecoveryObservation;
 mod claim_funding;
 mod journal;
+mod paired_submission;
 mod recovery;
 mod reorg;
 mod split;
@@ -100,6 +101,10 @@ struct Intent {
     ancestry: Option<ancestry::StoredAncestry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     funding_plan: Option<ancestry::StoredFundingPlan>,
+    /// Signed ordinary transactions for a version-10 Claim or version-11
+    /// Split. Reopening this record never restores live proof or permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_submission: Option<paired_submission::PairedSubmissionRecord>,
     identity: WalletIdentity,
     plan: ClaimPlan,
     unsigned_digest: sha256::Hash,
@@ -197,6 +202,7 @@ fn context_digest(context: &Context) -> sha256::Hash {
     sha256::Hash::hash(&bytes)
 }
 fn validate(intent: &Intent) -> Result<(), Error> {
+    paired_submission::validate(intent)?;
     // A Split intent has its own rules (no Bitcoin Cube, signed scriptSigs,
     // a tracked signed txid). Every Claim check below stays as it was.
     if intent.split.is_some() || split::VERSIONS.contains(&intent.version) {
@@ -429,6 +435,7 @@ impl Controller {
             },
             ancestry,
             funding_plan,
+            paired_submission: None,
             identity,
             unsigned_digest: digest(&plan.step1),
             context_digest: context_digest(&context),
