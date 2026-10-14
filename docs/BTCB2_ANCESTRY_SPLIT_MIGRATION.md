@@ -404,6 +404,10 @@ marker spend cases remain.
    Core also has typed pair finalizers for both Claim and Split. They require
    the same shared input set, distinct chain-specific funding inputs, ordinary
    outputs and valid signatures on both exact PSBTs before returning a pair.
+   Both pairs now also have pre-signing validators for incomplete PSBTs. They
+   bind the two constructions and reject changes to transaction outputs,
+   prevout metadata or sighash policy after a signer round trip. These checks
+   do not replace live two-chain proof at each signer dispatch.
    The version-10 Claim and version-11 Split journals now expose a review-only
    path that first validates a fresh paired funding collection against the
    exact saved intent and then invokes the corresponding pair finalizer.

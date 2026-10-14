@@ -268,7 +268,7 @@ impl VerifiedAncestrySplitStep2 {
     }
 }
 
-fn check_bound(
+pub(super) fn check_bound(
     construction: &AncestrySplitStep2,
     inputs: &AncestrySplitStep2Inputs<'_>,
 ) -> Result<(), FinalizeError> {

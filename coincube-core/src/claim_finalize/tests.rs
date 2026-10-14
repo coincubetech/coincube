@@ -767,6 +767,29 @@ fn ordinary_claim_pair_requires_both_signed_transactions() {
             }),
     )
     .unwrap();
+    let unsigned_fork = UnifiedPsbt::from_psbt(fork.psbt().clone()).unwrap();
+    assert!(
+        validate_ancestry_claim_pair_signing(&bitcoin, &fork, bitcoin.psbt(), &unsigned_fork,)
+            .is_ok()
+    );
+    assert!(
+        validate_ancestry_claim_pair_signing(&bitcoin, &fork, &bitcoin_signed, &fork_signed,)
+            .is_ok()
+    );
+    let mut changed_bitcoin = bitcoin_signed.clone();
+    changed_bitcoin.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        validate_ancestry_claim_pair_signing(&bitcoin, &fork, &changed_bitcoin, &fork_signed),
+        Err(ClaimPairFinalizeError::Bitcoin(
+            FinalizeError::ConstructionChanged
+        ))
+    ));
+    let mut changed_fork = fork_signed.clone();
+    changed_fork.psbt_mut().unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(
+        validate_ancestry_claim_pair_signing(&bitcoin, &fork, &bitcoin_signed, &changed_fork)
+            .is_err()
+    );
     let verified =
         finalize_ancestry_claim_pair(&bitcoin, &fork, &bitcoin_signed, &fork_signed, &verify)
             .unwrap();
@@ -789,7 +812,9 @@ fn ordinary_claim_pair_requires_both_signed_transactions() {
 fn ancestry_rejects_wrong_metadata_non_all_and_invalid_or_insufficient_signatures() {
     let (built, signers) = ancestry_fixture(false);
     let secp = secp256k1::Secp256k1::new();
+    assert!(validate_ancestry_transfer_signing(&built, built.psbt()).is_ok());
     let partial = signers[0].sign_psbt(built.psbt().clone(), &secp).unwrap();
+    assert!(validate_ancestry_transfer_signing(&built, &partial).is_ok());
     assert!(matches!(
         finalize_ancestry_transfer(&built, &partial, &secp),
         Err(FinalizeError::Unsatisfied)
@@ -798,11 +823,19 @@ fn ancestry_rejects_wrong_metadata_non_all_and_invalid_or_insufficient_signature
     let mut bad = signed.clone();
     bad.inputs[0].non_witness_utxo = None;
     assert!(matches!(
+        validate_ancestry_transfer_signing(&built, &bad),
+        Err(FinalizeError::ConstructionChanged)
+    ));
+    assert!(matches!(
         finalize_ancestry_transfer(&built, &bad, &secp),
         Err(FinalizeError::ConstructionChanged)
     ));
     let mut bad = signed.clone();
     bad.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        validate_ancestry_transfer_signing(&built, &bad),
+        Err(FinalizeError::ConstructionChanged)
+    ));
     assert!(matches!(
         finalize_ancestry_transfer(&built, &bad, &secp),
         Err(FinalizeError::ConstructionChanged)
@@ -810,6 +843,10 @@ fn ancestry_rejects_wrong_metadata_non_all_and_invalid_or_insufficient_signature
     for flag in [2, 3, 0x21, 0x81] {
         let mut bad = signed.clone();
         bad.inputs[0].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from_u32(flag));
+        assert!(matches!(
+            validate_ancestry_transfer_signing(&built, &bad),
+            Err(FinalizeError::UnsupportedSighash)
+        ));
         assert!(matches!(
             finalize_ancestry_transfer(&built, &bad, &secp),
             Err(FinalizeError::UnsupportedSighash)

@@ -51,6 +51,16 @@ fn bind(
         claimed_prevouts: construction.claimed_prevouts().to_vec(),
     }
 }
+/// Check an in-progress Bitcoin ancestry PSBT before another signer handles
+/// it. Incomplete signatures are allowed, but the owned transaction and all
+/// non-signature metadata must still match the original construction.
+pub fn validate_ancestry_transfer_signing(
+    construction: &AncestrySelfTransfer,
+    signed: &Psbt,
+) -> Result<(), FinalizeError> {
+    validate_transfer_signing(construction.psbt(), construction.descriptor(), signed)
+}
+
 /// Authenticate every supplied signature and interpret the retained witness,
 /// requiring exact owned metadata and SIGHASH_ALL. Does not prove exclusivity,
 /// maturity, unspentness, deployment activity, or permission to broadcast.
@@ -125,6 +135,23 @@ pub fn finalize_ancestry_claim_pair<C: secp256k1::Verification>(
     fork_signed: &crate::psbt_unified::UnifiedPsbt,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<VerifiedAncestryClaimPair, ClaimPairFinalizeError> {
+    validate_ancestry_claim_pair_signing(bitcoin, fork, bitcoin_signed, fork_signed)?;
+    let bitcoin = finalize_ancestry_transfer(bitcoin, bitcoin_signed, secp)
+        .map_err(ClaimPairFinalizeError::Bitcoin)?;
+    let fork =
+        finalize_claim_fork_sweep(fork, fork_signed, secp).map_err(ClaimPairFinalizeError::Fork)?;
+    Ok(VerifiedAncestryClaimPair { bitcoin, fork })
+}
+
+/// Validate the exact paired construction after each signer round trip.
+/// Incomplete signatures are allowed. This is not live ancestry evidence or
+/// permission to offer either transaction to a signer or network.
+pub fn validate_ancestry_claim_pair_signing(
+    bitcoin: &AncestrySelfTransfer,
+    fork: &crate::claim_spend::ClaimForkSweep,
+    bitcoin_signed: &Psbt,
+    fork_signed: &crate::psbt_unified::UnifiedPsbt,
+) -> Result<(), ClaimPairFinalizeError> {
     let shared: BTreeSet<_> = bitcoin.claimed_prevouts().iter().copied().collect();
     let fork_inputs: BTreeSet<_> = fork
         .psbt()
@@ -160,9 +187,8 @@ pub fn finalize_ancestry_claim_pair<C: secp256k1::Verification>(
     {
         return Err(ClaimPairFinalizeError::ConstructionChanged);
     }
-    let bitcoin = finalize_ancestry_transfer(bitcoin, bitcoin_signed, secp)
+    validate_ancestry_transfer_signing(bitcoin, bitcoin_signed)
         .map_err(ClaimPairFinalizeError::Bitcoin)?;
-    let fork =
-        finalize_claim_fork_sweep(fork, fork_signed, secp).map_err(ClaimPairFinalizeError::Fork)?;
-    Ok(VerifiedAncestryClaimPair { bitcoin, fork })
+    validate_claim_fork_signing(fork, fork_signed).map_err(ClaimPairFinalizeError::Fork)?;
+    Ok(())
 }

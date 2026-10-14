@@ -431,6 +431,32 @@ pub fn finalize_ancestry_split_pair<C: secp256k1::Verification>(
     fork_signed: &Psbt,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<VerifiedAncestrySplitPair, FinalizeError> {
+    validate_ancestry_split_pair_signing(
+        bitcoin,
+        bitcoin_inputs,
+        bitcoin_signed,
+        fork,
+        fork_inputs,
+        fork_signed,
+    )?;
+    let bitcoin = finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, bitcoin_signed, secp)?;
+    let fork = finalize_ancestry_split_step2(fork, fork_inputs, fork_signed, secp)?;
+    Ok(VerifiedAncestrySplitPair { bitcoin, fork })
+}
+
+/// Check a partially signed Split pair against the exact two ordinary
+/// constructions and current source inputs. Incomplete signatures are
+/// allowed; live ancestry, wallet reservations and signer admission remain
+/// separate requirements.
+#[allow(clippy::too_many_arguments)]
+pub fn validate_ancestry_split_pair_signing(
+    bitcoin: &AncestrySplitStep1,
+    bitcoin_inputs: &AncestrySplitInputs<'_>,
+    bitcoin_signed: &Psbt,
+    fork: &AncestrySplitStep2,
+    fork_inputs: &AncestrySplitStep2Inputs<'_>,
+    fork_signed: &Psbt,
+) -> Result<(), FinalizeError> {
     let shared: BTreeSet<_> = bitcoin.claimed_prevouts().iter().copied().collect();
     let fork_shared: BTreeSet<_> = fork.claimed_prevouts().iter().copied().collect();
     if !matches!(
@@ -457,9 +483,11 @@ pub fn finalize_ancestry_split_pair<C: secp256k1::Verification>(
     {
         return Err(FinalizeError::ConstructionChanged);
     }
-    let bitcoin = finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, bitcoin_signed, secp)?;
-    let fork = finalize_ancestry_split_step2(fork, fork_inputs, fork_signed, secp)?;
-    Ok(VerifiedAncestrySplitPair { bitcoin, fork })
+    check_bound(bitcoin, bitcoin_inputs)?;
+    step2::check_bound(fork, fork_inputs)?;
+    check_signed_construction(bitcoin.psbt(), bitcoin_signed)?;
+    check_signed_construction(fork.psbt(), fork_signed)?;
+    Ok(())
 }
 
 fn check_bound(

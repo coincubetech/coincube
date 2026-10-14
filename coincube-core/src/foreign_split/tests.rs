@@ -579,6 +579,38 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
         let fork = create_ancestry_split_step2(&fork_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
         let bitcoin_signed = sign(bitcoin.psbt(), &wallet.signers);
         let fork_signed = sign(fork.psbt(), &wallet.signers);
+        assert!(validate_ancestry_split_pair_signing(
+            &bitcoin,
+            &bitcoin_inputs,
+            bitcoin.psbt(),
+            &fork,
+            &fork_inputs,
+            fork.psbt(),
+        )
+        .is_ok());
+        assert!(validate_ancestry_split_pair_signing(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_signed,
+            &fork,
+            &fork_inputs,
+            &fork_signed,
+        )
+        .is_ok());
+        let mut changed_bitcoin = bitcoin_signed.clone();
+        changed_bitcoin.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert_eq!(
+            validate_ancestry_split_pair_signing(
+                &bitcoin,
+                &bitcoin_inputs,
+                &changed_bitcoin,
+                &fork,
+                &fork_inputs,
+                &fork_signed,
+            )
+            .unwrap_err(),
+            FinalizeError::ConstructionChanged
+        );
         let secp = secp256k1::Secp256k1::verification_only();
         let verified = finalize_ancestry_split_pair(
             &bitcoin,
@@ -609,6 +641,18 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
         .is_err());
         let mut changed = fork_signed;
         changed.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert_eq!(
+            validate_ancestry_split_pair_signing(
+                &bitcoin,
+                &bitcoin_inputs,
+                &bitcoin_signed,
+                &fork,
+                &fork_inputs,
+                &changed,
+            )
+            .unwrap_err(),
+            FinalizeError::ConstructionChanged
+        );
         assert_eq!(
             finalize_ancestry_split_pair(
                 &bitcoin,

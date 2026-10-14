@@ -99,32 +99,7 @@ fn finalize_transfer<C: secp256k1::Verification>(
     signed: &Psbt,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<VerifiedPoisonTransfer, FinalizeError> {
-    if signed.unsigned_tx != original.unsigned_tx
-        || signed.inputs.len() != original.inputs.len()
-        || signed.outputs.len() != original.outputs.len()
-    {
-        return Err(FinalizeError::ConstructionChanged);
-    }
-    let mut normalized = signed.clone();
-    for (index, input) in signed.inputs.iter().enumerate() {
-        if input
-            .sighash_type
-            .is_some_and(|s| s.ecdsa_hash_ty() != Ok(EcdsaSighashType::All))
-            || input
-                .partial_sigs
-                .values()
-                .any(|s| s.sighash_type != EcdsaSighashType::All)
-        {
-            return Err(FinalizeError::UnsupportedSighash);
-        }
-        normalized.inputs[index].partial_sigs.clear();
-        normalized.inputs[index].sighash_type = original.inputs[index].sighash_type;
-    }
-    if normalized != *original {
-        return Err(FinalizeError::ConstructionChanged);
-    }
-    spend::reverify_spend_before_broadcast(descriptor, signed)
-        .map_err(|_| FinalizeError::Economics)?;
+    validate_transfer_signing(original, descriptor, signed)?;
     let mut prevouts = Vec::with_capacity(signed.inputs.len());
     let mut cache = SighashCache::new(&signed.unsigned_tx);
     for (index, input) in signed.inputs.iter().enumerate() {
@@ -177,6 +152,43 @@ fn finalize_transfer<C: secp256k1::Verification>(
         fee,
         signatures_per_input,
     })
+}
+
+/// Validate an incomplete signer-returned PSBT against the exact owned
+/// construction. Only partial signatures and absent/ALL sighash requests may
+/// differ. This does not establish signature validity or chain eligibility.
+fn validate_transfer_signing(
+    original: &Psbt,
+    descriptor: &CoincubeDescriptor,
+    signed: &Psbt,
+) -> Result<(), FinalizeError> {
+    if signed.unsigned_tx != original.unsigned_tx
+        || signed.inputs.len() != original.inputs.len()
+        || signed.outputs.len() != original.outputs.len()
+    {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    let mut normalized = signed.clone();
+    for (index, input) in signed.inputs.iter().enumerate() {
+        if input
+            .sighash_type
+            .is_some_and(|s| s.ecdsa_hash_ty() != Ok(EcdsaSighashType::All))
+            || input
+                .partial_sigs
+                .values()
+                .any(|s| s.sighash_type != EcdsaSighashType::All)
+        {
+            return Err(FinalizeError::UnsupportedSighash);
+        }
+        normalized.inputs[index].partial_sigs.clear();
+        normalized.inputs[index].sighash_type = original.inputs[index].sighash_type;
+    }
+    if normalized != *original {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    spend::reverify_spend_before_broadcast(descriptor, signed)
+        .map_err(|_| FinalizeError::Economics)?;
+    Ok(())
 }
 
 /// A finalized fork sweep and its verified retained-witness reports. This is
@@ -533,8 +545,9 @@ fn verify_retained_witness<C: secp256k1::Verification>(
 
 mod ancestry;
 pub use ancestry::{
-    finalize_ancestry_claim_pair, finalize_ancestry_transfer, verify_ancestry_transaction,
-    ClaimPairFinalizeError, VerifiedAncestryClaimPair, VerifiedAncestryTransfer,
+    finalize_ancestry_claim_pair, finalize_ancestry_transfer, validate_ancestry_claim_pair_signing,
+    validate_ancestry_transfer_signing, verify_ancestry_transaction, ClaimPairFinalizeError,
+    VerifiedAncestryClaimPair, VerifiedAncestryTransfer,
 };
 
 #[cfg(test)]
