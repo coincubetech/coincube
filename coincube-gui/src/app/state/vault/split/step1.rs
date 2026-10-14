@@ -401,8 +401,9 @@ pub async fn check_reserved_funding_addresses(
     let source = source.clone();
     let target = target_cube.to_owned();
     let expected = context.clone();
+    let for_load = directory.clone();
     let saved = tokio::task::spawn_blocking(move || {
-        claim_workflow::load_split_funding(&directory, &source, &target, &expected)
+        claim_workflow::load_split_funding(&for_load, &source, &target, &expected)
     })
     .await
     .map_err(|_| "Reading the saved funding addresses was interrupted.".to_string())?
@@ -423,7 +424,7 @@ pub async fn check_reserved_funding_addresses(
                     .address_used(chain, address)
                     .await
                     .map_err(|_| "Address history could not be checked on both chains.".to_string())?;
-                if used {
+                if used && !saved.is_released() {
                     return Err("A reserved address already has chain history. Review the funding plan before sending coins.".to_string());
                 }
             }
@@ -432,6 +433,17 @@ pub async fn check_reserved_funding_addresses(
     })
     .await
     .map_err(|_| "Checking both chains' address history timed out.".to_string())??;
+    if !connect.session_current() || connect.context() != context {
+        return Err("The Connect session changed during the address check.".into());
+    }
+    if !saved.is_released() {
+        tokio::task::spawn_blocking(move || {
+            claim_workflow::release_split_funding(&directory, &saved)
+        })
+        .await
+        .map_err(|_| "Saving the checked funding addresses was interrupted.".to_string())?
+        .map_err(|_| "The checked funding addresses could not be saved.".to_string())?;
+    }
     if !connect.session_current() || connect.context() != context {
         return Err("The Connect session changed during the address check.".into());
     }

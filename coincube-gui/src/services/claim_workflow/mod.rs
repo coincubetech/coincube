@@ -30,7 +30,9 @@ pub use split::{
     peek_split_journal, split_identity, RecordedSplit, SplitJournalSummary, SplitKind,
     Step1Conflict, MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE,
 };
-pub use split_funding::{load_split_funding, reserve_split_funding, SplitFundingReservation};
+pub use split_funding::{
+    load_split_funding, release_split_funding, reserve_split_funding, SplitFundingReservation,
+};
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
 pub const REOPEN_BUSY_BUDGET: std::time::Duration = std::time::Duration::from_secs(2);

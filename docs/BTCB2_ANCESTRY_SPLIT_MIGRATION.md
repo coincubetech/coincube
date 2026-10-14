@@ -155,7 +155,12 @@ a replayable spend.
    Split's production "Start split" now stores this reservation under the
    source digest, performs all six two-chain address-history reads off the UI
    thread, and shows distinct Bitcoin and BTCB2 deposit addresses only when
-   the check succeeds. The old route picker is bypassed for fresh production
+   the check succeeds. It then durably marks the same reservation released;
+   a later retry with a matching source, target and Connect identity reuses
+   those exact addresses after fresh authenticated reads on both chains even
+   when deposits have created history, while a
+   first display still refuses any already-used address. The old route picker
+   is bypassed for fresh production
    splits and cannot open a retired signer path. Deposit progress, exact
    funding minimums, proof refresh, restart recovery of funding-only records
    and ordinary signer admission remain to be wired. Claim now independently reserves
@@ -173,8 +178,14 @@ a replayable spend.
    same reservation, reconciles a new paired scan with the full Bitcoin Vault
    UTXO set, and runs the bounded two-chain ancestry collector; it displays
    only a transient status and does not retain spend authority. Per-chain
-   deposit progress, exact funding minimums, funding-only restart recovery
-   and ordinary transaction admission remain.
+   deposit progress, exact funding minimums, the Split funding-only restart
+   route and ordinary transaction admission remain. Claim now durably marks
+   its saved reservation released only after both addresses were checked
+   unused and the Bitcoin daemon accepted their receive indices. Reopening
+   that same Claim reservation checks identity and wallet state again, then
+   displays the exact addresses after fresh authenticated history reads even
+   if deposits have since made their
+   history nonempty; it never chooses replacements on retry.
    Coincubed `getinfo` now reports an explicit chain ID; older daemon
    responses and the remote Connect wallet API still report none, so address
    preparation refuses those backends. Connect must return an authenticated

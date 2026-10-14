@@ -243,6 +243,32 @@ impl Journal {
         if self.load_claim_funding_reservation()?.is_some() {
             return Err(Error::Conflict);
         }
+        self.write_claim_funding_reservation(reservation)
+    }
+
+    pub(super) fn release_claim_funding_reservation(
+        &mut self,
+        expected: &super::claim_funding::ClaimFundingReservation,
+    ) -> Result<super::claim_funding::ClaimFundingReservation, Error> {
+        self.ensure_current()?;
+        let saved = self
+            .load_claim_funding_reservation()?
+            .ok_or(Error::InvalidJournal)?;
+        if saved != *expected {
+            return Err(Error::Conflict);
+        }
+        if saved.is_released() {
+            return Ok(saved);
+        }
+        let released = saved.released_copy();
+        self.write_claim_funding_reservation(&released)?;
+        Ok(released)
+    }
+
+    fn write_claim_funding_reservation(
+        &mut self,
+        reservation: &super::claim_funding::ClaimFundingReservation,
+    ) -> Result<(), Error> {
         let bytes = serde_json::to_vec(reservation).map_err(|_| Error::InvalidPlan)?;
         if bytes.len() as u64 > CLAIM_FUNDING_MAX_BYTES {
             return Err(Error::InvalidPlan);
@@ -292,6 +318,32 @@ impl Journal {
         if self.load_split_funding_reservation()?.is_some() {
             return Err(Error::Conflict);
         }
+        self.write_split_funding_reservation(reservation)
+    }
+
+    pub(super) fn release_split_funding_reservation(
+        &mut self,
+        expected: &super::split_funding::SplitFundingReservation,
+    ) -> Result<super::split_funding::SplitFundingReservation, Error> {
+        self.ensure_current()?;
+        let saved = self
+            .load_split_funding_reservation()?
+            .ok_or(Error::InvalidJournal)?;
+        if saved != *expected {
+            return Err(Error::Conflict);
+        }
+        if saved.is_released() {
+            return Ok(saved);
+        }
+        let released = saved.released_copy();
+        self.write_split_funding_reservation(&released)?;
+        Ok(released)
+    }
+
+    fn write_split_funding_reservation(
+        &mut self,
+        reservation: &super::split_funding::SplitFundingReservation,
+    ) -> Result<(), Error> {
         let bytes = serde_json::to_vec(reservation).map_err(|_| Error::InvalidPlan)?;
         if bytes.len() as u64 > SPLIT_FUNDING_MAX_BYTES {
             return Err(Error::InvalidPlan);

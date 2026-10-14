@@ -26,6 +26,11 @@ pub struct SplitFundingReservation {
     external: String,
     internal: Option<String>,
     pub indices: FreshFundingAddresses,
+    /// The initial unused-history check passed before these addresses were
+    /// shown. Later deposits make history nonempty, so restart must reuse the
+    /// exact saved addresses rather than applying that first-use check again.
+    #[serde(default)]
+    released: bool,
 }
 
 impl SplitFundingReservation {
@@ -36,7 +41,7 @@ impl SplitFundingReservation {
         indices: FreshFundingAddresses,
     ) -> Result<Self, Error> {
         let record = Self {
-            version: 1,
+            version: 2,
             source_digest: source.digest(),
             target_cube: target_cube.to_owned(),
             account: context.account.clone(),
@@ -44,13 +49,15 @@ impl SplitFundingReservation {
             external: source.external().to_string(),
             internal: source.internal().map(ToString::to_string),
             indices,
+            released: false,
         };
         record.validate()?;
         Ok(record)
     }
 
     pub(super) fn validate(&self) -> Result<(), Error> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && self.released)
             || self.target_cube.is_empty()
             || self.account.is_empty()
             || self.provider.is_empty()
@@ -124,6 +131,17 @@ impl SplitFundingReservation {
         ])
     }
 
+    pub fn is_released(&self) -> bool {
+        self.released
+    }
+
+    pub(super) fn released_copy(&self) -> Self {
+        let mut copy = self.clone();
+        copy.version = 2;
+        copy.released = true;
+        copy
+    }
+
     pub fn matches(&self, source: &SplitSource, target_cube: &str, context: &Context) -> bool {
         self.source_digest == source.digest()
             && self.target_cube == target_cube
@@ -135,8 +153,9 @@ impl SplitFundingReservation {
 
 /// Save the exact three addresses before showing deposit instructions. Once
 /// saved, a new scan cannot choose new indices for this source/target pair.
-/// A caller must still recheck all addresses' history on both chains before
-/// displaying them, and must recollect funding proofs before a spend.
+/// The first display requires unused history on both chains and a durable
+/// release; later displays reuse those same addresses after identity checks.
+/// Funding proofs must still be recollected before a spend.
 pub fn reserve_split_funding(
     directory: &Path,
     source: &SplitSource,
@@ -144,10 +163,6 @@ pub fn reserve_split_funding(
     context: &Context,
     inventory: &SplitInventory,
 ) -> Result<SplitFundingReservation, Error> {
-    let indices = inventory
-        .fresh_funding_addresses()
-        .ok_or(Error::InvalidPlan)?;
-    let requested = SplitFundingReservation::new(source, target_cube, context, indices)?;
     super::prepare_directory(directory)?;
     let mut journal = Journal::open(directory)?;
     if journal.load()?.is_some()
@@ -157,19 +172,23 @@ pub fn reserve_split_funding(
         return Err(Error::Conflict);
     }
     if let Some(saved) = journal.load_split_funding_reservation()? {
-        return if saved == requested {
+        return if saved.matches(source, target_cube, context) {
             Ok(saved)
         } else {
-            Err(Error::Conflict)
+            Err(Error::WrongIdentity)
         };
     }
+    let indices = inventory
+        .fresh_funding_addresses()
+        .ok_or(Error::InvalidPlan)?;
+    let requested = SplitFundingReservation::new(source, target_cube, context, indices)?;
     journal.store_split_funding_reservation(&requested)?;
     Ok(requested)
 }
 
 /// Recover the immutable address selection after restart. The caller must
 /// match the saved account/provider and source before making any address
-/// visible, then check current two-chain address history again.
+/// visible. A released reservation may have nonempty deposit history.
 pub fn load_split_funding(
     directory: &Path,
     source: &SplitSource,
@@ -188,6 +207,16 @@ pub fn load_split_funding(
         Some(_) => Err(Error::WrongIdentity),
         None => Ok(None),
     }
+}
+
+/// Record that the initial two-chain unused-address check succeeded. The
+/// journal lock compares the exact reservation before atomically replacing it.
+pub fn release_split_funding(
+    directory: &Path,
+    expected: &SplitFundingReservation,
+) -> Result<SplitFundingReservation, Error> {
+    let mut journal = Journal::open(directory)?;
+    journal.release_split_funding_reservation(expected)
 }
 
 #[cfg(test)]
@@ -258,24 +287,37 @@ mod tests {
         let source = source();
         let saved = reserve_split_funding(&directory, &source, "cube-a", &context(), &inventory(3))
             .unwrap();
+        let mut old = serde_json::to_value(&saved).unwrap();
+        old.as_object_mut().unwrap().remove("released");
+        old["version"] = serde_json::json!(1);
+        let old: SplitFundingReservation = serde_json::from_value(old).unwrap();
+        assert!(!old.is_released());
         assert_eq!(saved.addresses().unwrap().len(), 3);
+        let released = release_split_funding(&directory, &saved).unwrap();
+        assert!(released.is_released());
+        assert_eq!(released.addresses().unwrap(), saved.addresses().unwrap());
+        assert!(matches!(
+            release_split_funding(&directory, &saved),
+            Err(Error::Conflict)
+        ));
         let mut restarted = context();
         restarted.generation += 1;
         assert_eq!(
             load_split_funding(&directory, &source, "cube-a", &restarted)
                 .unwrap()
                 .unwrap(),
-            saved
+            released
         );
         assert_eq!(
             reserve_split_funding(&directory, &source, "cube-a", &restarted, &inventory(3))
                 .unwrap(),
-            saved
+            released
         );
-        assert!(matches!(
-            reserve_split_funding(&directory, &source, "cube-a", &context(), &inventory(4)),
-            Err(Error::Conflict)
-        ));
+        assert_eq!(
+            reserve_split_funding(&directory, &source, "cube-a", &context(), &inventory(4))
+                .unwrap(),
+            released
+        );
         let mut other_account = context();
         other_account.account = "account-b".into();
         assert!(matches!(

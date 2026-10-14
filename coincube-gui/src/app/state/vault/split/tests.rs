@@ -568,11 +568,54 @@ async fn reserved_split_deposit_addresses_require_six_fresh_history_checks() {
         .lock()
         .unwrap()
         .insert(ChainId::Bitcoin, Ok(true));
-    assert!(
-        step1::check_reserved_funding_addresses(connect.as_ref(), directory, &source, TARGET,)
+    let resumed =
+        step1::check_reserved_funding_addresses(connect.as_ref(), directory, &source, TARGET)
             .await
-            .is_err()
-    );
+            .unwrap();
+    assert_eq!(resumed, addresses);
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+}
+
+#[tokio::test]
+async fn split_deposit_addresses_with_history_before_first_release_are_refused() {
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    crate::services::claim_workflow::reserve_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+    )
+    .unwrap();
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    assert!(step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .is_err());
+    assert!(!crate::services::claim_workflow::load_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+    )
+    .unwrap()
+    .unwrap()
+    .is_released());
 }
 
 /// Run a task the panel returned; collect the Split events it produced.

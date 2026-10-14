@@ -132,6 +132,7 @@ async fn checked_history(
     addresses: [String; 2],
     generation: &watch::Receiver<u64>,
     expected: u64,
+    require_unused: bool,
 ) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
     use coincube_core::chain::ChainId;
     if !current(generation, expected) {
@@ -154,7 +155,7 @@ async fn checked_history(
                 if !(0..=MAX_ADDRESS_AGE_SECONDS).contains(&age) {
                     return Err(ClaimAddressError::Stale);
                 }
-                if used {
+                if used && require_unused {
                     return Err(ClaimAddressError::Used);
                 }
                 if !current(generation, expected) {
@@ -180,6 +181,12 @@ pub struct ClaimFundingReservation {
     provider: String,
     descriptor: String,
     pub indices: FreshDepositAddresses,
+    /// Set only after both addresses passed the initial unused-history check
+    /// and the Bitcoin daemon acknowledged their receive indices. Later
+    /// deposits make the address history nonempty, so restart must not repeat
+    /// that initial check or silently rotate addresses.
+    #[serde(default)]
+    released: bool,
 }
 
 impl ClaimFundingReservation {
@@ -190,19 +197,21 @@ impl ClaimFundingReservation {
         indices: FreshDepositAddresses,
     ) -> Result<Self, Error> {
         let saved = Self {
-            version: 1,
+            version: 2,
             identity: identity.clone(),
             account: context.account.clone(),
             provider: context.provider.clone(),
             descriptor: descriptor.to_string(),
             indices,
+            released: false,
         };
         saved.validate()?;
         Ok(saved)
     }
 
     pub(super) fn validate(&self) -> Result<(), Error> {
-        if self.version != 1
+        if !matches!(self.version, 1 | 2)
+            || (self.version == 1 && self.released)
             || self.identity.bitcoin_cube.is_empty()
             || self.identity.fork_cube.is_empty()
             || self.identity.bitcoin_cube.len() > 256
@@ -256,6 +265,17 @@ impl ClaimFundingReservation {
             self.address(&descriptor, self.indices.bitcoin_deposit)?,
             self.address(&descriptor, self.indices.btcb2_deposit)?,
         ])
+    }
+
+    pub(super) fn is_released(&self) -> bool {
+        self.released
+    }
+
+    pub(super) fn released_copy(&self) -> Self {
+        let mut copy = self.clone();
+        copy.version = 2;
+        copy.released = true;
+        copy
     }
 
     fn matches(
@@ -381,10 +401,6 @@ pub fn reserve_claim_funding(
     {
         return Err(Error::InvalidPlan);
     }
-    let indices = inventory
-        .fresh_deposit_addresses()
-        .ok_or(Error::InvalidPlan)?;
-    let requested = ClaimFundingReservation::new(descriptor, identity, context, indices)?;
     super::prepare_directory(directory)?;
     let mut journal = Journal::open(directory)?;
     if journal.load()?.is_some()
@@ -394,12 +410,16 @@ pub fn reserve_claim_funding(
         return Err(Error::Conflict);
     }
     if let Some(saved) = journal.load_claim_funding_reservation()? {
-        return if saved == requested {
+        return if saved.matches(descriptor, identity, context) {
             Ok(saved)
         } else {
-            Err(Error::Conflict)
+            Err(Error::WrongIdentity)
         };
     }
+    let indices = inventory
+        .fresh_deposit_addresses()
+        .ok_or(Error::InvalidPlan)?;
+    let requested = ClaimFundingReservation::new(descriptor, identity, context, indices)?;
     journal.store_claim_funding_reservation(&requested)?;
     Ok(requested)
 }
@@ -465,7 +485,7 @@ pub async fn check_reserved_claim_addresses(
         },
     )
     .map_err(|_| ClaimAddressError::Unavailable)?;
-    checked_history(&esplora, addresses, &generation, expected).await
+    checked_history(&esplora, addresses, &generation, expected, true).await
 }
 
 /// Prepare the Bitcoin Vault to notice deposits at both reserved receive
@@ -481,33 +501,65 @@ pub async fn prepare_claim_deposit_instructions(
     generation: watch::Receiver<u64>,
     daemon: &(dyn Daemon + Send + Sync),
 ) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
-    let checked = check_reserved_claim_addresses(
+    let expected = context.generation;
+    if !current(&generation, expected)
+        || client.token().is_none_or(str::is_empty)
+        || client.base_url.trim_end_matches('/') != context.provider.trim_end_matches('/')
+    {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    let for_load = (
         directory.clone(),
         descriptor.clone(),
         identity.clone(),
         context.clone(),
-        client,
-        generation.clone(),
-    )
-    .await?;
-    let expected = context.generation;
+    );
     let saved = tokio::task::spawn_blocking(move || {
+        let (directory, descriptor, identity, context) = for_load;
         load_claim_funding(&directory, &descriptor, &identity, &context)
     })
     .await
     .map_err(|_| ClaimAddressError::Unavailable)?
     .map_err(|_| ClaimAddressError::InvalidReservation)?
     .ok_or(ClaimAddressError::MissingReservation)?;
-    if saved
+    let addresses = saved
         .addresses()
-        .map_err(|_| ClaimAddressError::InvalidReservation)?
-        != [
-            checked.bitcoin_deposit.clone(),
-            checked.btcb2_deposit.clone(),
-        ]
-    {
-        return Err(ClaimAddressError::InvalidReservation);
-    }
+        .map_err(|_| ClaimAddressError::InvalidReservation)?;
+    let checked = if saved.is_released() {
+        // Once a deposit arrives, nonempty address history is expected. The
+        // durable release records that the initial unused check succeeded.
+        // Read both chains again to authenticate the current Connect session
+        // and address history, without treating deposits as a new-address
+        // violation or as spend authority.
+        let esplora = ConnectEsplora::new(
+            &client,
+            CollectionContext {
+                expected_generation: expected,
+                generation: generation.clone(),
+            },
+        )
+        .map_err(|_| ClaimAddressError::Unavailable)?;
+        checked_history(&esplora, addresses.clone(), &generation, expected, false).await?
+    } else {
+        let checked = check_reserved_claim_addresses(
+            directory.clone(),
+            descriptor,
+            identity,
+            context,
+            client,
+            generation.clone(),
+        )
+        .await?;
+        if addresses
+            != [
+                checked.bitcoin_deposit.clone(),
+                checked.btcb2_deposit.clone(),
+            ]
+        {
+            return Err(ClaimAddressError::InvalidReservation);
+        }
+        checked
+    };
     let highest = saved
         .indices
         .bitcoin_deposit
@@ -523,6 +575,18 @@ pub async fn prepare_claim_deposit_instructions(
         .map_err(|_| ClaimAddressError::WalletState)?;
     if updated.receive < highest {
         return Err(ClaimAddressError::WalletState);
+    }
+    if !current(&generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    if !saved.is_released() {
+        tokio::task::spawn_blocking(move || {
+            let mut journal = Journal::open(&directory)?;
+            journal.release_claim_funding_reservation(&saved)
+        })
+        .await
+        .map_err(|_| ClaimAddressError::Unavailable)?
+        .map_err(|_| ClaimAddressError::InvalidReservation)?;
     }
     if !current(&generation, expected) {
         return Err(ClaimAddressError::ChangedSession);
@@ -605,7 +669,7 @@ mod tests {
         };
         let addresses = || ["bitcoin-address".into(), "btcb2-address".into()];
         let clean = make(now, None);
-        let checked = checked_history(&clean, addresses(), &generation, 7)
+        let checked = checked_history(&clean, addresses(), &generation, 7, true)
             .await
             .unwrap();
         assert_eq!(checked.bitcoin_deposit, "bitcoin-address");
@@ -616,18 +680,28 @@ mod tests {
                 &make(now, Some(ChainId::BitcoinBlake2b)),
                 addresses(),
                 &generation,
-                7
+                7,
+                true,
             )
             .await,
             Err(ClaimAddressError::Used)
         );
+        assert!(checked_history(
+            &make(now, Some(ChainId::BitcoinBlake2b)),
+            addresses(),
+            &generation,
+            7,
+            false,
+        )
+        .await
+        .is_ok());
         assert_eq!(
-            checked_history(&make(now - 61, None), addresses(), &generation, 7).await,
+            checked_history(&make(now - 61, None), addresses(), &generation, 7, true).await,
             Err(ClaimAddressError::Stale)
         );
         sender.send(8).unwrap();
         assert_eq!(
-            checked_history(&clean, addresses(), &generation, 7).await,
+            checked_history(&clean, addresses(), &generation, 7, true).await,
             Err(ClaimAddressError::ChangedSession)
         );
     }
@@ -754,12 +828,31 @@ mod tests {
         };
         let saved =
             ClaimFundingReservation::new(&descriptor, &identity, &context, indices).unwrap();
+        let mut old = serde_json::to_value(&saved).unwrap();
+        old.as_object_mut().unwrap().remove("released");
+        old["version"] = serde_json::json!(1);
+        let old: ClaimFundingReservation = serde_json::from_value(old).unwrap();
+        assert!(!old.is_released());
+        assert_eq!(old.indices, saved.indices);
         let addresses = saved.addresses().unwrap();
         assert_ne!(addresses[0], addresses[1]);
         super::super::prepare_directory(&directory).unwrap();
         {
             let mut journal = Journal::open(&directory).unwrap();
             journal.store_claim_funding_reservation(&saved).unwrap();
+            let released = journal.release_claim_funding_reservation(&saved).unwrap();
+            assert!(released.is_released());
+            assert_eq!(released.addresses().unwrap(), addresses);
+            assert_eq!(
+                journal
+                    .release_claim_funding_reservation(&released)
+                    .unwrap(),
+                released
+            );
+            assert!(matches!(
+                journal.release_claim_funding_reservation(&saved),
+                Err(Error::Conflict)
+            ));
         }
         let mut restarted = context.clone();
         restarted.generation += 1;
@@ -767,7 +860,7 @@ mod tests {
             load_claim_funding(&directory, &descriptor, &identity, &restarted)
                 .unwrap()
                 .unwrap(),
-            saved
+            saved.released_copy()
         );
         let mut other = identity.clone();
         other.fork_cube = "other-cube".into();
