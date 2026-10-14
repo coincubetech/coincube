@@ -37,7 +37,7 @@ pub use split::{
 pub use split_funding::{
     load_split_funding, peek_split_funding, release_split_funding, reserve_split_funding,
     reserve_split_funding_with_target, SplitFundingDiscoveryError, SplitFundingReservation,
-    SplitTargetBinding,
+    SplitPairRequalificationError, SplitTargetBinding,
 };
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.

@@ -431,6 +431,7 @@ impl SplitFundingReservation {
         &self,
         directory: PathBuf,
         source: &SplitSource,
+        target_cube: &str,
         target_vault: (&WalletId, &CoincubeDescriptor),
         context: &Context,
         inventory: &SplitInventory,
@@ -453,7 +454,7 @@ impl SplitFundingReservation {
             .script_pubkey()
             .map_err(|_| SplitPairRequalificationError::Changed)?;
         if !self.released
-            || !self.matches(source, &self.target_cube, context)
+            || !self.matches(source, target_cube, context)
             || bitcoin.source() != source
             || fork.source() != source
             || bitcoin.destination() != self.indices.bitcoin_return
@@ -897,16 +898,15 @@ mod tests {
 
     #[test]
     fn split_funding_requires_distinct_ranged_addresses() {
+        let directory = std::env::temp_dir().join(format!(
+            "split-invalid-funding-{}-{}",
+            std::process::id(),
+            super::super::controller_id().unwrap()
+        ));
         let source = source();
         assert_eq!(inventory(3).fresh_funding_addresses(), Some(indices()));
         assert!(matches!(
-            reserve_split_funding(
-                Path::new("not-created"),
-                &source,
-                "cube-a",
-                &context(),
-                &inventory(18)
-            ),
+            reserve_split_funding(&directory, &source, "cube-a", &context(), &inventory(18)),
             Err(Error::InvalidPlan)
         ));
         let mut same = indices();
@@ -924,6 +924,7 @@ mod tests {
             SplitFundingReservation::new(&fixed, "cube-a", &context(), indices()),
             Err(Error::InvalidPlan)
         ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
