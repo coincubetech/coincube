@@ -335,11 +335,10 @@ shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.
 The latter mines separate post-fork coinbases into the foreign source, tests
 both signed transactions against each node, confirms BTCB2 first, and checks
 that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin
-confirmation is reorganized out. The witness-key-hash cases also reject the
-opposite transaction after a six-block reorg of either chain.
+confirmation is reorganized out. All five supported source shapes also reject
+the opposite transaction after a six-block reorg of either chain.
 The Split-only fixture needs the two pinned Knots binaries, not electrs.
-Coordinator restart, stale observation and marker spend cases remain; deeper
-reorg coverage for the other source shapes is still needed.
+Coordinator restart, stale observation and marker spend cases remain.
 - Exercise Claim and Split through their actual GUI intents and signed-PSBT
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device
