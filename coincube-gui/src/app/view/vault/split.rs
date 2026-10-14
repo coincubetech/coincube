@@ -14,7 +14,7 @@ use coincube_ui::{
     widget::{ColumnExt, Element},
 };
 use iced::{
-    widget::{Column, Container, Row, Space},
+    widget::{scrollable, Column, Container, Row, Space},
     Alignment, Length,
 };
 
@@ -41,6 +41,28 @@ fn action(label: &'static str, message: SplitMessage) -> Element<'static, Messag
 fn primary(label: &'static str, message: SplitMessage) -> Element<'static, Message> {
     button::primary(None, label)
         .on_press(Message::Split(message))
+        .into()
+}
+
+fn funding_address_row(address: String, notice: &'static str) -> Element<'static, Message> {
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(
+            Container::new(
+                scrollable(p2_regular(address.clone()).style(theme::text::secondary))
+                    .width(Length::Fill)
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(2).scroller_width(2),
+                    )),
+            )
+            .width(Length::Fill)
+            .max_width(750.0),
+        )
+        .push(
+            button::secondary_compact(None, "Copy address")
+                .on_press(Message::CopyWithToast(address, notice.to_string())),
+        )
         .into()
 }
 
@@ -540,13 +562,19 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         addresses.fee_quote.bitcoin_minimum_sats,
                         addresses.fee_quote.bitcoin_rate_sat_vb,
                     )))
-                    .push(caption(addresses.bitcoin_deposit.clone()))
+                    .push(funding_address_row(
+                        addresses.bitcoin_deposit.clone(),
+                        "Copied Bitcoin deposit address to clipboard",
+                    ))
                     .push(p1_regular(format!(
                         "Send at least {} sats of Bitcoin Blake2b to this BTCB2 address of the same wallet (fee estimate when prepared: {} sat/vB):",
                         addresses.fee_quote.btcb2_minimum_sats,
                         addresses.fee_quote.btcb2_rate_sat_vb,
                     )))
-                    .push(caption(addresses.btcb2_deposit.clone()))
+                    .push(funding_address_row(
+                        addresses.btcb2_deposit.clone(),
+                        "Copied BTCB2 deposit address to clipboard",
+                    ))
                     .push(p1_regular("Send only the named coin to each address and wait for confirmation. These minimums reflect current fees; if fees rise before signing, you may need to add funds. The deposits are fee inputs, not the split itself. Both coins must pass independent ancestry, ownership, confirmation and unspent checks before signing."))
                     .push(caption("The Bitcoin return address is reserved separately and is not a deposit destination."));
                 if let Some(progress) = panel.funding_progress() {

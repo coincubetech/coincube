@@ -238,7 +238,7 @@ mod tests {
             &descriptor,
             &verify,
             &mut getter,
-            &[shared.clone(), bitcoin_funding],
+            &[shared, bitcoin_funding],
             ChildNumber::from_normal_idx(12).unwrap(),
             5,
             absolute::LockTime::ZERO,

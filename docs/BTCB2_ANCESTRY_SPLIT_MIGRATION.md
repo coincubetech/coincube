@@ -232,6 +232,8 @@ a replayable spend.
    first display still refuses any already-used address. The old route picker
    is bypassed for fresh production
    splits and cannot open a retired signer path. The paired Split funding
+   screen now gives both deposit addresses adjacent copy controls with the
+   same clipboard confirmation as Claim. The paired Split funding
    search now filters out unrelated post-fork outputs at other receive
    indices. The production Split deposit screen now offers a read-only
    "Check deposits" action: it rescans the saved source descriptors on both
@@ -502,6 +504,10 @@ marker spend cases remain.
    are not called from the wizard: the paired coordinator still has to bind
    fresh two-chain proof, reservations, preflight and explicit approval to
    separate durable submission intents before either gate can be entered.
+   Gate constructors now accept the finalized Claim or Split pair directly
+   and bind separately to its Bitcoin or BTCB2 witness; the coordinator must
+   still issue them only after the corresponding durable possible-attempt
+   record and one-use user approval.
    Paired Connect preflight also accepts the typed, signature-verified Claim
    or Split pair directly, observes both exact witnesses under one session,
    and refuses non-mainnet pairs; it remains read-only evidence.

@@ -125,6 +125,47 @@ impl SubmissionGate {
     ) -> (Self, SubmissionRevoker) {
         Self::for_transaction(verified.chain(), verified.transaction(), not_after)
     }
+    /// Exact ordinary Bitcoin Claim witness. Only the coordinator may issue
+    /// this after fresh paired proof, preflight, approval and a durable
+    /// possible-attempt record. A gate cannot authorize the BTCB2 side.
+    pub fn for_ancestry_claim_bitcoin(
+        pair: &VerifiedAncestryClaimPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(
+            pair.bitcoin().chain(),
+            pair.bitcoin().transaction(),
+            not_after,
+        )
+    }
+    /// Exact ordinary BTCB2 Claim witness. This needs its own fresh proof,
+    /// preflight, approval and durable possible-attempt record.
+    pub fn for_ancestry_claim_fork(
+        pair: &VerifiedAncestryClaimPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(pair.fork().chain(), pair.fork().transaction(), not_after)
+    }
+    /// Exact ordinary Bitcoin Split witness. The matched BTCB2 witness in
+    /// the pair does not gain transport authority from this gate.
+    pub fn for_ancestry_split_bitcoin(
+        pair: &VerifiedAncestrySplitPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(
+            pair.bitcoin().chain(),
+            pair.bitcoin().transaction(),
+            not_after,
+        )
+    }
+    /// Exact ordinary BTCB2 Split witness, admitted independently after the
+    /// Bitcoin side is observed and a new possible-attempt record is saved.
+    pub fn for_ancestry_split_fork(
+        pair: &VerifiedAncestrySplitPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(pair.fork().chain(), pair.fork().transaction(), not_after)
+    }
     /// Fork transport gate only. Fresh split evidence, approval and durable
     /// submission intent remain the coordinator's responsibility.
     pub fn for_claim_fork(

@@ -38,40 +38,6 @@ fn reserve_claim_change(
     Ok(serde_json::json!(control.reserve_change()?.index()))
 }
 
-#[cfg(test)]
-mod claim_change_tests {
-    use super::*;
-    use crate::{
-        jsonrpc::rpc::Params,
-        testutils::{DummyBitcoind, DummyCoincube, DummyDatabase},
-    };
-
-    #[test]
-    fn reservation_requires_exact_chain_and_descriptor_before_advancing() {
-        let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
-        let control = daemon.control();
-        let chain = control.config.bitcoin_config.chain;
-        let descriptor = control.config.main_descriptor.to_string();
-        let request = |chain: &str, descriptor: &str| {
-            Params::Array(vec![
-                serde_json::json!(chain),
-                serde_json::json!(descriptor),
-            ])
-        };
-        assert!(reserve_claim_change(control, request("bitcoin-blake2b", &descriptor)).is_err());
-        assert!(reserve_claim_change(control, request(&chain.to_string(), "invalid")).is_err());
-        assert_eq!(
-            reserve_claim_change(control, request(&chain.to_string(), &descriptor)).unwrap(),
-            serde_json::json!(miniscript::bitcoin::bip32::ChildNumber::Normal { index: 1 })
-        );
-        assert_eq!(
-            reserve_claim_change(control, request(&chain.to_string(), &descriptor)).unwrap(),
-            serde_json::json!(miniscript::bitcoin::bip32::ChildNumber::Normal { index: 2 })
-        );
-        daemon.shutdown();
-    }
-}
-
 fn create_spend(control: &DaemonControl, params: Params) -> Result<serde_json::Value, Error> {
     let destinations = params
         .get(0, "destinations")
@@ -672,4 +638,38 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
     };
 
     Ok(Response::success(req.id, result))
+}
+
+#[cfg(test)]
+mod claim_change_tests {
+    use super::*;
+    use crate::{
+        jsonrpc::rpc::Params,
+        testutils::{DummyBitcoind, DummyCoincube, DummyDatabase},
+    };
+
+    #[test]
+    fn reservation_requires_exact_chain_and_descriptor_before_advancing() {
+        let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = daemon.control();
+        let chain = control.config.bitcoin_config.chain;
+        let descriptor = control.config.main_descriptor.to_string();
+        let request = |chain: &str, descriptor: &str| {
+            Params::Array(vec![
+                serde_json::json!(chain),
+                serde_json::json!(descriptor),
+            ])
+        };
+        assert!(reserve_claim_change(control, request("bitcoin-blake2b", &descriptor)).is_err());
+        assert!(reserve_claim_change(control, request(&chain.to_string(), "invalid")).is_err());
+        assert_eq!(
+            reserve_claim_change(control, request(&chain.to_string(), &descriptor)).unwrap(),
+            serde_json::json!(miniscript::bitcoin::bip32::ChildNumber::Normal { index: 1 })
+        );
+        assert_eq!(
+            reserve_claim_change(control, request(&chain.to_string(), &descriptor)).unwrap(),
+            serde_json::json!(miniscript::bitcoin::bip32::ChildNumber::Normal { index: 2 })
+        );
+        daemon.shutdown();
+    }
 }
