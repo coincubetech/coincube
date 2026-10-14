@@ -82,7 +82,7 @@ pub fn theme_toggle_button<'a, M: Clone + 'a>(
             icon.style(crate::theme::text::secondary),
             crate::component::text::p2_regular(label),
         ]
-        .spacing(8)
+        .spacing(10)
         .align_y(iced::alignment::Vertical::Center),
     )
     .width(iced::Length::Fill)
