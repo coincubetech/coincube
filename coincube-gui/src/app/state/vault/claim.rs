@@ -1568,8 +1568,18 @@ impl ClaimStep1Panel {
                         "The paired BTCB2 Cube closed or its Connect session changed. Reopen it and check deposits again."
                             .to_string()
                     })?;
+                    inventory
+                        .reconcile_fork_daemon(&*fork_daemon, saved.indices.btcb2_deposit)
+                        .await
+                        .map_err(|_| {
+                            "The paired BTCB2 Vault's complete coin set or sync state changed. Reopen it and check deposits again."
+                                .to_string()
+                        })?;
                     if generation.has_changed().is_err() || *generation.borrow() != expected {
                         return Err("The Connect session changed during the deposit check.".into());
+                    }
+                    if !fork_binding.current() {
+                        return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
                     }
                     let (fork_generation, fork_expected) = fork_binding.generation_guard();
                     let change = claim_workflow::reserve_claim_change_indices(

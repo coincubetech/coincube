@@ -290,6 +290,12 @@ a replayable spend.
    daemon comparison now uses the explicit `getinfo` chain identity, so an
    external Coincubed daemon can pass the same positive check as an embedded
    one; an older or unbound remote response cannot.
+   The paired BTCB2 daemon now undergoes the same complete-wallet
+   reconciliation before Claim preview: its explicit chain ID, descriptor,
+   sync and address coverage must agree, every shared coin must still be
+   owned and unspent at its BTCB2 block height, and the reserved BTCB2
+   funding coin must match the fork scan. Signer admission must repeat both
+   wallet reads.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks
