@@ -105,12 +105,15 @@ a replayable spend.
    A partial failure burns any already allocated index. Version-10 Claim
    creation and restart require the exact saved pair. Coincubed now exposes a
    local RPC reservation that checks the requested chain ID and descriptor
-   before atomically advancing the persisted branch; embedded and local-socket
-   desktop daemons use the same bound operation. The production wizard does
-   not yet invoke this service because it has no authenticated BTCB2 wallet
-   daemon handle. The separate legacy remote-wallet backend still cannot
-   atomically reserve change indices. The source and target daemons must be
-   paired before preview or signing is enabled.
+   before atomically advancing the persisted branch. The generic socket is
+   intentionally disabled for BTCB2 desktop daemons; the production Claim
+   wizard instead borrows the currently open paired fork daemon in process.
+   It checks the exact Cube, descriptor, local data root, account, provider
+   and token before a deposit check, and stores only a weak reference. After
+   both proofs pass, it asks both daemons for durable change indices and
+   constructs a read-only exact PSBT preview. The separate legacy
+   remote-wallet backend still cannot atomically reserve change indices.
+   The preview is not signer admission and is discarded after 30 seconds.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly
@@ -296,8 +299,9 @@ a replayable spend.
    destination; mainnet address encoding alone cannot distinguish the two
    chains. An older Connect wallet response without an authenticated chain
    ID is therefore refused until Connect supplies it.
-   The Claim wizard calls paired funding discovery only for read-only deposit
-   status; it does not yet call the transaction builder.
+   The Claim wizard now calls the paired transaction builder for a read-only
+   preview once the BTCB2 Cube is open and both wallet change branches have
+   been reserved. It does not hand the pair to signers.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,
@@ -342,9 +346,9 @@ PSBTs. It refuses missing amounts, duplicate or omitted inputs, mismatched
 shared coins across chains (including different scripts at the same amount)
 and OP_RETURN outputs. The recorded Claim step-one
 review uses its Bitcoin side and labels the marker as an unverified candidate.
-The Split deposit stage now consumes the paired model only after fresh
+The Split and Claim deposit stages now consume the paired model only after fresh
 two-chain proof, source ownership, bound reservations and construction of
-both ordinary PSBTs. Claim still needs its paired preview. The model alone
+both ordinary PSBTs. The model alone
 cannot enable signing.
 
 Build this as a reusable *read-only* coin summary for Claim and foreign Split,

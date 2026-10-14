@@ -306,6 +306,11 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(matches!(p.stage, Stage::FundingChecking));
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
+    let session = p.connect.clone().unwrap();
+    assert_eq!(p.funding_pair_target(&session), Some("fork-cube"));
+    let mut other = session.clone();
+    other.account = "another-account".into();
+    assert_eq!(p.funding_pair_target(&other), None);
     assert!(!p.can_sign_or_submit());
     p.funding_checking = true;
     p.check_seq = 12;
@@ -313,8 +318,9 @@ fn claim_funding_results_require_the_current_panel_and_session() {
         bitcoin_candidate: true,
         btcb2_candidate: true,
         both_verified: true,
+        review: None,
     };
-    drop(p.apply(ClaimEvent::FundingChecked(11, 7, 0, Ok(progress))));
+    drop(p.apply(ClaimEvent::FundingChecked(11, 7, 0, Ok(progress.clone()))));
     assert!(p.funding_checking);
     assert!(p.funding_status.is_none());
     drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Ok(progress))));
@@ -335,6 +341,7 @@ fn claim_funding_results_require_the_current_panel_and_session() {
             bitcoin_candidate: true,
             btcb2_candidate: false,
             both_verified: false,
+            review: None,
         }),
     )));
     let status = p.funding_status.as_deref().unwrap();

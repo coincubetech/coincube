@@ -704,6 +704,42 @@ impl GUI {
                 Task::batch(tasks)
             }
             Message::Pane(i, msg) => {
+                // Bind the Claim's Bitcoin tab to its exact, currently open
+                // BTCB2 wallet immediately before a deposit check. Fork Cubes
+                // intentionally have no generic JSON-RPC socket; borrowing
+                // their in-process daemon keeps that restriction intact.
+                if let pane::Message::Tab(
+                    tab_id,
+                    tab::Message::Run(AppMessage::View(crate::app::view::Message::Claim(
+                        crate::app::view::ClaimMessage::CheckFunding,
+                    ))),
+                ) = &msg
+                {
+                    let request = self
+                        .panes
+                        .get(i)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                        .and_then(|tab| match &tab.state {
+                            tab::State::App(app) => app.claim_pair_request(),
+                            _ => None,
+                        });
+                    let fork_daemon = request.as_ref().and_then(|request| {
+                        self.panes.iter().find_map(|(_, pane)| {
+                            pane.tabs.iter().find_map(|tab| match &tab.state {
+                                tab::State::App(app) => app.claim_fork_daemon(request),
+                                _ => None,
+                            })
+                        })
+                    });
+                    if let Some(tab::State::App(app)) = self
+                        .panes
+                        .get_mut(i)
+                        .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == *tab_id))
+                        .map(|tab| &mut tab.state)
+                    {
+                        app.bind_claim_fork_daemon(fork_daemon.as_ref());
+                    }
+                }
                 match msg {
                     // Handle ListCurrencies requests separately.
                     pane::Message::Tab(tab_id, tab::Message::Run(inner))

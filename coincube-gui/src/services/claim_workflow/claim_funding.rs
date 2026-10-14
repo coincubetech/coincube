@@ -110,6 +110,19 @@ pub async fn quote_claim_deposit_minimums(
     shared_count: usize,
     client: CoincubeClient,
 ) -> Result<(u64, u64), ClaimAddressError> {
+    quote_claim_deposit_terms(descriptor, indices, shared_count, client)
+        .await
+        .map(|(minimums, _)| minimums)
+}
+
+/// Return the fresh fee rates together with the candidate floors so a review
+/// builds its exact PSBTs from the same quotes used to admit the deposits.
+pub async fn quote_claim_deposit_terms(
+    descriptor: &CoincubeDescriptor,
+    indices: FreshDepositAddresses,
+    shared_count: usize,
+    client: CoincubeClient,
+) -> Result<((u64, u64), (u64, u64)), ClaimAddressError> {
     let bitcoin_fees = ConnectBitcoinFees::new(&client).ok_or(ClaimAddressError::FeeUnavailable)?;
     let bitcoin_rate = bitcoin_step1_feerate(&bitcoin_fees)
         .await
@@ -118,7 +131,10 @@ pub async fn quote_claim_deposit_minimums(
     let btcb2_rate = btcb2_sweep_feerate(&*btcb2_fees)
         .await
         .ok_or(ClaimAddressError::FeeUnavailable)?;
-    minimum_claim_deposits(descriptor, indices, shared_count, bitcoin_rate, btcb2_rate)
+    Ok((
+        minimum_claim_deposits(descriptor, indices, shared_count, bitcoin_rate, btcb2_rate)?,
+        (bitcoin_rate, btcb2_rate),
+    ))
 }
 
 fn ensure_claim_wallet_ready(

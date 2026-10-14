@@ -794,6 +794,15 @@ impl Panels {
 /// Interval between bitcoind sync progress polls (in seconds).
 const BITCOIND_SYNC_POLL_INTERVAL: Duration = Duration::from_secs(10);
 
+/// Ephemeral cross-tab request for the exact Claim target. The authenticated
+/// client is kept in memory only; no token is written into a journal or log.
+pub(crate) struct ClaimPairRequest {
+    root: CoincubeDirectory,
+    fork_cube: String,
+    descriptor: coincube_core::descriptors::CoincubeDescriptor,
+    session: state::vault::claim::ConnectSession,
+}
+
 pub struct App {
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
@@ -4376,6 +4385,82 @@ impl App {
 
     pub fn cube_settings(&self) -> &settings::CubeSettings {
         &self.cube_settings
+    }
+
+    /// A Bitcoin Claim may borrow the paired BTCB2 wallet only while both
+    /// Cubes are open under the same authenticated Connect session.
+    pub(crate) fn claim_pair_request(&self) -> Option<ClaimPairRequest> {
+        if self.cube_settings.network != crate::chain::ChainId::Bitcoin
+            || self.claim_session_invalidated
+        {
+            return None;
+        }
+        let wallet = self.wallet.as_ref()?;
+        if wallet.chain != crate::chain::ChainId::Bitcoin {
+            return None;
+        }
+        let panel = self.panels.claim.as_ref()?;
+        let session = self.claim_connect_session()?;
+        let fork_cube = panel.funding_pair_target(&session)?.to_owned();
+        Some(ClaimPairRequest {
+            root: self.datadir.clone(),
+            fork_cube,
+            descriptor: wallet.main_descriptor.clone(),
+            session,
+        })
+    }
+
+    /// Return no daemon unless the open fork Cube, local wallet configuration
+    /// and admitted Connect session all match the Bitcoin Claim request.
+    pub(crate) fn claim_fork_daemon(
+        &self,
+        request: &ClaimPairRequest,
+    ) -> Option<Arc<dyn Daemon + Sync + Send>> {
+        if self.datadir != request.root
+            || self.cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
+            || self.cube_settings.id != request.fork_cube
+            || self.split_backend != state::vault::claim::BackendState::Ready
+            || !self.panels.connect.account.bitcoin_blake2b_enabled()
+        {
+            return None;
+        }
+        let wallet = self.wallet.as_ref()?;
+        if wallet.chain != crate::chain::ChainId::BitcoinBlake2b
+            || wallet.main_descriptor != request.descriptor
+            || self.cube_settings.vault_wallet_id.as_ref() != Some(&wallet.id())
+        {
+            return None;
+        }
+        let current = self.panels.connect.account.authenticated_client()?;
+        let account = self.panels.connect.account.user.as_ref()?.id.to_string();
+        if account != request.session.account
+            || current.base_url != request.session.client.base_url
+            || current.token() != request.session.client.token()
+        {
+            return None;
+        }
+        let daemon = self.daemon.as_ref()?;
+        let config = daemon.config()?;
+        if !crate::chain::is_managed_local_fork(config, &self.datadir)
+            && !self.fork_connect_client.as_ref().is_some_and(|bound| {
+                bound.base_url == request.session.client.base_url
+                    && bound.token() == request.session.client.token()
+            })
+        {
+            return None;
+        }
+        (config.bitcoin_config.chain == crate::chain::ChainId::BitcoinBlake2b
+            && config.main_descriptor == request.descriptor)
+            .then(|| daemon.clone())
+    }
+
+    pub(crate) fn bind_claim_fork_daemon(
+        &mut self,
+        daemon: Option<&Arc<dyn Daemon + Sync + Send>>,
+    ) {
+        if let Some(panel) = &mut self.panels.claim {
+            panel.bind_fork_daemon(daemon);
+        }
     }
 
     fn split_context_valid(&self, intent: &split_intent::SplitIntent) -> bool {
@@ -10514,6 +10599,46 @@ mod tests {
         }
         settle_split_ports(&mut app);
         app
+    }
+
+    #[test]
+    fn claim_fork_pairing_requires_exact_open_wallet_and_connect_identity() {
+        let root = std::env::temp_dir().join(format!("claim-fork-pair-{}", uuid::Uuid::new_v4()));
+        let mut app = split_app(&root, false, true);
+        let wallet = app.wallet.as_ref().unwrap();
+        let mut request = ClaimPairRequest {
+            root: app.datadir.clone(),
+            fork_cube: app.cube_settings.id.clone(),
+            descriptor: wallet.main_descriptor.clone(),
+            session: state::vault::claim::ConnectSession {
+                client: app.fork_connect_client.as_ref().unwrap().clone(),
+                account: "7".into(),
+            },
+        };
+        app.cube_settings.vault_wallet_id = Some(wallet.id());
+        assert!(app.claim_fork_daemon(&request).is_some());
+
+        request.fork_cube = "other".into();
+        assert!(app.claim_fork_daemon(&request).is_none());
+        request.fork_cube = app.cube_settings.id.clone();
+        request.root = CoincubeDirectory::new(root.join("other"));
+        assert!(app.claim_fork_daemon(&request).is_none());
+        request.root = app.datadir.clone();
+        request.session.account = "8".into();
+        assert!(app.claim_fork_daemon(&request).is_none());
+        request.session.account = "7".into();
+        request.session.client.set_token("other-token");
+        assert!(app.claim_fork_daemon(&request).is_none());
+        request.session.client = app.fork_connect_client.as_ref().unwrap().clone();
+        request.session.client.base_url = "https://other.example/".into();
+        assert!(app.claim_fork_daemon(&request).is_none());
+        request.session.client = app.fork_connect_client.as_ref().unwrap().clone();
+        app.split_backend = state::vault::claim::BackendState::Switching;
+        assert!(app.claim_fork_daemon(&request).is_none());
+        app.split_backend = state::vault::claim::BackendState::Ready;
+        app.cube_settings.vault_wallet_id = None;
+        assert!(app.claim_fork_daemon(&request).is_none());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     fn local_app(root: &std::path::Path) -> App {

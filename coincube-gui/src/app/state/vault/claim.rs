@@ -31,7 +31,7 @@ use std::{
     convert::TryFrom,
     fmt,
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -278,11 +278,13 @@ impl ClaimSession {
 
 /// Deposit scan hints are displayed separately from the paired ancestry
 /// proof. A candidate never enables signing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClaimDepositProgress {
     pub bitcoin_candidate: bool,
     pub btcb2_candidate: bool,
     pub both_verified: bool,
+    /// Derived from the exact ordinary PSBT pair. It is never signer authority.
+    pub review: Option<view::vault::ancestry_coins::CoinPairReview>,
 }
 
 pub(crate) fn funding_proof_refusal(
@@ -506,9 +508,13 @@ pub struct ClaimStep1Panel {
     bitcoin_cube: String,
     generation: watch::Receiver<u64>,
     connect: Option<ConnectSession>,
+    /// A paired, currently open BTCB2 wallet. Weak ownership ensures closing
+    /// its tab cannot leave a stopped daemon held alive by the Bitcoin Cube.
+    fork_daemon: Option<Weak<dyn Daemon + Sync + Send>>,
     pre: Preconditions,
     funding_error: Option<String>,
     funding_status: Option<String>,
+    funding_review: Option<view::vault::ancestry_coins::CoinPairReview>,
     funding_checking: bool,
     stage: Stage,
     /// The live coordinator's revoker, kept outside the session so a
@@ -554,9 +560,11 @@ impl ClaimStep1Panel {
             bitcoin_cube,
             generation,
             connect,
+            fork_daemon: None,
             pre: Preconditions::default(),
             funding_error: None,
             funding_status: None,
+            funding_review: None,
             funding_checking: false,
             stage: Stage::Preconditions,
             revoker: None,
@@ -659,6 +667,10 @@ impl ClaimStep1Panel {
         self.funding_status.as_deref()
     }
 
+    pub fn funding_review(&self) -> Option<&view::vault::ancestry_coins::CoinPairReview> {
+        self.funding_review.as_ref()
+    }
+
     pub fn funding_checking(&self) -> bool {
         self.funding_checking
     }
@@ -679,6 +691,7 @@ impl ClaimStep1Panel {
         let signed_out = replaced && connect.is_none();
         self.connect = connect;
         if replaced {
+            self.fork_daemon = None;
             self.revoke();
             self.note_session_ended(signed_out);
         }
@@ -692,6 +705,7 @@ impl ClaimStep1Panel {
     /// coordinator yet: the count advanced here tells its result apart from
     /// one sent after the revocation.
     pub fn revoke(&mut self) {
+        self.fork_daemon = None;
         self.revoked = true;
         self.revocations = self.revocations.wrapping_add(1);
         if matches!(self.stage, Stage::PairedRecovery(_)) {
@@ -706,6 +720,7 @@ impl ClaimStep1Panel {
             self.stage = Stage::Preconditions;
             self.funding_error = None;
             self.funding_status = None;
+            self.funding_review = None;
             self.funding_checking = false;
         }
         if self.building.take().is_some() {
@@ -825,6 +840,22 @@ impl ClaimStep1Panel {
     /// Whether the App's daemon may be bound to right now.
     fn backend_ready(&self) -> bool {
         self.backend == BackendState::Ready
+    }
+
+    /// Only the GUI's cross-tab pairing path sets this for the next deposit
+    /// check. It validates Cube, descriptor and Connect identity first.
+    pub(crate) fn bind_fork_daemon(&mut self, daemon: Option<&Arc<dyn Daemon + Sync + Send>>) {
+        self.fork_daemon = daemon.map(Arc::downgrade);
+    }
+
+    pub(crate) fn funding_pair_target(&self, session: &ConnectSession) -> Option<&str> {
+        (matches!(self.stage, Stage::FundingDeposits(_))
+            && self
+                .connect
+                .as_ref()
+                .is_some_and(|bound| same_session(bound, session)))
+        .then(|| self.pre.target.as_deref())
+        .flatten()
     }
 
     /// Whether a task sent under `generation` and `revocations` may still
@@ -1353,9 +1384,11 @@ impl ClaimStep1Panel {
         let descriptor = self.wallet.main_descriptor.clone();
         let bitcoin_cube = self.bitcoin_cube.clone();
         let fork_cube = self.pre.target.clone();
+        let fork_daemon = self.fork_daemon.as_ref().and_then(Weak::upgrade);
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_checking = true;
         self.funding_status = None;
+        self.funding_review = None;
         Task::perform(
             async move {
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
@@ -1415,8 +1448,8 @@ impl ClaimStep1Panel {
                         "The saved deposit addresses no longer match this Vault and account."
                             .to_string()
                     })?;
-                let minimums = if bitcoin_candidate && btcb2_candidate {
-                    claim_workflow::quote_claim_deposit_minimums(
+                let (minimums, rates) = if bitcoin_candidate && btcb2_candidate {
+                    claim_workflow::quote_claim_deposit_terms(
                         &descriptor,
                         saved.indices,
                         inventory.shared().len(),
@@ -1428,7 +1461,7 @@ impl ClaimStep1Panel {
                             .to_string()
                     })?
                 } else {
-                    (0, 0)
+                    ((0, 0), (0, 0))
                 };
                 if generation.has_changed().is_err() || *generation.borrow() != expected {
                     return Err("The Connect session changed during the deposit check.".into());
@@ -1454,13 +1487,13 @@ impl ClaimStep1Panel {
                     ChainId::BitcoinBlake2b,
                     CollectionContext {
                         expected_generation: expected,
-                        generation,
+                        generation: generation.clone(),
                     },
                 )
                 .map_err(|_| "The two-chain observation source is unavailable.".to_string())?;
-                saved
+                let proof = saved
                     .discover_reserved_funding(
-                        directory,
+                        directory.clone(),
                         &inventory,
                         &identity,
                         &context,
@@ -1470,11 +1503,6 @@ impl ClaimStep1Panel {
                         minimums,
                     )
                     .await
-                    .map(|proof| ClaimDepositProgress {
-                        bitcoin_candidate,
-                        btcb2_candidate,
-                        both_verified: proof.is_some() && bitcoin_candidate && btcb2_candidate,
-                    })
                     .map_err(|error| match error {
                         claim_workflow::ClaimFundingDiscoveryError::Discovery(error) =>
                             funding_proof_refusal(error).to_string(),
@@ -1482,7 +1510,87 @@ impl ClaimStep1Panel {
                             "The Bitcoin Vault's coins or sync state changed. Reopen it and check deposits again.".to_string(),
                         claim_workflow::ClaimFundingDiscoveryError::InvalidReservation(_) =>
                             "The saved deposit reservation no longer matches this Vault and Connect session.".to_string(),
-                    })
+                    })?;
+                let review = if let Some(proof) = proof {
+                    let fork_daemon = fork_daemon.ok_or_else(|| {
+                        "Open the paired BTCB2 Cube under this Connect account, then check both deposits again."
+                            .to_string()
+                    })?;
+                    if generation.has_changed().is_err() || *generation.borrow() != expected {
+                        return Err("The Connect session changed during the deposit check.".into());
+                    }
+                    let change = claim_workflow::reserve_claim_change_indices(
+                        directory,
+                        &descriptor,
+                        &identity,
+                        &context,
+                        &*daemon,
+                        &*fork_daemon,
+                        &generation,
+                    )
+                    .await
+                    .map_err(|error| match error {
+                        claim_workflow::ClaimChangeError::Cancelled =>
+                            "The Connect session changed before change addresses were reserved.".to_string(),
+                        claim_workflow::ClaimChangeError::WalletState =>
+                            "The paired Bitcoin or BTCB2 Vault is unavailable or changed. Reopen both Cubes and check deposits again.".to_string(),
+                        claim_workflow::ClaimChangeError::Journal(_) =>
+                            "The saved Claim reservation changed. Reopen the Claim and check deposits again.".to_string(),
+                    })?;
+                    let tips = claim::PreflightTips {
+                        bitcoin: proof
+                            .inputs
+                            .funding()
+                            .bitcoin()
+                            .ancestry()
+                            .pair()
+                            .bitcoin()
+                            .tip,
+                        fork: proof.inputs.funding().fork().ancestry().pair().fork().tip,
+                    };
+                    let review_context = crate::services::claim_observation::http::FundingContext {
+                        provider: &context.provider,
+                        generation: context.generation,
+                        now: source.now(),
+                        max_age_seconds: CHECK_POLICY.observations.max_observation_age_seconds,
+                        tips,
+                    };
+                    let (bitcoin, fork) = inventory
+                        .construct_pair_for_review(
+                            &proof,
+                            ChildNumber::Normal {
+                                index: change.bitcoin,
+                            },
+                            ChildNumber::Normal { index: change.fork },
+                            rates.0,
+                            rates.1,
+                            review_context,
+                        )
+                        .map_err(|error| {
+                            format!("The exact Claim pair could not be reviewed: {error:?}")
+                        })?;
+                    Some(
+                        view::vault::ancestry_coins::CoinPairReview::from_psbts(
+                            bitcoin.psbt(),
+                            fork.psbt(),
+                            bitcoin.claimed_prevouts(),
+                            proof.bitcoin.outpoint,
+                            proof.fork.outpoint,
+                        )
+                        .map_err(str::to_owned)?,
+                    )
+                } else {
+                    None
+                };
+                if generation.has_changed().is_err() || *generation.borrow() != expected {
+                    return Err("The Connect session changed during the deposit check.".into());
+                }
+                Ok(ClaimDepositProgress {
+                    bitcoin_candidate,
+                    btcb2_candidate,
+                    both_verified: review.is_some(),
+                    review,
+                })
             },
             move |result| {
                 Message::Claim(ClaimEvent::FundingChecked(
@@ -2084,6 +2192,7 @@ impl ClaimStep1Panel {
                 self.check_seq = self.check_seq.wrapping_add(1);
                 self.funding_checking = false;
                 self.funding_status = None;
+                self.funding_review = None;
                 self.stage = Stage::Preconditions;
             }
             Stage::PairedRecovery(_) => {
@@ -2106,11 +2215,16 @@ impl ClaimStep1Panel {
                 if !self.authorized(generation, revocations) || !self.backend_ready() {
                     self.stage = Stage::Preconditions;
                     self.funding_status = None;
+                    self.funding_review = None;
                     self.funding_error =
                         Some("The Claim session changed during the deposit check.".into());
                     return Task::none();
                 }
                 let proof_complete = matches!(&result, Ok(progress) if progress.both_verified);
+                self.funding_review = result
+                    .as_ref()
+                    .ok()
+                    .and_then(|progress| progress.review.clone());
                 self.funding_status = Some(match result {
                     Ok(progress) => format!(
                         "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
@@ -2152,6 +2266,7 @@ impl ClaimStep1Panel {
                     && matches!(self.stage, Stage::FundingDeposits(_))
                     && self.authorized(generation, revocations)
                 {
+                    self.funding_review = None;
                     self.funding_status = Some(
                         "The deposit proof has expired. Check both deposits again for current chain state and fees."
                             .into(),

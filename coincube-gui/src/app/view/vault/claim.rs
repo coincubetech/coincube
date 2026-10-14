@@ -9,7 +9,7 @@ use iced::{
 
 use coincube_core::{
     claim::{Assessment, MIN_CONFIRMATIONS},
-    miniscript::bitcoin::Amount,
+    miniscript::bitcoin::{Address, Amount, Network, TxOut},
 };
 use coincube_ui::{
     component::{amount::*, button, card, text::*},
@@ -28,7 +28,10 @@ use crate::{
         view::{
             dashboard,
             message::*,
-            vault::{ancestry_coins::CoinReview, psbt},
+            vault::{
+                ancestry_coins::{CoinPairReview, CoinReview},
+                psbt,
+            },
         },
     },
     services::{
@@ -73,6 +76,7 @@ pub fn view<'a>(
                     (!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding))
                 ))
                 .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
+                .push_maybe(panel.funding_review().map(funding_review_view))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
         StageView::PairedRecovery(recovery, checking, error) => dashboard(
@@ -156,6 +160,53 @@ pub fn view<'a>(
             ),
         ),
     }
+}
+
+fn funding_review_view(review: &CoinPairReview) -> Element<'static, Message> {
+    let address = |output: &TxOut| {
+        Address::from_script(&output.script_pubkey, Network::Bitcoin)
+            .map(|address| address.to_string())
+            .unwrap_or_else(|_| format!("script {}", hex::encode(output.script_pubkey.as_bytes())))
+    };
+    let mut rows = Column::new()
+        .spacing(12)
+        .push(p1_bold("Paired transaction preview — read only"))
+        .push(p1_regular(format!(
+            "{} shared pre-fork coins · {} sats on each chain",
+            review.bitcoin.shared.len(),
+            review.bitcoin.shared_total.to_sat()
+        )));
+    for coin in &review.bitcoin.shared {
+        rows = rows.push(p2_regular(format!(
+            "Before fork · present on both chains: {} · {} sats",
+            coin.outpoint,
+            coin.amount.to_sat()
+        )));
+    }
+    rows.push(p1_bold("Bitcoin transaction"))
+        .push(p2_regular(format!(
+            "Bitcoin-only · verified: {} · {} sats",
+            review.bitcoin.funding.outpoint,
+            review.bitcoin.funding.amount.to_sat()
+        )))
+        .push(p2_regular(format!(
+            "Back to this Vault: {}",
+            address(&review.bitcoin.destination)
+        )))
+        .push(p2_regular(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
+        .push(p1_bold("Bitcoin Blake2b transaction"))
+        .push(p2_regular(format!(
+            "BTCB2-only · verified: {} · {} sats",
+            review.fork.funding.outpoint,
+            review.fork.funding.amount.to_sat()
+        )))
+        .push(p2_regular(format!(
+            "Back to the paired BTCB2 Vault: {}",
+            address(&review.fork.destination)
+        )))
+        .push(p2_regular(format!("Fee: {} sats", review.fork.fee.to_sat())))
+        .push(p1_regular("Each transaction spends all shared coins with one verified chain-specific funding coin. These exact PSBTs are a preview only; the app must recheck both proofs, wallets and fees before signing."))
+        .into()
 }
 
 fn header<'a>(step: &'static str) -> Element<'a, Message> {
