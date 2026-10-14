@@ -104,6 +104,7 @@ impl PostBitcoinAncestryProof {
             && self.fork == record.fork_identity()
             && self.tips.fork.hash == preflight.tip()
             && self.confirmed_bitcoin_block == confirmation.block()
+            && self.tips.bitcoin == confirmation.tip()
             && proof_fresh(self.observed_at, now, self.max_age_seconds)
     }
 }
@@ -163,10 +164,7 @@ pub(super) fn post_bitcoin_proof_for_test(
         bitcoin: (bitcoin.compute_txid(), bitcoin.compute_wtxid()),
         fork: (fork.compute_txid(), fork.compute_wtxid()),
         tips: PreflightTips {
-            bitcoin: BlockRef {
-                height: 1,
-                hash: tip,
-            },
+            bitcoin: confirmation.tip(),
             fork: BlockRef {
                 height: 1,
                 hash: tip,
@@ -410,6 +408,7 @@ impl Controller {
             || saved.fork_attempt.is_some()
             || !confirmation.accepted_for(current, saved.bitcoin(), now)
             || confirmation.block() != observed.bitcoin_confirmation()
+            || confirmation.tip() != tips.bitcoin
         {
             return Err(Error::Conflict);
         }

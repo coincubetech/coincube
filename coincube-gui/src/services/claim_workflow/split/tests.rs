@@ -749,6 +749,24 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         ),
         Err(Error::LateObservation)
     ));
+    let changed_bitcoin_tip =
+        refreshed_confirmation
+            .clone()
+            .with_tip_for_test(coincube_core::claim::BlockRef {
+                height: 2,
+                hash: hash(10),
+            });
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &changed_bitcoin_tip,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
     reopened
         .record_possible_ancestry_fork_attempt(
             &context(),

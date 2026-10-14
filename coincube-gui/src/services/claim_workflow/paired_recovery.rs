@@ -21,7 +21,11 @@ const MAX_CONFIRMATION_AGE_SECONDS: i64 = 30;
 pub(crate) enum ChainState {
     Absent,
     Unconfirmed,
-    Confirmed { block: BlockRef, confirmations: u64 },
+    Confirmed {
+        block: BlockRef,
+        tip: BlockRef,
+        confirmations: u64,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,6 +63,7 @@ pub(crate) struct BitcoinConfirmation {
     txid: Txid,
     wtxid: Wtxid,
     block: BlockRef,
+    tip: BlockRef,
     context: Context,
     started_at: i64,
 }
@@ -68,9 +73,19 @@ impl BitcoinConfirmation {
         self.block
     }
 
+    pub(crate) fn tip(&self) -> BlockRef {
+        self.tip
+    }
+
     #[cfg(test)]
     pub(crate) fn with_block_for_test(mut self, block: BlockRef) -> Self {
         self.block = block;
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_tip_for_test(mut self, tip: BlockRef) -> Self {
+        self.tip = tip;
         self
     }
 
@@ -167,6 +182,7 @@ async fn reconcile_side(
             }
             ChainState::Confirmed {
                 block,
+                tip: tip_before,
                 confirmations: tip_before.height - block.height + 1,
             }
         }
@@ -245,6 +261,7 @@ impl Controller {
         let bitcoin_confirmation = match bitcoin {
             SideReport::Observed(ChainState::Confirmed {
                 block,
+                tip,
                 confirmations,
             }) if confirmations >= MIN_CONFIRMATIONS
                 && started_at >= 0
@@ -257,6 +274,7 @@ impl Controller {
                     txid,
                     wtxid,
                     block,
+                    tip,
                     context: current.clone(),
                     started_at,
                 })
@@ -281,6 +299,10 @@ pub(crate) fn confirmed_bitcoin_for_test(
         txid: transaction.compute_txid(),
         wtxid: transaction.compute_wtxid(),
         block: BlockRef {
+            height: 1,
+            hash: coincube_core::miniscript::bitcoin::BlockHash::all_zeros(),
+        },
+        tip: BlockRef {
             height: 1,
             hash: coincube_core::miniscript::bitcoin::BlockHash::all_zeros(),
         },
@@ -457,6 +479,10 @@ mod tests {
                     Ok(ChainState::Confirmed {
                         block: BlockRef {
                             height: 5,
+                            hash: hash.parse().unwrap(),
+                        },
+                        tip: BlockRef {
+                            height: 10,
                             hash: hash.parse().unwrap(),
                         },
                         confirmations: 6,

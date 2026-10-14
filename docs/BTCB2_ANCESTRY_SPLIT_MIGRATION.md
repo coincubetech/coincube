@@ -419,9 +419,11 @@ marker spend cases remain.
    and the original observation-age limit (capped at 30 seconds). A separate
    post-Bitcoin proof is issued only after the stage-two collector agrees with
    the saved witnesses, exact canonical Bitcoin confirmation block, input set
-   and current two-chain tips. Recording the possible BTCB2 send requires
-   this new proof as well as fresh fork policy and the *same* six-confirmation
-   block token, so a reorg between collection and submission forces a new read.
+   and current two-chain tips. The six-confirmation token now retains the
+   Bitcoin tip under which its block was read. Recording the possible BTCB2
+   send requires this new proof, fresh fork policy and the *same* confirmation
+   block and Bitcoin tip token, so a changed chain view between collection and
+   submission forces a new read.
    Neither proof survives restart or grants transport access by itself.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
