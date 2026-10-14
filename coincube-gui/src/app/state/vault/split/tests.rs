@@ -809,6 +809,88 @@ async fn funding_only_split_reopens_same_addresses_after_restart() {
     assert!(reopened.construction().is_none());
 }
 
+#[tokio::test]
+async fn unsigned_paired_split_reopens_only_with_original_target_and_account() {
+    use std::str::FromStr;
+
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    let descriptor =
+        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let wallet_id = crate::app::settings::WalletId::new(
+        descriptor.to_string().split_once('#').unwrap().1.to_owned(),
+        Some(1),
+    );
+    let target = crate::services::claim_workflow::SplitTargetBinding::for_test(
+        wallet_id.clone(),
+        &descriptor,
+        4,
+    );
+    crate::services::claim_workflow::reserve_split_funding_with_target(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+        &target,
+    )
+    .unwrap();
+    let addresses = step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .unwrap();
+
+    let vault = (wallet_id.clone(), descriptor.clone());
+    assert_eq!(
+        step1::recover_unsigned_paired_funding_addresses(
+            connect.as_ref(),
+            directory.clone(),
+            &source,
+            TARGET,
+            Some(&vault),
+        )
+        .await
+        .unwrap(),
+        addresses
+    );
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+    let wrong_vault = (
+        crate::app::settings::WalletId::new("other".into(), Some(1)),
+        descriptor,
+    );
+    assert!(step1::recover_unsigned_paired_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+        Some(&wrong_vault),
+    )
+    .await
+    .is_err());
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+    let mut other_account = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut other_account).unwrap().context.account = "another-account".into();
+    assert!(step1::recover_unsigned_paired_funding_addresses(
+        other_account.as_ref(),
+        directory,
+        &source,
+        TARGET,
+        Some(&vault),
+    )
+    .await
+    .is_err());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn used_split_deposit_address_is_never_displayed_or_signed() {
     let scan = Scan::new(Shape::Wpkh);

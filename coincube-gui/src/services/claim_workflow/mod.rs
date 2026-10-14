@@ -994,3 +994,5 @@ impl Controller {
 }
 #[cfg(all(test, any(unix, windows)))]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::WSH_DESC as TEST_WSH_DESC;

@@ -671,6 +671,47 @@ pub async fn recover_funding_addresses(
     Ok((source, addresses))
 }
 
+/// A version-11 intent may be durable before either signer has returned a
+/// signature. Reopen its exact released reservation under the current source,
+/// target Vault and Connect identity, then repeat both-chain address reads.
+/// This returns the deposit screen, never a signer or proof of spendability.
+pub async fn recover_unsigned_paired_funding_addresses(
+    connect: &dyn SplitConnect,
+    directory: PathBuf,
+    source: &SplitSource,
+    target_cube: &str,
+    target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+) -> Result<CheckedFundingAddresses, String> {
+    let context = connect.context();
+    let (wallet_id, descriptor) = target_vault
+        .ok_or_else(|| "The recorded BTCB2 target Vault is unavailable.".to_string())?;
+    let saved_directory = directory.clone();
+    let saved_source = source.clone();
+    let saved_target = target_cube.to_owned();
+    let saved_context = context.clone();
+    let reservation = tokio::task::spawn_blocking(move || {
+        claim_workflow::load_split_funding(
+            &saved_directory,
+            &saved_source,
+            &saved_target,
+            &saved_context,
+        )
+    })
+    .await
+    .map_err(|_| "Reading the recorded funding plan was interrupted.".to_string())?
+    .map_err(|_| "The recorded funding plan could not be verified.".to_string())?
+    .ok_or_else(|| "The recorded split has no saved deposit addresses.".to_string())?;
+    if !reservation.is_released()
+        || !reservation
+            .target_binding
+            .as_ref()
+            .is_some_and(|binding| binding.matches_vault(wallet_id, descriptor))
+    {
+        return Err("The recorded split deposits no longer match this BTCB2 Vault.".into());
+    }
+    check_reserved_funding_addresses(connect, directory, source, target_cube).await
+}
+
 /// The production Connect side: Claim's observation source and anchor, the
 /// Split evidence and fee readers, and the daemonless Split coordinator.
 pub struct ProductionConnect {

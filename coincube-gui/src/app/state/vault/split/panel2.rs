@@ -1163,6 +1163,19 @@ impl SplitPanel {
 
     pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
         match event {
+            SplitEvent::Restarted(_, Ok(Restarted::PairedFunding(source, addresses))) => {
+                self.funding_source = Some(source);
+                self.funding_addresses = Some(addresses);
+                self.funding_journal = self.journal.clone();
+                self.funding_progress = None;
+                self.paired_recovery = None;
+                self.notice = Some(
+                    "The recorded Split pair is unsigned. Check both deposits again before signing."
+                        .into(),
+                );
+                self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
             SplitEvent::Restarted(_, Ok(Restarted::PairedRecovery(recovery))) => {
                 self.paired_recovery = Some(recovery);
                 self.notice = None;

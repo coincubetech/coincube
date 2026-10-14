@@ -372,6 +372,11 @@ a replayable spend.
    New Split deposit records also bind the authenticated target BTCB2 Vault
    ID, descriptor and reserved receive script under the same journal lock.
    Reopening or checking deposits rejects a different loaded target Vault.
+   An unsigned version-11 Split intent now reopens at its saved deposit
+   addresses after rechecking the original source, target Vault, Connect
+   account, both-chain address histories and fee quotes. A recorded signed
+   pair still opens read-only recovery; reopening never restores signer
+   authority from the journal.
    The target daemon must positively identify as BTCB2 when reserving its
    destination; mainnet address encoding alone cannot distinguish the two
    chains. An older Connect wallet response without an authenticated chain

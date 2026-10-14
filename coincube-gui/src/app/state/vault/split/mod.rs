@@ -278,6 +278,7 @@ impl fmt::Debug for Recon {
 #[derive(Debug)]
 pub enum Restarted {
     Step1,
+    PairedFunding(SplitSource, step1::CheckedFundingAddresses),
     PairedRecovery(PairedSplitRecovery),
     /// The reconciler, with the journal's step-2 dead end if it is in one,
     /// or else why a resend the journal allows could not be opened.
@@ -1054,23 +1055,25 @@ impl SplitPanel {
             return Task::none();
         }
         self.notice = None;
-        if let Some((digest, directory)) = self.funding_journal.clone() {
-            self.stage = Stage::Working(Work::ReservingFunding);
-            let target = self.target_cube.clone();
-            let target_vault = self.target_vault.clone();
-            return self.spawn(
-                async move {
-                    step1::recover_funding_addresses(
-                        &*connect,
-                        directory,
-                        digest,
-                        &target,
-                        target_vault.as_ref(),
-                    )
-                    .await
-                },
-                SplitEvent::FundingRecovered,
-            );
+        if self.journal.is_none() {
+            if let Some((digest, directory)) = self.funding_journal.clone() {
+                self.stage = Stage::Working(Work::ReservingFunding);
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                return self.spawn(
+                    async move {
+                        step1::recover_funding_addresses(
+                            &*connect,
+                            directory,
+                            digest,
+                            &target,
+                            target_vault.as_ref(),
+                        )
+                        .await
+                    },
+                    SplitEvent::FundingRecovered,
+                );
+            }
         }
         if let Some((digest, directory)) = self.journal.clone() {
             // A recorded step-2 submission reopens only the reconciler. The
@@ -1081,6 +1084,7 @@ impl SplitPanel {
             // step-2 port when there is one (P3-3).
             self.stage = Stage::Working(Work::Restarting);
             let target = self.target_cube.clone();
+            let target_vault = self.target_vault.clone();
             let (context, recon) = (connect.context(), self.recon_port.clone());
             let resend = self.step2_port.clone().map(|port| (port, connect.clone()));
             return self.spawn(
@@ -1100,6 +1104,41 @@ impl SplitPanel {
                             ))
                         })?;
                     if controller.is_paired_ancestry_split() {
+                        if controller.recorded_signed_ancestry_pair().is_none() {
+                            let recorded = controller
+                                .recorded_split()
+                                .map_err(|_| {
+                                    step2::Step2Refusal::retry(
+                                        "The recorded source wallet could not be verified.",
+                                    )
+                                })?
+                                .ok_or_else(|| {
+                                    step2::Step2Refusal::retry(
+                                        "The recorded split source is missing.",
+                                    )
+                                })?;
+                            let source = recorded.source.ok_or_else(|| {
+                                step2::Step2Refusal::retry(
+                                    "The recorded source descriptors are unavailable.",
+                                )
+                            })?;
+                            if recorded.source_digest != digest || recorded.target_cube != target {
+                                return Err(step2::Step2Refusal::retry(
+                                    "The recorded split belongs to another wallet or target.",
+                                ));
+                            }
+                            drop(controller);
+                            let addresses = step1::recover_unsigned_paired_funding_addresses(
+                                &*connect,
+                                directory,
+                                &source,
+                                &target,
+                                target_vault.as_ref(),
+                            )
+                            .await
+                            .map_err(step2::Step2Refusal::retry)?;
+                            return Ok(Restarted::PairedFunding(source, addresses));
+                        }
                         let recovery = paired_recovery(&mut controller, &*connect)
                             .await
                             .map_err(step2::Step2Refusal::retry)?;
