@@ -633,6 +633,101 @@ mod tests {
                         );
                         fork_status.assert_hits(2);
                         fork_unspent.assert_hits(1);
+                        let mut shared_tx = bitcoin.clone();
+                        shared_tx.output[0].value = Amount::from_sat(3411);
+                        let shared = OutPoint::new(shared_tx.compute_txid(), 0);
+                        let mut shared_outspends = Vec::new();
+                        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                            let prefix = format!(
+                                "/api/v1/esplora/{}",
+                                HttpObservationSource::prefix(chain).unwrap()
+                            );
+                            fresh_mock(
+                                &server,
+                                &format!("{prefix}/tx/{}", shared.txid),
+                                json!({"txid":shared.txid,"status":{
+                                    "confirmed":true,"block_height":BIP34_HEIGHT,
+                                    "block_hash":BIP34_HASH}})
+                                .to_string(),
+                            );
+                            shared_outspends.push(fresh_mock(
+                                &server,
+                                &format!("{prefix}/tx/{}/outspend/0", shared.txid),
+                                json!({"spent":false}).to_string(),
+                            ));
+                        }
+                        let spend_inputs = source
+                            .collect_spend_inputs(&root_path, &fork_path, &[shared], policy)
+                            .await
+                            .unwrap();
+                        assert_eq!(
+                            spend_inputs.shared(),
+                            &[(
+                                shared,
+                                BlockRef {
+                                    height: BIP34_HEIGHT,
+                                    hash: BlockHash::from_str(BIP34_HASH).unwrap(),
+                                }
+                            )]
+                        );
+                        let mut bitcoin_spend = shared_tx.clone();
+                        bitcoin_spend.input = vec![
+                            coincube_core::miniscript::bitcoin::TxIn {
+                                previous_output: shared,
+                                ..Default::default()
+                            },
+                            coincube_core::miniscript::bitcoin::TxIn {
+                                previous_output: root_path.selected(),
+                                ..Default::default()
+                            },
+                        ];
+                        let mut fork_spend = bitcoin_spend.clone();
+                        fork_spend.input[1].previous_output = fork_path.selected();
+                        let provider = source.provider_identity();
+                        let funding_context = FundingContext {
+                            provider: &provider,
+                            generation: pair_funding.bitcoin().ancestry().generation(),
+                            now: source.now(),
+                            max_age_seconds: policy.max_observation_age_seconds,
+                            tips: PreflightTips {
+                                bitcoin: pair_funding.bitcoin().ancestry().pair().bitcoin().tip,
+                                fork: pair_funding.fork().ancestry().pair().fork().tip,
+                            },
+                        };
+                        assert_eq!(
+                            spend_inputs.validate_for_transactions(
+                                &bitcoin_spend,
+                                &fork_spend,
+                                &[shared],
+                                funding_context,
+                            ),
+                            Ok(())
+                        );
+                        fork_spend.input[0].previous_output = root_path.selected();
+                        assert_eq!(
+                            spend_inputs.validate_for_transactions(
+                                &bitcoin_spend,
+                                &fork_spend,
+                                &[shared],
+                                funding_context,
+                            ),
+                            Err(FailureKind::Changed)
+                        );
+                        shared_outspends.pop().unwrap().delete_async().await;
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}/outspend/0",
+                                shared.txid
+                            ),
+                            json!({"spent":true}).to_string(),
+                        );
+                        assert!(matches!(
+                            source
+                                .collect_spend_inputs(&root_path, &fork_path, &[shared], policy)
+                                .await,
+                            Err(FailureKind::Changed)
+                        ));
                         // The first input leads to a positively observed pre-fork
                         // root; discovery must continue to the second input.
                         let mut old_root = bitcoin.clone();

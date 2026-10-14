@@ -58,9 +58,14 @@ a replayable spend.
    post-fork funding candidates. Review-only validators compare those bytes,
    retained paths, session, source constructions and two current tips for
    Split and Claim; Split also binds the candidates' block assignments.
-   Signer admission still needs fresh source-UTXO authentication,
-   reservations and a durable intent binding; no candidate or validator result
-   is cached spend authority.
+   A further read-only collection now checks every shared input's confirmed
+   transaction against the same canonical pre-fork block on both chains and
+   requires an explicit current unspent response on each, under the paired
+   funding session and stable tips. Claim and Split review validators bind
+   that exact shared set to both unsigned transactions. Signer admission still
+   needs to consume this fresh evidence with wallet ownership, reservations
+   and the durable intent; no candidate or validator result is cached spend
+   authority.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly

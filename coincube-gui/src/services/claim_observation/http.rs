@@ -15,7 +15,7 @@ mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 pub use discovery::{
     AncestryContext, CollectedAncestry, CollectedAncestrySweep, CollectedFundingCoin,
-    CollectedFundingPair, DiscoveredAncestry, DiscoveryError, FundingContext,
+    CollectedFundingPair, CollectedSpendInputs, DiscoveredAncestry, DiscoveryError, FundingContext,
     MAX_ANCESTRY_CANDIDATES,
 };
 

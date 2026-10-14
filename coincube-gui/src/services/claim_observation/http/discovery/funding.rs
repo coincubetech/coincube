@@ -149,6 +149,7 @@ impl CollectedFundingCoin {
 
 /// Current two-chain review context. A stored journal must not persist this
 /// as authority: regenerate it from a fresh session and fresh chain tips.
+#[derive(Clone, Copy)]
 pub struct FundingContext<'a> {
     pub provider: &'a str,
     pub generation: u64,
@@ -166,6 +167,132 @@ pub struct CollectedFundingPair {
     bitcoin: CollectedFundingCoin,
     fork: CollectedFundingCoin,
     observed_at: i64,
+}
+
+/// One read-only collection covering both chain-specific funding coins and
+/// every shared pre-fork input. It is bound to one account generation and two
+/// stable tips; it is not a reservation or a signing capability.
+#[derive(Debug)]
+pub struct CollectedSpendInputs {
+    funding: CollectedFundingPair,
+    shared: Vec<(OutPoint, BlockRef)>,
+    observed_at: i64,
+}
+
+impl CollectedSpendInputs {
+    pub fn funding(&self) -> &CollectedFundingPair {
+        &self.funding
+    }
+
+    pub fn shared(&self) -> &[(OutPoint, BlockRef)] {
+        &self.shared
+    }
+
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
+
+    /// Review the Claim's owned constructions against the complete fresh
+    /// shared set and both chain-specific funding coins together.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_for_claim(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        bitcoin_coin: &CandidateCoin,
+        fork_coin: &CandidateCoin,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        self.funding.validate_for_claim(
+            bitcoin_path,
+            fork_path,
+            bitcoin_coin,
+            fork_coin,
+            bitcoin,
+            fork,
+            context,
+        )?;
+        self.validate_for_transactions(
+            &bitcoin.psbt().unsigned_tx,
+            &fork.psbt().unsigned_tx,
+            bitcoin.claimed_prevouts(),
+            context,
+        )
+    }
+
+    /// Review a foreign Split's exact ordinary constructions under the same
+    /// complete observation. No result from this method authorizes signing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_for_split(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        bitcoin_coin: &SplitCoin,
+        fork_coin: &SplitCoin,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        self.funding.validate_for_split(
+            bitcoin_path,
+            fork_path,
+            bitcoin_coin,
+            fork_coin,
+            bitcoin,
+            fork,
+            context,
+        )?;
+        self.validate_for_transactions(
+            &bitcoin.psbt().unsigned_tx,
+            &fork.psbt().unsigned_tx,
+            bitcoin.claimed_prevouts(),
+            context,
+        )
+    }
+
+    /// Bind the collected shared set to both exact unsigned transactions and
+    /// the current session. Ownership still comes from the core builders;
+    /// reservations and a new preflight are required before any signing.
+    pub fn validate_for_transactions(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        claimed: &[OutPoint],
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        self.funding.validate_session(context)?;
+        if !super::super::super::fresh(self.observed_at, context.now, context.max_age_seconds) {
+            return Err(FailureKind::Stale);
+        }
+        let shared: BTreeSet<_> = self.shared.iter().map(|(outpoint, _)| *outpoint).collect();
+        let claimed: BTreeSet<_> = claimed.iter().copied().collect();
+        let mut bitcoin_inputs: BTreeSet<_> = bitcoin
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let mut fork_inputs: BTreeSet<_> = fork
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        if shared.is_empty()
+            || shared.len() != self.shared.len()
+            || claimed.len() != self.shared.len()
+            || claimed != shared
+            || bitcoin_inputs.len() != bitcoin.input.len()
+            || fork_inputs.len() != fork.input.len()
+            || !bitcoin_inputs.remove(&self.funding.bitcoin.selected)
+            || !fork_inputs.remove(&self.funding.fork.selected)
+            || bitcoin_inputs != shared
+            || fork_inputs != shared
+        {
+            return Err(FailureKind::Changed);
+        }
+        Ok(())
+    }
 }
 
 impl CollectedFundingPair {
@@ -488,6 +615,120 @@ impl HttpObservationSource {
             Ok(CollectedFundingPair {
                 bitcoin,
                 fork,
+                observed_at,
+            })
+        })
+        .await
+        .map_err(|_| FailureKind::Deadline)?
+    }
+
+    /// Refresh both funding proofs and every shared input under the same
+    /// provider generation and stable two-chain tips. For each shared coin,
+    /// require a confirmed transaction in the same canonical pre-fork block
+    /// on both chains and an explicit current unspent response on each.
+    /// Missing, stale or spent responses never become evidence of safety.
+    pub async fn collect_spend_inputs(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        shared: &[OutPoint],
+        policy: Policy,
+    ) -> Result<CollectedSpendInputs, FailureKind> {
+        let unique: BTreeSet<_> = shared.iter().copied().collect();
+        if unique.is_empty()
+            || unique.len() != shared.len()
+            || unique.contains(&bitcoin_path.selected())
+            || unique.contains(&fork_path.selected())
+            || unique.iter().any(OutPoint::is_null)
+        {
+            return Err(FailureKind::InvalidPlan);
+        }
+        let snapshot = self.discovery_snapshot();
+        tokio::time::timeout(MAX_COLLECTION_TIME, async {
+            let funding = snapshot
+                .collect_funding_pair(bitcoin_path, fork_path, policy)
+                .await?;
+            let roots = funding.bitcoin.ancestry.pair();
+            let fork_height = roots
+                .anchor()
+                .observation
+                .fork
+                .as_ref()
+                .ok_or(FailureKind::InvalidPlan)?
+                .height;
+            let bitcoin_tip = roots.bitcoin().tip;
+            let fork_tip = roots.fork().tip;
+            let mut observed_at = funding.observed_at;
+            let mut confirmed = Vec::with_capacity(unique.len());
+            for outpoint in unique {
+                let mut blocks = Vec::with_capacity(2);
+                for (chain, tip) in [
+                    (ChainId::Bitcoin, bitcoin_tip),
+                    (ChainId::BitcoinBlake2b, fork_tip),
+                ] {
+                    let (status, status_stamp) = super::super::super::read(
+                        snapshot.transaction(chain, outpoint.txid).await?,
+                        chain,
+                        &snapshot,
+                        policy,
+                        Stage::BitcoinInclusion,
+                    )
+                    .map_err(|error| error.kind)?;
+                    let TransactionObservation::Confirmed { block, .. } = status else {
+                        return Err(FailureKind::Changed);
+                    };
+                    if block.height >= fork_height || block.height > tip.height {
+                        return Err(FailureKind::Changed);
+                    }
+                    let (canonical, canonical_stamp) = super::super::super::read(
+                        snapshot.hash_at_height(chain, block.height).await?,
+                        chain,
+                        &snapshot,
+                        policy,
+                        Stage::BitcoinInclusion,
+                    )
+                    .map_err(|error| error.kind)?;
+                    let (outspend, outspend_stamp) = super::super::super::read(
+                        snapshot.outspend(chain, outpoint).await?,
+                        chain,
+                        &snapshot,
+                        policy,
+                        Stage::Preflight,
+                    )
+                    .map_err(|error| error.kind)?;
+                    if canonical != block.hash || outspend.spent {
+                        return Err(FailureKind::Changed);
+                    }
+                    observed_at = observed_at
+                        .min(status_stamp)
+                        .min(canonical_stamp)
+                        .min(outspend_stamp);
+                    blocks.push(block);
+                }
+                if blocks[0] != blocks[1] {
+                    return Err(FailureKind::Changed);
+                }
+                confirmed.push((outpoint, blocks[0]));
+            }
+            let last_bitcoin = snapshot.tip(ChainId::Bitcoin).await?;
+            let last_fork = snapshot.tip(ChainId::BitcoinBlake2b).await?;
+            if last_bitcoin.value() != &bitcoin_tip || last_fork.value() != &fork_tip {
+                return Err(FailureKind::Changed);
+            }
+            observed_at = observed_at
+                .min(last_bitcoin.observed_at())
+                .min(last_fork.observed_at());
+            if !super::super::super::fresh(
+                observed_at,
+                snapshot.now(),
+                policy.max_observation_age_seconds,
+            ) {
+                return Err(FailureKind::Stale);
+            }
+            snapshot.validate_context(&funding.bitcoin.ancestry.provider, roots.generation())?;
+            Ok(CollectedSpendInputs {
+                funding,
+                shared: confirmed,
                 observed_at,
             })
         })
