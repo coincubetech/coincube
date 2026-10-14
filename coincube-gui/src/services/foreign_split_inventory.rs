@@ -200,6 +200,18 @@ impl SplitInventory {
         }
         .cloned()
     }
+    /// All scan-time funding candidates in deterministic outpoint order.
+    /// These remain hints; only the live paired collector can qualify one
+    /// candidate on each chain for review.
+    pub fn funding_candidates(&self, chain: ChainId) -> Vec<SplitCoin> {
+        match chain {
+            ChainId::Bitcoin => self.bitcoin_funding_candidates.values(),
+            ChainId::BitcoinBlake2b => self.btcb2_funding_candidates.values(),
+            _ => return Vec::new(),
+        }
+        .cloned()
+        .collect()
+    }
     /// Unconfirmed on either chain, or present on both after the fork.
     pub fn pending(&self) -> &[InventoryCoin] {
         &self.pending
@@ -670,12 +682,20 @@ mod tests {
         assert_eq!(bitcoin_funding.previous, bitcoin_post.previous);
         assert_eq!(bitcoin_funding.bitcoin_block.unwrap().height, 150);
         assert!(bitcoin_funding.btcb2_block.is_none());
+        assert_eq!(
+            inventory.funding_candidates(ChainId::Bitcoin),
+            vec![bitcoin_funding]
+        );
         let fork_funding = inventory
             .funding_candidate(ChainId::BitcoinBlake2b, btcb2_post.outpoint)
             .unwrap();
         assert_eq!(fork_funding.previous, btcb2_post.previous);
         assert_eq!(fork_funding.btcb2_block.unwrap().height, 151);
         assert!(fork_funding.bitcoin_block.is_none());
+        assert_eq!(
+            inventory.funding_candidates(ChainId::BitcoinBlake2b),
+            vec![fork_funding]
+        );
         assert!(inventory
             .funding_candidate(ChainId::Bitcoin, btcb2_post.outpoint)
             .is_none());

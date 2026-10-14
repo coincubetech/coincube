@@ -68,6 +68,12 @@ a replayable spend.
    Claim or version-11 Split journal. Signer admission still needs to consume
    this fresh evidence with wallet ownership, reservations and a new preflight;
    no candidate or validator result is cached spend authority.
+   A bounded paired search now uses one session, deadline and request budget
+   for Bitcoin and BTCB2 candidate ancestry plus the shared-input refresh;
+   it returns no one-sided result. For foreign Split, scan-derived funding and
+   shared coins are rechecked against the source descriptor before the search.
+   Selected coins are matched to live paths and confirmation blocks. This is
+   still read-only and is not yet invoked by the production Split panel.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly
@@ -97,6 +103,10 @@ a replayable spend.
    unsigned constructions, funding paths, fee rates and target identity, and
    restart can rebuild both from current source coins. It remains unchecked;
    reconstruction does not restore chain proof, reservations or signer access.
+   A read-only paired construction now takes the qualified funding result and
+   builds both ordinary PSBTs together, then validates them against the paired
+   observation. It requires the exact source receive index and target script
+   supplied by their owners, and refuses if scan tips have changed.
    Next update coordinator transport and preflight to carry both typed live
    proofs. Keep the unified signature fallback separate and labeled with its
    actual replay properties.
@@ -152,7 +162,8 @@ read-only and must be generated from the exact PSBT inputs being signed.
 The reusable read-only `CoinReview`/`CoinPairReview` model now derives shared
 and funding rows, subtotals, destination and fees from the exact unsigned
 PSBTs. It refuses missing amounts, duplicate or omitted inputs, mismatched
-shared coins across chains and OP_RETURN outputs. The recorded Claim step-one
+shared coins across chains (including different scripts at the same amount)
+and OP_RETURN outputs. The recorded Claim step-one
 review uses its Bitcoin side and labels the marker as an unverified candidate.
 The paired Claim and Split wizard stages still need to consume the model only
 after fresh two-chain proof, source ownership and reservations are bound; the

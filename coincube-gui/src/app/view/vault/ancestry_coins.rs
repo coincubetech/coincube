@@ -8,6 +8,9 @@ use std::collections::BTreeSet;
 pub struct CoinRow {
     pub outpoint: OutPoint,
     pub amount: Amount,
+    /// Retained so a paired review cannot call two different outputs the
+    /// same shared coin merely because their values happen to match.
+    pub output: TxOut,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -55,6 +58,7 @@ impl CoinReview {
             rows.push(CoinRow {
                 outpoint,
                 amount: utxo.value,
+                output: utxo.clone(),
             });
         }
         let funding_row = rows
@@ -204,7 +208,7 @@ mod tests {
     }
 
     #[test]
-    fn pair_rebuilds_rows_from_changed_psbt_and_refuses_divergent_shared_amounts() {
+    fn pair_rebuilds_rows_from_changed_psbt_and_refuses_divergent_shared_outputs() {
         let shared = outpoint(1);
         let bitcoin_marker = outpoint(2);
         let fork_marker = outpoint(3);
@@ -220,6 +224,17 @@ mod tests {
         assert_eq!(first.fork.fee.to_sat(), 600);
         assert_eq!(rebuilt.fork.fee.to_sat(), 900);
         fork.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(99_999);
+        assert!(CoinPairReview::from_psbts(
+            &bitcoin,
+            &fork,
+            &[shared],
+            bitcoin_marker,
+            fork_marker,
+        )
+        .is_err());
+        fork.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(100_000);
+        fork.inputs[0].witness_utxo.as_mut().unwrap().script_pubkey =
+            ScriptBuf::from_bytes(vec![0, 20, 9]);
         assert!(CoinPairReview::from_psbts(
             &bitcoin,
             &fork,

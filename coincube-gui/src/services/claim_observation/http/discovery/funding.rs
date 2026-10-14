@@ -3,13 +3,20 @@
 //! reservation, signer admission or broadcast authority.
 
 use super::*;
+use crate::services::foreign_split_inventory::{FreshIndex, SplitInventory};
 use coincube_core::{
     claim::{PreflightTips, MIN_CONFIRMATIONS},
     claim_ancestry::retained::RetainedPath,
     claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
-    foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitCoin},
-    miniscript::bitcoin::{consensus::deserialize, psbt::Psbt, Transaction, TxOut},
+    foreign_split::{
+        create_ancestry_split_step1, create_ancestry_split_step2, AncestrySplitInputs,
+        AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs, SplitBranch, SplitCoin,
+        SplitSource,
+    },
+    miniscript::bitcoin::{
+        absolute::LockTime, consensus::deserialize, psbt::Psbt, Script, Transaction, TxOut,
+    },
     spend::CandidateCoin,
 };
 use std::collections::BTreeSet;
@@ -178,6 +185,238 @@ pub struct CollectedSpendInputs {
     shared: Vec<(OutPoint, BlockRef)>,
     shared_outputs: Vec<(OutPoint, TxOut)>,
     observed_at: i64,
+}
+
+/// Read-only foreign Split discovery, joined to the exact scan-derived coins
+/// and source descriptor. Neither this object nor its paths reserve an input
+/// or grant signer access; the two ordinary constructions and journal must
+/// still be checked against fresh observations at admission.
+#[derive(Debug)]
+pub struct OwnedSplitFunding {
+    pub bitcoin: SplitCoin,
+    pub fork: SplitCoin,
+    pub bitcoin_path: RetainedPath,
+    pub fork_path: RetainedPath,
+    pub inputs: CollectedSpendInputs,
+}
+
+/// Construction from live paired proof is still a review artifact. An
+/// independent signer admission must recheck the same proof against current
+/// reservations, source coins and a fresh preflight before exposing either
+/// PSBT to a hardware or software signer.
+#[derive(Debug)]
+pub enum SplitPairError {
+    Changed,
+    InvalidConstruction(coincube_core::foreign_split::Error),
+    Observation(FailureKind),
+}
+
+impl OwnedSplitFunding {
+    /// Build both ordinary transactions from one qualified pair. The source
+    /// wallet's fresh receive index and the target Cube's reserved script are
+    /// supplied by their respective owners; neither can be inferred from a
+    /// funding observation. The same shared inputs appear in both PSBTs.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_split_pair(
+        &self,
+        inventory: &SplitInventory,
+        source: &SplitSource,
+        target_script: &Script,
+        bitcoin_feerate_vb: u64,
+        fork_feerate_vb: u64,
+        context: FundingContext<'_>,
+    ) -> Result<(AncestrySplitStep1, AncestrySplitStep2), SplitPairError> {
+        let FreshIndex::Proven(destination) = inventory.fresh_receive() else {
+            return Err(SplitPairError::Changed);
+        };
+        let shared = inventory.splittable_coins();
+        let expected: BTreeSet<_> = shared.iter().map(|coin| coin.outpoint).collect();
+        let observed: BTreeSet<_> = self
+            .inputs
+            .shared()
+            .iter()
+            .map(|(outpoint, _)| *outpoint)
+            .collect();
+        if shared.is_empty()
+            || expected.len() != shared.len()
+            || expected != observed
+            || inventory.fork_height()
+                != self
+                    .inputs
+                    .funding()
+                    .bitcoin()
+                    .ancestry()
+                    .pair()
+                    .anchor()
+                    .observation
+                    .fork
+                    .as_ref()
+                    .map_or(0, |fork| fork.height)
+            || inventory.bitcoin_tip() != context.tips.bitcoin.hash
+            || inventory.btcb2_tip() != context.tips.fork.hash
+            || inventory.bitcoin_tip_height() as u64 != context.tips.bitcoin.height
+            || inventory.btcb2_tip_height() as u64 != context.tips.fork.height
+            || !source_owns_coin(source, &self.bitcoin)
+            || !source_owns_coin(source, &self.fork)
+            || shared.iter().any(|coin| !source_owns_coin(source, coin))
+        {
+            return Err(SplitPairError::Changed);
+        }
+        let bitcoin_dependency = self
+            .bitcoin_path
+            .reverify()
+            .map_err(|_| SplitPairError::Changed)?;
+        let fork_dependency = self
+            .fork_path
+            .reverify()
+            .map_err(|_| SplitPairError::Changed)?;
+        let bitcoin_tip = inventory.bitcoin_tip_height();
+        let fork_tip = inventory.btcb2_tip_height();
+        let bitcoin_locktime =
+            LockTime::from_height(bitcoin_tip).map_err(|_| SplitPairError::Changed)?;
+        let fork_locktime = LockTime::from_height(fork_tip).map_err(|_| SplitPairError::Changed)?;
+        let bitcoin = create_ancestry_split_step1(
+            &AncestrySplitInputs {
+                chain: ChainId::Bitcoin,
+                source,
+                shared: &shared,
+                funding: &self.bitcoin,
+                dependency: &bitcoin_dependency,
+                fork_height: inventory.fork_height(),
+                destination,
+            },
+            bitcoin_feerate_vb,
+            bitcoin_locktime,
+            bitcoin_tip,
+        )
+        .map_err(SplitPairError::InvalidConstruction)?;
+        let fork = create_ancestry_split_step2(
+            &AncestrySplitStep2Inputs {
+                chain: ChainId::BitcoinBlake2b,
+                source,
+                shared: &shared,
+                funding: &self.fork,
+                dependency: &fork_dependency,
+                fork_height: inventory.fork_height(),
+                claimed: bitcoin.claimed_prevouts(),
+                target: target_script,
+            },
+            fork_feerate_vb,
+            fork_locktime,
+            fork_tip,
+        )
+        .map_err(SplitPairError::InvalidConstruction)?;
+        self.inputs
+            .validate_for_split(
+                &self.bitcoin_path,
+                &self.fork_path,
+                &self.bitcoin,
+                &self.fork,
+                &bitcoin,
+                &fork,
+                context,
+            )
+            .map_err(SplitPairError::Observation)?;
+        Ok((bitcoin, fork))
+    }
+}
+
+fn source_owns_coin(source: &SplitSource, coin: &SplitCoin) -> bool {
+    let Some(output) = coin.previous.output.get(coin.outpoint.vout as usize) else {
+        return false;
+    };
+    let descriptor = match coin.branch {
+        SplitBranch::External => Some(source.external()),
+        SplitBranch::Internal => source.internal(),
+    };
+    coin.previous.compute_txid() == coin.outpoint.txid
+        && coin.index < (1 << 31)
+        && descriptor
+            .and_then(|descriptor| descriptor.at_derivation_index(coin.index).ok())
+            .is_some_and(|descriptor| descriptor.script_pubkey() == output.script_pubkey)
+}
+
+impl HttpObservationSource {
+    /// Search both candidate inventories in one bounded collection, then bind
+    /// the selected raw transactions and derivations to the foreign source.
+    /// A missing path on either chain returns no pair, never a one-sided plan.
+    pub async fn discover_owned_split_funding(
+        &self,
+        inventory: &SplitInventory,
+        source: &SplitSource,
+        policy: Policy,
+    ) -> Result<Option<OwnedSplitFunding>, DiscoveryError> {
+        let invalid = || DiscoveryError::Observation(FailureKind::InvalidPlan);
+        let bitcoin = inventory.funding_candidates(ChainId::Bitcoin);
+        let fork = inventory.funding_candidates(ChainId::BitcoinBlake2b);
+        let shared = inventory.splittable_coins();
+        if bitcoin.len() > MAX_ANCESTRY_CANDIDATES || fork.len() > MAX_ANCESTRY_CANDIDATES {
+            return Err(DiscoveryError::Observation(FailureKind::CollectionLimit));
+        }
+        if shared.is_empty()
+            || bitcoin
+                .iter()
+                .chain(&fork)
+                .chain(&shared)
+                .any(|coin| !source_owns_coin(source, coin))
+        {
+            return Err(invalid());
+        }
+        let bitcoin_outpoints: Vec<_> = bitcoin.iter().map(|coin| coin.outpoint).collect();
+        let fork_outpoints: Vec<_> = fork.iter().map(|coin| coin.outpoint).collect();
+        let shared_outpoints: Vec<_> = shared.iter().map(|coin| coin.outpoint).collect();
+        let Some(inputs) = self
+            .discover_spend_inputs(
+                &bitcoin_outpoints,
+                &fork_outpoints,
+                &shared_outpoints,
+                policy,
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let bitcoin_selected = inputs.funding().bitcoin().selected();
+        let fork_selected = inputs.funding().fork().selected();
+        let bitcoin_coin = bitcoin
+            .into_iter()
+            .find(|coin| coin.outpoint == bitcoin_selected)
+            .ok_or_else(invalid)?;
+        let fork_coin = fork
+            .into_iter()
+            .find(|coin| coin.outpoint == fork_selected)
+            .ok_or_else(invalid)?;
+        let bitcoin_path = inputs
+            .funding()
+            .bitcoin()
+            .ancestry()
+            .retained_path()
+            .map_err(DiscoveryError::Structural)?;
+        let fork_path = inputs
+            .funding()
+            .fork()
+            .ancestry()
+            .retained_path()
+            .map_err(DiscoveryError::Structural)?;
+        inputs
+            .funding()
+            .bitcoin()
+            .validate_candidate(&bitcoin_path, &bitcoin_coin)
+            .and_then(|_| {
+                inputs
+                    .funding()
+                    .fork()
+                    .validate_candidate(&fork_path, &fork_coin)
+            })
+            .map_err(DiscoveryError::Observation)?;
+        Ok(Some(OwnedSplitFunding {
+            bitcoin: bitcoin_coin,
+            fork: fork_coin,
+            bitcoin_path,
+            fork_path,
+            inputs,
+        }))
+    }
 }
 
 impl CollectedSpendInputs {
@@ -795,6 +1034,59 @@ impl HttpObservationSource {
 mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::hashes::Hash;
+
+    #[test]
+    fn split_funding_must_match_source_descriptor_and_previous_transaction() {
+        use coincube_core::{
+            foreign_split::SplitBranch,
+            miniscript::{
+                bitcoin::{absolute::LockTime, transaction::Version, Amount, TxIn},
+                Descriptor,
+            },
+        };
+        use std::str::FromStr;
+        let descriptor = Descriptor::from_str(
+            "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)",
+        )
+        .unwrap();
+        let source = SplitSource::new(descriptor, None).unwrap();
+        let script = source
+            .external()
+            .at_derivation_index(0)
+            .unwrap()
+            .script_pubkey();
+        let previous = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: script,
+            }],
+        };
+        let mut candidate = SplitCoin {
+            outpoint: OutPoint::new(previous.compute_txid(), 0),
+            branch: SplitBranch::External,
+            index: 0,
+            previous,
+            bitcoin_block: None,
+            btcb2_block: None,
+        };
+        assert!(source_owns_coin(&source, &candidate));
+        candidate.previous.output[0].script_pubkey =
+            coincube_core::miniscript::bitcoin::ScriptBuf::new();
+        assert!(!source_owns_coin(&source, &candidate));
+        candidate.previous.output[0].script_pubkey = source
+            .external()
+            .at_derivation_index(0)
+            .unwrap()
+            .script_pubkey();
+        candidate.outpoint.vout = 1;
+        assert!(!source_owns_coin(&source, &candidate));
+        candidate.outpoint.vout = 0;
+        candidate.branch = SplitBranch::Internal;
+        assert!(!source_owns_coin(&source, &candidate));
+    }
 
     #[test]
     fn shared_psbt_metadata_must_match_the_txid_authenticated_output() {

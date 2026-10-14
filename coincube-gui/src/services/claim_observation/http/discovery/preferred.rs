@@ -3,6 +3,74 @@ use super::*;
 
 pub const MAX_ANCESTRY_CANDIDATES: usize = 32;
 impl HttpObservationSource {
+    /// Discover both chain-specific funding paths and refresh every shared
+    /// input as one bounded read. A one-sided result is never returned: the
+    /// caller still has to bind the selected outputs to its source wallet,
+    /// reserve them, build both transactions and run signer preflight.
+    ///
+    /// The outer snapshot shares one request/byte budget across both searches
+    /// and the final collection, with one wall-clock deadline for the pair.
+    pub async fn discover_spend_inputs(
+        &self,
+        bitcoin_candidates: &[OutPoint],
+        fork_candidates: &[OutPoint],
+        shared: &[OutPoint],
+        policy: Policy,
+    ) -> Result<Option<CollectedSpendInputs>, DiscoveryError> {
+        let invalid = || DiscoveryError::Observation(FailureKind::InvalidPlan);
+        let shared_set: BTreeSet<_> = shared.iter().copied().collect();
+        if bitcoin_candidates.len() > MAX_ANCESTRY_CANDIDATES
+            || fork_candidates.len() > MAX_ANCESTRY_CANDIDATES
+        {
+            return Err(DiscoveryError::Observation(FailureKind::CollectionLimit));
+        }
+        if shared_set.is_empty()
+            || shared_set.len() != shared.len()
+            || shared_set.iter().any(OutPoint::is_null)
+            || policy.max_observation_age_seconds <= 0
+            || policy.expiry_margin_seconds <= 0
+            || bitcoin_candidates.iter().any(OutPoint::is_null)
+            || fork_candidates.iter().any(OutPoint::is_null)
+            || bitcoin_candidates.iter().collect::<BTreeSet<_>>().len() != bitcoin_candidates.len()
+            || fork_candidates.iter().collect::<BTreeSet<_>>().len() != fork_candidates.len()
+            || bitcoin_candidates
+                .iter()
+                .any(|coin| shared_set.contains(coin))
+            || fork_candidates.iter().any(|coin| shared_set.contains(coin))
+            || bitcoin_candidates
+                .iter()
+                .any(|coin| fork_candidates.contains(coin))
+        {
+            return Err(invalid());
+        }
+        let source = self.discovery_snapshot();
+        tokio::time::timeout(MAX_COLLECTION_TIME, async {
+            let Some(bitcoin) = source
+                .discover_preferred_ancestry(bitcoin_candidates, policy)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let Some(fork) = source
+                .discover_preferred_fork_ancestry(fork_candidates, policy)
+                .await?
+            else {
+                return Ok(None);
+            };
+            let bitcoin_path = bitcoin
+                .retained_path()
+                .map_err(DiscoveryError::Structural)?;
+            let fork_path = fork.retained_path().map_err(DiscoveryError::Structural)?;
+            let inputs = source
+                .collect_spend_inputs(&bitcoin_path, &fork_path, shared, policy)
+                .await
+                .map_err(DiscoveryError::Observation)?;
+            Ok(Some(inputs))
+        })
+        .await
+        .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))?
+    }
+
     /// Search in caller preference order. The caller supplies owned, confirmed,
     /// mature, unspent candidates disjoint from the shared Claim inputs; those
     /// conditions must be checked again during construction and preflight.
@@ -132,6 +200,50 @@ mod tests {
             Err(DiscoveryError::Observation(FailureKind::Cancelled))
         ));
         any.assert_hits(0);
+    }
+
+    #[tokio::test]
+    async fn paired_search_refuses_overlap_and_oversize_before_any_network_read() {
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+        client.set_token("paired-search-fixture");
+        let (_sender, generation) = tokio::sync::watch::channel(1);
+        let source = HttpObservationSource::new(
+            client,
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: 1,
+                generation,
+            },
+        )
+        .unwrap();
+        let (id, _) = ancestry_fixture();
+        let shared = OutPoint::new(id, 0);
+        let funding = OutPoint::new(id, 1);
+        for (bitcoin, fork, common) in [
+            (vec![shared], vec![funding], vec![shared]),
+            (vec![funding], vec![funding], vec![shared]),
+            (vec![funding, funding], vec![], vec![shared]),
+            (vec![funding], vec![], vec![]),
+        ] {
+            assert!(matches!(
+                source
+                    .discover_spend_inputs(&bitcoin, &fork, &common, policy())
+                    .await,
+                Err(DiscoveryError::Observation(FailureKind::InvalidPlan))
+            ));
+        }
+        assert!(matches!(
+            source
+                .discover_spend_inputs(
+                    &[],
+                    &vec![funding; MAX_ANCESTRY_CANDIDATES + 1],
+                    &[shared],
+                    policy()
+                )
+                .await,
+            Err(DiscoveryError::Observation(FailureKind::CollectionLimit))
+        ));
     }
 
     #[tokio::test]
