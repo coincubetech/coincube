@@ -275,9 +275,7 @@ pub fn create_ancestry_split_step1(
         .checked_mul(feerate_vb)
         .ok_or(Error::Economics)?;
     if plan.funding_amount < fee {
-        return Err(Error::InvalidFunding(
-            "Bitcoin-only funding input does not cover the transaction fee",
-        ));
+        return Err(Error::FundingBelowFee(ChainId::Bitcoin));
     }
     let value = plan.total.checked_sub(fee).ok_or(Error::Economics)?;
     check_economics(

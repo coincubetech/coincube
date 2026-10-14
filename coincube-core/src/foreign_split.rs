@@ -119,6 +119,9 @@ pub enum Error {
     /// A post-fork funding coin is missing, malformed, or not bound to the
     /// supplied structural dependency. Live chain exclusivity is separate.
     InvalidFunding(&'static str),
+    /// The selected chain-specific funding input cannot cover the current
+    /// transaction fee; shared pre-fork value must never subsidize it.
+    FundingBelowFee(ChainId),
 }
 
 impl fmt::Display for Error {
@@ -162,6 +165,12 @@ impl fmt::Display for Error {
             }
             Self::InvalidTarget => f.write_str("Step 2 target address is not usable"),
             Self::InvalidFunding(reason) => write!(f, "Invalid split funding coin: {reason}"),
+            Self::FundingBelowFee(chain) => {
+                write!(
+                    f,
+                    "{chain:?} funding coin does not cover this transaction's fee"
+                )
+            }
         }
     }
 }

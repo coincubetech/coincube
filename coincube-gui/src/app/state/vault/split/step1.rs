@@ -901,7 +901,15 @@ impl SplitConnect for ProductionConnect {
                         context,
                     )
                     .map_err(|error| {
-                        format!("The exact split transactions could not be reviewed: {error:?}")
+                        match error {
+                            crate::services::claim_observation::http::SplitPairError::InvalidConstruction(
+                                coincube_core::foreign_split::Error::FundingBelowFee(ChainId::Bitcoin),
+                            ) => "The selected Bitcoin-only coin cannot cover the current Bitcoin transaction fee. It cannot be used for this attempt; retry when fees fall or after a separate eligible deposit is confirmed.".to_string(),
+                            crate::services::claim_observation::http::SplitPairError::InvalidConstruction(
+                                coincube_core::foreign_split::Error::FundingBelowFee(ChainId::BitcoinBlake2b),
+                            ) => "The selected BTCB2-only coin cannot cover the current BTCB2 transaction fee. It cannot be used for this attempt; retry when fees fall or after a separate eligible deposit is confirmed.".to_string(),
+                            _ => format!("The exact split transactions could not be reviewed: {error:?}"),
+                        }
                     })?;
                 Some(
                     crate::app::view::vault::ancestry_coins::CoinPairReview::from_psbts(

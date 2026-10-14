@@ -210,9 +210,7 @@ pub fn create_ancestry_split_step2(
         .checked_mul(feerate_vb)
         .ok_or(Error::Economics)?;
     if plan.funding_amount < fee {
-        return Err(Error::InvalidFunding(
-            "BTCB2-only funding input does not cover the transaction fee",
-        ));
+        return Err(Error::FundingBelowFee(ChainId::BitcoinBlake2b));
     }
     let value = plan.total.checked_sub(fee).ok_or(Error::Economics)?;
     check_economics(plan.total, value, inputs.target, plan.maximum_signed_vbytes)?;
