@@ -235,6 +235,39 @@ pub struct AncestrySelfTransfer {
     poison_derivation: (ChildNumber, bool),
     claimed_prevouts: Vec<bitcoin::OutPoint>,
 }
+
+/// Upper bound for an ordinary one-output Claim transaction spending every
+/// shared coin plus one chain-specific deposit. This is a funding estimate,
+/// not authorization to construct, sign or broadcast a transaction.
+pub fn estimate_ancestry_self_transfer_vbytes(
+    descriptor: &CoincubeDescriptor,
+    shared_count: usize,
+) -> Result<u64, Error> {
+    if descriptor.is_taproot() || shared_count == 0 {
+        return Err(Error::InvalidRequest(
+            "Native P2WSH and at least one shared coin required",
+        ));
+    }
+    let input_count = shared_count
+        .checked_add(1)
+        .filter(|count| *count <= 20_001)
+        .ok_or(Error::InvalidRequest("Too many Claim inputs to estimate"))?;
+    let secp = secp256k1::Secp256k1::verification_only();
+    let change_script = descriptor
+        .change_descriptor()
+        .derive(ChildNumber::Normal { index: 0 }, &secp)
+        .script_pubkey();
+    let tx = bitcoin::Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![bitcoin::TxIn::default(); input_count],
+        output: vec![bitcoin::TxOut {
+            value: bitcoin::Amount::ZERO,
+            script_pubkey: change_script,
+        }],
+    };
+    Ok(descriptor.unsigned_tx_max_vbytes(&tx, true))
+}
 impl AncestrySelfTransfer {
     pub fn psbt(&self) -> &bitcoin::psbt::Psbt {
         self.transfer.psbt()
@@ -939,6 +972,9 @@ mod tests {
         )
         .unwrap();
         let fee = owned_spend_fee(&coins, built.psbt()).unwrap();
+        let estimated = estimate_ancestry_self_transfer_vbytes(&desc, 1).unwrap();
+        assert!(estimated >= fee / 5);
+        assert!(estimated - fee / 5 < 10);
         let vbytes = fee / 5;
         let too_small = coins[0].amount.to_sat() / vbytes + 1;
         assert!(matches!(

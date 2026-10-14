@@ -215,6 +215,10 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     let addresses = claim_workflow::CheckedClaimFundingAddresses {
         bitcoin_deposit: "bitcoin-address".into(),
         btcb2_deposit: "btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
     };
     drop(p.apply(ClaimEvent::FundingPrepared(10, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingChecking));

@@ -11,8 +11,10 @@ use crate::services::{
         CollectionContext, FailureKind,
     },
     coincube::CoincubeClient,
+    foreign_psbt::btcb2_sweep_feerate,
     foreign_split_inventory::FreshDepositAddresses,
     split_evidence::ConnectEsplora,
+    split_fees::{bitcoin_step1_feerate, btcb2_fee_source, ConnectBitcoinFees},
 };
 use async_trait::async_trait;
 use coincube_core::{
@@ -84,6 +86,7 @@ pub enum ClaimAddressError {
     ChangedSession,
     Used,
     Unavailable,
+    FeeUnavailable,
     WalletState,
     Stale,
     Deadline,
@@ -93,6 +96,16 @@ pub enum ClaimAddressError {
 pub struct CheckedClaimFundingAddresses {
     pub bitcoin_deposit: String,
     pub btcb2_deposit: String,
+    pub bitcoin_minimum_sats: u64,
+    pub btcb2_minimum_sats: u64,
+    pub bitcoin_rate_sat_vb: u64,
+    pub btcb2_rate_sat_vb: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CheckedClaimAddresses {
+    bitcoin_deposit: String,
+    btcb2_deposit: String,
 }
 
 #[derive(Debug)]
@@ -133,7 +146,7 @@ async fn checked_history(
     generation: &watch::Receiver<u64>,
     expected: u64,
     require_unused: bool,
-) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
+) -> Result<CheckedClaimAddresses, ClaimAddressError> {
     use coincube_core::chain::ChainId;
     if !current(generation, expected) {
         return Err(ClaimAddressError::ChangedSession);
@@ -163,7 +176,7 @@ async fn checked_history(
                 }
             }
         }
-        Ok(CheckedClaimFundingAddresses {
+        Ok(CheckedClaimAddresses {
             bitcoin_deposit: addresses[0].clone(),
             btcb2_deposit: addresses[1].clone(),
         })
@@ -462,14 +475,14 @@ pub fn load_claim_funding(
 /// identity and fresh Bitcoin/BTCB2 address histories still show them unused.
 /// A successful result is not a proof that either later deposit is exclusive.
 #[allow(clippy::too_many_arguments)]
-pub async fn check_reserved_claim_addresses(
+async fn check_reserved_claim_addresses(
     directory: PathBuf,
     descriptor: CoincubeDescriptor,
     identity: WalletIdentity,
     context: Context,
     client: CoincubeClient,
     generation: watch::Receiver<u64>,
-) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
+) -> Result<CheckedClaimAddresses, ClaimAddressError> {
     if !current(&generation, context.generation)
         || client.token().is_none_or(str::is_empty)
         || client.base_url.trim_end_matches('/') != context.provider.trim_end_matches('/')
@@ -513,6 +526,7 @@ pub async fn prepare_claim_deposit_instructions(
     client: CoincubeClient,
     generation: watch::Receiver<u64>,
     daemon: &(dyn Daemon + Send + Sync),
+    shared_count: usize,
 ) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
     let expected = context.generation;
     if !current(&generation, expected)
@@ -556,10 +570,10 @@ pub async fn prepare_claim_deposit_instructions(
     } else {
         let checked = check_reserved_claim_addresses(
             directory.clone(),
-            descriptor,
+            descriptor.clone(),
             identity,
             context,
-            client,
+            client.clone(),
             generation.clone(),
         )
         .await?;
@@ -572,6 +586,40 @@ pub async fn prepare_claim_deposit_instructions(
             return Err(ClaimAddressError::InvalidReservation);
         }
         checked
+    };
+    let size = coincube_core::claim_spend::estimate_ancestry_self_transfer_vbytes(
+        &descriptor,
+        shared_count,
+    )
+    .map_err(|_| ClaimAddressError::FeeUnavailable)?;
+    let bitcoin_fees = ConnectBitcoinFees::new(&client).ok_or(ClaimAddressError::FeeUnavailable)?;
+    let bitcoin_rate = bitcoin_step1_feerate(&bitcoin_fees)
+        .await
+        .ok_or(ClaimAddressError::FeeUnavailable)?;
+    let btcb2_fees = btcb2_fee_source(Some(client));
+    let btcb2_rate = btcb2_sweep_feerate(&*btcb2_fees)
+        .await
+        .ok_or(ClaimAddressError::FeeUnavailable)?;
+    if !current(&generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+    let minimum = |index: u32, rate: u64| {
+        let script = descriptor
+            .receive_descriptor()
+            .derive(ChildNumber::Normal { index }, &secp)
+            .script_pubkey();
+        size.checked_mul(rate)
+            .map(|fee| fee.max(script.minimal_non_dust().to_sat()))
+            .ok_or(ClaimAddressError::FeeUnavailable)
+    };
+    let quoted = CheckedClaimFundingAddresses {
+        bitcoin_deposit: checked.bitcoin_deposit,
+        btcb2_deposit: checked.btcb2_deposit,
+        bitcoin_minimum_sats: minimum(saved.indices.bitcoin_deposit, bitcoin_rate)?,
+        btcb2_minimum_sats: minimum(saved.indices.btcb2_deposit, btcb2_rate)?,
+        bitcoin_rate_sat_vb: bitcoin_rate,
+        btcb2_rate_sat_vb: btcb2_rate,
     };
     let highest = saved
         .indices
@@ -604,7 +652,7 @@ pub async fn prepare_claim_deposit_instructions(
     if !current(&generation, expected) {
         return Err(ClaimAddressError::ChangedSession);
     }
-    Ok(checked)
+    Ok(quoted)
 }
 
 #[cfg(test)]

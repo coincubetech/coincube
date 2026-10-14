@@ -1189,6 +1189,7 @@ impl ClaimStep1Panel {
                 if inventory.shared().is_empty() {
                     return Err("No shared pre-fork coins were found in this Vault.".into());
                 }
+                let shared_count = inventory.shared().len();
                 let for_reservation = (
                     directory.clone(),
                     descriptor.clone(),
@@ -1216,9 +1217,14 @@ impl ClaimStep1Panel {
                     connect.client,
                     generation,
                     &*daemon,
+                    shared_count,
                 )
                 .await
-                .map_err(|_| "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.".to_string())
+                .map_err(|error| if error == claim_workflow::ClaimAddressError::FeeUnavailable {
+                    "Current Bitcoin and BTCB2 fee quotes are needed before showing deposit amounts.".to_string()
+                } else {
+                    "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.".to_string()
+                })
             },
             move |result| {
                 Message::Claim(ClaimEvent::FundingPrepared(

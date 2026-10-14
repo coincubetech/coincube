@@ -123,7 +123,11 @@ a replayable spend.
    saved source and reads current fees on both chains before showing each
    minimum; it refuses the instructions when either quote is unavailable.
    This estimate must be recalculated from actual inputs at review. Claim's
-   deposit screen still needs a corresponding minimum quote.
+   deposit screen now uses the Vault descriptor's maximum signed size for all
+   scanned shared inputs plus one funding input, reads fresh fees on each
+   chain, and shows separate minimum deposits. It refuses to release an
+   address reservation when either quote is unavailable. The actual fee must
+   still be recalculated from the constructed pair at review.
    Both rebuild exact PSBTs from fresh coins and the persisted fee rate,
    rejecting changed scripts, amounts, input sets, destinations and fees.
    These are structural builders only; the old OP_RETURN types remain for
@@ -204,8 +208,7 @@ a replayable spend.
    only a transient status and does not retain spend authority. Its status
    distinguishes candidate presence at the Bitcoin and BTCB2 reserved addresses
    from a successful paired ancestry proof. An unreleased reservation cannot
-   enter discovery. Exact funding minimums and ordinary transaction admission
-   remain. Claim now durably marks
+   enter discovery. Ordinary transaction admission remains. Claim now durably marks
    its saved reservation released only after both addresses were checked
    unused and the Bitcoin daemon accepted their receive indices. Reopening
    that same Claim reservation checks identity and wallet state again, then
