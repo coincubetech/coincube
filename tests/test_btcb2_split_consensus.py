@@ -1229,6 +1229,20 @@ def test_split_ancestry_pair_consensus(split_chains, shape, record_property):
         assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
         a.rpc.reconsiderblock(block)
         assert a.rpc.getbestblockhash() == block
+        # A six-block reorg on either side likewise cannot make the exact
+        # other-chain bytes valid, even though shared coins become unspent.
+        for own, other_raw in (
+            (a, signed["btcb2_raw"]),
+            (b, signed["bitcoin_raw"]),
+        ):
+            own.generate_block(5)
+            tip = own.rpc.getbestblockhash()
+            first_confirmation = own.rpc.getblockhash(own.rpc.getblockcount() - 5)
+            own.rpc.invalidateblock(first_confirmation)
+            rejected = own.rpc.testmempoolaccept([other_raw])[0]
+            assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+            own.rpc.reconsiderblock(first_confirmation)
+            assert own.rpc.getbestblockhash() == tip
 
 
 def confirmed_step1(split_chains, shape):
