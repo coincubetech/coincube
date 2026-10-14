@@ -456,6 +456,17 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .unwrap();
     assert_eq!(restored_bitcoin.psbt(), bitcoin.psbt());
     assert_eq!(restored_fork.psbt(), fork.psbt());
+    let recovered_fork = reopened
+        .restore_ancestry_split_fork(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &fork_marker,
+            TIP,
+        )
+        .unwrap();
+    assert_eq!(recovered_fork.psbt(), fork.psbt());
     assert!(!reopened.construction_verified);
     // Both ordinary witnesses remain bound to the exact unsigned journal
     // pair across restart. This record is only reconciliation data; the
@@ -864,6 +875,21 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .unwrap()
         .possible_attempt(ChainId::Bitcoin)
         .is_some());
+    assert_eq!(
+        reopened
+            .restore_ancestry_split_fork(
+                &context(),
+                &wallet.source,
+                &target,
+                &shared,
+                &fork_marker,
+                TIP,
+            )
+            .unwrap()
+            .psbt(),
+        fork.psbt()
+    );
+    assert!(!reopened.construction_verified);
     let initial_proof = super::super::paired_submission::initial_proof_for_test(
         &reopened,
         &context(),
@@ -1140,6 +1166,28 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             TIP,
             &shared,
             &wrong_marker,
+            TIP,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(matches!(
+        reopened.restore_ancestry_split_fork(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &wrong_marker,
+            TIP,
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        reopened.restore_ancestry_split_fork(
+            &context(),
+            &wallet.source,
+            &target,
+            &[],
+            &fork_marker,
             TIP,
         ),
         Err(Error::InvalidPlan)

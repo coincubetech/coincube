@@ -1010,6 +1010,74 @@ impl Controller {
         Ok((bitcoin, fork))
     }
 
+    /// Rebuild only the saved BTCB2 transaction from source-owned coins.
+    /// Once Bitcoin confirms, its spent inputs cannot be recovered from a
+    /// current UTXO scan, so the pair restorer above is not usable at that
+    /// stage. This is structural reconstruction only: the signed Bitcoin
+    /// witness, live two-chain proof, reservation and signer admission still
+    /// have to be checked independently.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_ancestry_split_fork(
+        &mut self,
+        current: &Context,
+        source: &SplitSource,
+        target: &CoincubeDescriptor,
+        fork_shared: &[SplitCoin],
+        fork_marker: &SplitCoin,
+        fork_tip: u32,
+    ) -> Result<AncestrySplitStep2, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        let record = self.record_of(SplitKind::Ancestry)?;
+        let funding = record.funding.as_ref().ok_or(Error::InvalidJournal)?;
+        if self.intent.phase != Phase::Intent
+            || record.source_digest != source.digest()
+            || record
+                .descriptors
+                .as_ref()
+                .map(StoredDescriptors::source)
+                .transpose()?
+                != Some(source.clone())
+            || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
+            || !funding.fork.matches_coin(fork_marker)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let target_index = coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(
+            record.target_index.ok_or(Error::InvalidJournal)?,
+        )
+        .map_err(|_| Error::InvalidJournal)?;
+        let target_script = target
+            .receive_descriptor()
+            .derive(
+                target_index,
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        if record.target_script.as_ref() != Some(&target_script) {
+            return Err(Error::WrongIdentity);
+        }
+        let fork_path = funding.fork.decode()?;
+        let dependency = fork_path.reverify().map_err(|_| Error::InvalidJournal)?;
+        reconstruct_ancestry_split_step2(
+            &AncestrySplitStep2Inputs {
+                chain: self.intent.plan.fork_chain,
+                source,
+                shared: fork_shared,
+                funding: fork_marker,
+                dependency: &dependency,
+                fork_height: record.fork_height,
+                claimed: &self.intent.plan.claimed_prevouts,
+                target: &target_script,
+            },
+            &funding.step2_unsigned,
+            funding.fork_feerate_vb,
+            fork_tip,
+        )
+        .map_err(|_| Error::InvalidPlan)
+    }
+
     /// Compare a fresh two-chain observation with the exact version-11
     /// journal and the two owned ordinary constructions. This is a read-only
     /// review check, never construction or signing authority.

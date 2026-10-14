@@ -618,7 +618,11 @@ marker spend cases remain.
    transactions from the fresh post-Bitcoin scan. Each shared input's block
    must equal the collector's canonical pre-fork Bitcoin block, and the BTCB2
    funding input must match the scan's joined candidate. The recovered coins
-   remain construction data; no signer or send path consumes them yet.
+   remain construction data; no signer or send path consumes them yet. A
+   separate version-11 journal reader can now reconstruct only the recorded
+   BTCB2 PSBT from such coins, since the Bitcoin inputs have left the current
+   UTXO scan. It grants no spend permission and still needs the saved signed
+   Bitcoin witness and full stage-two requalification at the coordinator.
    The version-10 Claim and version-11 Split journal proof entries now accept
    those distinct requalification result types rather than a raw
    post-Bitcoin observation. Their shared private check binds the saved exact
