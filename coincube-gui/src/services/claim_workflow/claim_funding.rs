@@ -297,7 +297,8 @@ impl ClaimFundingReservation {
         context: &Context,
     ) -> Result<(Vec<CandidateCoin>, Vec<CandidateCoin>), Error> {
         self.validate()?;
-        if !self.matches(inventory.descriptor(), identity, context)
+        if !self.is_released()
+            || !self.matches(inventory.descriptor(), identity, context)
             || inventory.scan_report().bitcoin.generation() != context.generation
             || inventory.scan_report().btcb2.generation() != context.generation
         {
@@ -308,6 +309,18 @@ impl ClaimFundingReservation {
             inventory.fork_funding(),
             self.indices,
         ))
+    }
+
+    /// Display-only candidate presence at the two exact released addresses.
+    /// Neither a scan hit nor this status proves exclusive ancestry.
+    pub fn candidate_presence(
+        &self,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+    ) -> Result<(bool, bool), Error> {
+        let (bitcoin, fork) = self.reserved_candidates(inventory, identity, context)?;
+        Ok((!bitcoin.is_empty(), !fork.is_empty()))
     }
 
     /// Search only the exact two receive addresses reserved before deposits.

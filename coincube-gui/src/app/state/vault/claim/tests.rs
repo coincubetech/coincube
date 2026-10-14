@@ -223,12 +223,33 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(!p.can_sign_or_submit());
     p.funding_checking = true;
     p.check_seq = 12;
-    drop(p.apply(ClaimEvent::FundingChecked(11, 7, 0, Ok(true))));
+    let progress = ClaimDepositProgress {
+        bitcoin_candidate: true,
+        btcb2_candidate: true,
+        both_verified: true,
+    };
+    drop(p.apply(ClaimEvent::FundingChecked(11, 7, 0, Ok(progress))));
     assert!(p.funding_checking);
     assert!(p.funding_status.is_none());
-    drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Ok(true))));
+    drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Ok(progress))));
     assert!(!p.funding_checking);
     assert!(p.funding_status.as_deref().unwrap().contains("proofs"));
+    assert!(!p.can_sign_or_submit());
+    p.funding_checking = true;
+    p.check_seq = 13;
+    drop(p.apply(ClaimEvent::FundingChecked(
+        13,
+        7,
+        0,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: false,
+            both_verified: false,
+        }),
+    )));
+    let status = p.funding_status.as_deref().unwrap();
+    assert!(status.contains("Bitcoin deposit: post-fork candidate found"));
+    assert!(status.contains("Bitcoin Blake2b deposit: no confirmed candidate"));
     assert!(!p.can_sign_or_submit());
     p.revoke();
     assert!(matches!(p.stage, Stage::Preconditions));

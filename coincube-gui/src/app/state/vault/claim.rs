@@ -275,6 +275,15 @@ impl ClaimSession {
     }
 }
 
+/// Deposit scan hints are displayed separately from the paired ancestry
+/// proof. A candidate never enables signing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ClaimDepositProgress {
+    pub bitcoin_candidate: bool,
+    pub btcb2_candidate: bool,
+    pub both_verified: bool,
+}
+
 /// Results of the panel's async work. Every variant that carries the
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
@@ -285,7 +294,7 @@ pub enum ClaimEvent {
         u64,
         Result<claim_workflow::CheckedClaimFundingAddresses, String>,
     ),
-    FundingChecked(u64, u64, u64, Result<bool, String>),
+    FundingChecked(u64, u64, u64, Result<ClaimDepositProgress, String>),
     Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
@@ -1312,6 +1321,12 @@ impl ClaimStep1Panel {
                     "The saved deposit addresses no longer match this Cube and account.".to_string()
                 })?
                 .ok_or_else(|| "The saved deposit addresses are missing.".to_string())?;
+                let (bitcoin_candidate, btcb2_candidate) = saved
+                    .candidate_presence(&inventory, &identity, &context)
+                    .map_err(|_| {
+                        "The saved deposit addresses no longer match this Vault and account."
+                            .to_string()
+                    })?;
                 let source = HttpObservationSource::new(
                     connect.client,
                     ChainId::Bitcoin,
@@ -1333,7 +1348,11 @@ impl ClaimStep1Panel {
                         CHECK_POLICY.observations,
                     )
                     .await
-                    .map(|proof| proof.is_some())
+                    .map(|proof| ClaimDepositProgress {
+                        bitcoin_candidate,
+                        btcb2_candidate,
+                        both_verified: proof.is_some() && bitcoin_candidate && btcb2_candidate,
+                    })
                     .map_err(|_| "The deposits could not both be verified against the current chains and Vault.".to_string())
             },
             move |result| {
@@ -1959,10 +1978,24 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 self.funding_status = Some(match result {
-                    Ok(true) => "Both deposits have current two-chain ancestry proofs.".into(),
-                    Ok(false) => {
-                        "Waiting for confirmed, unspent deposits at both reserved addresses.".into()
-                    }
+                    Ok(progress) => format!(
+                        "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
+                        if progress.bitcoin_candidate {
+                            "post-fork candidate found"
+                        } else {
+                            "no confirmed candidate at the reserved address"
+                        },
+                        if progress.btcb2_candidate {
+                            "post-fork candidate found"
+                        } else {
+                            "no confirmed candidate at the reserved address"
+                        },
+                        if progress.both_verified {
+                            "Both deposits have current two-chain ancestry proofs."
+                        } else {
+                            "Candidates are not yet spend authority."
+                        }
+                    ),
                     Err(reason) => reason,
                 });
                 Task::none()

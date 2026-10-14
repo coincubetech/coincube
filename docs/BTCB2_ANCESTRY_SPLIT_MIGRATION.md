@@ -189,8 +189,10 @@ a replayable spend.
    this stage cannot sign. A separate "Check deposits" action now reloads the
    same reservation, reconciles a new paired scan with the full Bitcoin Vault
    UTXO set, and runs the bounded two-chain ancestry collector; it displays
-   only a transient status and does not retain spend authority. Per-chain
-   deposit progress, exact funding minimums and ordinary transaction admission
+   only a transient status and does not retain spend authority. Its status
+   distinguishes candidate presence at the Bitcoin and BTCB2 reserved addresses
+   from a successful paired ancestry proof. An unreleased reservation cannot
+   enter discovery. Exact funding minimums and ordinary transaction admission
    remain. Claim now durably marks
    its saved reservation released only after both addresses were checked
    unused and the Bitcoin daemon accepted their receive indices. Reopening
