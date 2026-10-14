@@ -221,14 +221,18 @@ impl OwnedSplitFunding {
         &self,
         inventory: &SplitInventory,
         source: &SplitSource,
+        bitcoin_return_index: u32,
         target_script: &Script,
         bitcoin_feerate_vb: u64,
         fork_feerate_vb: u64,
         context: FundingContext<'_>,
     ) -> Result<(AncestrySplitStep1, AncestrySplitStep2), SplitPairError> {
-        let FreshIndex::Proven(destination) = inventory.fresh_receive() else {
+        // The return index belongs to the durable funding plan. After the
+        // deposits appear in a new scan, the first unused index advances; it
+        // must be exactly the return address the user already reviewed.
+        if inventory.fresh_receive() != FreshIndex::Proven(bitcoin_return_index) {
             return Err(SplitPairError::Changed);
-        };
+        }
         let shared = inventory.splittable_coins();
         let expected: BTreeSet<_> = shared.iter().map(|coin| coin.outpoint).collect();
         let observed: BTreeSet<_> = self
@@ -283,7 +287,7 @@ impl OwnedSplitFunding {
                 funding: &self.bitcoin,
                 dependency: &bitcoin_dependency,
                 fork_height: inventory.fork_height(),
-                destination,
+                destination: bitcoin_return_index,
             },
             bitcoin_feerate_vb,
             bitcoin_locktime,

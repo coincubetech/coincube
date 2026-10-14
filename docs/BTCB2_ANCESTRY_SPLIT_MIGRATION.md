@@ -121,6 +121,12 @@ a replayable spend.
    action. If a deposit is too small, unconfirmed, spent, entangled, outside
    scanner coverage or cannot be traced to a chain-specific coinbase, explain
    that state without enabling Sign. Do not call the deposit itself a split.
+   The foreign scan now identifies three distinct receive indices proved unused
+   within both chains' covered ranges: Bitcoin deposit, BTCB2 deposit, and
+   Bitcoin self-transfer return. These are read-only hints, not reservations;
+   the wizard must durably reserve the exact addresses and recheck their
+   history before displaying them. A scan with room for only one fresh address
+   cannot start the two-deposit flow.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,

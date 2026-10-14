@@ -108,6 +108,16 @@ pub enum FreshIndex {
     NotProven,
 }
 
+/// Three distinct addresses proved unused inside both complete source-wallet
+/// scans. These indices are hints until a durable wizard record reserves them
+/// and Connect rechecks their history immediately before showing deposits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FreshFundingAddresses {
+    pub bitcoin_deposit: u32,
+    pub btcb2_deposit: u32,
+    pub bitcoin_return: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitInventory {
     generation: u64,
@@ -130,6 +140,7 @@ pub struct SplitInventory {
     btcb2_funding_candidates: BTreeMap<OutPoint, SplitCoin>,
     pending: Vec<InventoryCoin>,
     fresh_receive: FreshIndex,
+    fresh_funding_addresses: Option<FreshFundingAddresses>,
 }
 
 impl SplitInventory {
@@ -219,6 +230,12 @@ impl SplitInventory {
     pub fn fresh_receive(&self) -> FreshIndex {
         self.fresh_receive
     }
+    /// Read-only candidates for the two deposits and Bitcoin self-transfer.
+    /// The distinct indexes prevent an address reused across chains from
+    /// being mistaken for chain-specific funding evidence.
+    pub fn fresh_funding_addresses(&self) -> Option<FreshFundingAddresses> {
+        self.fresh_funding_addresses
+    }
 
     /// Join two complete reports of the same generation and descriptors.
     pub fn join(
@@ -262,6 +279,14 @@ impl SplitInventory {
             btcb2_funding_candidates: BTreeMap::new(),
             pending: Vec::new(),
             fresh_receive: fresh_receive(btcb2, bitcoin, external_ranged),
+            fresh_funding_addresses: fresh_receive_indices(btcb2, bitcoin, external_ranged, 3)
+                .and_then(|indices| {
+                    Some(FreshFundingAddresses {
+                        bitcoin_deposit: *indices.first()?,
+                        btcb2_deposit: *indices.get(1)?,
+                        bitcoin_return: *indices.get(2)?,
+                    })
+                }),
         };
         for coin in btcb2.coins() {
             let fork_side = btcb2.fork_side(coin);
@@ -423,34 +448,51 @@ fn fresh_receive(btcb2: &ScanReport, bitcoin: &ScanReport, external_ranged: bool
     if !external_ranged {
         return FreshIndex::FixedDescriptor;
     }
+    fresh_receive_indices(btcb2, bitcoin, true, 1)
+        .and_then(|indices| indices.first().copied())
+        .map_or(FreshIndex::NotProven, FreshIndex::Proven)
+}
+
+fn fresh_receive_indices(
+    btcb2: &ScanReport,
+    bitcoin: &ScanReport,
+    external_ranged: bool,
+    count: u32,
+) -> Option<Vec<u32>> {
+    if !external_ranged || count == 0 || count > 3 {
+        return None;
+    }
     let (Some(a), Some(b)) = (
         btcb2.coverage(Branch::External),
         bitcoin.coverage(Branch::External),
     ) else {
-        return FreshIndex::NotProven;
+        return None;
     };
     // Indices below a nonzero start were never observed.
     if a.start != 0 || b.start != 0 {
-        return FreshIndex::NotProven;
+        return None;
     }
     let next = match a.last_used.max(b.last_used) {
         Some(index) => index.checked_add(1),
         None => Some(0),
     };
-    match next {
-        Some(index)
-            if a.contains(index)
-                && b.contains(index)
-                && !btcb2
-                    .coins()
-                    .iter()
-                    .chain(bitcoin.coins())
-                    .any(|c| c.branch == Branch::External && c.index == index) =>
+    let first = next?;
+    let mut indices = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let index = first.checked_add(offset)?;
+        if !a.contains(index)
+            || !b.contains(index)
+            || btcb2
+                .coins()
+                .iter()
+                .chain(bitcoin.coins())
+                .any(|c| c.branch == Branch::External && c.index == index)
         {
-            FreshIndex::Proven(index)
+            return None;
         }
-        _ => FreshIndex::NotProven,
+        indices.push(index);
     }
+    Some(indices)
 }
 
 /// The Bitcoin mirror of a BTCB2 plan: same descriptors, ranges and gap.
@@ -707,6 +749,14 @@ mod tests {
             vec![replayed.outpoint, bitcoin_unconfirmed.outpoint]
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
+        assert_eq!(
+            inventory.fresh_funding_addresses(),
+            Some(FreshFundingAddresses {
+                bitcoin_deposit: 6,
+                btcb2_deposit: 7,
+                bitcoin_return: 8,
+            })
+        );
     }
 
     #[test]
@@ -903,6 +953,15 @@ mod tests {
         let mut late = walk(20, None);
         late[0].start = 5;
         assert_eq!(fresh(late, walk(20, None), true), FreshIndex::NotProven);
+        let too_narrow = SplitInventory::join(
+            &report(ChainId::BitcoinBlake2b, vec![], walk(9, Some(7))),
+            &report(ChainId::Bitcoin, vec![], walk(20, Some(7))),
+            5,
+            true,
+        )
+        .unwrap();
+        assert_eq!(too_narrow.fresh_receive(), FreshIndex::Proven(8));
+        assert_eq!(too_narrow.fresh_funding_addresses(), None);
         // A coin at the candidate index contradicts "unused": refuse it.
         let inventory = SplitInventory::join(
             &report(
