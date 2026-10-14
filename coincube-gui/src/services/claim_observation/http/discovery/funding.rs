@@ -300,6 +300,33 @@ impl CollectedFundingPair {
         {
             return Err(FailureKind::Changed);
         }
+        let shared: BTreeSet<_> = step1.claimed_prevouts().iter().copied().collect();
+        let mut first: BTreeSet<_> = step1
+            .psbt()
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let mut second: BTreeSet<_> = step2
+            .psbt()
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        if shared.len() != step1.claimed_prevouts().len()
+            || first.len() != step1.psbt().unsigned_tx.input.len()
+            || second.len() != step2.psbt().unsigned_tx.input.len()
+            || !first.remove(&self.bitcoin.selected)
+            || !second.remove(&self.fork.selected)
+            || first != shared
+            || second != shared
+            || step1.psbt().unsigned_tx.output.len() != 1
+            || step2.psbt().unsigned_tx.output.len() != 1
+        {
+            return Err(FailureKind::Changed);
+        }
         self.bitcoin
             .validate_candidate(bitcoin_path, bitcoin_candidate)?;
         self.fork.validate_candidate(fork_path, fork_candidate)?;
