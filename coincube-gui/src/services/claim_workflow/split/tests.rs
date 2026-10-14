@@ -890,6 +890,62 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         fork.psbt()
     );
     assert!(!reopened.construction_verified);
+    let recovered_inputs = crate::services::foreign_split_inventory::PostBitcoinSplitCoins {
+        shared: shared.clone(),
+        funding: fork_marker.clone(),
+    };
+    let recovery_tips = PreflightTips {
+        bitcoin: BlockRef {
+            height: u64::from(TIP),
+            hash: hash(7),
+        },
+        fork: BlockRef {
+            height: u64::from(TIP),
+            hash: hash(8),
+        },
+    };
+    let (verified_after_bitcoin, recovered_fork_psbt) =
+        super::super::split_funding::reverify_post_bitcoin_split_pair(
+            &mut reopened,
+            &context(),
+            &wallet.source,
+            &target,
+            &recovered_inputs,
+            &bitcoin_marker,
+            &bitcoin_path,
+            &fork_path,
+            recovery_tips,
+        )
+        .unwrap();
+    assert_eq!(
+        verified_after_bitcoin.bitcoin().transaction(),
+        signed.bitcoin().transaction()
+    );
+    assert_eq!(
+        verified_after_bitcoin.fork().transaction(),
+        signed.fork().transaction()
+    );
+    assert_eq!(recovered_fork_psbt, *fork.psbt());
+    assert!(!reopened.construction_verified);
+    let mut changed_fork_marker = fork_marker.clone();
+    changed_fork_marker.index += 1;
+    assert!(matches!(
+        super::super::split_funding::reverify_post_bitcoin_split_pair(
+            &mut reopened,
+            &context(),
+            &wallet.source,
+            &target,
+            &crate::services::foreign_split_inventory::PostBitcoinSplitCoins {
+                shared: shared.clone(),
+                funding: changed_fork_marker,
+            },
+            &bitcoin_marker,
+            &bitcoin_path,
+            &fork_path,
+            recovery_tips,
+        ),
+        Err(Error::InvalidPlan)
+    ));
     let initial_proof = super::super::paired_submission::initial_proof_for_test(
         &reopened,
         &context(),

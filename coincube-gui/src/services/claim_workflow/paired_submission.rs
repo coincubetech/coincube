@@ -984,30 +984,29 @@ impl Controller {
 
     /// Only a Split requalification that checked the saved source and target
     /// reservation may enter the version-11 stage-two boundary.
-    #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // Stage-two coordinator remains gated.
     pub(crate) fn post_bitcoin_split_proof(
         &mut self,
         current: &Context,
         requalified: &RequalifiedPostBitcoinSplit,
-        fork_psbt: &Psbt,
         confirmation: &BitcoinConfirmation,
         policy: Policy,
         now: i64,
-        tips: PreflightTips,
-    ) -> Result<PostBitcoinAncestryProof, Error> {
+    ) -> Result<(VerifiedAncestrySplitPair, PostBitcoinAncestryProof), Error> {
         if self.intent.version != 11 || self.intent.split.is_none() {
             return Err(Error::WrongIdentity);
         }
-        self.post_bitcoin_ancestry_proof(
+        let (pair, fork_psbt) = requalified.reverify_recorded_pair(self, current)?;
+        let proof = self.post_bitcoin_ancestry_proof(
             current,
             &requalified.observed,
-            fork_psbt,
+            &fork_psbt,
             confirmation,
             policy,
             now,
-            tips,
-        )
+            requalified.tips(),
+        )?;
+        Ok((pair, proof))
     }
 
     /// Recheck post-Bitcoin evidence against the saved signed pair and

@@ -42,6 +42,7 @@ use coincube_core::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
+    convert::TryInto,
     path::{Path, PathBuf},
     str::FromStr,
     time::{Duration, Instant},
@@ -444,6 +445,113 @@ pub struct RequalifiedPostBitcoinSplit {
     /// Exact source-owned inputs for rebuilding the recorded BTCB2 PSBT.
     /// The stage-two coordinator must still reverify the saved signed pair.
     pub(super) fork_coins: PostBitcoinSplitCoins,
+    source: SplitSource,
+    target_descriptor: CoincubeDescriptor,
+    bitcoin_path: RetainedPath,
+    fork_path: RetainedPath,
+    context: Context,
+    tips: PreflightTips,
+    checked_at: Instant,
+}
+
+#[allow(dead_code)] // The stage-two Split coordinator is still gated.
+impl RequalifiedPostBitcoinSplit {
+    pub(super) fn tips(&self) -> PreflightTips {
+        self.tips
+    }
+
+    /// Rebuild both exact journal templates, then verify their saved signed
+    /// witnesses with the source-owned inputs recovered by this fresh scan.
+    /// The Bitcoin inputs are already spent, so this is signature evidence,
+    /// not a renewed all-unspent proof or submission authority.
+    pub(super) fn reverify_recorded_pair(
+        &self,
+        controller: &mut Controller,
+        current: &Context,
+    ) -> Result<(VerifiedAncestrySplitPair, Psbt), Error> {
+        if self.context != *current || self.checked_at.elapsed() >= Duration::from_secs(10) {
+            return Err(Error::LateObservation);
+        }
+        reverify_post_bitcoin_split_pair(
+            controller,
+            current,
+            &self.source,
+            &self.target_descriptor,
+            &self.fork_coins,
+            &self.bitcoin_funding,
+            &self.bitcoin_path,
+            &self.fork_path,
+            self.tips,
+        )
+    }
+}
+
+/// Signature-only bridge between the spent Bitcoin inputs, live BTCB2 scan
+/// and exact signed journal. Only `RequalifiedPostBitcoinSplit` may use its
+/// result with fresh post-Bitcoin proof; this helper grants no transport token.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // Called by the gated stage-two requalification.
+pub(super) fn reverify_post_bitcoin_split_pair(
+    controller: &mut Controller,
+    current: &Context,
+    source: &SplitSource,
+    target: &CoincubeDescriptor,
+    fork_coins: &PostBitcoinSplitCoins,
+    bitcoin_funding: &SplitCoin,
+    bitcoin_path: &RetainedPath,
+    fork_path: &RetainedPath,
+    tips: PreflightTips,
+) -> Result<(VerifiedAncestrySplitPair, Psbt), Error> {
+    let bitcoin_tip = tips
+        .bitcoin
+        .height
+        .try_into()
+        .map_err(|_| Error::InvalidPlan)?;
+    let fork_tip = tips
+        .fork
+        .height
+        .try_into()
+        .map_err(|_| Error::InvalidPlan)?;
+    let (bitcoin, fork) = controller.restore_ancestry_split_pair(
+        current,
+        source,
+        target,
+        &fork_coins.shared,
+        bitcoin_funding,
+        bitcoin_tip,
+        &fork_coins.shared,
+        &fork_coins.funding,
+        fork_tip,
+    )?;
+    let bitcoin_dependency = bitcoin_path.reverify().map_err(|_| Error::InvalidPlan)?;
+    let fork_dependency = fork_path.reverify().map_err(|_| Error::InvalidPlan)?;
+    let bitcoin_inputs = AncestrySplitInputs {
+        chain: ChainId::Bitcoin,
+        source,
+        shared: &fork_coins.shared,
+        funding: bitcoin_funding,
+        dependency: &bitcoin_dependency,
+        fork_height: bitcoin.fork_height(),
+        destination: bitcoin.destination(),
+    };
+    let fork_inputs = AncestrySplitStep2Inputs {
+        chain: ChainId::BitcoinBlake2b,
+        source,
+        shared: &fork_coins.shared,
+        funding: &fork_coins.funding,
+        dependency: &fork_dependency,
+        fork_height: fork.fork_height(),
+        claimed: bitcoin.claimed_prevouts(),
+        target: fork.target(),
+    };
+    let verified = controller.verify_recorded_ancestry_split_pair(
+        current,
+        &bitcoin,
+        &bitcoin_inputs,
+        &fork,
+        &fork_inputs,
+    )?;
+    Ok((verified, fork.psbt().clone()))
 }
 
 /// The destination Vault address already authenticated and reserved when
@@ -1125,6 +1233,13 @@ impl SplitFundingReservation {
             observed: collected,
             bitcoin_funding,
             fork_coins,
+            source: source.clone(),
+            target_descriptor: target_vault.1.clone(),
+            bitcoin_path: bitcoin_path.clone(),
+            fork_path: fork_path.clone(),
+            context: context.clone(),
+            tips,
+            checked_at: Instant::now(),
         })
     }
 }

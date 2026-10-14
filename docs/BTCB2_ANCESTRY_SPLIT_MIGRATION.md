@@ -627,6 +627,12 @@ marker spend cases remain.
    source derivation for whole-pair reconstruction. Neither path grants spend
    permission; the coordinator must still join the signed journal, current
    reservations, finalized BTCB2 witness and policy before review.
+   The Split stage-two proof entry now requires that joined step: the expiring
+   requalification rebuilds both exact version-11 constructions from the
+   recovered coins and retained paths, then cryptographically reverifies the
+   saved Bitcoin and BTCB2 witnesses. Only that reverified pair can accompany
+   the post-Bitcoin proof to a future review. The production wizard still does
+   not call this entry or expose a broadcast action.
    The version-10 Claim and version-11 Split journal proof entries now accept
    those distinct requalification result types rather than a raw
    post-Bitcoin observation. Their shared private check binds the saved exact
