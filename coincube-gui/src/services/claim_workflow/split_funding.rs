@@ -3,6 +3,7 @@
 //! users need the deposit addresses before either funding coin exists.
 //! Loading it does not grant signing or broadcasting authority.
 
+use super::paired_signing_permit::PairedSigningPermit;
 use super::{journal::Journal, Context, Error};
 use crate::app::settings::WalletId;
 use crate::services::{
@@ -23,7 +24,11 @@ use coincube_core::{
     claim::{Policy, PreflightTips},
     claim_ancestry::retained::RetainedPath,
     descriptors::CoincubeDescriptor,
-    foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitSource},
+    foreign_split::{
+        finalize_ancestry_split_step1, finalize_ancestry_split_step2,
+        validate_ancestry_split_pair_signing, AncestrySplitInputs, AncestrySplitStep1,
+        AncestrySplitStep2, AncestrySplitStep2Inputs, FinalizeError, SplitCoin, SplitSource,
+    },
     miniscript::{
         bitcoin::{
             bip32::ChildNumber,
@@ -38,7 +43,9 @@ use serde::{Deserialize, Serialize};
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
+    time::{Duration, Instant},
 };
+use tokio::sync::watch;
 
 #[derive(Debug)]
 pub enum SplitFundingDiscoveryError {
@@ -68,16 +75,30 @@ pub enum SplitPostBitcoinError {
 /// requalification for one exact ordinary Split pair. It grants no signer or
 /// broadcast access by itself.
 #[derive(Debug)]
+#[allow(dead_code)] // The production Split signer transition is still gated.
 pub(crate) struct RequalifiedInitialSplit {
     pub(super) funding: OwnedSplitFunding,
     target_descriptor: CoincubeDescriptor,
     bitcoin_psbt: Psbt,
     fork_psbt: Psbt,
+    shared: Vec<SplitCoin>,
+    context: Context,
+    tips: PreflightTips,
+    checked_at: Instant,
 }
 
+#[allow(dead_code)] // Used by the staged paired Split signer transition.
 impl RequalifiedInitialSplit {
     pub(crate) fn funding(&self) -> &OwnedSplitFunding {
         &self.funding
+    }
+
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub(crate) fn tips(&self) -> PreflightTips {
+        self.tips
     }
 
     pub(super) fn matches_pair(
@@ -89,6 +110,85 @@ impl RequalifiedInitialSplit {
         self.target_descriptor == *target
             && self.bitcoin_psbt == *bitcoin.psbt()
             && self.fork_psbt == *fork.psbt()
+    }
+
+    /// Admit one signer operation after the exact source wallet, two funding
+    /// coins and current chain tips have been checked again. This does not
+    /// admit a signed return or grant submission authority.
+    pub(crate) fn signer_permit(
+        &self,
+        chain: ChainId,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        current: &Psbt,
+        generation: watch::Receiver<u64>,
+    ) -> Option<PairedSigningPermit> {
+        if !self.matches_pair(&self.target_descriptor, bitcoin, fork)
+            || self.checked_at.elapsed() >= Duration::from_secs(10)
+            || generation.has_changed().is_err()
+            || *generation.borrow() != self.context.generation
+        {
+            return None;
+        }
+        let bitcoin_dependency = self.funding.bitcoin_path.reverify().ok()?;
+        let fork_dependency = self.funding.fork_path.reverify().ok()?;
+        let bitcoin_inputs = AncestrySplitInputs {
+            chain: bitcoin.chain(),
+            source: bitcoin.source(),
+            shared: &self.shared,
+            funding: &self.funding.bitcoin,
+            dependency: &bitcoin_dependency,
+            fork_height: bitcoin.fork_height(),
+            destination: bitcoin.destination(),
+        };
+        let fork_inputs = AncestrySplitStep2Inputs {
+            chain: fork.chain(),
+            source: fork.source(),
+            shared: &self.shared,
+            funding: &self.funding.fork,
+            dependency: &fork_dependency,
+            fork_height: fork.fork_height(),
+            claimed: bitcoin.claimed_prevouts(),
+            target: fork
+                .psbt()
+                .unsigned_tx
+                .output
+                .first()?
+                .script_pubkey
+                .as_script(),
+        };
+        let bitcoin_signed = if chain == ChainId::Bitcoin {
+            current
+        } else {
+            bitcoin.psbt()
+        };
+        let fork_signed = if chain == ChainId::BitcoinBlake2b {
+            current
+        } else {
+            fork.psbt()
+        };
+        validate_ancestry_split_pair_signing(
+            bitcoin,
+            &bitcoin_inputs,
+            bitcoin_signed,
+            fork,
+            &fork_inputs,
+            fork_signed,
+        )
+        .ok()?;
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let valid = match chain {
+            ChainId::Bitcoin => matches!(
+                finalize_ancestry_split_step1(bitcoin, &bitcoin_inputs, current, &secp),
+                Ok(_) | Err(FinalizeError::Unsatisfied)
+            ),
+            ChainId::BitcoinBlake2b => matches!(
+                finalize_ancestry_split_step2(fork, &fork_inputs, current, &secp),
+                Ok(_) | Err(FinalizeError::Unsatisfied)
+            ),
+            _ => false,
+        };
+        valid.then(|| PairedSigningPermit::new(chain, current, generation, self.context.generation))
     }
 }
 
@@ -595,6 +695,10 @@ impl SplitFundingReservation {
             target_descriptor: target_vault.1.clone(),
             bitcoin_psbt: bitcoin.psbt().clone(),
             fork_psbt: fork.psbt().clone(),
+            shared: inventory.splittable_coins(),
+            context: context.clone(),
+            tips,
+            checked_at: Instant::now(),
         })
     }
 

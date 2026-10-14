@@ -490,6 +490,114 @@ pub fn validate_ancestry_split_pair_signing(
     Ok(())
 }
 
+/// Merge independently returned ordinary Split signatures without accepting
+/// altered PSBT metadata, conflicting signatures or a one-sided threshold as
+/// completion. Live ancestry and signer admission are separate checks.
+#[derive(Debug)]
+pub struct CombinedAncestrySplitPair {
+    pub bitcoin: Psbt,
+    pub fork: Psbt,
+    pub complete: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CombineAncestrySplitError {
+    TooManyReturns,
+    UnsignedReturn,
+    ConflictingSignature { chain: ChainId, input: usize },
+    Invalid(FinalizeError),
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn combine_ancestry_split_pair<C: secp256k1::Verification>(
+    bitcoin: &AncestrySplitStep1,
+    bitcoin_inputs: &AncestrySplitInputs<'_>,
+    bitcoin_returns: &[Psbt],
+    fork: &AncestrySplitStep2,
+    fork_inputs: &AncestrySplitStep2Inputs<'_>,
+    fork_returns: &[Psbt],
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<CombinedAncestrySplitPair, CombineAncestrySplitError> {
+    const MAX_RETURNS: usize = 16;
+    if bitcoin_returns.len() > MAX_RETURNS || fork_returns.len() > MAX_RETURNS {
+        return Err(CombineAncestrySplitError::TooManyReturns);
+    }
+    let mut bitcoin_signed = bitcoin.psbt().clone();
+    let mut fork_signed = fork.psbt().clone();
+    for (chain, returns, aggregate) in [
+        (ChainId::Bitcoin, bitcoin_returns, &mut bitcoin_signed),
+        (ChainId::BitcoinBlake2b, fork_returns, &mut fork_signed),
+    ] {
+        for returned in returns {
+            if returned
+                .inputs
+                .iter()
+                .all(|input| input.partial_sigs.is_empty())
+            {
+                return Err(CombineAncestrySplitError::UnsignedReturn);
+            }
+            let checked = match chain {
+                ChainId::Bitcoin => {
+                    finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, returned, secp)
+                        .map(|_| ())
+                }
+                ChainId::BitcoinBlake2b => {
+                    finalize_ancestry_split_step2(fork, fork_inputs, returned, secp).map(|_| ())
+                }
+                _ => unreachable!(),
+            };
+            if !matches!(checked, Ok(()) | Err(FinalizeError::Unsatisfied)) {
+                return Err(CombineAncestrySplitError::Invalid(checked.unwrap_err()));
+            }
+            for (index, (input, supplied)) in aggregate
+                .inputs
+                .iter_mut()
+                .zip(&returned.inputs)
+                .enumerate()
+            {
+                for (key, signature) in &supplied.partial_sigs {
+                    if input
+                        .partial_sigs
+                        .get(key)
+                        .is_some_and(|old| old != signature)
+                    {
+                        return Err(CombineAncestrySplitError::ConflictingSignature {
+                            chain,
+                            input: index,
+                        });
+                    }
+                    input.partial_sigs.insert(*key, *signature);
+                }
+            }
+        }
+    }
+    validate_ancestry_split_pair_signing(
+        bitcoin,
+        bitcoin_inputs,
+        &bitcoin_signed,
+        fork,
+        fork_inputs,
+        &fork_signed,
+    )
+    .map_err(CombineAncestrySplitError::Invalid)?;
+    let bitcoin_complete =
+        match finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, &bitcoin_signed, secp) {
+            Ok(_) => true,
+            Err(FinalizeError::Unsatisfied) => false,
+            Err(error) => return Err(CombineAncestrySplitError::Invalid(error)),
+        };
+    let fork_complete = match finalize_ancestry_split_step2(fork, fork_inputs, &fork_signed, secp) {
+        Ok(_) => true,
+        Err(FinalizeError::Unsatisfied) => false,
+        Err(error) => return Err(CombineAncestrySplitError::Invalid(error)),
+    };
+    Ok(CombinedAncestrySplitPair {
+        bitcoin: bitcoin_signed,
+        fork: fork_signed,
+        complete: bitcoin_complete && fork_complete,
+    })
+}
+
 fn check_bound(
     construction: &AncestrySplitStep1,
     inputs: &AncestrySplitInputs<'_>,

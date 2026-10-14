@@ -1194,12 +1194,13 @@ pub use step2::{
 
 mod ancestry;
 pub use ancestry::{
-    create_ancestry_split_step1, create_ancestry_split_step2, estimate_ancestry_signed_vbytes,
-    finalize_ancestry_split_pair, finalize_ancestry_split_step1, finalize_ancestry_split_step2,
-    reconstruct_ancestry_split_step1, reconstruct_ancestry_split_step2,
-    validate_ancestry_split_pair_signing, verify_ancestry_split_step1_transaction,
-    verify_ancestry_split_step2_transaction, AncestrySplitInputs, AncestrySplitStep1,
-    AncestrySplitStep2, AncestrySplitStep2Inputs, VerifiedAncestrySplitPair,
+    combine_ancestry_split_pair, create_ancestry_split_step1, create_ancestry_split_step2,
+    estimate_ancestry_signed_vbytes, finalize_ancestry_split_pair, finalize_ancestry_split_step1,
+    finalize_ancestry_split_step2, reconstruct_ancestry_split_step1,
+    reconstruct_ancestry_split_step2, validate_ancestry_split_pair_signing,
+    verify_ancestry_split_step1_transaction, verify_ancestry_split_step2_transaction,
+    AncestrySplitInputs, AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs,
+    CombineAncestrySplitError, CombinedAncestrySplitPair, VerifiedAncestrySplitPair,
     VerifiedAncestrySplitStep2,
 };
 

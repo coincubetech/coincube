@@ -579,6 +579,65 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
         let fork = create_ancestry_split_step2(&fork_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
         let bitcoin_signed = sign(bitcoin.psbt(), &wallet.signers);
         let fork_signed = sign(fork.psbt(), &wallet.signers);
+        let bitcoin_returns: Vec<_> = wallet
+            .signers
+            .iter()
+            .map(|signer| sign(bitcoin.psbt(), std::slice::from_ref(signer)))
+            .collect();
+        let fork_returns: Vec<_> = wallet
+            .signers
+            .iter()
+            .map(|signer| sign(fork.psbt(), std::slice::from_ref(signer)))
+            .collect();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let one_sided = combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_returns,
+            &fork,
+            &fork_inputs,
+            &[],
+            &secp,
+        )
+        .unwrap();
+        assert!(!one_sided.complete, "{:?}", shape);
+        let combined = combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_returns,
+            &fork,
+            &fork_inputs,
+            &fork_returns,
+            &secp,
+        )
+        .unwrap();
+        assert!(combined.complete, "{:?}", shape);
+        assert!(finalize_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &combined.bitcoin,
+            &fork,
+            &fork_inputs,
+            &combined.fork,
+            &secp,
+        )
+        .is_ok());
+        let mut altered_return = fork_returns[0].clone();
+        altered_return.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert!(matches!(
+            combine_ancestry_split_pair(
+                &bitcoin,
+                &bitcoin_inputs,
+                &bitcoin_returns,
+                &fork,
+                &fork_inputs,
+                &[altered_return],
+                &secp,
+            ),
+            Err(CombineAncestrySplitError::Invalid(
+                FinalizeError::ConstructionChanged
+            ))
+        ));
         assert!(validate_ancestry_split_pair_signing(
             &bitcoin,
             &bitcoin_inputs,
@@ -611,7 +670,6 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
             .unwrap_err(),
             FinalizeError::ConstructionChanged
         );
-        let secp = secp256k1::Secp256k1::verification_only();
         let verified = finalize_ancestry_split_pair(
             &bitcoin,
             &bitcoin_inputs,
