@@ -117,8 +117,13 @@ a replayable spend.
    Both ordinary Split builders now refuse a marker whose value is smaller
    than that chain's computed worst-case transaction fee. Claim's ordinary
    Bitcoin and BTCB2 builders apply the same fee-cover check to their selected
-   chain-specific inputs. Deposit screens still need to quote the expected
-   minimum before requesting funds and reprice at review.
+   chain-specific inputs, including when reconstructing recorded transactions.
+   A review-only size estimator matches the exact constructed sizes across all
+   supported foreign source shapes. The Split deposit screen now rescans the
+   saved source and reads current fees on both chains before showing each
+   minimum; it refuses the instructions when either quote is unavailable.
+   This estimate must be recalculated from actual inputs at review. Claim's
+   deposit screen still needs a corresponding minimum quote.
    Both rebuild exact PSBTs from fresh coins and the persisted fee rate,
    rejecting changed scripts, amounts, input sets, destinations and fees.
    These are structural builders only; the old OP_RETURN types remain for

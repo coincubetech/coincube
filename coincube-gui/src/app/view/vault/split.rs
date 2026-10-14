@@ -517,11 +517,19 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             if let Some(addresses) = panel.funding_addresses() {
                 body = body
                     .push(p1_bold("Fund the source wallet on each chain"))
-                    .push(p1_regular("Send a small confirmed Bitcoin deposit to this Bitcoin address of the wallet being split:"))
+                    .push(p1_regular(format!(
+                        "Send at least {} sats of Bitcoin to this Bitcoin address of the wallet being split (current fee estimate: {} sat/vB):",
+                        addresses.fee_quote.bitcoin_minimum_sats,
+                        addresses.fee_quote.bitcoin_rate_sat_vb,
+                    )))
                     .push(caption(addresses.bitcoin_deposit.clone()))
-                    .push(p1_regular("Send a separate small confirmed Bitcoin Blake2b deposit to this BTCB2 address of the same wallet:"))
+                    .push(p1_regular(format!(
+                        "Send at least {} sats of Bitcoin Blake2b to this BTCB2 address of the same wallet (current fee estimate: {} sat/vB):",
+                        addresses.fee_quote.btcb2_minimum_sats,
+                        addresses.fee_quote.btcb2_rate_sat_vb,
+                    )))
                     .push(caption(addresses.btcb2_deposit.clone()))
-                    .push(p1_regular("Send only the named coin to each address. These deposits are fee inputs, not the split itself. Both coins must later pass independent ancestry, ownership, confirmation and unspent checks before any transaction can be signed."))
+                    .push(p1_regular("Send only the named coin to each address and wait for confirmation. These minimums reflect current fees; if fees rise before signing, you may need to add funds. The deposits are fee inputs, not the split itself. Both coins must pass independent ancestry, ownership, confirmation and unspent checks before signing."))
                     .push(caption("The Bitcoin return address is reserved separately and is not a deposit destination."));
                 if let Some(progress) = panel.funding_progress() {
                     let candidate = |seen| {

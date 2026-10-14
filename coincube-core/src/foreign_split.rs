@@ -1,11 +1,10 @@
-//! Split step 1: the Bitcoin-side poison self-transfer of a foreign (non-Cube)
-//! wallet. Construction, deterministic reconstruction and finalization only.
+//! Foreign-wallet split construction, deterministic reconstruction and
+//! finalization only.
 //!
-//! Step 1 spends every selected pre-fork coin of the foreign wallet on Bitcoin
-//! to one fresh address of the same wallet, with the OP_RETURN poison shared
-//! with Claim ([`crate::split_poison`]). It is the Bitcoin half of #568's
-//! primary poison split; the BTCB2 half (step 2) spends the same original
-//! outpoints into the target Cube once step 1 is confirmed.
+//! The old step 1 spent every selected pre-fork coin on Bitcoin with the
+//! OP_RETURN marker shared with Claim ([`crate::split_poison`]). The ordinary
+//! ancestry pair instead adds a chain-specific funding input on each chain;
+//! both halves spend the same shared outpoints to their respective destinations.
 //!
 //! Supported source shapes, matching [`crate::unified_foreign`]: `pkh`, `wpkh`,
 //! `sh(wpkh)`, `wsh(multi)` and `wsh(sortedmulti)`. Taproot (`tr`) is scan-only
@@ -20,8 +19,9 @@
 //! observations and the observed fork height, and establish all of the above
 //! separately before any signature is requested or broadcast.
 //!
-//! Only a Bitcoin OP_RETURN poison is built. Input poison waits for the #547
-//! ancestry gate (owner decision D2).
+//! The legacy OP_RETURN builders remain for recorded intents; new ancestry
+//! builders create ordinary `S + B` and `S + F` transactions. Neither builder
+//! grants chain proof or signing authority on its own.
 
 use std::{collections::BTreeSet, fmt};
 
@@ -1167,8 +1167,8 @@ pub use step2::{
 
 mod ancestry;
 pub use ancestry::{
-    create_ancestry_split_step1, create_ancestry_split_step2, finalize_ancestry_split_step1,
-    finalize_ancestry_split_step2, reconstruct_ancestry_split_step1,
+    create_ancestry_split_step1, create_ancestry_split_step2, estimate_ancestry_signed_vbytes,
+    finalize_ancestry_split_step1, finalize_ancestry_split_step2, reconstruct_ancestry_split_step1,
     reconstruct_ancestry_split_step2, verify_ancestry_split_step1_transaction,
     verify_ancestry_split_step2_transaction, AncestrySplitInputs, AncestrySplitStep1,
     AncestrySplitStep2, AncestrySplitStep2Inputs, VerifiedAncestrySplitStep2,

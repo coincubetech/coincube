@@ -348,6 +348,21 @@ impl SplitConnect for FakeConnect {
     async fn bitcoin_feerate(&self) -> Option<u64> {
         self.feerate
     }
+    async fn funding_fee_quote(
+        &self,
+        _source: &SplitSource,
+        _reservation: &crate::services::claim_workflow::SplitFundingReservation,
+    ) -> Result<step1::SplitFundingQuote, String> {
+        let rate = self
+            .feerate
+            .ok_or_else(|| "The Bitcoin funding fee quote is unavailable.".to_string())?;
+        Ok(step1::SplitFundingQuote {
+            bitcoin_rate_sat_vb: rate,
+            btcb2_rate_sat_vb: 2,
+            bitcoin_minimum_sats: 2_000,
+            btcb2_minimum_sats: 2_000,
+        })
+    }
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind> {
         self.calls
             .address_reads
@@ -574,6 +589,45 @@ async fn reserved_split_deposit_addresses_require_six_fresh_history_checks() {
             .unwrap();
     assert_eq!(resumed, addresses);
     assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+}
+
+#[tokio::test]
+async fn split_deposit_addresses_are_not_released_without_a_fee_quote() {
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let mut connect = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut connect).unwrap().feerate = None;
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    let saved = crate::services::claim_workflow::reserve_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+    )
+    .unwrap();
+    assert!(step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        crate::services::claim_workflow::load_split_funding(
+            &directory,
+            &source,
+            TARGET,
+            &connect.context,
+        )
+        .unwrap(),
+        Some(saved)
+    );
 }
 
 #[tokio::test]

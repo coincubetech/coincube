@@ -404,6 +404,15 @@ pub trait SplitConnect: Send + Sync {
     /// The fork's window from the authenticated anchor, with the fork marker.
     async fn window(&self) -> Result<ForkWindow, String>;
     async fn bitcoin_feerate(&self) -> Option<u64>;
+    /// A current fee quote for the exact saved source and target addresses.
+    /// This is display guidance only; signing must reprice and revalidate.
+    async fn funding_fee_quote(
+        &self,
+        _source: &SplitSource,
+        _reservation: &claim_workflow::SplitFundingReservation,
+    ) -> Result<SplitFundingQuote, String> {
+        Err("The two-chain funding fee quote is unavailable.".into())
+    }
     /// Whether `address` has any chain or mempool history (fresh read).
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind>;
     /// Recheck the exact saved source on both chains after deposits arrive.
@@ -429,6 +438,15 @@ pub struct CheckedFundingAddresses {
     pub bitcoin_deposit: String,
     pub btcb2_deposit: String,
     pub bitcoin_return: String,
+    pub fee_quote: SplitFundingQuote,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitFundingQuote {
+    pub bitcoin_rate_sat_vb: u64,
+    pub btcb2_rate_sat_vb: u64,
+    pub bitcoin_minimum_sats: u64,
+    pub btcb2_minimum_sats: u64,
 }
 
 /// Display-only observation. Candidate flags never enable signing; only the
@@ -454,8 +472,9 @@ pub async fn check_reserved_funding_addresses(
     let target = target_cube.to_owned();
     let expected = context.clone();
     let for_load = directory.clone();
+    let source_for_load = source.clone();
     let saved = tokio::task::spawn_blocking(move || {
-        claim_workflow::load_split_funding(&for_load, &source, &target, &expected)
+        claim_workflow::load_split_funding(&for_load, &source_for_load, &target, &expected)
     })
     .await
     .map_err(|_| "Reading the saved funding addresses was interrupted.".to_string())?
@@ -485,6 +504,12 @@ pub async fn check_reserved_funding_addresses(
     })
     .await
     .map_err(|_| "Checking both chains' address history timed out.".to_string())??;
+    let fee_quote = tokio::time::timeout(
+        std::time::Duration::from_secs(45),
+        connect.funding_fee_quote(&source, &saved),
+    )
+    .await
+    .map_err(|_| "Quoting both chains' deposit fees timed out.".to_string())??;
     if !connect.session_current() || connect.context() != context {
         return Err("The Connect session changed during the address check.".into());
     }
@@ -503,6 +528,7 @@ pub async fn check_reserved_funding_addresses(
         bitcoin_deposit,
         btcb2_deposit,
         bitcoin_return,
+        fee_quote,
     })
 }
 
@@ -661,6 +687,96 @@ impl SplitConnect for ProductionConnect {
     async fn bitcoin_feerate(&self) -> Option<u64> {
         let fees = ConnectBitcoinFees::new(&self.session.client)?;
         bitcoin_step1_feerate(&fees).await
+    }
+    async fn funding_fee_quote(
+        &self,
+        source: &SplitSource,
+        reservation: &claim_workflow::SplitFundingReservation,
+    ) -> Result<SplitFundingQuote, String> {
+        if !self.session_current() {
+            return Err("The Connect session changed before the funding quote.".into());
+        }
+        let target = reservation.target_binding.as_ref().ok_or_else(|| {
+            "The BTCB2 destination is not bound to this funding plan.".to_string()
+        })?;
+        let target_script = target
+            .script_pubkey()
+            .map_err(|_| "The saved BTCB2 destination is invalid.".to_string())?;
+        let scan = foreign_split_inventory::scan(
+            self.session.client.clone(),
+            split_funding_scan_plan(source)?,
+            self.expected,
+            self.generation.clone(),
+        )
+        .await
+        .map_err(|error| format!("The wallet scan for the funding quote failed: {error:?}"))?;
+        if !self.session_current() {
+            return Err("The Connect session changed during the funding quote.".into());
+        }
+        let shared = scan.inventory.splittable_coins();
+        let return_script = source
+            .external()
+            .at_derivation_index(reservation.indices.bitcoin_return)
+            .map_err(|_| "The Bitcoin return address is invalid.".to_string())?
+            .script_pubkey();
+        let bitcoin_vbytes = coincube_core::foreign_split::estimate_ancestry_signed_vbytes(
+            source,
+            &shared,
+            scan.inventory.fork_height(),
+            reservation.indices.bitcoin_deposit,
+            return_script.as_script(),
+        )
+        .map_err(|_| "The Bitcoin deposit fee cannot be estimated for these coins.".to_string())?;
+        let btcb2_vbytes = coincube_core::foreign_split::estimate_ancestry_signed_vbytes(
+            source,
+            &shared,
+            scan.inventory.fork_height(),
+            reservation.indices.btcb2_deposit,
+            target_script.as_script(),
+        )
+        .map_err(|_| "The BTCB2 deposit fee cannot be estimated for these coins.".to_string())?;
+        let bitcoin_rate_sat_vb = self
+            .bitcoin_feerate()
+            .await
+            .ok_or_else(|| "The current Bitcoin fee quote is unavailable.".to_string())?;
+        let btcb2_fees =
+            crate::services::split_fees::btcb2_fee_source(Some(self.session.client.clone()));
+        let btcb2_rate_sat_vb = crate::services::foreign_psbt::btcb2_sweep_feerate(&*btcb2_fees)
+            .await
+            .ok_or_else(|| "The current BTCB2 fee quote is unavailable.".to_string())?;
+        if !self.session_current() {
+            return Err("The Connect session changed during the funding quote.".into());
+        }
+        let bitcoin_minimum_sats = bitcoin_vbytes
+            .checked_mul(bitcoin_rate_sat_vb)
+            .ok_or_else(|| "The Bitcoin fee quote is out of range.".to_string())?
+            .max(
+                source
+                    .external()
+                    .at_derivation_index(reservation.indices.bitcoin_deposit)
+                    .map_err(|_| "The Bitcoin deposit address is invalid.".to_string())?
+                    .script_pubkey()
+                    .minimal_non_dust()
+                    .to_sat(),
+            );
+        let btcb2_minimum_sats = btcb2_vbytes
+            .checked_mul(btcb2_rate_sat_vb)
+            .ok_or_else(|| "The BTCB2 fee quote is out of range.".to_string())?
+            .max(
+                source
+                    .external()
+                    .at_derivation_index(reservation.indices.btcb2_deposit)
+                    .map_err(|_| "The BTCB2 deposit address is invalid.".to_string())?
+                    .script_pubkey()
+                    .minimal_non_dust()
+                    .to_sat(),
+            );
+        Ok(SplitFundingQuote {
+            bitcoin_rate_sat_vb,
+            btcb2_rate_sat_vb,
+            bitcoin_minimum_sats,
+            btcb2_minimum_sats,
+        })
     }
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind> {
         address_used(&self.esplora, chain, address, self.observation.now()).await

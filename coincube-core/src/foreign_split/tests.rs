@@ -268,6 +268,18 @@ fn ancestry_step1_builds_exact_shared_plus_funding_and_signs_every_shape() {
         };
         let step = create_ancestry_split_step1(&inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
         let tx = &step.psbt().unsigned_tx;
+        assert_eq!(
+            estimate_ancestry_signed_vbytes(
+                &wallet.source,
+                &shared,
+                FORK,
+                funding.index,
+                tx.output[0].script_pubkey.as_script(),
+            )
+            .unwrap(),
+            step.maximum_signed_vbytes(),
+            "{shape:?}"
+        );
         let mut expected: Vec<_> = shared.iter().map(|coin| coin.outpoint).collect();
         expected.sort();
         assert_eq!(step.claimed_prevouts(), expected, "{shape:?}");
@@ -447,6 +459,18 @@ fn ancestry_step2_builds_exact_shared_plus_funding_and_signs_every_shape() {
         };
         let step = create_ancestry_split_step2(&inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
         let tx = &step.psbt().unsigned_tx;
+        assert_eq!(
+            estimate_ancestry_signed_vbytes(
+                &wallet.source,
+                &shared,
+                FORK,
+                funding.index,
+                target.as_script(),
+            )
+            .unwrap(),
+            step.maximum_signed_vbytes(),
+            "{shape:?}"
+        );
         let mut expected = claimed.clone();
         expected.sort();
         assert_eq!(step.claimed_prevouts(), expected, "{shape:?}");

@@ -88,6 +88,51 @@ impl AncestrySplitStep1 {
     }
 }
 
+/// Estimate the exact worst-case signed size of a future `S + B` or `S + F`
+/// one-output transaction before its funding coin exists. This authenticates
+/// the shared coins and derives the reserved funding script, but does not
+/// establish that a later deposit is chain-specific, confirmed or unspent.
+/// Recalculate the actual fee from the constructed PSBT at review.
+pub fn estimate_ancestry_signed_vbytes(
+    source: &SplitSource,
+    shared: &[SplitCoin],
+    fork_height: u64,
+    funding_index: u32,
+    destination: &bitcoin::Script,
+) -> Result<u64, Error> {
+    let mut selected = select(source, shared, fork_height)?.selected;
+    let definite = source.derive(SplitBranch::External, funding_index)?;
+    let funding_script = definite.script_pubkey();
+    if funding_script == *destination {
+        return Err(Error::DestinationNotFresh);
+    }
+    selected.push(Selected {
+        // This outpoint is only a fixed-width placeholder for size
+        // estimation. No transaction can be constructed from this entry.
+        outpoint: OutPoint::null(),
+        branch: SplitBranch::External,
+        index: funding_index,
+        previous: Transaction {
+            version: transaction::Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: Vec::new(),
+            output: Vec::new(),
+        },
+        output: TxOut {
+            value: Amount::ZERO,
+            script_pubkey: funding_script,
+        },
+        definite,
+    });
+    maximum_signed_vbytes(
+        &selected,
+        vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: destination.to_owned(),
+        }],
+    )
+}
+
 struct Plan {
     selected: Vec<Selected>,
     shared: Vec<OutPoint>,
