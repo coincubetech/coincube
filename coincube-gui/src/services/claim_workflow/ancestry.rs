@@ -550,7 +550,7 @@ impl Controller {
                         bitcoin.descriptor().to_string().as_bytes(),
                     ),
                 };
-                let controller = Self::reopen(directory, &identity, context)?;
+                let controller = Self::reopen_settling_blocking(directory, &identity, context)?;
                 let saved_fork = controller
                     .intent
                     .funding_plan

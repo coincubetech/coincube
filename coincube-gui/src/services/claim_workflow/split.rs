@@ -895,7 +895,7 @@ impl Controller {
             Ok(controller) => Ok(controller),
             Err(Error::Conflict) => {
                 let identity = split_identity(target_cube, bitcoin.source().digest());
-                let controller = Self::reopen(directory, &identity, context)?;
+                let controller = Self::reopen_settling_blocking(directory, &identity, context)?;
                 let record = controller
                     .intent
                     .split
