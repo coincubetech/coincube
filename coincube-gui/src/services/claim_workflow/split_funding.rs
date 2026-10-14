@@ -306,6 +306,7 @@ impl SplitFundingReservation {
         source: &SplitSource,
         context: &Context,
         inventory: &SplitInventory,
+        minimums: (u64, u64),
     ) -> Result<SplitInventory, SplitFundingDiscoveryError> {
         if !self.is_released() {
             return Err(SplitFundingDiscoveryError::Changed);
@@ -316,7 +317,9 @@ impl SplitFundingReservation {
         if saved != *self || !saved.matches(source, &self.target_cube, context) {
             return Err(SplitFundingDiscoveryError::Changed);
         }
-        Ok(inventory.funding_at_reserved_addresses(self.indices))
+        Ok(inventory
+            .funding_at_reserved_addresses(self.indices)
+            .funding_covering_estimated_fees(minimums.0, minimums.1))
     }
 
     /// Reload the exact pre-deposit selection and search only its two receive
@@ -330,6 +333,7 @@ impl SplitFundingReservation {
         inventory: &SplitInventory,
         observations: &HttpObservationSource,
         policy: Policy,
+        minimums: (u64, u64),
     ) -> Result<Option<OwnedSplitFunding>, SplitFundingDiscoveryError> {
         observations
             .validate_context(&context.provider, context.generation)
@@ -346,6 +350,7 @@ impl SplitFundingReservation {
                 &source_for_load,
                 &context_for_load,
                 &inventory_for_load,
+                minimums,
             )
         })
         .await
@@ -758,7 +763,13 @@ mod tests {
         let saved = reserve_split_funding(&directory, &source, "cube-a", &context(), &inventory(3))
             .unwrap();
         assert!(matches!(
-            saved.checked_reserved_inventory(&directory, &source, &context(), &inventory(3)),
+            saved.checked_reserved_inventory(
+                &directory,
+                &source,
+                &context(),
+                &inventory(3),
+                (0, 0)
+            ),
             Err(SplitFundingDiscoveryError::Changed)
         ));
         let released = release_split_funding(&directory, &saved).unwrap();
@@ -767,11 +778,17 @@ mod tests {
         // The foreign scan generation stays at 1. It is separate from the
         // authenticated Connect account generation.
         assert!(released
-            .checked_reserved_inventory(&directory, &source, &later_account, &inventory(3))
+            .checked_reserved_inventory(&directory, &source, &later_account, &inventory(3), (0, 0))
             .is_ok());
         later_account.account = "another-account".into();
         assert!(matches!(
-            released.checked_reserved_inventory(&directory, &source, &later_account, &inventory(3)),
+            released.checked_reserved_inventory(
+                &directory,
+                &source,
+                &later_account,
+                &inventory(3),
+                (0, 0)
+            ),
             Err(SplitFundingDiscoveryError::InvalidReservation(
                 Error::WrongIdentity
             ))

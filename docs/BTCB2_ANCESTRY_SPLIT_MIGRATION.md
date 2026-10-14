@@ -192,7 +192,13 @@ a replayable spend.
    PSBTs at current per-chain fee rates and derives a read-only coin,
    destination and fee preview from their exact inputs and outputs. It discards
    the proof and transactions after displaying the preview and cannot open
-   Sign. Exact per-chain proof failure states, proof refresh and ordinary
+   Sign. Before the read-only proof search, the deposit check now excludes
+   individual coins at either reserved address that are below that chain's
+   current estimated fee. This lets a later sufficient deposit be considered
+   without rotating the reserved address; the exact builder still enforces
+   the fee bound. The check also distinguishes a shared ancestry root,
+   reorganization and unavailable fresh reads in its retry guidance.
+   Exact per-chain proof failure states, proof refresh and ordinary
    signer admission remain to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal
    bound to both Cubes, the Vault descriptor and the Connect identity. Its

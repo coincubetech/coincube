@@ -245,6 +245,31 @@ impl SplitInventory {
         });
         restricted
     }
+    /// Exclude deposits that cannot individually pay the estimated fee for
+    /// their chain. A later eligible output to the same reserved address must
+    /// remain selectable even if an earlier, smaller output sorts first.
+    /// This is only candidate filtering; the paired live proof and exact
+    /// transaction construction still decide whether the coin is usable.
+    pub fn funding_covering_estimated_fees(
+        &self,
+        bitcoin_minimum_sats: u64,
+        btcb2_minimum_sats: u64,
+    ) -> Self {
+        let mut eligible = self.clone();
+        eligible.bitcoin_funding_candidates.retain(|_, coin| {
+            coin.previous
+                .output
+                .get(coin.outpoint.vout as usize)
+                .is_some_and(|output| output.value.to_sat() >= bitcoin_minimum_sats)
+        });
+        eligible.btcb2_funding_candidates.retain(|_, coin| {
+            coin.previous
+                .output
+                .get(coin.outpoint.vout as usize)
+                .is_some_and(|output| output.value.to_sat() >= btcb2_minimum_sats)
+        });
+        eligible
+    }
     /// Unconfirmed on either chain, or present on both after the fork.
     pub fn pending(&self) -> &[InventoryCoin] {
         &self.pending
@@ -758,7 +783,7 @@ mod tests {
         assert!(bitcoin_funding.btcb2_block.is_none());
         assert_eq!(
             inventory.funding_candidates(ChainId::Bitcoin),
-            vec![bitcoin_funding]
+            vec![bitcoin_funding.clone()]
         );
         let fork_funding = inventory
             .funding_candidate(ChainId::BitcoinBlake2b, btcb2_post.outpoint)
@@ -768,7 +793,7 @@ mod tests {
         assert!(fork_funding.bitcoin_block.is_none());
         assert_eq!(
             inventory.funding_candidates(ChainId::BitcoinBlake2b),
-            vec![fork_funding]
+            vec![fork_funding.clone()]
         );
         let reserved = inventory.funding_at_reserved_addresses(FreshFundingAddresses {
             bitcoin_deposit: 3,
@@ -780,6 +805,35 @@ mod tests {
             reserved.funding_candidates(ChainId::BitcoinBlake2b).len(),
             1
         );
+        let mut with_earlier_small_deposit = reserved.clone();
+        let mut small = bitcoin_funding.clone();
+        small.previous.output[0].value = Amount::from_sat(1_000);
+        small.outpoint.txid = small.previous.compute_txid();
+        with_earlier_small_deposit
+            .bitcoin_funding_candidates
+            .insert(small.outpoint, small.clone());
+        assert_eq!(
+            with_earlier_small_deposit
+                .funding_covering_estimated_fees(4_000, 5_000)
+                .funding_candidates(ChainId::Bitcoin),
+            vec![bitcoin_funding.clone()]
+        );
+        let bitcoin_too_small = reserved.funding_covering_estimated_fees(4_001, 5_000);
+        assert!(bitcoin_too_small
+            .funding_candidates(ChainId::Bitcoin)
+            .is_empty());
+        assert_eq!(
+            bitcoin_too_small.funding_candidates(ChainId::BitcoinBlake2b),
+            vec![fork_funding.clone()]
+        );
+        let fork_too_small = reserved.funding_covering_estimated_fees(4_000, 5_001);
+        assert_eq!(
+            fork_too_small.funding_candidates(ChainId::Bitcoin),
+            vec![bitcoin_funding.clone()]
+        );
+        assert!(fork_too_small
+            .funding_candidates(ChainId::BitcoinBlake2b)
+            .is_empty());
         let elsewhere = inventory.funding_at_reserved_addresses(FreshFundingAddresses {
             bitcoin_deposit: 4,
             btcb2_deposit: 3,

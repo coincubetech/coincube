@@ -657,6 +657,63 @@ fn split_funding_scan_plan(source: &SplitSource) -> Result<ScanPlan, String> {
     })
 }
 
+fn split_funding_quote_for_inventory(
+    source: &SplitSource,
+    reservation: &claim_workflow::SplitFundingReservation,
+    inventory: &foreign_split_inventory::SplitInventory,
+    target_script: &coincube_core::miniscript::bitcoin::Script,
+    bitcoin_rate_sat_vb: u64,
+    btcb2_rate_sat_vb: u64,
+) -> Result<SplitFundingQuote, String> {
+    let shared = inventory.splittable_coins();
+    let return_script = source
+        .external()
+        .at_derivation_index(reservation.indices.bitcoin_return)
+        .map_err(|_| "The Bitcoin return address is invalid.".to_string())?
+        .script_pubkey();
+    let minimum = |index: u32,
+                   destination: &coincube_core::miniscript::bitcoin::Script,
+                   rate: u64,
+                   chain: &str|
+     -> Result<u64, String> {
+        let vbytes = coincube_core::foreign_split::estimate_ancestry_signed_vbytes(
+            source,
+            &shared,
+            inventory.fork_height(),
+            index,
+            destination,
+        )
+        .map_err(|_| format!("The {chain} deposit fee cannot be estimated for these coins."))?;
+        let fee = vbytes
+            .checked_mul(rate)
+            .ok_or_else(|| format!("The {chain} fee quote is out of range."))?;
+        let dust = source
+            .external()
+            .at_derivation_index(index)
+            .map_err(|_| format!("The {chain} deposit address is invalid."))?
+            .script_pubkey()
+            .minimal_non_dust()
+            .to_sat();
+        Ok(fee.max(dust))
+    };
+    Ok(SplitFundingQuote {
+        bitcoin_rate_sat_vb,
+        btcb2_rate_sat_vb,
+        bitcoin_minimum_sats: minimum(
+            reservation.indices.bitcoin_deposit,
+            return_script.as_script(),
+            bitcoin_rate_sat_vb,
+            "Bitcoin",
+        )?,
+        btcb2_minimum_sats: minimum(
+            reservation.indices.btcb2_deposit,
+            target_script,
+            btcb2_rate_sat_vb,
+            "BTCB2",
+        )?,
+    })
+}
+
 #[async_trait]
 impl SplitConnect for ProductionConnect {
     fn context(&self) -> Context {
@@ -716,28 +773,6 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() {
             return Err("The Connect session changed during the funding quote.".into());
         }
-        let shared = scan.inventory.splittable_coins();
-        let return_script = source
-            .external()
-            .at_derivation_index(reservation.indices.bitcoin_return)
-            .map_err(|_| "The Bitcoin return address is invalid.".to_string())?
-            .script_pubkey();
-        let bitcoin_vbytes = coincube_core::foreign_split::estimate_ancestry_signed_vbytes(
-            source,
-            &shared,
-            scan.inventory.fork_height(),
-            reservation.indices.bitcoin_deposit,
-            return_script.as_script(),
-        )
-        .map_err(|_| "The Bitcoin deposit fee cannot be estimated for these coins.".to_string())?;
-        let btcb2_vbytes = coincube_core::foreign_split::estimate_ancestry_signed_vbytes(
-            source,
-            &shared,
-            scan.inventory.fork_height(),
-            reservation.indices.btcb2_deposit,
-            target_script.as_script(),
-        )
-        .map_err(|_| "The BTCB2 deposit fee cannot be estimated for these coins.".to_string())?;
         let bitcoin_rate_sat_vb = self
             .bitcoin_feerate()
             .await
@@ -750,36 +785,14 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() {
             return Err("The Connect session changed during the funding quote.".into());
         }
-        let bitcoin_minimum_sats = bitcoin_vbytes
-            .checked_mul(bitcoin_rate_sat_vb)
-            .ok_or_else(|| "The Bitcoin fee quote is out of range.".to_string())?
-            .max(
-                source
-                    .external()
-                    .at_derivation_index(reservation.indices.bitcoin_deposit)
-                    .map_err(|_| "The Bitcoin deposit address is invalid.".to_string())?
-                    .script_pubkey()
-                    .minimal_non_dust()
-                    .to_sat(),
-            );
-        let btcb2_minimum_sats = btcb2_vbytes
-            .checked_mul(btcb2_rate_sat_vb)
-            .ok_or_else(|| "The BTCB2 fee quote is out of range.".to_string())?
-            .max(
-                source
-                    .external()
-                    .at_derivation_index(reservation.indices.btcb2_deposit)
-                    .map_err(|_| "The BTCB2 deposit address is invalid.".to_string())?
-                    .script_pubkey()
-                    .minimal_non_dust()
-                    .to_sat(),
-            );
-        Ok(SplitFundingQuote {
+        split_funding_quote_for_inventory(
+            source,
+            reservation,
+            &scan.inventory,
+            target_script.as_script(),
             bitcoin_rate_sat_vb,
             btcb2_rate_sat_vb,
-            bitcoin_minimum_sats,
-            btcb2_minimum_sats,
-        })
+        )
     }
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind> {
         address_used(&self.esplora, chain, address, self.observation.now()).await
@@ -844,6 +857,51 @@ impl SplitConnect for ProductionConnect {
             .funding_candidates(ChainId::BitcoinBlake2b)
             .is_empty();
         let review = if bitcoin_candidate && btcb2_candidate {
+            let target_script = reservation
+                .target_binding
+                .as_ref()
+                .ok_or_else(|| "The BTCB2 target reservation is missing.".to_string())?
+                .script_pubkey()
+                .map_err(|_| "The BTCB2 target address changed.".to_string())?;
+            let bitcoin_rate = self
+                .bitcoin_feerate()
+                .await
+                .ok_or_else(|| "The current Bitcoin fee quote is unavailable.".to_string())?;
+            let fork_fees =
+                crate::services::split_fees::btcb2_fee_source(Some(self.session.client.clone()));
+            let fork_rate = crate::services::foreign_psbt::btcb2_sweep_feerate(&*fork_fees)
+                .await
+                .ok_or_else(|| "The current BTCB2 fee quote is unavailable.".to_string())?;
+            if !self.session_current() || self.context() != context {
+                return Err("The Connect session changed during the deposit check.".into());
+            }
+            let quote = split_funding_quote_for_inventory(
+                source,
+                &reservation,
+                &scan.inventory,
+                target_script.as_script(),
+                bitcoin_rate,
+                fork_rate,
+            )?;
+            let eligible = reserved.funding_covering_estimated_fees(
+                quote.bitcoin_minimum_sats,
+                quote.btcb2_minimum_sats,
+            );
+            if eligible.funding_candidates(ChainId::Bitcoin).is_empty() {
+                return Err(format!(
+                    "No Bitcoin deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+                    quote.bitcoin_minimum_sats
+                ));
+            }
+            if eligible
+                .funding_candidates(ChainId::BitcoinBlake2b)
+                .is_empty()
+            {
+                return Err(format!(
+                    "No BTCB2 deposit candidate at the reserved address covers the current minimum of {} sats. A separate eligible deposit may be sent to that same address.",
+                    quote.btcb2_minimum_sats
+                ));
+            }
             let found = reservation
                 .discover_reserved_funding(
                     directory,
@@ -852,6 +910,7 @@ impl SplitConnect for ProductionConnect {
                     &scan.inventory,
                     &self.observation,
                     CHECK_POLICY.observations,
+                    (quote.bitcoin_minimum_sats, quote.btcb2_minimum_sats),
                 )
                 .await
                 .map_err(|error| match error {
@@ -863,22 +922,6 @@ impl SplitConnect for ProductionConnect {
                         "The saved deposit reservation no longer matches this source and target Cube.".to_string(),
                 })?;
             if let Some(found) = found {
-                let target_script = reservation
-                    .target_binding
-                    .as_ref()
-                    .ok_or_else(|| "The BTCB2 target reservation is missing.".to_string())?
-                    .script_pubkey()
-                    .map_err(|_| "The BTCB2 target address changed.".to_string())?;
-                let bitcoin_rate = self
-                    .bitcoin_feerate()
-                    .await
-                    .ok_or_else(|| "The current Bitcoin fee quote is unavailable.".to_string())?;
-                let fork_fees = crate::services::split_fees::btcb2_fee_source(Some(
-                    self.session.client.clone(),
-                ));
-                let fork_rate = crate::services::foreign_psbt::btcb2_sweep_feerate(&*fork_fees)
-                    .await
-                    .ok_or_else(|| "The current BTCB2 fee quote is unavailable.".to_string())?;
                 let tips = coincube_core::claim::PreflightTips {
                     bitcoin: found
                         .inputs
