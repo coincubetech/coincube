@@ -4,7 +4,7 @@
 //! Loading it does not grant signing or broadcasting authority.
 
 use super::paired_signing_permit::PairedSigningPermit;
-use super::{journal::Journal, Context, Error};
+use super::{journal::Journal, Context, Controller, Error};
 use crate::app::settings::WalletId;
 use crate::services::{
     claim_observation::{
@@ -28,6 +28,7 @@ use coincube_core::{
         finalize_ancestry_split_step1, finalize_ancestry_split_step2,
         validate_ancestry_split_pair_signing, AncestrySplitInputs, AncestrySplitStep1,
         AncestrySplitStep2, AncestrySplitStep2Inputs, FinalizeError, SplitCoin, SplitSource,
+        VerifiedAncestrySplitPair,
     },
     miniscript::{
         bitcoin::{
@@ -189,6 +190,91 @@ impl RequalifiedInitialSplit {
             _ => false,
         };
         valid.then(|| PairedSigningPermit::new(chain, current, generation, self.context.generation))
+    }
+
+    /// Recheck two returned signer PSBTs against this fresh pair, finalize
+    /// every input, and bind the exact witnesses to the saved version-11
+    /// journal. This does not write a possible send or enter a transport gate.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn finalize_signed_pair_for_record(
+        &self,
+        controller: &mut Controller,
+        target: &CoincubeDescriptor,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_signed: &Psbt,
+        fork: &AncestrySplitStep2,
+        fork_signed: &Psbt,
+        policy: Policy,
+        now: i64,
+    ) -> Result<VerifiedAncestrySplitPair, Error> {
+        if !self.matches_pair(target, bitcoin, fork)
+            || self.checked_at.elapsed() >= Duration::from_secs(10)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let bitcoin_dependency = self
+            .funding
+            .bitcoin_path
+            .reverify()
+            .map_err(|_| Error::Unchecked)?;
+        let fork_dependency = self
+            .funding
+            .fork_path
+            .reverify()
+            .map_err(|_| Error::Unchecked)?;
+        let bitcoin_inputs = AncestrySplitInputs {
+            chain: bitcoin.chain(),
+            source: bitcoin.source(),
+            shared: &self.shared,
+            funding: &self.funding.bitcoin,
+            dependency: &bitcoin_dependency,
+            fork_height: bitcoin.fork_height(),
+            destination: bitcoin.destination(),
+        };
+        let fork_inputs = AncestrySplitStep2Inputs {
+            chain: fork.chain(),
+            source: fork.source(),
+            shared: &self.shared,
+            funding: &self.funding.fork,
+            dependency: &fork_dependency,
+            fork_height: fork.fork_height(),
+            claimed: bitcoin.claimed_prevouts(),
+            target: fork
+                .psbt()
+                .unsigned_tx
+                .output
+                .first()
+                .ok_or(Error::InvalidPlan)?
+                .script_pubkey
+                .as_script(),
+        };
+        let combined = crate::services::split_psbt_file::combine_ancestry_split_pair(
+            bitcoin,
+            &bitcoin_inputs,
+            std::slice::from_ref(bitcoin_signed),
+            fork,
+            &fork_inputs,
+            std::slice::from_ref(fork_signed),
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        if !combined.complete {
+            return Err(Error::Unchecked);
+        }
+        let (verified, _) = controller.finalize_ancestry_split_pair_for_review(
+            &self.context,
+            self,
+            target,
+            bitcoin,
+            &bitcoin_inputs,
+            &combined.bitcoin,
+            fork,
+            &fork_inputs,
+            &combined.fork,
+            policy,
+            now,
+            self.tips,
+        )?;
+        Ok(verified)
     }
 }
 

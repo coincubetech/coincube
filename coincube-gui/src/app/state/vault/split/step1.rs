@@ -35,6 +35,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::Arc,
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use async_trait::async_trait;
@@ -447,6 +448,23 @@ pub trait SplitConnect: Send + Sync {
         _rates: (u64, u64),
     ) -> Result<SplitSignerCheck, String> {
         Err("Two-chain Split signer preparation is unavailable for this session.".into())
+    }
+    /// Finalize both exact signer returns after a new paired scan, then save
+    /// the two signed witnesses atomically. No preflight or send occurs here.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_exact_signed_pair(
+        &self,
+        _directory: PathBuf,
+        _source: &SplitSource,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _bitcoin: &AncestrySplitStep1,
+        _bitcoin_signed: &Psbt,
+        _fork: &AncestrySplitStep2,
+        _fork_signed: &Psbt,
+        _rates: (u64, u64),
+    ) -> Result<(Txid, Txid), String> {
+        Err("Two-chain Split signing is unavailable for this session.".into())
     }
     /// Opens or creates the journal. Blocking: callers use `spawn_blocking`.
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error>;
@@ -1302,6 +1320,72 @@ impl SplitConnect for ProductionConnect {
             requalified: funding,
             generation: self.generation.clone(),
         })
+    }
+    async fn record_exact_signed_pair(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_signed: &Psbt,
+        fork: &AncestrySplitStep2,
+        fork_signed: &Psbt,
+        rates: (u64, u64),
+    ) -> Result<(Txid, Txid), String> {
+        let (_, target_descriptor) = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let check = self
+            .prepare_exact_pair_intent(
+                directory.clone(),
+                source,
+                target_cube,
+                target_vault,
+                bitcoin,
+                fork,
+                rates,
+            )
+            .await?;
+        if !self.session_current() || self.context() != check.context().clone() {
+            return Err("The Connect session changed before recording this split.".into());
+        }
+        let current = check.context().clone();
+        let identity = claim_workflow::split_identity(target_cube.to_owned(), source.digest());
+        let target_descriptor = target_descriptor.clone();
+        let bitcoin = bitcoin.clone();
+        let fork = fork.clone();
+        let bitcoin_signed = bitcoin_signed.clone();
+        let fork_signed = fork_signed.clone();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut controller =
+                Controller::reopen_settling_blocking(&directory, &identity, current.clone())?;
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map_err(|_| claim_workflow::Error::LateObservation)?
+                .as_secs() as i64;
+            let verified = check.requalified.finalize_signed_pair_for_record(
+                &mut controller,
+                &target_descriptor,
+                &bitcoin,
+                &bitcoin_signed,
+                &fork,
+                &fork_signed,
+                CHECK_POLICY.observations,
+                now,
+            )?;
+            controller.record_signed_ancestry_split_pair(&current, &verified)?;
+            Ok::<(Txid, Txid), claim_workflow::Error>((
+                verified.bitcoin().transaction().compute_txid(),
+                verified.fork().transaction().compute_txid(),
+            ))
+        })
+        .await
+        .map_err(|_| "Recording the signed Split pair was interrupted.".to_string())?
+        .map_err(|error| format!("The signed Split pair could not be recorded: {error:?}"))?;
+        if !self.session_current() {
+            return Err("The Connect session changed while recording this split.".into());
+        }
+        Ok(result)
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
         let production = SplitProduction::new(

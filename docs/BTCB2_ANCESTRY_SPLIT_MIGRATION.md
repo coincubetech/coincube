@@ -366,6 +366,12 @@ a replayable spend.
    The paired Split PSBT file importer now uses the same strict core combiner,
    so two valid returns for the same key with conflicting signatures cannot
    be merged by silently keeping whichever file was read first.
+   The production Split adapter now also has a finalization boundary for both
+   signed ordinary PSBTs: it rescans and requalifies the exact pair, checks
+   each signer return, reopens the version-11 journal, verifies both complete
+   signed transactions against the live proof and atomically records both
+   witnesses. The UI does not call this boundary yet; it does not preflight
+   or send either transaction.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks
