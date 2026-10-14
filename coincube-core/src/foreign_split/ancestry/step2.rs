@@ -1,0 +1,366 @@
+//! Ordinary BTCB2 split step 2: exactly the shared inputs from Bitcoin step 1
+//! plus one post-fork BTCB2 funding input, to the target Cube. Structural
+//! construction only; live two-chain exclusivity and UTXO checks are external.
+
+use super::*;
+
+#[derive(Debug, Clone, Copy)]
+pub struct AncestrySplitStep2Inputs<'a> {
+    pub chain: ChainId,
+    pub source: &'a SplitSource,
+    pub shared: &'a [SplitCoin],
+    pub funding: &'a SplitCoin,
+    pub dependency: &'a CoinbaseDependency,
+    pub fork_height: u64,
+    /// Exactly step 1's `claimed_prevouts`, not including Bitcoin funding.
+    pub claimed: &'a [OutPoint],
+    /// Target Cube Vault address script, bound to a fresh Cube address by the
+    /// caller. This module checks only the script shape and foreign-source
+    /// collision window.
+    pub target: &'a bitcoin::Script,
+}
+
+#[derive(Debug, Clone)]
+pub struct AncestrySplitStep2 {
+    psbt: Psbt,
+    chain: ChainId,
+    source: SplitSource,
+    inputs: Vec<(SplitBranch, u32)>,
+    shared: Vec<OutPoint>,
+    funding: OutPoint,
+    fork_height: u64,
+    maximum_signed_vbytes: u64,
+    feerate_vb: u64,
+    total: u64,
+}
+
+impl AncestrySplitStep2 {
+    pub fn psbt(&self) -> &Psbt {
+        &self.psbt
+    }
+    pub fn chain(&self) -> ChainId {
+        self.chain
+    }
+    pub fn source(&self) -> &SplitSource {
+        &self.source
+    }
+    pub fn claimed_prevouts(&self) -> &[OutPoint] {
+        &self.shared
+    }
+    pub fn funding_prevout(&self) -> OutPoint {
+        self.funding
+    }
+    pub fn fork_height(&self) -> u64 {
+        self.fork_height
+    }
+    pub fn target(&self) -> &bitcoin::Script {
+        &self.psbt.unsigned_tx.output[0].script_pubkey
+    }
+    pub fn txid(&self) -> Txid {
+        self.psbt.unsigned_tx.compute_txid()
+    }
+    pub fn maximum_signed_vbytes(&self) -> u64 {
+        self.maximum_signed_vbytes
+    }
+    pub fn fee(&self) -> Amount {
+        Amount::from_sat(self.total - self.psbt.unsigned_tx.output[0].value.to_sat())
+    }
+}
+
+struct Plan2 {
+    selected: Vec<Selected>,
+    shared: Vec<OutPoint>,
+    total: u64,
+    maximum_signed_vbytes: u64,
+}
+
+fn plan(inputs: &AncestrySplitStep2Inputs<'_>) -> Result<Plan2, Error> {
+    if !inputs.chain.is_blake2b() {
+        return Err(Error::NotBitcoinBlake2b(inputs.chain));
+    }
+    let Selection {
+        mut selected,
+        outpoints,
+        total,
+    } = select(inputs.source, inputs.shared, inputs.fork_height)?;
+    let claimed: BTreeSet<_> = inputs.claimed.iter().copied().collect();
+    if claimed.len() != inputs.claimed.len() || claimed != outpoints {
+        return Err(Error::ClaimedMismatch);
+    }
+    let funding = inputs.funding;
+    if outpoints.contains(&funding.outpoint) {
+        return Err(Error::DuplicateInput(funding.outpoint));
+    }
+    if funding.outpoint != inputs.dependency.selected() {
+        return Err(Error::InvalidFunding(
+            "dependency does not name the funding input",
+        ));
+    }
+    if funding
+        .btcb2_block
+        .is_none_or(|block| block.height < inputs.fork_height)
+        || funding.bitcoin_block.is_some()
+    {
+        return Err(Error::InvalidFunding(
+            "funding input must be post-fork BTCB2 history",
+        ));
+    }
+    let definite = inputs.source.derive(funding.branch, funding.index)?;
+    let output =
+        spend::authenticate_previous_output(&funding.outpoint, Some(&funding.previous), None)
+            .map_err(|reason| Error::InputAuthentication {
+                outpoint: funding.outpoint,
+                reason,
+            })?;
+    if definite.script_pubkey() != output.script_pubkey {
+        return Err(Error::ScriptMismatch(funding.outpoint));
+    }
+    let total = total
+        .checked_add(output.value.to_sat())
+        .filter(|sum| *sum <= Amount::MAX_MONEY.to_sat())
+        .ok_or(Error::Economics)?;
+    selected.push(Selected {
+        outpoint: funding.outpoint,
+        branch: funding.branch,
+        index: funding.index,
+        previous: funding.previous.clone(),
+        output,
+        definite,
+    });
+    selected.sort_by_key(|input| input.outpoint);
+    if !(inputs.target.is_p2wsh() || inputs.target.is_p2tr())
+        || super::super::step2::is_source_script(inputs.source, &selected, inputs.target)?
+    {
+        return Err(Error::InvalidTarget);
+    }
+    let maximum_signed_vbytes = maximum_signed_vbytes(
+        &selected,
+        vec![TxOut {
+            value: Amount::ZERO,
+            script_pubkey: inputs.target.to_owned(),
+        }],
+    )?;
+    Ok(Plan2 {
+        selected,
+        shared: outpoints.into_iter().collect(),
+        total,
+        maximum_signed_vbytes,
+    })
+}
+
+fn build(
+    inputs: &AncestrySplitStep2Inputs<'_>,
+    plan: Plan2,
+    value: Amount,
+    locktime: LockTime,
+    feerate_vb: u64,
+) -> Result<AncestrySplitStep2, Error> {
+    let tx = unsigned_transaction(
+        &plan.selected,
+        vec![TxOut {
+            value,
+            script_pubkey: inputs.target.to_owned(),
+        }],
+        locktime,
+    );
+    let psbt = psbt_for(tx, &plan.selected)?;
+    Ok(AncestrySplitStep2 {
+        psbt,
+        chain: inputs.chain,
+        source: inputs.source.clone(),
+        inputs: plan
+            .selected
+            .iter()
+            .map(|input| (input.branch, input.index))
+            .collect(),
+        shared: plan.shared,
+        funding: inputs.funding.outpoint,
+        fork_height: inputs.fork_height,
+        maximum_signed_vbytes: plan.maximum_signed_vbytes,
+        feerate_vb,
+        total: plan.total,
+    })
+}
+
+pub fn create_ancestry_split_step2(
+    inputs: &AncestrySplitStep2Inputs<'_>,
+    feerate_vb: u64,
+    locktime: LockTime,
+    btcb2_tip_height: u32,
+) -> Result<AncestrySplitStep2, Error> {
+    check_locktime(locktime, btcb2_tip_height)?;
+    let plan = plan(inputs)?;
+    if !(1..=spend::MAX_FEERATE).contains(&feerate_vb) {
+        return Err(Error::Economics);
+    }
+    let fee = plan
+        .maximum_signed_vbytes
+        .checked_mul(feerate_vb)
+        .ok_or(Error::Economics)?;
+    let value = plan.total.checked_sub(fee).ok_or(Error::Economics)?;
+    check_economics(plan.total, value, inputs.target, plan.maximum_signed_vbytes)?;
+    build(inputs, plan, Amount::from_sat(value), locktime, feerate_vb)
+}
+
+/// Rebuild from current coin data and persisted fee rate, then require every
+/// unsigned byte to match. A changed fee, marker, target or shared set fails.
+pub fn reconstruct_ancestry_split_step2(
+    inputs: &AncestrySplitStep2Inputs<'_>,
+    recorded: &Transaction,
+    feerate_vb: u64,
+    btcb2_tip_height: u32,
+) -> Result<AncestrySplitStep2, Error> {
+    if recorded.output.len() != 1 {
+        return Err(Error::Recorded("Ancestry step 2 must have one output"));
+    }
+    let rebuilt =
+        create_ancestry_split_step2(inputs, feerate_vb, recorded.lock_time, btcb2_tip_height)?;
+    if rebuilt.psbt.unsigned_tx != *recorded {
+        return Err(Error::Recorded(
+            "Recorded transaction differs from the owned ancestry step-2 construction",
+        ));
+    }
+    Ok(rebuilt)
+}
+
+#[derive(Debug)]
+pub struct VerifiedAncestrySplitStep2 {
+    transaction: Transaction,
+    chain: ChainId,
+    construction_txid: Txid,
+    fee: Amount,
+    signatures_per_input: Vec<usize>,
+}
+
+impl VerifiedAncestrySplitStep2 {
+    pub fn transaction(&self) -> &Transaction {
+        &self.transaction
+    }
+    pub fn chain(&self) -> ChainId {
+        self.chain
+    }
+    pub fn construction_txid(&self) -> Txid {
+        self.construction_txid
+    }
+    pub fn fee(&self) -> Amount {
+        self.fee
+    }
+    pub fn vsize(&self) -> usize {
+        self.transaction.vsize()
+    }
+    pub fn signatures_per_input(&self) -> &[usize] {
+        &self.signatures_per_input
+    }
+}
+
+fn check_bound(
+    construction: &AncestrySplitStep2,
+    inputs: &AncestrySplitStep2Inputs<'_>,
+) -> Result<(), FinalizeError> {
+    let rebuilt = create_ancestry_split_step2(
+        inputs,
+        construction.feerate_vb,
+        construction.psbt.unsigned_tx.lock_time,
+        u32::MAX,
+    )
+    .map_err(|_| FinalizeError::CoinsChanged)?;
+    if rebuilt.psbt == construction.psbt
+        && rebuilt.chain == construction.chain
+        && rebuilt.shared == construction.shared
+        && rebuilt.funding == construction.funding
+        && rebuilt.source == construction.source
+        && rebuilt.fork_height == construction.fork_height
+    {
+        Ok(())
+    } else {
+        Err(FinalizeError::CoinsChanged)
+    }
+}
+
+pub fn finalize_ancestry_split_step2<C: secp256k1::Verification>(
+    construction: &AncestrySplitStep2,
+    inputs: &AncestrySplitStep2Inputs<'_>,
+    signed: &Psbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedAncestrySplitStep2, FinalizeError> {
+    check_bound(construction, inputs)?;
+    let original = &construction.psbt;
+    check_signed_construction(original, signed)?;
+    let prevouts =
+        verify_partial_signatures(&construction.source, &construction.inputs, signed, secp)?;
+    let total = prevouts
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+        .ok_or(FinalizeError::Economics)?;
+    let destination = &signed.unsigned_tx.output[0];
+    check_economics(
+        total,
+        destination.value.to_sat(),
+        &destination.script_pubkey,
+        construction.maximum_signed_vbytes,
+    )
+    .map_err(|_| FinalizeError::Economics)?;
+    let (transaction, signatures_per_input) =
+        finalize_and_replay(original, signed, &prevouts, secp)?;
+    Ok(VerifiedAncestrySplitStep2 {
+        construction_txid: original.unsigned_tx.compute_txid(),
+        transaction,
+        chain: construction.chain,
+        fee: Amount::from_sat(total - destination.value.to_sat()),
+        signatures_per_input,
+    })
+}
+
+pub fn verify_ancestry_split_step2_transaction<C: secp256k1::Verification>(
+    construction: &AncestrySplitStep2,
+    inputs: &AncestrySplitStep2Inputs<'_>,
+    transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedAncestrySplitStep2, FinalizeError> {
+    check_bound(construction, inputs)?;
+    let original = &construction.psbt;
+    if construction.inputs.len() != original.inputs.len()
+        || original.unsigned_tx.input.len() != original.inputs.len()
+        || original.unsigned_tx.output.len() != 1
+    {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    let mut prevouts = Vec::with_capacity(original.inputs.len());
+    for (index, input) in original.inputs.iter().enumerate() {
+        let output = spend::authenticate_previous_output(
+            &original.unsigned_tx.input[index].previous_output,
+            input.non_witness_utxo.as_ref(),
+            input.witness_utxo.as_ref(),
+        )
+        .map_err(|_| FinalizeError::InputAuthentication)?;
+        let (branch, derivation) = construction.inputs[index];
+        let definite = construction
+            .source
+            .derive(branch, derivation)
+            .map_err(|_| FinalizeError::InputAuthentication)?;
+        if definite.script_pubkey() != output.script_pubkey {
+            return Err(FinalizeError::InputAuthentication);
+        }
+        prevouts.push(output);
+    }
+    let signatures_per_input = verify_retained_witness(transaction, original, &prevouts, secp)?;
+    let total = prevouts
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+        .ok_or(FinalizeError::Economics)?;
+    let destination = &original.unsigned_tx.output[0];
+    check_economics(
+        total,
+        destination.value.to_sat(),
+        &destination.script_pubkey,
+        construction.maximum_signed_vbytes,
+    )
+    .map_err(|_| FinalizeError::Economics)?;
+    Ok(VerifiedAncestrySplitStep2 {
+        construction_txid: original.unsigned_tx.compute_txid(),
+        transaction: transaction.clone(),
+        chain: construction.chain,
+        fee: Amount::from_sat(total - destination.value.to_sat()),
+        signatures_per_input,
+    })
+}

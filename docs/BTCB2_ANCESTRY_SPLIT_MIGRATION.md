@@ -69,12 +69,14 @@ a replayable spend.
    migration and reconciliation are complete.
 3. **Foreign Split transactions.** The existing `foreign_split::SplitStep1`
    always writes OP_RETURN output 0 and treats every input as a shared claim.
-   Replace it with a typed ancestry construction containing `S + B`, one
-   ordinary destination output, and an explicit `claimed_prevouts = S`.
-   Extend step two to consume `S + F`, authenticating `F` against the foreign
-   source descriptor even though its destination is the target Cube. Rebuild
-   finalized PSBTs from fresh coins after restart and reject any changed
-   script, amount, input set, destination or fee. Update coordinator transport,
+   A separately typed ancestry construction now builds `S + B` with one
+   ordinary destination output and an explicit `claimed_prevouts = S`.
+   Its BTCB2 counterpart builds `S + F` and authenticates `F` against the
+   foreign source descriptor even though its destination is the target Cube.
+   Both rebuild exact PSBTs from fresh coins and the persisted fee rate,
+   rejecting changed scripts, amounts, input sets, destinations and fees.
+   These are structural builders only; the old OP_RETURN types remain for
+   recorded legacy transactions. Next update coordinator transport,
    preflight and journal identity to carry both typed proofs. Keep the unified
    signature fallback separate and labeled with its actual replay properties.
 4. **Both desktop wizards.** Lead with the two deposits and show separate

@@ -116,6 +116,9 @@ pub enum Error {
     /// address types), or is one of the foreign wallet's own scripts within
     /// the scanner's gap of a claimed coin's index.
     InvalidTarget,
+    /// A post-fork funding coin is missing, malformed, or not bound to the
+    /// supplied structural dependency. Live chain exclusivity is separate.
+    InvalidFunding(&'static str),
 }
 
 impl fmt::Display for Error {
@@ -158,6 +161,7 @@ impl fmt::Display for Error {
                 f.write_str("Step 2 must spend exactly the coins step 1 claimed")
             }
             Self::InvalidTarget => f.write_str("Step 2 target address is not usable"),
+            Self::InvalidFunding(reason) => write!(f, "Invalid split funding coin: {reason}"),
         }
     }
 }
@@ -1159,6 +1163,15 @@ mod step2;
 pub use step2::{
     create_split_step2, finalize_split_step2, reconstruct_split_step2,
     verify_split_step2_transaction, SplitStep2, SplitStep2Inputs, VerifiedSplitStep2,
+};
+
+mod ancestry;
+pub use ancestry::{
+    create_ancestry_split_step1, create_ancestry_split_step2, finalize_ancestry_split_step1,
+    finalize_ancestry_split_step2, reconstruct_ancestry_split_step1,
+    reconstruct_ancestry_split_step2, verify_ancestry_split_step1_transaction,
+    verify_ancestry_split_step2_transaction, AncestrySplitInputs, AncestrySplitStep1,
+    AncestrySplitStep2, AncestrySplitStep2Inputs, VerifiedAncestrySplitStep2,
 };
 
 mod unified;
