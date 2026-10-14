@@ -44,6 +44,7 @@ fn primary(label: &'static str, message: SplitMessage) -> Element<'static, Messa
 fn working(work: Work) -> &'static str {
     match work {
         Work::ReservingFunding => "Saving fresh deposit addresses and checking both chains for prior use…",
+        Work::CheckingFunding => "Scanning both chains and checking deposit ancestry…",
         Work::Checking => "Checking the fork, fees and the fresh address…",
         Work::Building => "Building step 1…",
         Work::Exporting => "Saving the PSBT file…",
@@ -522,6 +523,30 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     .push(caption(addresses.btcb2_deposit.clone()))
                     .push(p1_regular("Send only the named coin to each address. These deposits are fee inputs, not the split itself. Both coins must later pass independent ancestry, ownership, confirmation and unspent checks before any transaction can be signed."))
                     .push(caption("The Bitcoin return address is reserved separately and is not a deposit destination."));
+                if let Some(progress) = panel.funding_progress() {
+                    let candidate = |seen| {
+                        if seen {
+                            "post-fork coin found; checking paired proof"
+                        } else {
+                            "no confirmed post-fork coin found at the reserved address"
+                        }
+                    };
+                    body = body
+                        .push(caption(format!(
+                            "Bitcoin deposit: {}",
+                            candidate(progress.bitcoin_candidate)
+                        )))
+                        .push(caption(format!(
+                            "Bitcoin Blake2b deposit: {}",
+                            candidate(progress.btcb2_candidate)
+                        )));
+                    if progress.both_verified {
+                        body = body.push(p1_regular("Both deposits passed a paired ancestry check. Signing remains unavailable until the exact transactions, fees and current inputs are reviewed together."));
+                    } else if progress.bitcoin_candidate && progress.btcb2_candidate {
+                        body = body.push(p1_regular("Both deposits are visible, but their paired chain-specific ancestry has not been established. No transaction can be signed."));
+                    }
+                }
+                actions = actions.push(action("Check deposits", SplitMessage::CheckDeposits));
             }
         }
         Stage::ChooseRoute => {

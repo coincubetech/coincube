@@ -167,6 +167,7 @@ pub enum Step2Stage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
     ReservingFunding,
+    CheckingFunding,
     Checking,
     Building,
     Exporting,
@@ -314,6 +315,7 @@ pub type ResumeResult = Result<(Box<Resumed>, Driver), Box<Unresumed>>;
 #[derive(Debug)]
 pub enum SplitEvent {
     FundingPrepared(u64, Result<step1::CheckedFundingAddresses, String>),
+    FundingChecked(u64, Result<step1::SplitDepositProgress, String>),
     Checked(u64, Result<Box<Prepared>, Refusal>),
     Built(u64, Result<Box<SplitStep1>, String>),
     Exported(u64, Result<Option<PathBuf>, String>),
@@ -440,6 +442,7 @@ pub enum Recovered {
 #[derive(Debug, Clone)]
 pub enum SplitMessage {
     Retry,
+    CheckDeposits,
     ExportUnsigned(Encoding),
     ImportSigned,
     Review,
@@ -501,6 +504,7 @@ pub struct SplitPanel {
     /// Fresh start only.
     intent: Option<Arc<SplitIntent>>,
     funding_addresses: Option<step1::CheckedFundingAddresses>,
+    funding_progress: Option<step1::SplitDepositProgress>,
     prepared: Option<Box<Prepared>>,
     construction: Option<Box<SplitStep1>>,
     files: Vec<Psbt>,
@@ -625,6 +629,7 @@ impl SplitPanel {
             hidden: false,
             intent: None,
             funding_addresses: None,
+            funding_progress: None,
             prepared: None,
             construction: None,
             files: Vec::new(),
@@ -724,6 +729,9 @@ impl SplitPanel {
     }
     pub fn funding_addresses(&self) -> Option<&step1::CheckedFundingAddresses> {
         self.funding_addresses.as_ref()
+    }
+    pub fn funding_progress(&self) -> Option<step1::SplitDepositProgress> {
+        self.funding_progress
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden
@@ -874,6 +882,7 @@ impl SplitPanel {
         self.revoke_unified();
         self.device.close();
         self.funding_addresses = None;
+        self.funding_progress = None;
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
@@ -1224,6 +1233,35 @@ impl SplitPanel {
         }
         let seq = self.seq;
         match message {
+            SplitMessage::CheckDeposits if self.stage == Stage::FundingDeposits => {
+                let (Some(connect), Some(intent)) = (self.connect.clone(), self.intent.clone())
+                else {
+                    return Task::none();
+                };
+                let source = match crate::services::split_source::split_source(
+                    &intent.external,
+                    intent.internal.as_ref(),
+                ) {
+                    Ok(source) => source,
+                    Err(error) => {
+                        self.notice = Some(error.to_string());
+                        return Task::none();
+                    }
+                };
+                let directory = step1::journal_directory(&self.journal_root, source.digest());
+                let target = self.target_cube.clone();
+                self.notice = None;
+                self.funding_progress = None;
+                self.stage = Stage::Working(Work::CheckingFunding);
+                self.spawn(
+                    async move {
+                        connect
+                            .check_split_deposits(directory, &source, &target)
+                            .await
+                    },
+                    SplitEvent::FundingChecked,
+                )
+            }
             SplitMessage::Retry => {
                 if matches!(self.stage, Stage::Refused(Refusal { retry: true, .. })) {
                     self.stage = Stage::NeedsSession;
@@ -1481,11 +1519,22 @@ impl SplitPanel {
         match event {
             SplitEvent::FundingPrepared(_, Ok(addresses)) => {
                 self.funding_addresses = Some(addresses);
+                self.funding_progress = None;
                 self.stage = Stage::FundingDeposits;
                 Task::none()
             }
             SplitEvent::FundingPrepared(_, Err(reason)) => {
                 self.stage = Stage::Refused(Refusal::retry(reason));
+                Task::none()
+            }
+            SplitEvent::FundingChecked(_, Ok(progress)) => {
+                self.funding_progress = Some(progress);
+                self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::FundingChecked(_, Err(reason)) => {
+                self.notice = Some(reason);
+                self.stage = Stage::FundingDeposits;
                 Task::none()
             }
             SplitEvent::Checked(_, Ok(prepared)) => {
@@ -1844,6 +1893,7 @@ impl SplitEvent {
     fn seq(&self) -> u64 {
         match self {
             Self::FundingPrepared(seq, _)
+            | Self::FundingChecked(seq, _)
             | Self::Checked(seq, _)
             | Self::Built(seq, _)
             | Self::Exported(seq, _)

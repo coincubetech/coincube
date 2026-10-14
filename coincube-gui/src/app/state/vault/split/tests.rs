@@ -695,6 +695,14 @@ async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() 
         drive(&mut panel, task).await;
         assert_eq!(panel.stage(), &Stage::FundingDeposits);
         assert!(panel.construction().is_none());
+        // A transport with no paired rescan/proof implementation cannot
+        // promote visible deposit addresses into signing authority.
+        let task = panel.update(SplitMessage::CheckDeposits);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        assert!(panel.funding_progress().is_none());
+        assert!(panel.notice().is_some());
+        assert!(panel.construction().is_none());
         assert!(temp.root().exists());
     }
 }

@@ -77,7 +77,7 @@ a replayable spend.
    external receive indices shown to the user. The search reloads and compares
    the released reservation under the current Connect identity before
    returning a read-only result from a completed paired scan. It is not yet invoked by
-   the production Split panel and cannot authorize signing.
+   the production Split panel's deposit check and cannot authorize signing.
    Claim now has an equivalent read-only paired search that binds the selected
    Bitcoin and BTCB2 funding outputs and every shared output to its Vault
    descriptor. A Cube-specific entry point to the bounded two-chain scanner
@@ -167,9 +167,13 @@ a replayable spend.
    is bypassed for fresh production
    splits and cannot open a retired signer path. The paired Split funding
    search now filters out unrelated post-fork outputs at other receive
-   indices, but the panel still needs a new two-chain scan before using it.
-   Deposit progress, exact
-   funding minimums, proof refresh, restart recovery of funding-only records
+   indices. The production Split deposit screen now offers a read-only
+   "Check deposits" action: it rescans the saved source descriptors on both
+   chains, reloads the exact released reservation, reports whether each
+   reserved address has a confirmed post-fork candidate, and attempts the
+   bounded paired ancestry proof. It discards the proof after displaying the
+   result and cannot open Sign. Exact per-chain proof failure states, funding
+   minimums, fee review, proof refresh, restart recovery of funding-only records
    and ordinary signer admission remain to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal
    bound to both Cubes, the Vault descriptor and the Connect identity. Its

@@ -73,8 +73,8 @@ use crate::{
             TransactionObservation,
         },
         claim_workflow::{self, Context, Controller, Phase, Status},
-        foreign_scan::MAX_ADDRESSES,
-        foreign_split_inventory::FreshIndex,
+        foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanPlan, MAX_ADDRESSES},
+        foreign_split_inventory::{self, FreshIndex},
         split_evidence::{
             authenticate_outpoints, ConnectEsplora, ConnectSplitEvidence, EvidenceError,
             EvidenceFailure, RecordedOutpoint, SplitEvidenceSource, MAX_EVIDENCE_AGE_SECONDS,
@@ -374,6 +374,16 @@ pub trait SplitConnect: Send + Sync {
     async fn bitcoin_feerate(&self) -> Option<u64>;
     /// Whether `address` has any chain or mempool history (fresh read).
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind>;
+    /// Recheck the exact saved source on both chains after deposits arrive.
+    /// The default refuses; a mock cannot claim funding readiness by omission.
+    async fn check_split_deposits(
+        &self,
+        _directory: PathBuf,
+        _source: &SplitSource,
+        _target_cube: &str,
+    ) -> Result<SplitDepositProgress, String> {
+        Err("Two-chain funding checks are unavailable for this session.".into())
+    }
     /// Opens or creates the journal. Blocking: callers use `spawn_blocking`.
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error>;
 }
@@ -386,6 +396,15 @@ pub struct CheckedFundingAddresses {
     pub bitcoin_deposit: String,
     pub btcb2_deposit: String,
     pub bitcoin_return: String,
+}
+
+/// Display-only observation. Candidate flags never enable signing; only the
+/// paired proof can set `both_verified`, and it is discarded after this read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SplitDepositProgress {
+    pub bitcoin_candidate: bool,
+    pub btcb2_candidate: bool,
+    pub both_verified: bool,
 }
 
 pub async fn check_reserved_funding_addresses(
@@ -510,6 +529,32 @@ impl ProductionConnect {
     }
 }
 
+fn split_funding_scan_plan(source: &SplitSource) -> Result<ScanPlan, String> {
+    // Match the bounded foreign-wallet scan that first selected the receive
+    // indices. A deposited output beyond this walk is unavailable, not proof
+    // of zero funds or permission to choose a different address.
+    const RANGE_END: u32 = 100;
+    const GAP: u32 = 20;
+    let branch = |kind, descriptor: String| -> Result<BranchRange, String> {
+        let descriptor = ScanDescriptor::parse(kind, &descriptor)
+            .map_err(|_| "The saved source descriptor cannot be scanned.".to_string())?;
+        Ok(BranchRange {
+            start: 0,
+            end_exclusive: descriptor.end_exclusive(RANGE_END),
+            descriptor,
+        })
+    };
+    let mut branches = vec![branch(Branch::External, source.external().to_string())?];
+    if let Some(internal) = source.internal() {
+        branches.push(branch(Branch::Internal, internal.to_string())?);
+    }
+    Ok(ScanPlan {
+        chain: ChainId::BitcoinBlake2b,
+        branches,
+        gap: GAP,
+    })
+}
+
 #[async_trait]
 impl SplitConnect for ProductionConnect {
     fn context(&self) -> Context {
@@ -546,6 +591,79 @@ impl SplitConnect for ProductionConnect {
     }
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind> {
         address_used(&self.esplora, chain, address, self.observation.now()).await
+    }
+    async fn check_split_deposits(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+    ) -> Result<SplitDepositProgress, String> {
+        if !self.session_current() {
+            return Err("The Connect session changed before checking deposits.".into());
+        }
+        let context = self.context();
+        let plan = split_funding_scan_plan(source)?;
+        let scan = foreign_split_inventory::scan(
+            self.session.client.clone(),
+            plan,
+            self.expected,
+            self.generation.clone(),
+        )
+        .await
+        .map_err(|error| format!("The two-chain wallet scan did not complete: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during the deposit scan.".into());
+        }
+        let source_for_load = source.clone();
+        let target = target_cube.to_owned();
+        let saved_directory = directory.clone();
+        let saved_context = context.clone();
+        let reservation = tokio::task::spawn_blocking(move || {
+            claim_workflow::load_split_funding(
+                &saved_directory,
+                &source_for_load,
+                &target,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| "Reading the saved deposit addresses was interrupted.".to_string())?
+        .map_err(|_| "The saved deposit addresses could not be verified.".to_string())?
+        .ok_or_else(|| "No saved deposit addresses were found for this wallet.".to_string())?;
+        if !reservation.is_released() {
+            return Err("The deposit addresses were not checked before release.".into());
+        }
+        let reserved = scan
+            .inventory
+            .funding_at_reserved_addresses(reservation.indices);
+        let bitcoin_candidate = !reserved.funding_candidates(ChainId::Bitcoin).is_empty();
+        let btcb2_candidate = !reserved
+            .funding_candidates(ChainId::BitcoinBlake2b)
+            .is_empty();
+        let both_verified = if bitcoin_candidate && btcb2_candidate {
+            reservation
+                .discover_reserved_funding(
+                    directory,
+                    source,
+                    &context,
+                    &scan.inventory,
+                    &self.observation,
+                    CHECK_POLICY.observations,
+                )
+                .await
+                .map_err(|error| format!("The paired deposit proof did not complete: {error:?}"))?
+                .is_some()
+        } else {
+            false
+        };
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during the deposit proof.".into());
+        }
+        Ok(SplitDepositProgress {
+            bitcoin_candidate,
+            btcb2_candidate,
+            both_verified,
+        })
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
         let production = SplitProduction::new(
