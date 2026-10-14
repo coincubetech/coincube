@@ -1,5 +1,6 @@
-//! Test bridge for the two-chain regtest, Split steps 1 and 2 (#568 B6a,
-//! B6b) and the single-step unified fallback (B4b-1a, B6-d). Builds,
+//! Test bridge for the two-chain regtest: the ordinary ancestry-based
+//! `S+B`/`S+F` pair, recorded legacy Split steps 1 and 2 (#568 B6a, B6b),
+//! and the single-step unified fallback (B4b-1a, B6-d). Builds,
 //! reconstructs and finalizes: no keys, network, wallet writes, fee source,
 //! freshness proof or Split authorization. Python supplies the chain
 //! observations, the claimed prevouts, the target and the signatures from
@@ -7,18 +8,22 @@
 //! `ALL|UNIFIED` records in the `coincube` proprietary namespace for the
 //! unified sweep), and checks node acceptance separately.
 //!
-//! Without `step2` or `unified` the request is a step 1 (the B6a shape).
-//! With `step2` the bridge builds only step 2, from the same coins, source
-//! and fork height; with `unified`, only the unified sweep of those coins.
+//! `ancestry_pair` builds both ordinary transactions from shared coins and
+//! distinct funding paths. Without any mode field the request is a legacy
+//! step 1; `step2` and `unified` select their corresponding legacy modes.
 use coincube_core::{
     chain::ChainId,
     claim::BlockRef,
+    claim_ancestry::{self, Link},
     foreign_split::{
-        create_split_step1, create_split_step2, create_unified_sweep, finalize_split_step1,
-        finalize_split_step2, finalize_unified_sweep, reconstruct_split_step1,
-        reconstruct_split_step2, reconstruct_unified_sweep, verify_split_step2_transaction,
-        verify_unified_sweep_transaction, SplitBranch, SplitCoin, SplitInputs, SplitSource,
-        SplitStep2Inputs, UnifiedInputs, VerifiedUnifiedSweep,
+        create_ancestry_split_step1, create_ancestry_split_step2, create_split_step1,
+        create_split_step2, create_unified_sweep, finalize_ancestry_split_step1,
+        finalize_ancestry_split_step2, finalize_split_step1, finalize_split_step2,
+        finalize_unified_sweep, reconstruct_split_step1, reconstruct_split_step2,
+        reconstruct_unified_sweep, verify_split_step2_transaction,
+        verify_unified_sweep_transaction, AncestrySplitInputs, AncestrySplitStep2Inputs,
+        SplitBranch, SplitCoin, SplitInputs, SplitSource, SplitStep2Inputs, UnifiedInputs,
+        VerifiedUnifiedSweep,
     },
     miniscript::{
         bitcoin::{
@@ -78,6 +83,28 @@ struct Request {
     step2: Option<Step2Request>,
     /// Present: build the single-step unified sweep instead (not with `step2`).
     unified: Option<UnifiedRequest>,
+    /// Ordinary, chain-specific S+B and S+F pair. Mutually exclusive with
+    /// legacy OP_RETURN and unified test modes.
+    ancestry_pair: Option<AncestryPairRequest>,
+}
+
+#[derive(Deserialize)]
+struct AncestryPairRequest {
+    bitcoin_funding: Coin,
+    btcb2_funding: Coin,
+    /// Selected-funding transaction first, terminal coinbase last.
+    bitcoin_path: Vec<PathLink>,
+    btcb2_path: Vec<PathLink>,
+    target: String,
+    btcb2_tip_height: u32,
+    signed_bitcoin: Option<String>,
+    signed_btcb2: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct PathLink {
+    transaction: String,
+    parent_input: Option<usize>,
 }
 
 #[derive(Deserialize)]
@@ -118,6 +145,130 @@ struct UnifiedRequest {
 
 fn required<T>(value: Option<T>, name: &str) -> Result<T, Box<dyn Error>> {
     value.ok_or_else(|| format!("step 1 needs `{name}`").into())
+}
+
+fn parse_coin(coin: &Coin) -> Result<SplitCoin, Box<dyn Error>> {
+    let previous: Transaction = deserialize_hex(&coin.previous)?;
+    Ok(SplitCoin {
+        outpoint: OutPoint::new(previous.compute_txid(), coin.vout),
+        branch: match coin.branch {
+            Branch::External => SplitBranch::External,
+            Branch::Internal => SplitBranch::Internal,
+        },
+        index: coin.index,
+        previous,
+        bitcoin_block: coin.bitcoin_block,
+        btcb2_block: coin.btcb2_block,
+    })
+}
+
+fn ancestry_pair(
+    request: &Request,
+    pair: &AncestryPairRequest,
+    source: &SplitSource,
+    shared: &[SplitCoin],
+) -> Result<Value, Box<dyn Error>> {
+    let bitcoin_funding = parse_coin(&pair.bitcoin_funding)?;
+    let btcb2_funding = parse_coin(&pair.btcb2_funding)?;
+    let path_a = pair
+        .bitcoin_path
+        .iter()
+        .map(|link| {
+            deserialize_hex::<Transaction>(&link.transaction)
+                .map(|tx| coincube_core::miniscript::bitcoin::consensus::serialize(&tx))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let path_b = pair
+        .btcb2_path
+        .iter()
+        .map(|link| {
+            deserialize_hex::<Transaction>(&link.transaction)
+                .map(|tx| coincube_core::miniscript::bitcoin::consensus::serialize(&tx))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let links_a = pair
+        .bitcoin_path
+        .iter()
+        .zip(&path_a)
+        .map(|(link, raw)| Link {
+            transaction: raw,
+            parent_input: link.parent_input,
+        })
+        .collect::<Vec<_>>();
+    let links_b = pair
+        .btcb2_path
+        .iter()
+        .zip(&path_b)
+        .map(|(link, raw)| Link {
+            transaction: raw,
+            parent_input: link.parent_input,
+        })
+        .collect::<Vec<_>>();
+    let dependency_a = claim_ancestry::verify(bitcoin_funding.outpoint, &links_a)
+        .map_err(|error| format!("Bitcoin dependency: {error:?}"))?;
+    let dependency_b = claim_ancestry::verify(btcb2_funding.outpoint, &links_b)
+        .map_err(|error| format!("BTCB2 dependency: {error:?}"))?;
+    let inputs_a = AncestrySplitInputs {
+        chain: ChainId::Bitcoin,
+        source,
+        shared,
+        funding: &bitcoin_funding,
+        dependency: &dependency_a,
+        fork_height: request.fork_height,
+        destination: required(request.destination, "destination")?,
+    };
+    let bitcoin = create_ancestry_split_step1(
+        &inputs_a,
+        required(request.feerate_vb, "feerate_vb")?,
+        LockTime::from_height(required(request.locktime, "locktime")?)?,
+        required(request.bitcoin_tip_height, "bitcoin_tip_height")?,
+    )?;
+    let target = ScriptBuf::from_hex(&pair.target)?;
+    let inputs_b = AncestrySplitStep2Inputs {
+        chain: ChainId::BitcoinBlake2b,
+        source,
+        shared,
+        funding: &btcb2_funding,
+        dependency: &dependency_b,
+        fork_height: request.fork_height,
+        claimed: bitcoin.claimed_prevouts(),
+        target: &target,
+    };
+    let btcb2 = create_ancestry_split_step2(
+        &inputs_b,
+        required(request.feerate_vb, "feerate_vb")?,
+        LockTime::from_height(required(request.locktime, "locktime")?)?,
+        pair.btcb2_tip_height,
+    )?;
+    let mut result = json!({
+        "bitcoin_psbt": bitcoin.psbt().to_string(),
+        "btcb2_psbt": btcb2.psbt().to_string(),
+        "bitcoin_unsigned_txid": bitcoin.txid(),
+        "btcb2_unsigned_txid": btcb2.txid(),
+        "shared_prevouts": bitcoin.claimed_prevouts().iter().map(ToString::to_string).collect::<Vec<_>>(),
+        "bitcoin_funding_prevout": bitcoin.funding_prevout().to_string(),
+        "btcb2_funding_prevout": btcb2.funding_prevout().to_string(),
+        "bitcoin_fee": bitcoin.fee().to_sat(),
+        "btcb2_fee": btcb2.fee().to_sat(),
+        "bitcoin_maximum_signed_vbytes": bitcoin.maximum_signed_vbytes(),
+        "btcb2_maximum_signed_vbytes": btcb2.maximum_signed_vbytes(),
+    });
+    let secp = secp256k1::Secp256k1::verification_only();
+    if let Some(signed) = &pair.signed_bitcoin {
+        let verified =
+            finalize_ancestry_split_step1(&bitcoin, &inputs_a, &Psbt::from_str(signed)?, &secp)?;
+        result["bitcoin_raw"] = json!(serialize_hex(verified.transaction()));
+        result["bitcoin_txid"] = json!(verified.transaction().compute_txid());
+        result["bitcoin_signatures_per_input"] = json!(verified.signatures_per_input());
+    }
+    if let Some(signed) = &pair.signed_btcb2 {
+        let verified =
+            finalize_ancestry_split_step2(&btcb2, &inputs_b, &Psbt::from_str(signed)?, &secp)?;
+        result["btcb2_raw"] = json!(serialize_hex(verified.transaction()));
+        result["btcb2_txid"] = json!(verified.transaction().compute_txid());
+        result["btcb2_signatures_per_input"] = json!(verified.signatures_per_input());
+    }
+    Ok(result)
 }
 
 fn step1(
@@ -351,28 +502,22 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map(Descriptor::<DescriptorPublicKey>::from_str)
         .transpose()?;
     let source = SplitSource::new(external, internal)?;
-    let mut coins = Vec::with_capacity(request.coins.len());
-    for coin in &request.coins {
-        let previous: Transaction = deserialize_hex(&coin.previous)?;
-        coins.push(SplitCoin {
-            outpoint: OutPoint::new(previous.compute_txid(), coin.vout),
-            branch: match coin.branch {
-                Branch::External => SplitBranch::External,
-                Branch::Internal => SplitBranch::Internal,
-            },
-            index: coin.index,
-            previous,
-            bitcoin_block: coin.bitcoin_block,
-            btcb2_block: coin.btcb2_block,
-        });
-    }
-    let result = match (&request.step2, &request.unified) {
-        (Some(_), Some(_)) => {
-            return Err("a request builds one of step 1, step 2 or the unified sweep".into())
+    let coins = request
+        .coins
+        .iter()
+        .map(parse_coin)
+        .collect::<Result<Vec<_>, _>>()?;
+    let result = match (&request.step2, &request.unified, &request.ancestry_pair) {
+        (None, None, Some(pair)) => ancestry_pair(&request, pair, &source, &coins)?,
+        (None, Some(unified_request), None) => unified(&request, unified_request, &source, &coins)?,
+        (Some(step2_request), None, None) => step2(&request, step2_request, &source, &coins)?,
+        (None, None, None) => step1(&request, &source, &coins)?,
+        _ => {
+            return Err(
+                "a request builds one of step 1, step 2 or the unified sweep, or the ancestry pair"
+                    .into(),
+            )
         }
-        (None, Some(unified_request)) => unified(&request, unified_request, &source, &coins)?,
-        (Some(step2_request), None) => step2(&request, step2_request, &source, &coins)?,
-        (None, None) => step1(&request, &source, &coins)?,
     };
     println!("{}", serde_json::to_string(&result)?);
     Ok(())
