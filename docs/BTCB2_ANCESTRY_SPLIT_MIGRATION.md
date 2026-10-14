@@ -641,6 +641,21 @@ marker spend cases remain.
    before returning that read-only pair. Neither path restores live proof or
    send authority; the stage-two coordinator must still invoke it after
    rebuilding source-owned inputs and refreshing both chains.
+   A staged first-send review now holds the reverified typed pair, an opaque
+   fresh two-chain proof, the exact Bitcoin and BTCB2 witnesses and their
+   fees. On explicit confirmation it reads positive Connect policy for both
+   exact witnesses from the same provider, persists the Bitcoin possible-send
+   record, then enters a one-use exact-byte gate. Once the record exists,
+   cancellation, timeout or any transport error is uncertain and never
+   automatically retried. A separate staged BTCB2 review requires the saved
+   Bitcoin attempt, the exact signed pair, a current six-confirmation Bitcoin
+   token and an opaque post-Bitcoin two-chain proof. On explicit confirmation
+   it rereads BTCB2 policy, journals the possible BTCB2 send and enters a
+   separate one-use exact-byte gate. Either review refuses a Connect origin
+   that differs from the authenticated proof provider before recording an
+   attempt. The wizard does not yet expose either review or broadcast action;
+   the post-Bitcoin coordinator must still join fresh source and target checks
+   to this review and both paths need GUI and end-to-end tests.
 The latter mines separate post-fork coinbases into the foreign source, tests
 both signed transactions against each node, confirms BTCB2 first, and checks
 that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin

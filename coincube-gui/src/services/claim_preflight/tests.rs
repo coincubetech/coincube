@@ -216,6 +216,23 @@ fn client(server: &MockServer) -> (PreflightClient, watch::Sender<u64>) {
     )
 }
 #[test]
+fn paired_submission_uses_the_same_connect_origin_as_its_proof_provider() {
+    let server = MockServer::start();
+    let (client, _sender) = client(&server);
+    assert!(client.matches_provider(&format!(
+        "bitcoin|{}/api/v1/esplora/bitcoin/mainnet",
+        server.base_url()
+    )));
+    assert!(!client.matches_provider(&format!(
+        "bitcoin|{}/api/v1/esplora/bitcoin-blake2b/mainnet",
+        server.base_url()
+    )));
+    assert!(
+        !client.matches_provider("bitcoin|https://another.example/api/v1/esplora/bitcoin/mainnet")
+    );
+    assert_eq!(client.submission_origin(), server.base_url());
+}
+#[test]
 fn exact_bindings_and_explicit_clock_bounds_are_required() {
     for (stamp, accepted) in [
         (9940, true),

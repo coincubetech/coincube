@@ -10,7 +10,9 @@ use super::{
     Error, Intent, Phase,
 };
 use crate::services::claim_observation::http::{CollectedPostBitcoinInputs, FundingContext};
-use crate::services::claim_preflight::{Evidence, FreshnessPolicy, PairEvidence};
+use crate::services::claim_preflight::{
+    self, Evidence, FreshnessPolicy, PairEvidence, PreflightClient,
+};
 use coincube_core::{
     chain::ChainId,
     claim::{BlockRef, Policy, PreflightTips},
@@ -22,9 +24,10 @@ use coincube_core::{
     },
     miniscript::bitcoin::{psbt::Psbt, BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
 };
-use coincubed::poison_broadcast::{SubmissionGate, SubmissionRevoker};
+use coincubed::poison_broadcast::{self, SubmissionGate, SubmissionOutcome, SubmissionRevoker};
 use serde::{Deserialize, Serialize};
-use std::time::Instant;
+use std::convert::TryFrom;
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_PROOF_AGE_SECONDS: i64 = 30;
 
@@ -122,6 +125,445 @@ fn proof_fresh(observed_at: i64, now: i64, max_age_seconds: i64) -> bool {
         && now
             .checked_sub(observed_at)
             .is_some_and(|age| (0..=max_age_seconds.min(MAX_PROOF_AGE_SECONDS)).contains(&age))
+}
+
+/// Two ordinary finalized transactions ready for an explicit first-send
+/// review. The variants retain their cryptographic pair type and cannot be
+/// assembled from arbitrary transaction bytes.
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+pub(crate) enum InitialSignedPair {
+    Claim(VerifiedAncestryClaimPair),
+    Split(VerifiedAncestrySplitPair),
+}
+
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+impl InitialSignedPair {
+    fn bitcoin(&self) -> &Transaction {
+        match self {
+            Self::Claim(pair) => pair.bitcoin().transaction(),
+            Self::Split(pair) => pair.bitcoin().transaction(),
+        }
+    }
+
+    fn fork(&self) -> &Transaction {
+        match self {
+            Self::Claim(pair) => pair.fork().transaction(),
+            Self::Split(pair) => pair.fork().transaction(),
+        }
+    }
+
+    fn fees(&self) -> (u64, u64) {
+        match self {
+            Self::Claim(pair) => (pair.bitcoin().fee().to_sat(), pair.fork().fee().to_sat()),
+            Self::Split(pair) => (pair.bitcoin().fee().to_sat(), pair.fork().fee().to_sat()),
+        }
+    }
+}
+
+/// Exact facts the user must approve before the first Bitcoin send. Each
+/// destination comes from the finalized witness, not a previously rendered
+/// PSBT or a fee quote. The BTCB2 transaction is displayed now but receives
+/// its own later approval after six Bitcoin confirmations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+pub(crate) struct InitialPairReviewSnapshot {
+    pub bitcoin: Transaction,
+    pub fork: Transaction,
+    pub bitcoin_fee_sats: u64,
+    pub fork_fee_sats: u64,
+}
+
+/// One-use in-memory consent handoff. Only a saved exact signed pair plus a
+/// fresh, controller-bound two-chain proof can prepare it. Reopening a journal
+/// never restores this value.
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+pub(crate) struct InitialPairReview {
+    pair: InitialSignedPair,
+    proof: InitialAncestryProof,
+    snapshot: InitialPairReviewSnapshot,
+    context: Context,
+    prepared_at: Instant,
+}
+
+#[derive(Debug)]
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+pub(crate) enum InitialPairSubmissionError {
+    Workflow(Error),
+    Preflight(claim_preflight::Error),
+    InvalidReview,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+pub(crate) enum InitialPairSubmissionOutcome {
+    UpstreamAccepted {
+        txid: Txid,
+        wtxid: Wtxid,
+    },
+    /// A possible send is durable; absence or a timeout is never retry
+    /// authority. Recovery must inspect the exact saved witness independently.
+    Uncertain {
+        txid: Txid,
+        wtxid: Wtxid,
+    },
+}
+
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+fn current_time() -> Result<i64, InitialPairSubmissionError> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_secs()).ok())
+        .ok_or(InitialPairSubmissionError::InvalidReview)
+}
+
+impl Controller {
+    /// Prepare a first-send review after a new complete wallet/source scan,
+    /// saved-witness re-verification and live two-chain proof. It makes no
+    /// network request and does not record a possible attempt.
+    #[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+    pub(crate) fn prepare_initial_pair_review(
+        &mut self,
+        current: &Context,
+        pair: InitialSignedPair,
+        proof: InitialAncestryProof,
+        now: i64,
+    ) -> Result<InitialPairReview, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        let saved = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if saved.bitcoin_attempt.is_some()
+            || saved.fork_attempt.is_some()
+            || saved.bitcoin_identity()
+                != (
+                    pair.bitcoin().compute_txid(),
+                    pair.bitcoin().compute_wtxid(),
+                )
+            || saved.fork_identity() != (pair.fork().compute_txid(), pair.fork().compute_wtxid())
+            || !matches!(
+                (&pair, self.intent.version),
+                (InitialSignedPair::Claim(_), 10) | (InitialSignedPair::Split(_), 11)
+            )
+            || proof.controller != self.id
+            || proof.context != *current
+            || proof.bitcoin != saved.bitcoin_identity()
+            || proof.fork != saved.fork_identity()
+            || !proof_fresh(proof.observed_at, now, proof.max_age_seconds)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let (bitcoin_fee_sats, fork_fee_sats) = pair.fees();
+        let snapshot = InitialPairReviewSnapshot {
+            bitcoin: pair.bitcoin().clone(),
+            fork: pair.fork().clone(),
+            bitcoin_fee_sats,
+            fork_fee_sats,
+        };
+        Ok(InitialPairReview {
+            pair,
+            proof,
+            snapshot,
+            context: current.clone(),
+            prepared_at: Instant::now(),
+        })
+    }
+}
+
+#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
+impl InitialPairReview {
+    pub(crate) fn snapshot(&self) -> &InitialPairReviewSnapshot {
+        &self.snapshot
+    }
+
+    /// Consume explicit approval. Policy is reread for *both* exact signed
+    /// witnesses. The journal's possible Bitcoin send is stored before the
+    /// one-use exact-byte Connect gate is entered. From that point every
+    /// cancelled, timed-out or rejected transport answer remains uncertain.
+    pub(crate) async fn confirm_and_submit(
+        self,
+        controller: &mut Controller,
+        current: &Context,
+        preflight: &PreflightClient,
+        policy: FreshnessPolicy,
+    ) -> Result<InitialPairSubmissionOutcome, InitialPairSubmissionError> {
+        if self.context != *current
+            || self.prepared_at.elapsed() >= Duration::from_secs(30)
+            || !preflight.matches_provider(&current.provider)
+        {
+            return Err(InitialPairSubmissionError::InvalidReview);
+        }
+        let evidence = match &self.pair {
+            InitialSignedPair::Claim(pair) => {
+                preflight
+                    .observe_verified_claim_pair(
+                        pair,
+                        self.proof.tips.bitcoin.hash,
+                        self.proof.tips.fork.hash,
+                        policy,
+                    )
+                    .await
+            }
+            InitialSignedPair::Split(pair) => {
+                preflight
+                    .observe_verified_split_pair(
+                        pair,
+                        self.proof.tips.bitcoin.hash,
+                        self.proof.tips.fork.hash,
+                        policy,
+                    )
+                    .await
+            }
+        }
+        .map_err(InitialPairSubmissionError::Preflight)?;
+        let now = current_time()?;
+        if self.prepared_at.elapsed() >= Duration::from_secs(30)
+            || self.snapshot.bitcoin != *self.pair.bitcoin()
+            || self.snapshot.fork != *self.pair.fork()
+        {
+            return Err(InitialPairSubmissionError::InvalidReview);
+        }
+        let durable = controller
+            .record_possible_ancestry_bitcoin_attempt(current, &self.proof, &evidence, policy, now)
+            .map_err(InitialPairSubmissionError::Workflow)?;
+        let txid = self.pair.bitcoin().compute_txid();
+        let wtxid = self.pair.bitcoin().compute_wtxid();
+        let uncertain = InitialPairSubmissionOutcome::Uncertain { txid, wtxid };
+        let not_after = Instant::now() + Duration::from_secs(10);
+        let gate = match &self.pair {
+            InitialSignedPair::Claim(pair) => durable.into_claim_gate(pair, not_after),
+            InitialSignedPair::Split(pair) => durable.into_split_gate(pair, not_after),
+        };
+        let Ok((gate, revoker)) = gate else {
+            // The durable possible-attempt record already exists. A
+            // post-journal failure cannot be reported as a safe no-send.
+            return Ok(uncertain);
+        };
+        let mut generation = preflight.session_generation();
+        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+            revoker.revoke();
+            return Ok(uncertain);
+        }
+        let origin = preflight.submission_origin().to_owned();
+        let submit = tokio::task::spawn_blocking(move || match self.pair {
+            InitialSignedPair::Claim(pair) => {
+                poison_broadcast::submit_ancestry_claim_bitcoin_to_connect(&pair, &gate, &origin)
+            }
+            InitialSignedPair::Split(pair) => {
+                poison_broadcast::submit_ancestry_split_bitcoin_to_connect(&pair, &gate, &origin)
+            }
+        });
+        let cancelled = async {
+            loop {
+                if generation.changed().await.is_err()
+                    || *generation.borrow_and_update() != current.generation
+                {
+                    break;
+                }
+            }
+        };
+        let result = tokio::select! { biased;
+            _ = cancelled => None,
+            result = tokio::time::timeout(Duration::from_secs(30), submit) => result.ok().and_then(Result::ok),
+        };
+        revoker.revoke();
+        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+            return Ok(uncertain);
+        }
+        match result {
+            Some(Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: observed_txid,
+                wtxid: observed_wtxid,
+            })) if observed_txid == txid && observed_wtxid == wtxid => {
+                Ok(InitialPairSubmissionOutcome::UpstreamAccepted { txid, wtxid })
+            }
+            _ => Ok(uncertain),
+        }
+    }
+}
+
+/// A separate, one-use approval for the BTCB2 half after the exact Bitcoin
+/// witness has six canonical confirmations. It cannot be created from the
+/// initial all-unspent proof or a status string.
+#[allow(dead_code)] // The staged second-chain wizard will consume this review.
+pub(crate) struct PostBitcoinPairReview {
+    pair: InitialSignedPair,
+    proof: PostBitcoinAncestryProof,
+    confirmation: BitcoinConfirmation,
+    snapshot: InitialPairReviewSnapshot,
+    context: Context,
+    prepared_at: Instant,
+}
+
+impl Controller {
+    /// The caller first rechecks the complete post-Bitcoin wallet/source,
+    /// target reservation and retained signatures to obtain `proof` and the
+    /// typed pair. This boundary binds those artifacts to the signed journal
+    /// and exact six-confirmation token; it makes no network request.
+    #[allow(dead_code)] // The staged second-chain wizard will consume this review.
+    pub(crate) fn prepare_post_bitcoin_pair_review(
+        &mut self,
+        current: &Context,
+        pair: InitialSignedPair,
+        proof: PostBitcoinAncestryProof,
+        confirmation: BitcoinConfirmation,
+        now: i64,
+    ) -> Result<PostBitcoinPairReview, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        let saved = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if saved.bitcoin_attempt.is_none()
+            || saved.fork_attempt.is_some()
+            || saved.bitcoin_identity()
+                != (
+                    pair.bitcoin().compute_txid(),
+                    pair.bitcoin().compute_wtxid(),
+                )
+            || saved.fork_identity() != (pair.fork().compute_txid(), pair.fork().compute_wtxid())
+            || !matches!(
+                (&pair, self.intent.version),
+                (InitialSignedPair::Claim(_), 10) | (InitialSignedPair::Split(_), 11)
+            )
+            || proof.controller != self.id
+            || proof.context != *current
+            || proof.bitcoin != saved.bitcoin_identity()
+            || proof.fork != saved.fork_identity()
+            || proof.confirmed_bitcoin_block != confirmation.block()
+            || proof.tips.bitcoin != confirmation.tip()
+            || !confirmation.accepted_for(current, saved.bitcoin(), now)
+            || !proof_fresh(proof.observed_at, now, proof.max_age_seconds)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let (bitcoin_fee_sats, fork_fee_sats) = pair.fees();
+        let snapshot = InitialPairReviewSnapshot {
+            bitcoin: pair.bitcoin().clone(),
+            fork: pair.fork().clone(),
+            bitcoin_fee_sats,
+            fork_fee_sats,
+        };
+        Ok(PostBitcoinPairReview {
+            pair,
+            proof,
+            confirmation,
+            snapshot,
+            context: current.clone(),
+            prepared_at: Instant::now(),
+        })
+    }
+}
+
+#[allow(dead_code)] // The staged second-chain wizard will consume this review.
+impl PostBitcoinPairReview {
+    pub(crate) fn snapshot(&self) -> &InitialPairReviewSnapshot {
+        &self.snapshot
+    }
+
+    /// BTCB2 receives its own live policy read, explicit approval and durable
+    /// possible-attempt record. Once journaled, every ambiguous outcome is
+    /// uncertain and never a reason to retry the same witness automatically.
+    pub(crate) async fn confirm_and_submit(
+        self,
+        controller: &mut Controller,
+        current: &Context,
+        preflight: &PreflightClient,
+        policy: FreshnessPolicy,
+    ) -> Result<InitialPairSubmissionOutcome, InitialPairSubmissionError> {
+        if self.context != *current
+            || self.prepared_at.elapsed() >= Duration::from_secs(30)
+            || !preflight.matches_provider(&current.provider)
+        {
+            return Err(InitialPairSubmissionError::InvalidReview);
+        }
+        let evidence = match &self.pair {
+            InitialSignedPair::Claim(pair) => {
+                preflight
+                    .observe_verified_claim_fork(pair, self.proof.tips.fork.hash, policy)
+                    .await
+            }
+            InitialSignedPair::Split(pair) => {
+                preflight
+                    .observe_verified_split_fork(pair, self.proof.tips.fork.hash, policy)
+                    .await
+            }
+        }
+        .map_err(InitialPairSubmissionError::Preflight)?;
+        let now = current_time()?;
+        if self.prepared_at.elapsed() >= Duration::from_secs(30)
+            || self.snapshot.bitcoin != *self.pair.bitcoin()
+            || self.snapshot.fork != *self.pair.fork()
+        {
+            return Err(InitialPairSubmissionError::InvalidReview);
+        }
+        let durable = controller
+            .record_possible_ancestry_fork_attempt(
+                current,
+                &self.proof,
+                &evidence,
+                &self.confirmation,
+                policy,
+                now,
+            )
+            .map_err(InitialPairSubmissionError::Workflow)?;
+        let txid = self.pair.fork().compute_txid();
+        let wtxid = self.pair.fork().compute_wtxid();
+        let uncertain = InitialPairSubmissionOutcome::Uncertain { txid, wtxid };
+        let not_after = Instant::now() + Duration::from_secs(10);
+        let gate = match &self.pair {
+            InitialSignedPair::Claim(pair) => durable.into_claim_gate(pair, not_after),
+            InitialSignedPair::Split(pair) => durable.into_split_gate(pair, not_after),
+        };
+        let Ok((gate, revoker)) = gate else {
+            return Ok(uncertain);
+        };
+        let mut generation = preflight.session_generation();
+        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+            revoker.revoke();
+            return Ok(uncertain);
+        }
+        let origin = preflight.submission_origin().to_owned();
+        let submit = tokio::task::spawn_blocking(move || match self.pair {
+            InitialSignedPair::Claim(pair) => {
+                poison_broadcast::submit_ancestry_claim_fork_to_connect(&pair, &gate, &origin)
+            }
+            InitialSignedPair::Split(pair) => {
+                poison_broadcast::submit_ancestry_split_fork_to_connect(&pair, &gate, &origin)
+            }
+        });
+        let cancelled = async {
+            loop {
+                if generation.changed().await.is_err()
+                    || *generation.borrow_and_update() != current.generation
+                {
+                    break;
+                }
+            }
+        };
+        let result = tokio::select! { biased;
+            _ = cancelled => None,
+            result = tokio::time::timeout(Duration::from_secs(30), submit) => result.ok().and_then(Result::ok),
+        };
+        revoker.revoke();
+        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+            return Ok(uncertain);
+        }
+        match result {
+            Some(Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: observed_txid,
+                wtxid: observed_wtxid,
+            })) if observed_txid == txid && observed_wtxid == wtxid => {
+                Ok(InitialPairSubmissionOutcome::UpstreamAccepted { txid, wtxid })
+            }
+            _ => Ok(uncertain),
+        }
+    }
 }
 
 #[cfg(test)]

@@ -279,6 +279,24 @@ fn retry_after(headers: &HeaderMap) -> Option<u64> {
     value.parse().ok()
 }
 impl PreflightClient {
+    /// The signed-pair coordinator must send to the same fixed Connect origin
+    /// whose anonymous policy endpoints it just checked. The provider string
+    /// is the stable identity used by the authenticated two-chain collector.
+    #[allow(dead_code)] // Used by the staged paired submission review.
+    pub(crate) fn matches_provider(&self, provider: &str) -> bool {
+        provider == format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.origin)
+    }
+
+    #[allow(dead_code)] // Used by the staged paired submission review.
+    pub(crate) fn submission_origin(&self) -> &str {
+        &self.origin
+    }
+
+    #[allow(dead_code)] // Used by the staged paired submission review.
+    pub(crate) fn session_generation(&self) -> watch::Receiver<u64> {
+        self.generation.clone()
+    }
+
     pub fn new(origin: &str, context: CollectionContext) -> Result<Self, Error> {
         let url = reqwest::Url::parse(origin).map_err(|_| Error::InvalidRequest)?;
         if !matches!(url.scheme(), "https" | "http")

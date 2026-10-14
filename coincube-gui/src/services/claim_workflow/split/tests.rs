@@ -633,6 +633,54 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert_eq!(reverified.bitcoin().transaction(), recorded.bitcoin());
     assert_eq!(reverified.fork().transaction(), recorded.fork());
     assert_eq!(reopened.status(), Status::Unchecked);
+    let review_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        recorded.bitcoin(),
+        recorded.fork(),
+        hash(7),
+        100,
+    );
+    let review = reopened
+        .prepare_initial_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(reverified),
+            review_proof,
+            100,
+        )
+        .unwrap();
+    assert_eq!(review.snapshot().bitcoin, *recorded.bitcoin());
+    assert_eq!(review.snapshot().fork, *recorded.fork());
+    assert!(review.snapshot().bitcoin_fee_sats > 0);
+    assert!(review.snapshot().fork_fee_sats > 0);
+    assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
+    let (_generation, receiver) = tokio::sync::watch::channel(context().generation);
+    let anonymous = crate::services::claim_preflight::PreflightClient::new(
+        "http://127.0.0.1:9",
+        crate::services::claim_observation::CollectionContext {
+            expected_generation: context().generation,
+            generation: receiver,
+        },
+    )
+    .unwrap();
+    let refusal = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(review.confirm_and_submit(
+            &mut reopened,
+            &context(),
+            &anonymous,
+            crate::services::claim_preflight::FreshnessPolicy {
+                max_age_seconds: 30,
+                max_future_skew_seconds: 5,
+            },
+        ));
+    assert!(matches!(
+        refusal,
+        Err(super::super::paired_submission::InitialPairSubmissionError::InvalidReview)
+    ));
+    assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
     let preflight = crate::services::claim_preflight::accepted_pair_for_test(
         signed.bitcoin().transaction(),
         signed.fork().transaction(),
@@ -783,6 +831,32 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         bitcoin_revoker.revoke(),
         coincubed::poison_broadcast::SubmissionState::Revoked
     );
+    let saved_pair = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    let repeated_review_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.prepare_initial_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(saved_pair),
+            repeated_review_proof,
+            100,
+        ),
+        Err(Error::WrongIdentity)
+    ));
     drop(reopened);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
     assert!(reopened
@@ -808,6 +882,67 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         ),
         Err(Error::Conflict)
     ));
+    let saved_pair = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    let review_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &confirmation,
+        hash(7),
+        100,
+    );
+    let post_review = reopened
+        .prepare_post_bitcoin_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(saved_pair),
+            review_proof,
+            confirmation.clone(),
+            100,
+        )
+        .unwrap();
+    assert_eq!(
+        post_review.snapshot().bitcoin,
+        *signed.bitcoin().transaction()
+    );
+    assert_eq!(post_review.snapshot().fork, *signed.fork().transaction());
+    assert!(post_review.snapshot().fork_fee_sats > 0);
+    let refusal = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(post_review.confirm_and_submit(&mut reopened, &context(), &anonymous, freshness));
+    assert!(matches!(
+        refusal,
+        Err(super::super::paired_submission::InitialPairSubmissionError::InvalidReview)
+    ));
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::BitcoinBlake2b)
+        .is_none());
+    let saved_pair = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    let wrong_confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.fork().transaction(),
+        context(),
+        100,
+    );
     let post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
         &reopened,
         &context(),
@@ -817,6 +952,25 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         hash(7),
         100,
     );
+    let wrong_review_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &confirmation,
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.prepare_post_bitcoin_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(saved_pair),
+            wrong_review_proof,
+            wrong_confirmation,
+            100,
+        ),
+        Err(Error::WrongIdentity)
+    ));
     assert!(matches!(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
