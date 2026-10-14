@@ -927,6 +927,7 @@ fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
     panel.stage = Stage::PairedRecovery;
     panel.paired_recovery = Some(PairedSplitRecovery {
         bitcoin_unattempted: false,
+        fork_ready_for_review: false,
         bitcoin_txid: None,
         fork_txid: None,
         bitcoin_output: None,
@@ -941,6 +942,8 @@ fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
         SplitMessage::ConfirmResend,
         SplitMessage::ReviewPairedBitcoin,
         SplitMessage::ConfirmPairedBitcoin,
+        SplitMessage::ReviewPairedFork,
+        SplitMessage::ConfirmPairedFork,
     ] {
         let _ = panel.update(message);
         assert_eq!(panel.stage(), &Stage::PairedRecovery);

@@ -2759,6 +2759,9 @@ pub enum ClaimMessage {
     ReviewPairedBitcoin,
     ConfirmPairedBitcoin,
     BackPairedBitcoin,
+    ReviewPairedFork,
+    ConfirmPairedFork,
+    BackPairedFork,
     /// Reserve distinct source-Vault addresses for chain-specific deposits.
     StartFunding,
     CheckFunding,

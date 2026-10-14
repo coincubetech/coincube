@@ -387,6 +387,48 @@ impl ClaimInventory {
         })
     }
 
+    /// Rebuild the saved unsigned pair using the spent Bitcoin dependency
+    /// and currently scanned BTCB2 inputs. The caller must then run the
+    /// distinct post-Bitcoin collector, full BTCB2 wallet reconciliation and
+    /// signed-witness check before offering a broadcast review.
+    pub(crate) fn restore_post_bitcoin_claim_pair_from_scan(
+        &self,
+        controller: &mut Controller,
+        current: &Context,
+        plan: &super::claim_workflow::RecordedPostBitcoinPairPlan,
+        shared_blocks: &[(OutPoint, BlockRef)],
+        bitcoin_index: u32,
+        fork_index: u32,
+    ) -> Result<(AncestrySelfTransfer, ClaimForkSweep), WorkflowError> {
+        let reservation = controller.recorded_post_bitcoin_pair_plan(current)?;
+        if reservation.bitcoin_path.selected() != plan.bitcoin_path.selected()
+            || reservation.fork_path.selected() != plan.fork_path.selected()
+            || reservation.bitcoin_path.encode() != plan.bitcoin_path.encode()
+            || reservation.fork_path.encode() != plan.fork_path.encode()
+            || reservation.shared != plan.shared
+            || reservation.signed_bitcoin != plan.signed_bitcoin
+        {
+            return Err(WorkflowError::WrongIdentity);
+        }
+        let coins = self
+            .post_bitcoin_restore_coins(
+                shared_blocks,
+                &plan.bitcoin_path,
+                bitcoin_index,
+                plan.fork_path.selected(),
+                fork_index,
+            )
+            .map_err(|_| WorkflowError::Unchecked)?;
+        controller.restore_ancestry_pair(
+            current,
+            &self.descriptor,
+            &mut coins.clone(),
+            &coins.bitcoin,
+            &mut coins.clone(),
+            &coins.fork,
+        )
+    }
+
     fn scanned_transactions(&self) -> Result<ScannedTransactions, ClaimPairError> {
         let mut transactions = BTreeMap::new();
         for coin in self

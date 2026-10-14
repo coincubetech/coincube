@@ -904,6 +904,12 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         reopened.recorded_initial_pair_plan(&context()),
         Err(Error::Unchecked)
     ));
+    let post_plan = reopened
+        .recorded_post_bitcoin_pair_plan(&context())
+        .unwrap();
+    assert_eq!(post_plan.bitcoin_path.selected(), bitcoin_path.selected());
+    assert_eq!(post_plan.fork_path.selected(), fork_path.selected());
+    assert_eq!(post_plan.signed_bitcoin, *signed.bitcoin().transaction());
     let (bitcoin_gate, bitcoin_revoker) = bitcoin_attempt
         .into_split_gate(
             &signed,
@@ -1269,6 +1275,10 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .unwrap()
         .possible_attempt(ChainId::BitcoinBlake2b)
         .is_some());
+    assert!(matches!(
+        reopened.recorded_post_bitcoin_pair_plan(&context()),
+        Err(Error::Unchecked)
+    ));
     let mut altered = serde_json::to_value(&reopened.intent).unwrap();
     let mut changed_fork = recorded.fork().clone();
     changed_fork.input[0].witness =

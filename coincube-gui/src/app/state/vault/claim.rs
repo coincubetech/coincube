@@ -474,6 +474,8 @@ pub enum ClaimEvent {
     PairedSigned(u64, u64, u64, Result<SignedPairDetails, String>),
     PairedBitcoinReviewed(u64, u64, u64, Result<InitialPairReviewSnapshot, String>),
     PairedBitcoinSubmitted(u64, u64, u64, Result<InitialPairSubmissionOutcome, String>),
+    PairedForkReviewed(u64, u64, u64, Result<InitialPairReviewSnapshot, String>),
+    PairedForkSubmitted(u64, u64, u64, Result<InitialPairSubmissionOutcome, String>),
     Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
@@ -525,6 +527,7 @@ enum RestartedState {
 #[derive(Debug, Clone)]
 pub struct PairedClaimRecovery {
     pub bitcoin_unattempted: bool,
+    pub fork_ready_for_review: bool,
     pub bitcoin_txid: Option<Txid>,
     pub fork_txid: Option<Txid>,
     pub bitcoin_output: Option<super::paired_summary::PairedOutputSummary>,
@@ -571,6 +574,9 @@ enum Stage {
     PairedBitcoinReviewing(PairedClaimRecovery),
     PairedBitcoinReview(PairedClaimRecovery, InitialPairReviewSnapshot),
     PairedBitcoinSubmitting(PairedClaimRecovery),
+    PairedForkReviewing(PairedClaimRecovery),
+    PairedForkReview(PairedClaimRecovery, InitialPairReviewSnapshot),
+    PairedForkSubmitting(PairedClaimRecovery),
     /// Built and shown; nothing signed yet.
     Plan {
         built: Box<Construction>,
@@ -656,6 +662,8 @@ pub enum StageView<'a> {
     PairedRecovery(&'a PairedClaimRecovery, bool, Option<&'a str>),
     PairedBitcoinReview(&'a InitialPairReviewSnapshot),
     PairedBitcoinSubmitting,
+    PairedForkReview(&'a InitialPairReviewSnapshot),
+    PairedForkSubmitting,
     Plan(&'a Construction),
     CheckingSign,
     Sign {
@@ -918,6 +926,9 @@ impl ClaimStep1Panel {
                 | Stage::PairedBitcoinReviewing(_)
                 | Stage::PairedBitcoinReview(..)
                 | Stage::PairedBitcoinSubmitting(_)
+                | Stage::PairedForkReviewing(_)
+                | Stage::PairedForkReview(..)
+                | Stage::PairedForkSubmitting(_)
                 | Stage::PairedSign { .. }
         ) {
             self.restart_pending = true;
@@ -1070,6 +1081,8 @@ impl ClaimStep1Panel {
                 | Stage::PairedRecovery(_)
                 | Stage::PairedBitcoinReviewing(_)
                 | Stage::PairedBitcoinReview(..)
+                | Stage::PairedForkReviewing(_)
+                | Stage::PairedForkReview(..)
         ) && self
             .connect
             .as_ref()
@@ -1195,6 +1208,11 @@ impl ClaimStep1Panel {
                 StageView::PairedRecovery(recovery, true, self.restart_error.as_deref())
             }
             Stage::PairedBitcoinSubmitting(_) => StageView::PairedBitcoinSubmitting,
+            Stage::PairedForkReview(_, review) => StageView::PairedForkReview(review),
+            Stage::PairedForkReviewing(recovery) => {
+                StageView::PairedRecovery(recovery, true, self.restart_error.as_deref())
+            }
+            Stage::PairedForkSubmitting(_) => StageView::PairedForkSubmitting,
             Stage::Plan { built } => StageView::Plan(built),
             Stage::CheckingSign(_) => StageView::CheckingSign,
             Stage::Sign {
@@ -2090,6 +2108,132 @@ impl ClaimStep1Panel {
             },
             move |result| {
                 Message::Claim(ClaimEvent::PairedBitcoinSubmitted(
+                    seq,
+                    expected,
+                    revocations,
+                    result,
+                ))
+            },
+        )
+    }
+
+    fn review_paired_fork(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
+        let Stage::PairedRecovery(recovery) = &self.stage else {
+            return Task::none();
+        };
+        if !recovery.fork_ready_for_review
+            || crate::services::claim_ancestry_gate::authorization().is_none()
+            || !self.backend_ready()
+        {
+            return Task::none();
+        }
+        let (Some(connect), Some(fork_binding), Some(fork_cube)) = (
+            self.connect.clone(),
+            self.fork_daemon.clone(),
+            self.pre.target.clone(),
+        ) else {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Open the paired BTCB2 Cube under this Connect account, then review the BTCB2 broadcast again."
+                    .into(),
+            )));
+        };
+        let recovery = recovery.clone();
+        let directory = journal_directory(&self.datadir, &self.wallet);
+        let bitcoin_cube = self.bitcoin_cube.clone();
+        let wallet = self.wallet.clone();
+        let expected = *self.generation.borrow();
+        let generation = self.generation.clone();
+        let revocations = self.revocations;
+        self.paired_broadcast_seq = self.paired_broadcast_seq.wrapping_add(1);
+        let seq = self.paired_broadcast_seq;
+        self.restart_error = None;
+        self.stage = Stage::PairedForkReviewing(recovery);
+        Task::perform(
+            async move {
+                signing::prepare_recorded_post_bitcoin_review(
+                    directory,
+                    bitcoin_cube,
+                    fork_cube,
+                    wallet,
+                    daemon,
+                    fork_binding,
+                    connect,
+                    expected,
+                    generation,
+                )
+                .await
+                .and_then(|(_, review)| {
+                    let snapshot = review.snapshot().clone();
+                    if super::paired_summary::PairedOutputSummary::from_signed(&snapshot.bitcoin)
+                        .is_none()
+                        || super::paired_summary::PairedOutputSummary::from_signed(&snapshot.fork)
+                            .is_none()
+                    {
+                        return Err(
+                            "The signed Claim destinations cannot be displayed for review.".into(),
+                        );
+                    }
+                    Ok(snapshot)
+                })
+            },
+            move |result| {
+                Message::Claim(ClaimEvent::PairedForkReviewed(
+                    seq,
+                    expected,
+                    revocations,
+                    result,
+                ))
+            },
+        )
+    }
+
+    fn confirm_paired_fork(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
+        if crate::services::claim_ancestry_gate::authorization().is_none() || !self.backend_ready()
+        {
+            return Task::none();
+        }
+        let Stage::PairedForkReview(recovery, displayed) = &self.stage else {
+            return Task::none();
+        };
+        let (Some(connect), Some(fork_binding), Some(fork_cube)) = (
+            self.connect.clone(),
+            self.fork_daemon.clone(),
+            self.pre.target.clone(),
+        ) else {
+            return Task::done(Message::View(view::Message::ShowError(
+                "Open the paired BTCB2 Cube under this Connect account, then review the BTCB2 broadcast again."
+                    .into(),
+            )));
+        };
+        let recovery = recovery.clone();
+        let displayed = displayed.clone();
+        let directory = journal_directory(&self.datadir, &self.wallet);
+        let bitcoin_cube = self.bitcoin_cube.clone();
+        let wallet = self.wallet.clone();
+        let expected = *self.generation.borrow();
+        let generation = self.generation.clone();
+        let revocations = self.revocations;
+        self.paired_broadcast_seq = self.paired_broadcast_seq.wrapping_add(1);
+        let seq = self.paired_broadcast_seq;
+        self.stage = Stage::PairedForkSubmitting(recovery);
+        Task::perform(
+            async move {
+                signing::confirm_recorded_second_broadcast(
+                    directory,
+                    bitcoin_cube,
+                    fork_cube,
+                    wallet,
+                    daemon,
+                    fork_binding,
+                    connect,
+                    expected,
+                    generation,
+                    displayed,
+                )
+                .await
+            },
+            move |result| {
+                Message::Claim(ClaimEvent::PairedForkSubmitted(
                     seq,
                     expected,
                     revocations,
@@ -3010,7 +3154,10 @@ impl ClaimStep1Panel {
             Stage::PairedRecovery(_)
             | Stage::PairedBitcoinReviewing(_)
             | Stage::PairedBitcoinReview(..)
-            | Stage::PairedBitcoinSubmitting(_) => {
+            | Stage::PairedBitcoinSubmitting(_)
+            | Stage::PairedForkReviewing(_)
+            | Stage::PairedForkReview(..)
+            | Stage::PairedForkSubmitting(_) => {
                 self.restart_pending = true;
                 self.stage = Stage::Preconditions;
             }
@@ -3074,6 +3221,54 @@ impl ClaimStep1Panel {
                 self.stage = Stage::PairedRecovery(recovery);
                 Task::none()
             }
+            ClaimEvent::PairedForkReviewed(seq, generation, revocations, result) => {
+                if seq != self.paired_broadcast_seq {
+                    return Task::none();
+                }
+                let Stage::PairedForkReviewing(recovery) = &self.stage else {
+                    return Task::none();
+                };
+                if !self.authorized(generation, revocations) {
+                    self.restart_pending = true;
+                    self.stage = Stage::Preconditions;
+                    return Task::none();
+                }
+                let recovery = recovery.clone();
+                match result {
+                    Ok(review) => self.stage = Stage::PairedForkReview(recovery, review),
+                    Err(reason) => {
+                        self.restart_error = Some(reason);
+                        self.stage = Stage::PairedRecovery(recovery);
+                    }
+                }
+                Task::none()
+            }
+            ClaimEvent::PairedForkSubmitted(seq, generation, revocations, result) => {
+                if seq != self.paired_broadcast_seq {
+                    return Task::none();
+                }
+                let Stage::PairedForkSubmitting(recovery) = &self.stage else {
+                    return Task::none();
+                };
+                if !self.authorized(generation, revocations) {
+                    self.restart_pending = true;
+                    self.stage = Stage::Preconditions;
+                    return Task::none();
+                }
+                let mut recovery = recovery.clone();
+                match result {
+                    Ok(_) => {
+                        recovery.fork_ready_for_review = false;
+                        self.restart_error = Some(
+                            "The BTCB2 send was recorded. Check both chains for its current status."
+                                .into(),
+                        );
+                    }
+                    Err(reason) => self.restart_error = Some(reason),
+                }
+                self.stage = Stage::PairedRecovery(recovery);
+                Task::none()
+            }
             ClaimEvent::PairedSigned(session, generation, revocations, result) => {
                 if session != self.paired_sign_seq {
                     return Task::none();
@@ -3095,6 +3290,7 @@ impl ClaimStep1Panel {
                     Ok(details) => {
                         self.stage = Stage::PairedRecovery(PairedClaimRecovery {
                             bitcoin_unattempted: true,
+                            fork_ready_for_review: false,
                             bitcoin_txid: Some(details.bitcoin_txid),
                             fork_txid: Some(details.fork_txid),
                             bitcoin_output: details.bitcoin_output,
@@ -3846,6 +4042,20 @@ impl State for ClaimStep1Panel {
                         }
                         Task::none()
                     }
+                    view::ClaimMessage::ReviewPairedFork => match daemon {
+                        Some(daemon) => self.review_paired_fork(daemon),
+                        None => node_unavailable(),
+                    },
+                    view::ClaimMessage::ConfirmPairedFork => match daemon {
+                        Some(daemon) => self.confirm_paired_fork(daemon),
+                        None => node_unavailable(),
+                    },
+                    view::ClaimMessage::BackPairedFork => {
+                        if let Stage::PairedForkReview(recovery, _) = &self.stage {
+                            self.stage = Stage::PairedRecovery(recovery.clone());
+                        }
+                        Task::none()
+                    }
                     view::ClaimMessage::StartFunding => match daemon {
                         Some(daemon) => self.prepare_funding(daemon),
                         None => node_unavailable(),
@@ -4000,7 +4210,10 @@ impl State for ClaimStep1Panel {
             Stage::PairedRecovery(_)
             | Stage::PairedBitcoinReviewing(_)
             | Stage::PairedBitcoinReview(..)
-            | Stage::PairedBitcoinSubmitting(_) => self.restart(daemon),
+            | Stage::PairedBitcoinSubmitting(_)
+            | Stage::PairedForkReviewing(_)
+            | Stage::PairedForkReview(..)
+            | Stage::PairedForkSubmitting(_) => self.restart(daemon),
             Stage::FundingChecking
             | Stage::FundingDeposits(_)
             | Stage::PairedSign { .. }
@@ -4384,6 +4597,7 @@ async fn restore_recorded_claim(
         .map_err(|_| "The two-chain status source is unavailable.".to_string())?;
         let (
             bitcoin_unattempted,
+            fork_ready_for_review,
             bitcoin_txid,
             fork_txid,
             bitcoin_output,
@@ -4392,6 +4606,7 @@ async fn restore_recorded_claim(
             fork_status,
         ) = if let Some(record) = controller.recorded_signed_ancestry_pair() {
             let bitcoin_unattempted = record.possible_attempt(ChainId::Bitcoin).is_none();
+            let fork_unattempted = record.possible_attempt(ChainId::BitcoinBlake2b).is_none();
             let bitcoin_txid = record.bitcoin_identity().0;
             let fork_txid = record.fork_identity().0;
             let bitcoin_output =
@@ -4411,6 +4626,7 @@ async fn restore_recorded_claim(
                 })?;
             (
                 bitcoin_unattempted,
+                !bitcoin_unattempted && fork_unattempted && report.bitcoin_confirmation().is_some(),
                 Some(bitcoin_txid),
                 Some(fork_txid),
                 bitcoin_output,
@@ -4420,6 +4636,7 @@ async fn restore_recorded_claim(
             )
         } else {
             (
+                false,
                 false,
                 None,
                 None,
@@ -4436,6 +4653,7 @@ async fn restore_recorded_claim(
             context,
             state: RestartedState::PairedRecovery(PairedClaimRecovery {
                 bitcoin_unattempted,
+                fork_ready_for_review,
                 bitcoin_txid,
                 fork_txid,
                 bitcoin_output,

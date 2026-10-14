@@ -714,7 +714,9 @@ impl GUI {
                     tab::Message::Run(AppMessage::View(crate::app::view::Message::Claim(
                         crate::app::view::ClaimMessage::CheckFunding
                         | crate::app::view::ClaimMessage::ReviewPairedBitcoin
-                        | crate::app::view::ClaimMessage::ConfirmPairedBitcoin,
+                        | crate::app::view::ClaimMessage::ConfirmPairedBitcoin
+                        | crate::app::view::ClaimMessage::ReviewPairedFork
+                        | crate::app::view::ClaimMessage::ConfirmPairedFork,
                     ))),
                 ) = &msg
                 {

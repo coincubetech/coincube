@@ -121,6 +121,10 @@ pub fn view<'a>(
                     && recovery.bitcoin_unattempted)
                     .then(|| button::primary(None, "Review Bitcoin broadcast")
                         .on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::ReviewPairedBitcoin)))))
+                .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some()
+                    && recovery.fork_ready_for_review)
+                    .then(|| button::primary(None, "Review BTCB2 broadcast")
+                        .on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::ReviewPairedFork)))))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
         StageView::PairedBitcoinReview(review) => dashboard(
@@ -152,6 +156,35 @@ pub fn view<'a>(
                 .spacing(20)
                 .push(header("Checking Bitcoin broadcast"))
                 .push(p1_regular("Tenshu is rechecking both chains, the signed transactions and Connect policy before attempting the Bitcoin send.")),
+        ),
+        StageView::PairedForkReview(review) => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Review Bitcoin Blake2b broadcast"))
+                .push(p1_regular("The recorded Bitcoin transaction has six canonical confirmations. Review the exact signed BTCB2 transaction before broadcasting it."))
+                .push(p1_bold("Bitcoin Blake2b — broadcast now"))
+                .push(p2_regular(format!("Txid: {}", review.fork.compute_txid())))
+                .push(p2_regular(format!("Fee: {} sats", review.fork_fee_sats)))
+                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                    p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
+                }))
+                .push(p1_bold("Bitcoin — recorded and confirmed"))
+                .push(p2_regular(format!("Txid: {}", review.bitcoin.compute_txid())))
+                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                    p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
+                }))
+                .push(button::secondary(None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedFork)))
+                .push(button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedFork))),
+        ),
+        StageView::PairedForkSubmitting => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Checking Bitcoin Blake2b broadcast"))
+                .push(p1_regular("Tenshu is rechecking both chains, the signed transactions and Connect policy before attempting the BTCB2 send.")),
         ),
         StageView::PairedSign {
             bitcoin,

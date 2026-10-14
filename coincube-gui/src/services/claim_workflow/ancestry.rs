@@ -133,7 +133,7 @@ fn exact_claim_fee_rate(
     )
 }
 impl StoredAncestry {
-    fn decode(&self) -> Result<RetainedPath, Error> {
+    pub(super) fn decode(&self) -> Result<RetainedPath, Error> {
         if self.raw.len() > 2 * MAX_ENCODED_BYTES
             || self
                 .derivation

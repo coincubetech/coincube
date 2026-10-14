@@ -93,6 +93,8 @@ fn working(work: Work) -> &'static str {
         Work::RecordingPairedSignatures => "Recording both signed transactions on this device…",
         Work::ReviewingPairedBitcoin => "Rechecking both chains for Bitcoin broadcast review…",
         Work::SubmittingPairedBitcoin => "Rechecking both chains before Bitcoin broadcast…",
+        Work::ReviewingPairedFork => "Rechecking the Bitcoin confirmation and BTCB2 inputs…",
+        Work::SubmittingPairedFork => "Rechecking both chains before BTCB2 broadcast…",
         Work::Checking => "Checking the fork, fees and the fresh address…",
         Work::Building => "Building step 1…",
         Work::Exporting => "Saving the PSBT file…",
@@ -559,7 +561,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let mut body = Column::new().spacing(10).max_width(640);
     body = if matches!(
         panel.stage(),
-        Stage::PairedRecovery | Stage::PairedBitcoinReview
+        Stage::PairedRecovery | Stage::PairedBitcoinReview | Stage::PairedForkReview
     ) {
         body.push(h3("Recorded two-chain split"))
     } else if matches!(panel.stage(), Stage::PairedSign) {
@@ -628,6 +630,16 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     SplitMessage::ReviewPairedBitcoin,
                 ));
             }
+            if crate::services::claim_ancestry_gate::authorization().is_some()
+                && panel
+                    .paired_recovery()
+                    .is_some_and(|recovery| recovery.fork_ready_for_review)
+            {
+                actions = actions.push(action(
+                    "Review BTCB2 broadcast",
+                    SplitMessage::ReviewPairedFork,
+                ));
+            }
         }
         Stage::PairedBitcoinReview => {
             if let Some(review) = panel.paired_bitcoin_review() {
@@ -649,6 +661,28 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                 actions = actions.push(action(
                     "Broadcast Transaction",
                     SplitMessage::ConfirmPairedBitcoin,
+                ));
+            }
+        }
+        Stage::PairedForkReview => {
+            if let Some(review) = panel.paired_fork_review() {
+                body = body
+                    .push(p1_regular("Bitcoin has six current confirmations. Review the exact signed BTCB2 destination and fee before this separate broadcast."))
+                    .push(p1_bold("Bitcoin — already recorded"))
+                    .push(caption(format!("Txid: {}", review.bitcoin.compute_txid())))
+                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }))
+                    .push(p1_bold("Bitcoin Blake2b — broadcast now"))
+                    .push(caption(format!("Txid: {}", review.fork.compute_txid())))
+                    .push(caption(format!("Fee: {} sats", review.fork_fee_sats)))
+                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }));
+                actions = actions.push(action("Back", SplitMessage::CheckPaired));
+                actions = actions.push(action(
+                    "Broadcast Transaction",
+                    SplitMessage::ConfirmPairedFork,
                 ));
             }
         }

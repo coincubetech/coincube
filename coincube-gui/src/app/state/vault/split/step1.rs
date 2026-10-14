@@ -43,7 +43,7 @@ use tokio::sync::watch;
 
 use coincube_core::{
     chain::ChainId,
-    claim::{Assessment, BlockRef, DeploymentState},
+    claim::{Assessment, BlockRef, DeploymentState, PreflightTips},
     foreign_split::{
         finalize_split_step1, reconstruct_split_step1, verify_split_step1_transaction,
         AncestrySplitStep1, AncestrySplitStep2, FinalizeError, SplitBranch, SplitCoin, SplitInputs,
@@ -431,6 +431,29 @@ pub trait SplitConnect: Send + Sync {
         _displayed: &claim_workflow::InitialPairReviewSnapshot,
     ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
         Err("The two-chain broadcast action is unavailable for this session.".into())
+    }
+    /// Repeat the distinct post-Bitcoin proof before displaying the exact
+    /// BTCB2 witness. A six-confirmation status is only a prerequisite.
+    async fn review_recorded_second_broadcast(
+        &self,
+        _directory: PathBuf,
+        _source_digest: sha256::Hash,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+    ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
+        Err("The post-Bitcoin broadcast review is unavailable for this session.".into())
+    }
+    /// Recollect both chains and compare the exact displayed pair before a
+    /// durable possible BTCB2 attempt or one-use transport gate is created.
+    async fn confirm_recorded_second_broadcast(
+        &self,
+        _directory: PathBuf,
+        _source_digest: sha256::Hash,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _displayed: &claim_workflow::InitialPairReviewSnapshot,
+    ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
+        Err("The post-Bitcoin broadcast action is unavailable for this session.".into())
     }
     /// The fork's window from the authenticated anchor, with the fork marker.
     async fn window(&self) -> Result<ForkWindow, String>;
@@ -981,6 +1004,181 @@ impl ProductionConnect {
         }
         Ok((controller, review))
     }
+
+    /// Reopen the exact signed Split only as structural data, then run the
+    /// separate post-Bitcoin proof. A confirmed Bitcoin witness is checked
+    /// again after the source scan; no journal reload grants send authority.
+    async fn prepare_recorded_post_bitcoin_review(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target_vault: &(WalletId, coincube_core::descriptors::CoincubeDescriptor),
+    ) -> Result<(Controller, claim_workflow::PostBitcoinPairReview), String> {
+        if !self.session_current() {
+            return Err("The Connect session changed before BTCB2 review.".into());
+        }
+        let context = self.context();
+        let identity = claim_workflow::split_identity(target_cube.to_owned(), source.digest());
+        let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Split journal is unavailable: {error:?}"))?;
+        let plan = controller
+            .recorded_post_bitcoin_pair_plan(&context)
+            .map_err(|error| format!("The BTCB2 send cannot be prepared: {error:?}"))?;
+        drop(controller);
+        let scan = foreign_split_inventory::scan(
+            self.session.client.clone(),
+            split_funding_scan_plan(source)?,
+            self.expected,
+            self.generation.clone(),
+        )
+        .await
+        .map_err(|error| format!("The post-Bitcoin source scan did not complete: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during the Split scan.".into());
+        }
+        let saved_directory = directory.clone();
+        let saved_source = source.clone();
+        let saved_target = target_cube.to_owned();
+        let saved_context = context.clone();
+        let reservation = tokio::task::spawn_blocking(move || {
+            claim_workflow::load_split_funding(
+                &saved_directory,
+                &saved_source,
+                &saved_target,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| "Reading the saved Split deposits was interrupted.".to_string())?
+        .map_err(|_| "The saved Split deposits could not be verified.".to_string())?
+        .ok_or_else(|| "The saved Split deposits are missing.".to_string())?;
+        let observed = self
+            .observation
+            .collect_post_bitcoin_inputs(
+                &plan.bitcoin_path,
+                &plan.fork_path,
+                &plan.shared,
+                &plan.signed_bitcoin,
+                CHECK_POLICY.observations,
+            )
+            .await
+            .map_err(|error| {
+                format!("The Bitcoin confirmation or BTCB2 inputs changed: {error:?}")
+            })?;
+        let (bitcoin_tip, fork_tip) = tokio::try_join!(
+            self.observation.tip(ChainId::Bitcoin),
+            self.observation.tip(ChainId::BitcoinBlake2b),
+        )
+        .map_err(|error| format!("The two-chain tips are unavailable: {error:?}"))?;
+        let tips = PreflightTips {
+            bitcoin: *bitcoin_tip.value(),
+            fork: *fork_tip.value(),
+        };
+        let fork_coins = scan
+            .post_bitcoin_fork_coins(
+                source,
+                observed.shared_blocks(),
+                plan.fork_path.selected(),
+                reservation.indices.btcb2_deposit,
+                self.expected,
+                tips,
+            )
+            .map_err(|error| format!("The BTCB2 source coins changed: {error:?}"))?;
+        let bitcoin_funding = observed
+            .bitcoin_funding_coin(
+                &plan.bitcoin_path,
+                source,
+                reservation.indices.bitcoin_deposit,
+            )
+            .map_err(|error| format!("The Bitcoin-only input changed: {error:?}"))?;
+        let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Split journal changed: {error:?}"))?;
+        let current_plan = controller
+            .recorded_post_bitcoin_pair_plan(&context)
+            .map_err(|error| format!("The recorded Split pair changed: {error:?}"))?;
+        if current_plan.signed_bitcoin != plan.signed_bitcoin
+            || current_plan.shared != plan.shared
+            || current_plan.bitcoin_path.selected() != plan.bitcoin_path.selected()
+            || current_plan.fork_path.selected() != plan.fork_path.selected()
+            || current_plan.bitcoin_path.encode() != plan.bitcoin_path.encode()
+            || current_plan.fork_path.encode() != plan.fork_path.encode()
+            || current_plan.bitcoin_rate_vb != plan.bitcoin_rate_vb
+            || current_plan.fork_rate_vb != plan.fork_rate_vb
+        {
+            return Err("The signed Split pair changed during the scan.".into());
+        }
+        let (bitcoin, fork) = controller
+            .restore_ancestry_split_pair(
+                &context,
+                source,
+                &target_vault.1,
+                &fork_coins.shared,
+                &bitcoin_funding,
+                scan.inventory.bitcoin_tip_height(),
+                &fork_coins.shared,
+                &fork_coins.funding,
+                scan.inventory.btcb2_tip_height(),
+            )
+            .map_err(|error| {
+                format!("The saved Split pair no longer matches the scan: {error:?}")
+            })?;
+        drop(controller);
+        let requalified = reservation
+            .requalify_post_bitcoin_fork(
+                directory.clone(),
+                source,
+                target_cube,
+                (&target_vault.0, &target_vault.1),
+                &context,
+                &scan,
+                &self.observation,
+                CHECK_POLICY.observations,
+                &bitcoin,
+                &fork,
+                &plan.signed_bitcoin,
+                &plan.bitcoin_path,
+                &plan.fork_path,
+            )
+            .await
+            .map_err(|error| format!("The BTCB2 Split inputs are no longer verified: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during BTCB2 verification.".into());
+        }
+        let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Split journal changed: {error:?}"))?;
+        let reconciliation = controller
+            .reconcile_possible_ancestry_attempts(
+                &context,
+                &self.observation,
+                CHECK_POLICY.observations.max_observation_age_seconds,
+            )
+            .await
+            .map_err(|error| format!("Bitcoin confirmation could not be checked: {error:?}"))?;
+        let confirmation = reconciliation
+            .bitcoin_confirmation()
+            .cloned()
+            .ok_or_else(|| {
+                "The exact Bitcoin transaction needs six current canonical confirmations."
+                    .to_string()
+            })?;
+        let review = controller
+            .prepare_post_bitcoin_split_review(
+                &context,
+                &requalified,
+                confirmation,
+                CHECK_POLICY.observations,
+                self.observation.now(),
+            )
+            .map_err(|error| format!("The BTCB2 Split pair is no longer verified: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during BTCB2 review.".into());
+        }
+        Ok((controller, review))
+    }
 }
 
 fn split_funding_scan_plan(source: &SplitSource) -> Result<ScanPlan, String> {
@@ -1150,6 +1348,77 @@ impl SplitConnect for ProductionConnect {
             )
             .await
             .map_err(|error| format!("The Bitcoin broadcast was refused: {error:?}"))
+    }
+    async fn review_recorded_second_broadcast(
+        &self,
+        directory: PathBuf,
+        source_digest: sha256::Hash,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+    ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
+        if claim_ancestry_gate::authorization().is_none() {
+            return Err("The paired BTCB2 split is not ready for broadcast.".into());
+        }
+        let target_vault = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let source = self
+            .recorded_paired_source(directory.clone(), source_digest, target_cube)
+            .await?;
+        let (_, review) = self
+            .prepare_recorded_post_bitcoin_review(directory, &source, target_cube, target_vault)
+            .await?;
+        let snapshot = review.snapshot().clone();
+        if crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(
+            &snapshot.bitcoin,
+        )
+        .is_none()
+            || crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(
+                &snapshot.fork,
+            )
+            .is_none()
+        {
+            return Err("The signed Split destinations cannot be displayed for review.".into());
+        }
+        Ok(snapshot)
+    }
+    async fn confirm_recorded_second_broadcast(
+        &self,
+        directory: PathBuf,
+        source_digest: sha256::Hash,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        displayed: &claim_workflow::InitialPairReviewSnapshot,
+    ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
+        if claim_ancestry_gate::authorization().is_none() {
+            return Err("The paired BTCB2 split is not ready for broadcast.".into());
+        }
+        let target_vault = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let source = self
+            .recorded_paired_source(directory.clone(), source_digest, target_cube)
+            .await?;
+        let (mut controller, review) = self
+            .prepare_recorded_post_bitcoin_review(directory, &source, target_cube, target_vault)
+            .await?;
+        let context = self.context();
+        let preflight = PreflightClient::new(
+            &self.session.client.base_url,
+            CollectionContext {
+                expected_generation: self.expected,
+                generation: self.generation.clone(),
+            },
+        )
+        .map_err(|error| format!("The Connect broadcast check is unavailable: {error:?}"))?;
+        review
+            .confirm_exact_snapshot_and_submit(
+                displayed,
+                &mut controller,
+                &context,
+                &preflight,
+                CHECK_POLICY.preflight,
+            )
+            .await
+            .map_err(|error| format!("The BTCB2 broadcast was refused: {error:?}"))
     }
     async fn window(&self) -> Result<ForkWindow, String> {
         let status = self

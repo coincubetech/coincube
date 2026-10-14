@@ -65,6 +65,7 @@ fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
     let state = || {
         Stage::PairedRecovery(PairedClaimRecovery {
             bitcoin_unattempted: false,
+            fork_ready_for_review: false,
             bitcoin_txid: None,
             fork_txid: None,
             bitcoin_output: None,
@@ -80,6 +81,14 @@ fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
         recovery.bitcoin_unattempted = true;
     }
     let _ = panel.review_paired_bitcoin(Arc::new(Recording::default()));
+    assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
+    if let Stage::PairedRecovery(recovery) = &mut panel.stage {
+        recovery.bitcoin_unattempted = false;
+        recovery.fork_ready_for_review = true;
+    }
+    // A recovery status is never authority to reopen or broadcast a saved
+    // fork witness while the production acceptance gate remains closed.
+    let _ = panel.review_paired_fork(Arc::new(Recording::default()));
     assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
     panel.restart_error = Some("The two-chain status source is unavailable.".into());
     assert!(matches!(

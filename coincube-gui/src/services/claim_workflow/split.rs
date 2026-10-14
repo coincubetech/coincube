@@ -254,6 +254,19 @@ pub(super) fn ancestry_funding_plan(intent: &Intent) -> Option<(OutPoint, OutPoi
     ))
 }
 
+/// Structural ancestry paths from a recorded ordinary pair. These bytes are
+/// restart hints only; every post-Bitcoin send must recollect both chains.
+pub(super) fn ancestry_funding_paths(
+    intent: &Intent,
+) -> Result<(RetainedPath, RetainedPath), Error> {
+    let funding = intent
+        .split
+        .as_ref()
+        .and_then(|record| record.funding.as_ref())
+        .ok_or(Error::InvalidJournal)?;
+    Ok((funding.bitcoin.decode()?, funding.fork.decode()?))
+}
+
 /// #568 S4, O4: the claimed coin fresh Bitcoin reads found missing from
 /// its address's unspent outputs while step 1 was absent, the Bitcoin tip
 /// of the reconcile that first found it, and (S4-D5) the tip at which it

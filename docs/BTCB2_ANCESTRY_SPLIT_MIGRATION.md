@@ -729,7 +729,16 @@ marker spend cases remain.
    recovered exact signed pair, new post-Bitcoin source check and canonical
    six-confirmation token to a one-use BTCB2 review in the same controller.
    The raw re-verification and proof producers are private to these handoffs;
-   neither route has a desktop broadcast action yet.
+   both wizards now have separate gated BTCB2 review and confirmation actions.
+   Each action reconstructs the exact saved pair from a new two-chain scan,
+   repeats post-Bitcoin wallet and ancestry checks, and independently checks
+   six canonical confirmations for the recorded Bitcoin transaction. The
+   confirmation action compares the newly verified signed bytes and fees to
+   those shown in the review before the paired preflight and one-use BTCB2
+   broadcast. Recovery screens only offer this review after a current
+   six-confirmation status read; that display state grants no send authority.
+   These paths are still unavailable while the production acceptance gate is
+   closed, pending the remaining end-to-end and hardware acceptance checks.
    The Claim and Split signed-pair recovery screens now also display the exact
    one-output destination and amount decoded from each retained signed
    transaction, including immediately after Claim signs. These are read-only

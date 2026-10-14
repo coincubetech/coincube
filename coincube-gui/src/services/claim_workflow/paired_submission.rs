@@ -16,6 +16,7 @@ use crate::services::claim_preflight::{
 use coincube_core::{
     chain::ChainId,
     claim::{BlockRef, Policy, PreflightTips},
+    claim_ancestry::retained::RetainedPath,
     claim_finalize::VerifiedAncestryClaimPair,
     claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     foreign_split::{
@@ -147,6 +148,19 @@ pub(crate) struct RecordedInitialPairPlan {
     pub fork_rate_vb: u64,
 }
 
+/// Restart hints for the distinct post-Bitcoin collector. In particular the
+/// signed Bitcoin bytes and retained roots are data to authenticate against
+/// the live chains, not evidence that the Bitcoin spend is confirmed.
+#[derive(Debug, Clone)]
+pub(crate) struct RecordedPostBitcoinPairPlan {
+    pub bitcoin_path: RetainedPath,
+    pub fork_path: RetainedPath,
+    pub shared: Vec<OutPoint>,
+    pub signed_bitcoin: Transaction,
+    pub bitcoin_rate_vb: u64,
+    pub fork_rate_vb: u64,
+}
+
 #[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
 impl InitialSignedPair {
     fn bitcoin(&self) -> &Transaction {
@@ -271,6 +285,62 @@ impl Controller {
         Ok(RecordedInitialPairPlan {
             bitcoin_funding,
             fork_funding,
+            bitcoin_rate_vb,
+            fork_rate_vb,
+        })
+    }
+
+    /// Expose only structural facts needed to begin a fresh stage-two scan.
+    /// A recorded Bitcoin attempt may be absent from the network or reorged;
+    /// this reader therefore grants neither six-confirmation proof nor a
+    /// BTCB2 send. It refuses once any BTCB2 attempt has been journaled.
+    pub(crate) fn recorded_post_bitcoin_pair_plan(
+        &mut self,
+        current: &Context,
+    ) -> Result<RecordedPostBitcoinPairPlan, Error> {
+        self.ensure_context(current)?;
+        let signed = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if signed.bitcoin_attempt.is_none() || signed.fork_attempt.is_some() {
+            return Err(Error::Unchecked);
+        }
+        let (bitcoin_path, fork_path, bitcoin_rate_vb, fork_rate_vb) = match self.intent.version {
+            10 => {
+                let bitcoin = self.intent.ancestry.as_ref().ok_or(Error::InvalidJournal)?;
+                let fork = self
+                    .intent
+                    .funding_plan
+                    .as_ref()
+                    .ok_or(Error::InvalidJournal)?;
+                (
+                    bitcoin.decode()?,
+                    fork.fork.decode()?,
+                    fork.bitcoin_feerate_vb,
+                    fork.fork_feerate_vb,
+                )
+            }
+            11 => {
+                let (bitcoin, fork) = split::ancestry_funding_paths(&self.intent)?;
+                let (_, _, bitcoin_rate, fork_rate) =
+                    split::ancestry_funding_plan(&self.intent).ok_or(Error::InvalidJournal)?;
+                (bitcoin, fork, bitcoin_rate, fork_rate)
+            }
+            _ => return Err(Error::WrongIdentity),
+        };
+        if bitcoin_path.selected() == fork_path.selected()
+            || signed.bitcoin().compute_txid() != signed.bitcoin_identity().0
+            || signed.fork().compute_txid() != signed.fork_identity().0
+        {
+            return Err(Error::InvalidJournal);
+        }
+        Ok(RecordedPostBitcoinPairPlan {
+            bitcoin_path,
+            fork_path,
+            shared: self.intent.plan.claimed_prevouts.clone(),
+            signed_bitcoin: signed.bitcoin().clone(),
             bitcoin_rate_vb,
             fork_rate_vb,
         })

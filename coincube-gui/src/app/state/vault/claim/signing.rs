@@ -251,6 +251,285 @@ pub(super) async fn confirm_recorded_first_broadcast(
         .map_err(|error| format!("The Bitcoin broadcast was refused: {error:?}"))
 }
 
+/// A recorded Bitcoin attempt is only a hint to start the distinct stage-two
+/// check. Scan both chains again, reconstruct the saved pair from source-owned
+/// bytes, reconcile the complete BTCB2 Vault and independently verify the
+/// canonical six-confirmation Bitcoin witness before offering review.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn prepare_recorded_post_bitcoin_review(
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<
+    (
+        claim_workflow::Controller,
+        claim_workflow::PostBitcoinPairReview,
+    ),
+    String,
+> {
+    let current_session = || {
+        if generation.has_changed().is_err() || *generation.borrow() != expected {
+            Err("The Connect session changed during BTCB2 review.".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    current_session()?;
+    let descriptor = wallet.main_descriptor.clone();
+    let fork_wallet = fork_binding
+        .wallet()
+        .ok_or_else(|| "The paired BTCB2 Vault closed during review.".to_string())?;
+    let fork_daemon = fork_binding
+        .upgrade()
+        .ok_or_else(|| "The paired BTCB2 Vault closed during review.".to_string())?;
+    if wallet.chain != ChainId::Bitcoin
+        || fork_wallet.chain != ChainId::BitcoinBlake2b
+        || fork_wallet.main_descriptor != descriptor
+        || !fork_binding.current()
+    {
+        return Err("The paired Bitcoin and BTCB2 Vaults changed. Reopen both Cubes.".into());
+    }
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube,
+        fork_cube,
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| {
+                format!("The signed Claim journal could not be reopened: {error:?}")
+            })?;
+    let plan = controller
+        .recorded_post_bitcoin_pair_plan(&context)
+        .map_err(|error| format!("The BTCB2 send cannot be prepared: {error:?}"))?;
+    drop(controller);
+    let info = daemon
+        .get_info()
+        .await
+        .map_err(|_| "The Bitcoin Vault is unavailable for the two-chain scan.".to_string())?;
+    if !bitcoin_funding_wallet_ready(&info, &descriptor) {
+        return Err("The Bitcoin Vault is not ready for BTCB2 review.".into());
+    }
+    let fork_info = fork_daemon
+        .get_info()
+        .await
+        .map_err(|_| "The BTCB2 Vault is unavailable for the two-chain scan.".to_string())?;
+    if fork_info.chain_id != Some(ChainId::BitcoinBlake2b)
+        || fork_daemon
+            .config()
+            .is_none_or(|config| config.main_descriptor != descriptor)
+    {
+        return Err("The paired BTCB2 Vault is not ready for review.".into());
+    }
+    let end_exclusive = info
+        .receive_index
+        .max(info.change_index)
+        .max(fork_info.receive_index)
+        .max(fork_info.change_index)
+        .saturating_add(128)
+        .max(256);
+    if end_exclusive > 20_000 {
+        return Err("The Vault's address range is too large for this bounded scan.".into());
+    }
+    let inventory = crate::services::claim_inventory::ClaimInventory::scan(
+        connect.client.clone(),
+        &descriptor,
+        end_exclusive,
+        64,
+        expected,
+        generation.clone(),
+    )
+    .await
+    .map_err(|_| "The post-Bitcoin two-chain Vault scan did not complete.".to_string())?;
+    current_session()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed during the scan.".into());
+    }
+    let saved_directory = directory.clone();
+    let saved_descriptor = descriptor.clone();
+    let saved_identity = identity.clone();
+    let saved_context = context.clone();
+    let reservation = tokio::task::spawn_blocking(move || {
+        claim_workflow::load_claim_funding(
+            &saved_directory,
+            &saved_descriptor,
+            &saved_identity,
+            &saved_context,
+        )
+    })
+    .await
+    .map_err(|_| "Reading the saved Claim deposits was interrupted.".to_string())?
+    .map_err(|_| "The saved Claim deposits could not be verified.".to_string())?
+    .ok_or_else(|| "The saved Claim deposits are missing.".to_string())?;
+    let source = HttpObservationSource::new(
+        connect.client.clone(),
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: expected,
+            generation: generation.clone(),
+        },
+    )
+    .map_err(|_| "The two-chain observation source is unavailable.".to_string())?;
+    let observed = source
+        .collect_post_bitcoin_inputs(
+            &plan.bitcoin_path,
+            &plan.fork_path,
+            &plan.shared,
+            &plan.signed_bitcoin,
+            CHECK_POLICY.observations,
+        )
+        .await
+        .map_err(|error| format!("The Bitcoin confirmation or BTCB2 inputs changed: {error:?}"))?;
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Claim journal changed: {error:?}"))?;
+    let current_plan = controller
+        .recorded_post_bitcoin_pair_plan(&context)
+        .map_err(|error| format!("The recorded Claim pair changed: {error:?}"))?;
+    if current_plan.signed_bitcoin != plan.signed_bitcoin
+        || current_plan.shared != plan.shared
+        || current_plan.bitcoin_path.selected() != plan.bitcoin_path.selected()
+        || current_plan.fork_path.selected() != plan.fork_path.selected()
+        || current_plan.bitcoin_path.encode() != plan.bitcoin_path.encode()
+        || current_plan.fork_path.encode() != plan.fork_path.encode()
+        || current_plan.bitcoin_rate_vb != plan.bitcoin_rate_vb
+        || current_plan.fork_rate_vb != plan.fork_rate_vb
+    {
+        return Err("The signed Claim pair changed during the scan.".into());
+    }
+    let (bitcoin, fork) = inventory
+        .restore_post_bitcoin_claim_pair_from_scan(
+            &mut controller,
+            &context,
+            &plan,
+            observed.shared_blocks(),
+            reservation.indices.bitcoin_deposit,
+            reservation.indices.btcb2_deposit,
+        )
+        .map_err(|error| format!("The saved Claim pair no longer matches the scan: {error:?}"))?;
+    drop(controller);
+    let requalified = reservation
+        .requalify_post_bitcoin_fork(
+            directory.clone(),
+            &inventory,
+            &identity,
+            &context,
+            &*fork_daemon,
+            &source,
+            CHECK_POLICY.observations,
+            &bitcoin,
+            &fork,
+            &plan.signed_bitcoin,
+            &plan.bitcoin_path,
+            &plan.fork_path,
+        )
+        .await
+        .map_err(|error| format!("The BTCB2 Claim inputs are no longer verified: {error:?}"))?;
+    current_session()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed during verification.".into());
+    }
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Claim journal changed: {error:?}"))?;
+    let reconciliation = controller
+        .reconcile_possible_ancestry_attempts(
+            &context,
+            &source,
+            CHECK_POLICY.observations.max_observation_age_seconds,
+        )
+        .await
+        .map_err(|error| format!("Bitcoin confirmation could not be checked: {error:?}"))?;
+    let confirmation = reconciliation
+        .bitcoin_confirmation()
+        .cloned()
+        .ok_or_else(|| {
+            "The exact Bitcoin transaction needs six current canonical confirmations.".to_string()
+        })?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The current time is unavailable for BTCB2 review.".to_string())?
+        .as_secs() as i64;
+    let review = controller
+        .prepare_post_bitcoin_claim_review(
+            &context,
+            &requalified,
+            confirmation,
+            CHECK_POLICY.observations,
+            now,
+        )
+        .map_err(|error| format!("The BTCB2 Claim pair is no longer verified: {error:?}"))?;
+    current_session()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed during review.".into());
+    }
+    Ok((controller, review))
+}
+
+/// A BTCB2 approval repeats the complete post-Bitcoin check and compares the
+/// exact finalized pair shown to the user before any policy read or durable
+/// possible-send record. Any outcome after recording is reconciled, not
+/// silently retried.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn confirm_recorded_second_broadcast(
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+    displayed: claim_workflow::InitialPairReviewSnapshot,
+) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
+    if crate::services::claim_ancestry_gate::authorization().is_none() {
+        return Err("The paired BTCB2 claim is not ready for broadcast.".into());
+    }
+    let (mut controller, review) = prepare_recorded_post_bitcoin_review(
+        directory,
+        bitcoin_cube,
+        fork_cube,
+        wallet,
+        daemon,
+        fork_binding,
+        connect.clone(),
+        expected,
+        generation.clone(),
+    )
+    .await?;
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let preflight = crate::services::claim_preflight::PreflightClient::new(
+        &connect.client.base_url,
+        CollectionContext {
+            expected_generation: expected,
+            generation,
+        },
+    )
+    .map_err(|error| format!("The Connect BTCB2 broadcast check is unavailable: {error:?}"))?;
+    review
+        .confirm_exact_snapshot_and_submit(
+            &displayed,
+            &mut controller,
+            &context,
+            &preflight,
+            CHECK_POLICY.preflight,
+        )
+        .await
+        .map_err(|error| format!("The BTCB2 broadcast was refused: {error:?}"))
+}
+
 /// Recollect the exact ordinary pair from a new two-chain scan and both
 /// complete Vault coin sets before recording its version-10 intent. A caller
 /// must repeat this at each signer dispatch: the journal is structural state,

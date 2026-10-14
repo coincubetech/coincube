@@ -121,6 +121,7 @@ pub enum Stage {
     PairedRecovery,
     /// Exact signed bytes and fees approved before a fresh Bitcoin send.
     PairedBitcoinReview,
+    PairedForkReview,
     /// #568 B4b-3c: the single-step (fork-only) route.
     Unified(unified::UnifiedStage),
     /// A task is running.
@@ -182,6 +183,8 @@ pub enum Work {
     RecordingPairedSignatures,
     ReviewingPairedBitcoin,
     SubmittingPairedBitcoin,
+    ReviewingPairedFork,
+    SubmittingPairedFork,
     Checking,
     Building,
     Exporting,
@@ -308,6 +311,7 @@ pub enum Restarted {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairedSplitRecovery {
     pub bitcoin_unattempted: bool,
+    pub fork_ready_for_review: bool,
     pub bitcoin_txid: Option<Txid>,
     pub fork_txid: Option<Txid>,
     pub bitcoin_output: Option<super::paired_summary::PairedOutputSummary>,
@@ -339,6 +343,7 @@ async fn paired_recovery(
         }
         return Ok(PairedSplitRecovery {
             bitcoin_unattempted: false,
+            fork_ready_for_review: false,
             bitcoin_txid: None,
             fork_txid: None,
             bitcoin_output: None,
@@ -349,6 +354,7 @@ async fn paired_recovery(
     };
     let bitcoin_txid = record.bitcoin_identity().0;
     let bitcoin_unattempted = record.possible_attempt(ChainId::Bitcoin).is_none();
+    let fork_unattempted = record.possible_attempt(ChainId::BitcoinBlake2b).is_none();
     let fork_txid = record.fork_identity().0;
     let bitcoin_output = super::paired_summary::PairedOutputSummary::from_signed(record.bitcoin());
     let fork_output = super::paired_summary::PairedOutputSummary::from_signed(record.fork());
@@ -373,6 +379,9 @@ async fn paired_recovery(
     }
     Ok(PairedSplitRecovery {
         bitcoin_unattempted,
+        fork_ready_for_review: !bitcoin_unattempted
+            && fork_unattempted
+            && report.bitcoin_confirmation().is_some(),
         bitcoin_txid: Some(bitcoin_txid),
         fork_txid: Some(fork_txid),
         bitcoin_output,
@@ -423,6 +432,8 @@ pub enum SplitEvent {
     PairedSignaturesRecorded(u64, Result<(Txid, Txid), String>),
     PairedBitcoinReviewed(u64, Result<InitialPairReviewSnapshot, String>),
     PairedBitcoinSubmitted(u64, Result<InitialPairSubmissionOutcome, String>),
+    PairedForkReviewed(u64, Result<InitialPairReviewSnapshot, String>),
+    PairedForkSubmitted(u64, Result<InitialPairSubmissionOutcome, String>),
     PairedExportChosen(u64, ChainId, Encoding, Option<PathBuf>),
     PairedImportChosen(u64, ChainId, Option<Vec<PathBuf>>),
     PairedExported(u64, Result<PathBuf, String>),
@@ -557,6 +568,8 @@ pub enum SplitMessage {
     CheckPaired,
     ReviewPairedBitcoin,
     ConfirmPairedBitcoin,
+    ReviewPairedFork,
+    ConfirmPairedFork,
     CheckDeposits,
     BeginPairedSigning,
     ExportPairedUnsigned(ChainId, Encoding),
@@ -633,6 +646,7 @@ pub struct SplitPanel {
     paired_signing: Option<PairedSplitSigning>,
     paired_recovery: Option<PairedSplitRecovery>,
     paired_bitcoin_review: Option<InitialPairReviewSnapshot>,
+    paired_fork_review: Option<InitialPairReviewSnapshot>,
     prepared: Option<Box<Prepared>>,
     construction: Option<Box<SplitStep1>>,
     files: Vec<Psbt>,
@@ -779,6 +793,7 @@ impl SplitPanel {
             paired_signing: None,
             paired_recovery: None,
             paired_bitcoin_review: None,
+            paired_fork_review: None,
             prepared: None,
             construction: None,
             files: Vec::new(),
@@ -933,6 +948,10 @@ impl SplitPanel {
 
     pub fn paired_bitcoin_review(&self) -> Option<&InitialPairReviewSnapshot> {
         self.paired_bitcoin_review.as_ref()
+    }
+
+    pub fn paired_fork_review(&self) -> Option<&InitialPairReviewSnapshot> {
+        self.paired_fork_review.as_ref()
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden
@@ -1090,6 +1109,7 @@ impl SplitPanel {
         self.paired_signing = None;
         self.paired_recovery = None;
         self.paired_bitcoin_review = None;
+        self.paired_fork_review = None;
         self.funding_source = None;
         self.funding_target_binding = None;
         self.driver = None;
@@ -1619,10 +1639,11 @@ impl SplitPanel {
             SplitMessage::CheckPaired
                 if matches!(
                     self.stage,
-                    Stage::PairedRecovery | Stage::PairedBitcoinReview
+                    Stage::PairedRecovery | Stage::PairedBitcoinReview | Stage::PairedForkReview
                 ) =>
             {
                 self.paired_bitcoin_review = None;
+                self.paired_fork_review = None;
                 self.stage = Stage::NeedsSession;
                 self.begin()
             }
@@ -1688,6 +1709,68 @@ impl SplitPanel {
                             .await
                     },
                     SplitEvent::PairedBitcoinSubmitted,
+                )
+            }
+            SplitMessage::ReviewPairedFork if self.stage == Stage::PairedRecovery => {
+                if crate::services::claim_ancestry_gate::authorization().is_none()
+                    || !self
+                        .paired_recovery
+                        .as_ref()
+                        .is_some_and(|recovery| recovery.fork_ready_for_review)
+                {
+                    return Task::none();
+                }
+                let (Some(connect), Some((digest, directory))) =
+                    (self.connect.clone(), self.journal.clone())
+                else {
+                    return Task::none();
+                };
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                self.stage = Stage::Working(Work::ReviewingPairedFork);
+                self.spawn(
+                    async move {
+                        connect
+                            .review_recorded_second_broadcast(
+                                directory,
+                                digest,
+                                &target,
+                                target_vault.as_ref(),
+                            )
+                            .await
+                    },
+                    SplitEvent::PairedForkReviewed,
+                )
+            }
+            SplitMessage::ConfirmPairedFork if self.stage == Stage::PairedForkReview => {
+                if crate::services::claim_ancestry_gate::authorization().is_none() {
+                    self.paired_fork_review = None;
+                    self.stage = Stage::PairedRecovery;
+                    return Task::none();
+                }
+                let (Some(connect), Some((digest, directory)), Some(displayed)) = (
+                    self.connect.clone(),
+                    self.journal.clone(),
+                    self.paired_fork_review.take(),
+                ) else {
+                    return Task::none();
+                };
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                self.stage = Stage::Working(Work::SubmittingPairedFork);
+                self.spawn(
+                    async move {
+                        connect
+                            .confirm_recorded_second_broadcast(
+                                directory,
+                                digest,
+                                &target,
+                                target_vault.as_ref(),
+                                &displayed,
+                            )
+                            .await
+                    },
+                    SplitEvent::PairedForkSubmitted,
                 )
             }
             SplitMessage::BeginPairedSigning if self.stage == Stage::FundingDeposits => {
@@ -2072,6 +2155,41 @@ impl SplitPanel {
             return Task::none();
         }
         match event {
+            SplitEvent::PairedForkReviewed(_, result) => {
+                if self.stage != Stage::Working(Work::ReviewingPairedFork) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(snapshot) => {
+                        self.paired_fork_review = Some(snapshot);
+                        self.notice = None;
+                        self.stage = Stage::PairedForkReview;
+                    }
+                    Err(reason) => {
+                        self.paired_fork_review = None;
+                        self.notice = Some(reason);
+                        self.stage = Stage::PairedRecovery;
+                    }
+                }
+                Task::none()
+            }
+            SplitEvent::PairedForkSubmitted(_, result) => {
+                if self.stage != Stage::Working(Work::SubmittingPairedFork) {
+                    return Task::none();
+                }
+                self.paired_fork_review = None;
+                match result {
+                    Ok(_) => {
+                        self.stage = Stage::NeedsSession;
+                        self.begin()
+                    }
+                    Err(reason) => {
+                        self.notice = Some(reason);
+                        self.stage = Stage::PairedRecovery;
+                        Task::none()
+                    }
+                }
+            }
             SplitEvent::PairedBitcoinReviewed(_, result) => {
                 if self.stage != Stage::Working(Work::ReviewingPairedBitcoin) {
                     return Task::none();
@@ -2746,6 +2864,8 @@ impl SplitEvent {
             | Self::PairedSignaturesRecorded(seq, _)
             | Self::PairedBitcoinReviewed(seq, _)
             | Self::PairedBitcoinSubmitted(seq, _)
+            | Self::PairedForkReviewed(seq, _)
+            | Self::PairedForkSubmitted(seq, _)
             | Self::PairedExportChosen(seq, ..)
             | Self::PairedImportChosen(seq, ..)
             | Self::PairedExported(seq, _)
