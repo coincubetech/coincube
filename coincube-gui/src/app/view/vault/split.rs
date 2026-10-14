@@ -4,7 +4,10 @@
 //! split" (#568 B5c-2), and step 2 is reachable only from a journal whose
 //! step 1 has six confirmations.
 
-use coincube_core::claim::MIN_CONFIRMATIONS;
+use coincube_core::{
+    claim::MIN_CONFIRMATIONS,
+    miniscript::bitcoin::{Address, Network},
+};
 use coincube_ui::{
     component::{button, card, text::*},
     theme,
@@ -548,8 +551,41 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                             "Bitcoin Blake2b deposit: {}",
                             candidate(progress.btcb2_candidate)
                         )));
-                    if progress.both_verified {
-                        body = body.push(p1_regular("Both deposits passed a paired ancestry check. Signing remains unavailable until the exact transactions, fees and current inputs are reviewed together."));
+                    if let Some(review) = &progress.review {
+                        let address = |output: &coincube_core::miniscript::bitcoin::TxOut| {
+                            Address::from_script(&output.script_pubkey, Network::Bitcoin)
+                                .map(|address| address.to_string())
+                                .unwrap_or_else(|_| {
+                                    format!(
+                                        "script {}",
+                                        hex::encode(output.script_pubkey.as_bytes())
+                                    )
+                                })
+                        };
+                        body = body
+                            .push(p1_bold("Paired transaction preview — read only"))
+                            .push(p1_regular(format!(
+                                "{} shared pre-fork coins · {} sats on each chain",
+                                review.bitcoin.shared.len(),
+                                review.bitcoin.shared_total.to_sat()
+                            )));
+                        for row in &review.bitcoin.shared {
+                            body = body.push(caption(format!(
+                                "Before fork · present on both chains: {} · {} sats",
+                                row.outpoint,
+                                row.amount.to_sat()
+                            )));
+                        }
+                        body = body
+                            .push(p1_bold("Bitcoin transaction"))
+                            .push(caption(format!("Bitcoin-only · verified: {} · {} sats", review.bitcoin.funding.outpoint, review.bitcoin.funding.amount.to_sat())))
+                            .push(caption(format!("Return to this source wallet: {}", address(&review.bitcoin.destination))))
+                            .push(caption(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
+                            .push(p1_bold("Bitcoin Blake2b transaction"))
+                            .push(caption(format!("BTCB2-only · verified: {} · {} sats", review.fork.funding.outpoint, review.fork.funding.amount.to_sat())))
+                            .push(caption(format!("Send to your paired BTCB2 Cube: {}", address(&review.fork.destination))))
+                            .push(caption(format!("Fee: {} sats", review.fork.fee.to_sat())))
+                            .push(p1_regular("Each transaction spends every shared coin together with its own verified chain-specific funding coin. This preview is not a signing or broadcast request; both proofs, wallet state and fees must be checked again before either transaction can be signed."));
                     } else if progress.bitcoin_candidate && progress.btcb2_candidate {
                         body = body.push(p1_regular("Both deposits are visible, but their paired chain-specific ancestry has not been established. No transaction can be signed."));
                     }

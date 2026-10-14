@@ -772,8 +772,8 @@ impl SplitPanel {
     pub fn funding_addresses(&self) -> Option<&step1::CheckedFundingAddresses> {
         self.funding_addresses.as_ref()
     }
-    pub fn funding_progress(&self) -> Option<step1::SplitDepositProgress> {
-        self.funding_progress
+    pub fn funding_progress(&self) -> Option<&step1::SplitDepositProgress> {
+        self.funding_progress.as_ref()
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden

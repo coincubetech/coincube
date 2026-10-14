@@ -188,10 +188,12 @@ a replayable spend.
    "Check deposits" action: it rescans the saved source descriptors on both
    chains, reloads the exact released reservation, reports whether each
    reserved address has a confirmed post-fork candidate, and attempts the
-   bounded paired ancestry proof. It discards the proof after displaying the
-   result and cannot open Sign. Exact per-chain proof failure states, funding
-   minimums, fee review, proof refresh and ordinary signer admission remain
-   to be wired. Claim now independently reserves
+   bounded paired ancestry proof. Once proof succeeds, it builds both ordinary
+   PSBTs at current per-chain fee rates and derives a read-only coin,
+   destination and fee preview from their exact inputs and outputs. It discards
+   the proof and transactions after displaying the preview and cannot open
+   Sign. Exact per-chain proof failure states, proof refresh and ordinary
+   signer admission remain to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal
    bound to both Cubes, the Vault descriptor and the Connect identity. Its
    pre-display check reloads that exact record and requires fresh unused
@@ -292,9 +294,10 @@ PSBTs. It refuses missing amounts, duplicate or omitted inputs, mismatched
 shared coins across chains (including different scripts at the same amount)
 and OP_RETURN outputs. The recorded Claim step-one
 review uses its Bitcoin side and labels the marker as an unverified candidate.
-The paired Claim and Split wizard stages still need to consume the model only
-after fresh two-chain proof, source ownership and reservations are bound; the
-model alone cannot enable signing.
+The Split deposit stage now consumes the paired model only after fresh
+two-chain proof, source ownership, bound reservations and construction of
+both ordinary PSBTs. Claim still needs its paired preview. The model alone
+cannot enable signing.
 
 Build this as a reusable *read-only* coin summary for Claim and foreign Split,
 using the existing amount formatting and badge components. Keep the normal
