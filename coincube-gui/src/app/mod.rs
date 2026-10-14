@@ -1046,6 +1046,7 @@ fn discover_split_panel(
             directory,
         ))
     };
+    panel.bind_target_vault(wallet.id(), wallet.main_descriptor.clone());
     // B4b-3b: the session-only device listing is rooted here; it writes
     // nothing under it.
     panel.set_device_datadir(data_dir.clone());
@@ -4613,18 +4614,40 @@ impl App {
             self.revoke_split_handoff();
             return Task::done(Message::View(view::Message::ShowError(reason)));
         }
-        let (Some(SplitHandoff::Review { intent, .. }), Some(wallet)) =
+        let (Some(SplitHandoff::Review { intent, target, .. }), Some(wallet)) =
             (self.split_handoff.take(), self.wallet.as_ref())
         else {
             return Task::none();
         };
+        if target.cube_id() != self.cube_settings.id || target.vault_id() != &wallet.id() {
+            self.revoke_split_handoff();
+            return Task::done(Message::View(view::Message::ShowError(
+                SPLIT_START_CANCELLED.to_string(),
+            )));
+        }
+        let binding = match crate::services::claim_workflow::SplitTargetBinding::from_evidence(
+            &target,
+            &wallet.main_descriptor,
+        ) {
+            Ok(binding) => binding,
+            Err(_) => {
+                self.revoke_split_handoff();
+                return Task::done(Message::View(view::Message::ShowError(
+                    SPLIT_START_CANCELLED.to_string(),
+                )));
+            }
+        };
         let root = state::vault::split::step1::journal_root(&self.datadir, &wallet.id());
+        let target_wallet_id = wallet.id();
+        let target_descriptor = wallet.main_descriptor.clone();
         self.revoke_split_handoff();
         let mut panel = Box::new(state::vault::split::SplitPanel::start(
             self.cube_settings.id.clone(),
             root,
             intent,
         ));
+        panel.bind_funding_target(binding);
+        panel.bind_target_vault(target_wallet_id, target_descriptor);
         // B4b-3b: the session-only device listing is rooted here, as for a
         // resumed panel; it writes nothing under it.
         panel.set_device_datadir(self.datadir.clone());
@@ -9887,7 +9910,7 @@ mod tests {
                 Ok(model::GetInfoResult {
                     version: String::new(),
                     network: Network::Bitcoin,
-                    chain_id: Some(coincube_core::chain::ChainId::Bitcoin),
+                    chain_id: Some(coincube_core::chain::ChainId::BitcoinBlake2b),
                     block_height: 1_000,
                     sync: 1.0,
                     descriptors: coincubed::commands::GetInfoDescriptors {
@@ -11177,7 +11200,7 @@ mod tests {
     /// #568 B5c-2 (the go-live, P5): "Start split" on the review constructs
     /// the panel once, for this Cube's Vault's journal root and the
     /// reviewed scan, consumes the handoff, and hands the panel the
-    /// session; the panel then offers its route. Pressed again (no review
+    /// session; the panel then reserves the two deposit addresses. Pressed again (no review
     /// left) it does nothing.
     #[test]
     fn start_split_constructs_the_panel_once_and_consumes_the_handoff() {
@@ -11203,7 +11226,7 @@ mod tests {
         );
         let first = panel as *const state::vault::split::SplitPanel;
         // The session's ports are built in a task; installed, the panel
-        // offers its route (nothing built, nothing checked yet).
+        // starts the deposit reservation (nothing built or checked yet).
         for message in task_messages(task) {
             assert!(
                 matches!(message, Message::SplitPortsBuilt(..)),
@@ -11213,7 +11236,10 @@ mod tests {
             drop(app.update(message));
         }
         let panel = app.split_panel.as_deref().unwrap();
-        assert_eq!(panel.stage(), &state::vault::split::Stage::ChooseRoute);
+        assert_eq!(
+            panel.stage(),
+            &state::vault::split::Stage::Working(state::vault::split::Work::ReservingFunding)
+        );
         // Pressed again with no review: nothing happens.
         let again = app.update(Message::View(view::Message::StartSplit));
         assert!(task_messages(again).is_empty());

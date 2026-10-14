@@ -76,6 +76,7 @@ use iced::Task;
 
 use coincube_core::{
     claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
+    descriptors::CoincubeDescriptor,
     foreign_split::{SplitCoin, SplitSource, SplitStep1},
     miniscript::bitcoin::{
         consensus::encode::serialize_hex, hashes::sha256, psbt::Psbt, OutPoint, Transaction, Txid,
@@ -500,6 +501,7 @@ pub enum SplitMessage {
 
 pub struct SplitPanel {
     target_cube: String,
+    target_vault: Option<(crate::app::settings::WalletId, CoincubeDescriptor)>,
     journal_root: PathBuf,
     connect: Option<Arc<dyn SplitConnect>>,
     seq: u64,
@@ -509,6 +511,9 @@ pub struct SplitPanel {
     intent: Option<Arc<SplitIntent>>,
     /// A deposit-only record without an ancestry transaction intent yet.
     funding_journal: Option<(sha256::Hash, PathBuf)>,
+    /// Authenticated target address from the App's pre-split Vault review.
+    /// Saved atomically with the source deposit addresses before display.
+    funding_target_binding: Option<crate::services::claim_workflow::SplitTargetBinding>,
     funding_source: Option<SplitSource>,
     funding_addresses: Option<step1::CheckedFundingAddresses>,
     funding_progress: Option<step1::SplitDepositProgress>,
@@ -629,6 +634,7 @@ impl SplitPanel {
     fn empty(target_cube: String, journal_root: PathBuf) -> Self {
         Self {
             target_cube,
+            target_vault: None,
             journal_root,
             connect: None,
             seq: 0,
@@ -636,6 +642,7 @@ impl SplitPanel {
             hidden: false,
             intent: None,
             funding_journal: None,
+            funding_target_binding: None,
             funding_source: None,
             funding_addresses: None,
             funding_progress: None,
@@ -718,6 +725,21 @@ impl SplitPanel {
         let mut panel = Self::empty(target_cube, journal_root);
         panel.intent = Some(Arc::new(intent));
         panel
+    }
+
+    pub(crate) fn bind_funding_target(
+        &mut self,
+        binding: crate::services::claim_workflow::SplitTargetBinding,
+    ) {
+        self.funding_target_binding = Some(binding);
+    }
+
+    pub(crate) fn bind_target_vault(
+        &mut self,
+        wallet_id: crate::app::settings::WalletId,
+        descriptor: CoincubeDescriptor,
+    ) {
+        self.target_vault = Some((wallet_id, descriptor));
     }
 
     /// Resume the existing journal `directory` (source `digest`), from the
@@ -907,6 +929,7 @@ impl SplitPanel {
         self.funding_addresses = None;
         self.funding_progress = None;
         self.funding_source = None;
+        self.funding_target_binding = None;
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
@@ -948,9 +971,17 @@ impl SplitPanel {
         if let Some((digest, directory)) = self.funding_journal.clone() {
             self.stage = Stage::Working(Work::ReservingFunding);
             let target = self.target_cube.clone();
+            let target_vault = self.target_vault.clone();
             return self.spawn(
                 async move {
-                    step1::recover_funding_addresses(&*connect, directory, digest, &target).await
+                    step1::recover_funding_addresses(
+                        &*connect,
+                        directory,
+                        digest,
+                        &target,
+                        target_vault.as_ref(),
+                    )
+                    .await
                 },
                 SplitEvent::FundingRecovered,
             );
@@ -1043,6 +1074,7 @@ impl SplitPanel {
             };
             let directory = step1::journal_directory(&self.journal_root, source.digest());
             let target = self.target_cube.clone();
+            let target_binding = self.funding_target_binding.clone();
             self.stage = Stage::Working(Work::ReservingFunding);
             return self.spawn(
                 async move {
@@ -1057,14 +1089,27 @@ impl SplitPanel {
                     let for_reservation = source.clone();
                     let for_directory = directory.clone();
                     let for_target = target.clone();
-                    tokio::task::spawn_blocking(move || {
-                        crate::services::claim_workflow::reserve_split_funding(
-                            &for_directory,
-                            &for_reservation,
-                            &for_target,
-                            &context,
-                            &inventory,
-                        )
+                    tokio::task::spawn_blocking(move || match target_binding {
+                        Some(binding) => {
+                            crate::services::claim_workflow::reserve_split_funding_with_target(
+                                &for_directory,
+                                &for_reservation,
+                                &for_target,
+                                &context,
+                                &inventory,
+                                &binding,
+                            )
+                        }
+                        None if cfg!(test) => {
+                            crate::services::claim_workflow::reserve_split_funding(
+                                &for_directory,
+                                &for_reservation,
+                                &for_target,
+                                &context,
+                                &inventory,
+                            )
+                        }
+                        None => Err(crate::services::claim_workflow::Error::InvalidPlan),
                     })
                     .await
                     .map_err(|_| "Saving the funding addresses was interrupted.".to_string())?
@@ -1278,13 +1323,19 @@ impl SplitPanel {
                     return Task::none();
                 };
                 let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
                 self.notice = None;
                 self.funding_progress = None;
                 self.stage = Stage::Working(Work::CheckingFunding);
                 self.spawn(
                     async move {
                         connect
-                            .check_split_deposits(directory, &source, &target)
+                            .check_split_deposits(
+                                directory,
+                                &source,
+                                &target,
+                                target_vault.as_ref(),
+                            )
                             .await
                     },
                     SplitEvent::FundingChecked,

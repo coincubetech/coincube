@@ -145,6 +145,14 @@ impl TargetAddressEvidence {
         &self.cube_id
     }
 
+    pub fn vault_id(&self) -> &WalletId {
+        &self.vault_id
+    }
+
+    pub fn script_pubkey(&self) -> &bitcoin::Script {
+        &self.script_pubkey
+    }
+
     pub fn vault_fingerprint(&self) -> &str {
         &self.vault_fingerprint
     }
@@ -167,7 +175,9 @@ fn check_target_fresh(
     script_pubkey: &bitcoin::Script,
 ) -> Result<(), ForeignPsbtError> {
     let info = &reservation.info;
-    if info.descriptors.main != wallet.main_descriptor {
+    if info.chain_id != Some(ChainId::BitcoinBlake2b)
+        || info.descriptors.main != wallet.main_descriptor
+    {
         return Err(ForeignPsbtError::TargetChanged);
     }
     let index = u32::from(reservation.reserved.derivation_index);
@@ -806,7 +816,7 @@ mod tests {
             info: GetInfoResult {
                 version: String::new(),
                 network: bitcoin::Network::Bitcoin,
-                chain_id: Some(coincube_core::chain::ChainId::Bitcoin),
+                chain_id: Some(coincube_core::chain::ChainId::BitcoinBlake2b),
                 block_height: 1_000,
                 sync: 1.0,
                 descriptors: coincubed::commands::GetInfoDescriptors {
@@ -1577,6 +1587,27 @@ mod tests {
             evidence.derivation_index(),
             ChildNumber::from_normal_idx(11).unwrap()
         );
+        let binding = crate::services::claim_workflow::SplitTargetBinding::from_evidence(
+            &evidence,
+            &descriptor,
+        )
+        .unwrap();
+        assert!(binding.matches_vault(&wallet.id(), &descriptor));
+        assert_eq!(binding.receive_index(), 11);
+        assert_eq!(
+            binding.script_pubkey().unwrap().as_script(),
+            evidence.script_pubkey()
+        );
+
+        // Shared mainnet address encoding is not evidence of the fork chain.
+        for wrong in [None, Some(ChainId::Bitcoin), Some(ChainId::Testnet4)] {
+            let mut reservation = fresh.clone();
+            reservation.info.chain_id = wrong;
+            assert_eq!(
+                authenticate(&reservation).unwrap_err(),
+                ForeignPsbtError::TargetChanged
+            );
+        }
 
         // Coins elsewhere in the Vault do not make index 11 used: other
         // receive indexes, and a change coin at the same numeric index

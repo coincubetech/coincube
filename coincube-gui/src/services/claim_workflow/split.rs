@@ -1209,6 +1209,17 @@ impl Controller {
                 .load_split_funding_reservation()?
                 .ok_or(Error::InvalidPlan)?;
             if !reserved.matches(&source, &record.target_cube, &context)
+                || !reserved.target_binding.as_ref().is_some_and(|target| {
+                    record.target_index.is_some_and(|index| {
+                        record.target_script.as_ref().is_some_and(|script| {
+                            target.matches_destination(
+                                funding.target_descriptor_digest,
+                                index,
+                                script.as_script(),
+                            )
+                        })
+                    })
+                })
                 || funding.bitcoin.is_change
                 || funding.fork.is_change
                 || funding.bitcoin.index != reserved.indices.bitcoin_deposit

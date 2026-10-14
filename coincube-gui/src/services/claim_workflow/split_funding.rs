@@ -4,15 +4,22 @@
 //! Loading it does not grant signing or broadcasting authority.
 
 use super::{journal::Journal, Context, Error};
+use crate::app::settings::WalletId;
 use crate::services::{
     claim_observation::http::{DiscoveryError, HttpObservationSource, OwnedSplitFunding},
+    foreign_psbt::TargetAddressEvidence,
     foreign_split_inventory::{FreshFundingAddresses, SplitInventory},
 };
 use coincube_core::{
     claim::Policy,
+    descriptors::CoincubeDescriptor,
     foreign_split::SplitSource,
     miniscript::{
-        bitcoin::{hashes::sha256, Address, Network},
+        bitcoin::{
+            bip32::ChildNumber,
+            hashes::{sha256, Hash},
+            Address, Network, ScriptBuf,
+        },
         Descriptor, DescriptorPublicKey,
     },
 };
@@ -29,6 +36,117 @@ pub enum SplitFundingDiscoveryError {
     Discovery(DiscoveryError),
 }
 
+/// The destination Vault address already authenticated and reserved when
+/// the user accepted the Split handoff. This is an immutable destination
+/// binding, not a fresh unused-address proof at signing time.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitTargetBinding {
+    vault_id: WalletId,
+    descriptor: String,
+    receive_index: u32,
+    script_hex: String,
+}
+
+impl SplitTargetBinding {
+    pub fn from_evidence(
+        target: &TargetAddressEvidence,
+        descriptor: &CoincubeDescriptor,
+    ) -> Result<Self, Error> {
+        let index = target.derivation_index();
+        if index.is_hardened() {
+            return Err(Error::InvalidPlan);
+        }
+        let binding = Self {
+            vault_id: target.vault_id().clone(),
+            descriptor: descriptor.to_string(),
+            receive_index: u32::from(index),
+            script_hex: hex::encode(target.script_pubkey().as_bytes()),
+        };
+        binding.validate()?;
+        if binding.script()?.as_script() != target.script_pubkey() {
+            return Err(Error::InvalidPlan);
+        }
+        Ok(binding)
+    }
+
+    fn validate(&self) -> Result<(), Error> {
+        if self.descriptor.len() > 16_384
+            || self.script_hex.len() > 20_000
+            || self.receive_index >= 1 << 31
+            || self.vault_id.descriptor_checksum.is_empty()
+        {
+            return Err(Error::InvalidPlan);
+        }
+        self.script().map(|_| ())
+    }
+
+    fn script(&self) -> Result<ScriptBuf, Error> {
+        let descriptor =
+            CoincubeDescriptor::from_str(&self.descriptor).map_err(|_| Error::InvalidPlan)?;
+        let script = descriptor
+            .receive_descriptor()
+            .derive(
+                ChildNumber::Normal {
+                    index: self.receive_index,
+                },
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        if hex::encode(script.as_bytes()) != self.script_hex {
+            return Err(Error::InvalidPlan);
+        }
+        Ok(script)
+    }
+
+    /// A reopened funding plan must still belong to the loaded target Vault.
+    pub fn matches_vault(&self, vault_id: &WalletId, descriptor: &CoincubeDescriptor) -> bool {
+        self.vault_id == *vault_id
+            && self.descriptor == descriptor.to_string()
+            && self.validate().is_ok()
+    }
+
+    pub fn receive_index(&self) -> u32 {
+        self.receive_index
+    }
+
+    pub fn script_pubkey(&self) -> Result<ScriptBuf, Error> {
+        self.script()
+    }
+
+    pub fn matches_destination(
+        &self,
+        descriptor_digest: sha256::Hash,
+        index: u32,
+        script: &coincube_core::miniscript::bitcoin::Script,
+    ) -> bool {
+        sha256::Hash::hash(self.descriptor.as_bytes()) == descriptor_digest
+            && self.receive_index == index
+            && self.script().is_ok_and(|saved| saved.as_script() == script)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        vault_id: WalletId,
+        descriptor: &CoincubeDescriptor,
+        index: u32,
+    ) -> Self {
+        let script = descriptor
+            .receive_descriptor()
+            .derive(
+                ChildNumber::Normal { index },
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        Self {
+            vault_id,
+            descriptor: descriptor.to_string(),
+            receive_index: index,
+            script_hex: hex::encode(script.as_bytes()),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitFundingReservation {
@@ -40,6 +158,10 @@ pub struct SplitFundingReservation {
     external: String,
     internal: Option<String>,
     pub indices: FreshFundingAddresses,
+    /// Present for new production splits. Older deposit-only records remain
+    /// readable, but cannot create an ordinary pair without a bound target.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_binding: Option<SplitTargetBinding>,
     /// The initial unused-history check passed before these addresses were
     /// shown. Later deposits make history nonempty, so restart must reuse the
     /// exact saved addresses rather than applying that first-use check again.
@@ -63,6 +185,7 @@ impl SplitFundingReservation {
             external: source.external().to_string(),
             internal: source.internal().map(ToString::to_string),
             indices,
+            target_binding: None,
             released: false,
         };
         record.validate()?;
@@ -70,8 +193,10 @@ impl SplitFundingReservation {
     }
 
     pub(super) fn validate(&self) -> Result<(), Error> {
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1 | 2 | 3)
             || (self.version == 1 && self.released)
+            || (self.version < 3 && self.target_binding.is_some())
+            || (self.version == 3 && self.target_binding.is_none())
             || self.target_cube.is_empty()
             || self.account.is_empty()
             || self.provider.is_empty()
@@ -101,6 +226,9 @@ impl SplitFundingReservation {
             return Err(Error::InvalidPlan);
         }
         let source = self.source()?;
+        if let Some(target) = &self.target_binding {
+            target.validate()?;
+        }
         if !source.external().has_wildcard() || source.digest() != self.source_digest {
             return Err(Error::InvalidPlan);
         }
@@ -151,7 +279,7 @@ impl SplitFundingReservation {
 
     pub(super) fn released_copy(&self) -> Self {
         let mut copy = self.clone();
-        copy.version = 2;
+        copy.version = if copy.target_binding.is_some() { 3 } else { 2 };
         copy.released = true;
         copy
     }
@@ -246,6 +374,38 @@ pub fn reserve_split_funding(
     context: &Context,
     inventory: &SplitInventory,
 ) -> Result<SplitFundingReservation, Error> {
+    reserve_split_funding_inner(directory, source, target_cube, context, inventory, None)
+}
+
+/// Production reservation binds the already authenticated target Vault
+/// address to the same durable record as the three source addresses.
+pub fn reserve_split_funding_with_target(
+    directory: &Path,
+    source: &SplitSource,
+    target_cube: &str,
+    context: &Context,
+    inventory: &SplitInventory,
+    target: &SplitTargetBinding,
+) -> Result<SplitFundingReservation, Error> {
+    target.validate()?;
+    reserve_split_funding_inner(
+        directory,
+        source,
+        target_cube,
+        context,
+        inventory,
+        Some(target),
+    )
+}
+
+fn reserve_split_funding_inner(
+    directory: &Path,
+    source: &SplitSource,
+    target_cube: &str,
+    context: &Context,
+    inventory: &SplitInventory,
+    target: Option<&SplitTargetBinding>,
+) -> Result<SplitFundingReservation, Error> {
     super::prepare_directory(directory)?;
     let mut journal = Journal::open(directory)?;
     if journal.load()?.is_some()
@@ -255,7 +415,9 @@ pub fn reserve_split_funding(
         return Err(Error::Conflict);
     }
     if let Some(saved) = journal.load_split_funding_reservation()? {
-        return if saved.matches(source, target_cube, context) {
+        return if saved.matches(source, target_cube, context)
+            && target.is_none_or(|expected| saved.target_binding.as_ref() == Some(expected))
+        {
             Ok(saved)
         } else {
             Err(Error::WrongIdentity)
@@ -264,7 +426,12 @@ pub fn reserve_split_funding(
     let indices = inventory
         .fresh_funding_addresses()
         .ok_or(Error::InvalidPlan)?;
-    let requested = SplitFundingReservation::new(source, target_cube, context, indices)?;
+    let mut requested = SplitFundingReservation::new(source, target_cube, context, indices)?;
+    if let Some(target) = target {
+        requested.version = 3;
+        requested.target_binding = Some(target.clone());
+        requested.validate()?;
+    }
     journal.store_split_funding_reservation(&requested)?;
     Ok(requested)
 }
@@ -329,6 +496,12 @@ mod tests {
         secp256k1::Secp256k1,
         BlockHash,
     };
+    use coincube_core::{
+        bip39::Mnemonic,
+        descriptors::{CoincubePolicy, PathInfo},
+        miniscript::{bitcoin::bip32::DerivationPath, DescriptorPublicKey},
+        signer::MasterSigner,
+    };
 
     fn source() -> SplitSource {
         let secp = Secp256k1::new();
@@ -372,6 +545,108 @@ mod tests {
             true,
         )
         .unwrap()
+    }
+
+    fn target_binding() -> (SplitTargetBinding, WalletId, CoincubeDescriptor) {
+        let secp = Secp256k1::new();
+        let keys: Vec<_> = [81_u8, 82]
+            .iter()
+            .map(|byte| {
+                let signer = MasterSigner::from_mnemonic(
+                    Network::Bitcoin,
+                    Mnemonic::from_entropy(&[*byte; 16]).unwrap(),
+                )
+                .unwrap();
+                DescriptorPublicKey::from_str(&format!(
+                    "[{}]{}/<0;1>/*",
+                    signer.fingerprint(&secp),
+                    signer.xpub_at(&DerivationPath::default(), &secp)
+                ))
+                .unwrap()
+            })
+            .collect();
+        let descriptor = CoincubeDescriptor::new(
+            CoincubePolicy::new_legacy(
+                PathInfo::Single(keys[0].clone()),
+                std::iter::once((46, PathInfo::Single(keys[1].clone()))).collect(),
+            )
+            .unwrap(),
+        );
+        let vault_id = WalletId::new(
+            descriptor
+                .to_string()
+                .split_once('#')
+                .unwrap()
+                .1
+                .to_string(),
+            Some(42),
+        );
+        let script = descriptor
+            .receive_descriptor()
+            .derive(
+                ChildNumber::Normal { index: 11 },
+                &Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        let binding = SplitTargetBinding {
+            vault_id: vault_id.clone(),
+            descriptor: descriptor.to_string(),
+            receive_index: 11,
+            script_hex: hex::encode(script.as_bytes()),
+        };
+        binding.validate().unwrap();
+        (binding, vault_id, descriptor)
+    }
+
+    #[test]
+    fn split_target_binding_is_durable_and_cannot_rotate_on_retry() {
+        let directory = std::env::temp_dir().join(format!(
+            "split-target-{}-{}",
+            std::process::id(),
+            super::super::controller_id().unwrap()
+        ));
+        let source = source();
+        let (binding, wallet_id, descriptor) = target_binding();
+        let saved = reserve_split_funding_with_target(
+            &directory,
+            &source,
+            "cube-a",
+            &context(),
+            &inventory(3),
+            &binding,
+        )
+        .unwrap();
+        assert_eq!(saved.target_binding.as_ref(), Some(&binding));
+        assert!(binding.matches_vault(&wallet_id, &descriptor));
+        let released = release_split_funding(&directory, &saved).unwrap();
+        assert_eq!(released.target_binding.as_ref(), Some(&binding));
+        assert!(released.is_released());
+        let mut later = context();
+        later.generation += 1;
+        assert_eq!(
+            load_split_funding(&directory, &source, "cube-a", &later)
+                .unwrap()
+                .unwrap(),
+            released
+        );
+        let mut changed = binding.clone();
+        changed.receive_index = 12;
+        assert!(matches!(changed.validate(), Err(Error::InvalidPlan)));
+        changed = binding.clone();
+        changed.vault_id.timestamp = Some(43);
+        assert!(!changed.matches_vault(&wallet_id, &descriptor));
+        assert!(matches!(
+            reserve_split_funding_with_target(
+                &directory,
+                &source,
+                "cube-a",
+                &later,
+                &inventory(3),
+                &changed,
+            ),
+            Err(Error::WrongIdentity)
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

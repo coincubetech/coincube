@@ -413,6 +413,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source: &SplitSource,
         _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
     ) -> Result<SplitDepositProgress, String> {
         Err("Two-chain funding checks are unavailable for this session.".into())
     }
@@ -513,6 +514,7 @@ pub async fn recover_funding_addresses(
     directory: PathBuf,
     digest: sha256::Hash,
     target_cube: &str,
+    target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
 ) -> Result<(SplitSource, CheckedFundingAddresses), String> {
     if !connect.session_current() {
         return Err("The Connect session changed before recovering deposit addresses.".into());
@@ -529,6 +531,16 @@ pub async fn recover_funding_addresses(
         .map_err(|_| "The saved source wallet is invalid.".to_string())?;
     if saved.source_digest != digest || !saved.matches(&source, &target, &connect.context()) {
         return Err("The funding record belongs to another wallet or Connect account.".into());
+    }
+    if let Some(binding) = &saved.target_binding {
+        let Some((wallet_id, descriptor)) = target_vault else {
+            return Err("The target Vault is unavailable for this funding record.".into());
+        };
+        if !binding.matches_vault(wallet_id, descriptor) {
+            return Err(
+                "The target Vault changed since the deposit addresses were reserved.".into(),
+            );
+        }
     }
     let addresses = check_reserved_funding_addresses(connect, directory, &source, &target).await?;
     Ok((source, addresses))
@@ -658,6 +670,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
     ) -> Result<SplitDepositProgress, String> {
         if !self.session_current() {
             return Err("The Connect session changed before checking deposits.".into());
@@ -693,6 +706,16 @@ impl SplitConnect for ProductionConnect {
         .ok_or_else(|| "No saved deposit addresses were found for this wallet.".to_string())?;
         if !reservation.is_released() {
             return Err("The deposit addresses were not checked before release.".into());
+        }
+        if let Some(binding) = &reservation.target_binding {
+            let Some((wallet_id, descriptor)) = target_vault else {
+                return Err("The target Vault is unavailable for this deposit check.".into());
+            };
+            if !binding.matches_vault(wallet_id, descriptor) {
+                return Err(
+                    "The target Vault changed since the deposit addresses were reserved.".into(),
+                );
+            }
         }
         let reserved = scan
             .inventory

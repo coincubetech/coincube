@@ -323,8 +323,45 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             }
         )
     );
-    super::super::reserve_split_funding(&temp.0, &wallet.source, TARGET, &context(), &inventory)
-        .unwrap();
+    let target_id = crate::app::settings::WalletId::new(
+        target.to_string().split_once('#').unwrap().1.to_string(),
+        Some(1),
+    );
+    let other = Temp::new();
+    let wrong_target = super::super::SplitTargetBinding::for_test(target_id.clone(), &target, 5);
+    super::super::reserve_split_funding_with_target(
+        &other.0,
+        &wallet.source,
+        TARGET,
+        &context(),
+        &inventory,
+        &wrong_target,
+    )
+    .unwrap();
+    assert!(matches!(
+        Controller::create_ancestry_split(
+            &other.0,
+            TARGET.into(),
+            &target,
+            4,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let target_binding = super::super::SplitTargetBinding::for_test(target_id, &target, 4);
+    super::super::reserve_split_funding_with_target(
+        &temp.0,
+        &wallet.source,
+        TARGET,
+        &context(),
+        &inventory,
+        &target_binding,
+    )
+    .unwrap();
     let mut changed_account = context();
     changed_account.account = "another-account".into();
     assert!(matches!(

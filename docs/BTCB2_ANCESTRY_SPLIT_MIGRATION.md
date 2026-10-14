@@ -127,7 +127,9 @@ a replayable spend.
    supplied by their owners, and refuses if scan tips have changed. Journal
    creation now also requires the saved pre-deposit record and checks that the
    Bitcoin funding index, BTCB2 funding index and Bitcoin return index match
-   its three distinct source addresses and Connect identity. It still does
+   its three distinct source addresses and Connect identity. The journal also
+   requires the exact BTCB2 target descriptor, receive index and script from
+   the saved target reservation; a different destination is refused. It still does
    not grant live proof or signer access.
    Next update coordinator transport and preflight to carry both typed live
    proofs. Keep the unified signature fallback separate and labeled with its
@@ -224,6 +226,13 @@ a replayable spend.
    digest, target Cube and account, then repeats both-chain address checks
    before showing the same deposit addresses. A resumed deposit screen can
    run the same read-only "Check deposits" scan.
+   New Split deposit records also bind the authenticated target BTCB2 Vault
+   ID, descriptor and reserved receive script under the same journal lock.
+   Reopening or checking deposits rejects a different loaded target Vault.
+   The target daemon must positively identify as BTCB2 when reserving its
+   destination; mainnet address encoding alone cannot distinguish the two
+   chains. An older Connect wallet response without an authenticated chain
+   ID is therefore refused until Connect supplies it.
    The Claim wizard calls paired funding discovery only for read-only deposit
    status; it does not yet call the transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
