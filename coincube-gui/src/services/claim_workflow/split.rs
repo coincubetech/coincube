@@ -942,6 +942,90 @@ impl Controller {
         Ok((bitcoin, fork))
     }
 
+    /// Compare a fresh two-chain observation with the exact version-11
+    /// journal and the two owned ordinary constructions. This is a read-only
+    /// review check, never construction or signing authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_ancestry_split_observation(
+        &mut self,
+        current: &Context,
+        observed: &crate::services::claim_observation::http::CollectedSpendInputs,
+        target: &CoincubeDescriptor,
+        bitcoin_coin: &SplitCoin,
+        fork_coin: &SplitCoin,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        let record = self.record_of(SplitKind::Ancestry)?;
+        let funding = record.funding.as_ref().ok_or(Error::InvalidJournal)?;
+        let bitcoin_path = funding.bitcoin.decode()?;
+        let fork_path = funding.fork.decode()?;
+        if self.intent.phase != Phase::Intent
+            || record
+                .descriptors
+                .as_ref()
+                .map(StoredDescriptors::source)
+                .transpose()?
+                != Some(bitcoin.source().clone())
+            || bitcoin.psbt().unsigned_tx != self.intent.plan.step1
+            || fork.psbt().unsigned_tx != funding.step2_unsigned
+            || bitcoin.source() != fork.source()
+            || bitcoin.source().digest() != record.source_digest
+            || bitcoin.fork_height() != record.fork_height
+            || fork.fork_height() != record.fork_height
+            || bitcoin.destination() != record.destination
+            || bitcoin.claimed_prevouts() != self.intent.plan.claimed_prevouts
+            || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
+            || funding
+                .bitcoin_feerate_vb
+                .checked_mul(bitcoin.maximum_signed_vbytes())
+                != Some(bitcoin.fee().to_sat())
+            || funding
+                .fork_feerate_vb
+                .checked_mul(fork.maximum_signed_vbytes())
+                != Some(fork.fee().to_sat())
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let index = coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(
+            record.target_index.ok_or(Error::InvalidJournal)?,
+        )
+        .map_err(|_| Error::InvalidJournal)?;
+        let script = target
+            .receive_descriptor()
+            .derive(
+                index,
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        if record.target_script.as_ref() != Some(&script) || fork.target() != script.as_script() {
+            return Err(Error::WrongIdentity);
+        }
+        observed
+            .validate_for_split(
+                &bitcoin_path,
+                &fork_path,
+                bitcoin_coin,
+                fork_coin,
+                bitcoin,
+                fork,
+                crate::services::claim_observation::http::FundingContext {
+                    provider: &current.provider,
+                    generation: current.generation,
+                    now,
+                    max_age_seconds: policy.max_observation_age_seconds,
+                    tips,
+                },
+            )
+            .map_err(|_| Error::Unchecked)
+    }
+
     /// Record a Split step 1 before any submission. `construction` is the
     /// opaque core builder output and `signed` its verified finalization;
     /// neither can come from a journal. `fork_height` is the authenticated

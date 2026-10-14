@@ -508,15 +508,15 @@ impl Controller {
             .map(Option::flatten)
     }
 
-    /// Check a fresh two-chain marker collection against this exact saved
-    /// pair and owned constructions. This is review-only: the controller stays
-    /// unchecked until current shared UTXOs, reservations and a second
+    /// Check a fresh two-chain marker and shared-input collection against
+    /// this exact saved pair and owned constructions. This is review-only:
+    /// the controller stays unchecked until reservations and a second
     /// preflight are bound by the signer admission path.
     #[allow(clippy::too_many_arguments)]
     pub fn validate_ancestry_pair_observation(
         &mut self,
         current: &Context,
-        pair: &crate::services::claim_observation::http::CollectedFundingPair,
+        pair: &crate::services::claim_observation::http::CollectedSpendInputs,
         bitcoin_coin: &CandidateCoin,
         fork_coin: &CandidateCoin,
         bitcoin: &AncestrySelfTransfer,

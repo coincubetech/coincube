@@ -62,10 +62,10 @@ a replayable spend.
    transaction against the same canonical pre-fork block on both chains and
    requires an explicit current unspent response on each, under the paired
    funding session and stable tips. Claim and Split review validators bind
-   that exact shared set to both unsigned transactions. Signer admission still
-   needs to consume this fresh evidence with wallet ownership, reservations
-   and the durable intent; no candidate or validator result is cached spend
-   authority.
+   that exact shared set to both unsigned transactions and their version-10
+   Claim or version-11 Split journal. Signer admission still needs to consume
+   this fresh evidence with wallet ownership, reservations and a new preflight;
+   no candidate or validator result is cached spend authority.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly
