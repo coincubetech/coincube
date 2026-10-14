@@ -334,8 +334,12 @@ a replayable spend.
    both-chain ancestry and shared-input evidence, rebuilds both PSBTs with
    the saved change indices and rates, compares all PSBT fields, rereads both
    wallets and tips, then checks the journal and Connect generation again.
-   It is not yet called by the GUI signer transition and does not authorize a
-   send; the signed-pair coordinator and each signer dispatch still need it.
+   A production preparation function can invoke it after a new bounded
+   two-chain Vault scan, require the current fee quotes to match the retained
+   pair, verify the currently open BTCB2 Vault and create or reopen only the
+   exact version-10 intent. It is not yet called by the GUI signer transition
+   and does not authorize a send; the signed-pair coordinator and each signer
+   dispatch still need it.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks

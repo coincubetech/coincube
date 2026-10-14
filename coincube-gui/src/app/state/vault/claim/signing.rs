@@ -3,6 +3,174 @@ use super::*;
 use coincube_core::miniscript::bitcoin::hashes::sha256;
 use std::collections::BTreeSet;
 
+/// Recollect the exact ordinary pair from a new two-chain scan and both
+/// complete Vault coin sets before recording its version-10 intent. A caller
+/// must repeat this at each signer dispatch: the journal is structural state,
+/// never spend authority. No transaction is signed or sent here.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // The paired signer UI is not yet wired.
+pub(super) async fn prepare_exact_pair_intent(
+    pair: PreparedClaimPair,
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<(), String> {
+    let current = || {
+        if generation.has_changed().is_err() || *generation.borrow() != expected {
+            Err("The Connect session changed during Claim preparation.".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    current()?;
+    if wallet.chain != ChainId::Bitcoin || !fork_binding.current() {
+        return Err("The paired Bitcoin and BTCB2 Vaults are not open for this Claim.".into());
+    }
+    let fork_daemon = fork_binding
+        .upgrade()
+        .ok_or_else(|| "The paired BTCB2 Vault closed during Claim preparation.".to_string())?;
+    let fork_wallet = fork_binding
+        .wallet()
+        .ok_or_else(|| "The paired BTCB2 Vault closed during Claim preparation.".to_string())?;
+    let descriptor = wallet.main_descriptor.clone();
+    if fork_wallet.chain != ChainId::BitcoinBlake2b
+        || fork_wallet.main_descriptor != descriptor
+        || pair.bitcoin.descriptor() != &descriptor
+        || pair.fork.descriptor() != &descriptor
+    {
+        return Err("The paired Vault descriptors changed. Reopen both Cubes.".into());
+    }
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube: bitcoin_cube.clone(),
+        fork_cube: fork_cube.clone(),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let info = daemon
+        .get_info()
+        .await
+        .map_err(|_| "The Bitcoin Vault is unavailable for Claim preparation.".to_string())?;
+    if !bitcoin_funding_wallet_ready(&info, &descriptor) {
+        return Err("The Bitcoin Vault is not ready for Claim preparation.".into());
+    }
+    let end_exclusive = info
+        .receive_index
+        .max(info.change_index)
+        .saturating_add(128)
+        .max(256);
+    if end_exclusive > 20_000 {
+        return Err("The Vault's address range is too large for this bounded scan.".into());
+    }
+    let inventory = crate::services::claim_inventory::ClaimInventory::scan(
+        connect.client.clone(),
+        &descriptor,
+        end_exclusive,
+        64,
+        expected,
+        generation.clone(),
+    )
+    .await
+    .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+    current()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed during Claim preparation.".into());
+    }
+    let saved_directory = directory.clone();
+    let saved_descriptor = descriptor.clone();
+    let saved_identity = identity.clone();
+    let saved_context = context.clone();
+    let reservation = tokio::task::spawn_blocking(move || {
+        claim_workflow::load_claim_funding(
+            &saved_directory,
+            &saved_descriptor,
+            &saved_identity,
+            &saved_context,
+        )
+    })
+    .await
+    .map_err(|_| "Reading the saved Claim deposits was interrupted.".to_string())?
+    .map_err(|_| "The saved Claim deposits could not be verified.".to_string())?
+    .ok_or_else(|| "The saved Claim deposits are missing.".to_string())?;
+    let (minimums, rates) = claim_workflow::quote_claim_deposit_terms(
+        &descriptor,
+        reservation.indices,
+        inventory.shared().len(),
+        connect.client.clone(),
+    )
+    .await
+    .map_err(|_| "Current Bitcoin and BTCB2 fee quotes are unavailable.".to_string())?;
+    current()?;
+    if rates != (pair.bitcoin_rate_vb, pair.fork_rate_vb) {
+        return Err(
+            "Claim fees changed. Check both deposits and review the transactions again.".into(),
+        );
+    }
+    let source = HttpObservationSource::new(
+        connect.client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: expected,
+            generation: generation.clone(),
+        },
+    )
+    .map_err(|_| "The two-chain observation source is unavailable.".to_string())?;
+    let funding = reservation
+        .requalify_exact_pair(
+            directory.clone(),
+            &inventory,
+            &identity,
+            &context,
+            &*daemon,
+            &*fork_daemon,
+            &source,
+            CHECK_POLICY.observations,
+            minimums,
+            &pair.bitcoin,
+            &pair.fork,
+            rates,
+        )
+        .await
+        .map_err(|error| format!("The exact Claim pair is no longer verified: {error:?}"))?;
+    current()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed during Claim verification.".into());
+    }
+    let bitcoin = pair.bitcoin;
+    let fork = pair.fork;
+    let result = tokio::task::spawn_blocking(move || {
+        let controller = claim_workflow::Controller::create_or_reopen_ancestry_pair(
+            &directory,
+            bitcoin_cube,
+            fork_cube,
+            &bitcoin,
+            &funding.bitcoin_path,
+            &fork,
+            &funding.fork_path,
+            (funding.fork.deriv_index, funding.fork.is_change),
+            rates.0,
+            rates.1,
+            context,
+        )?;
+        drop(controller);
+        Ok::<(), claim_workflow::Error>(())
+    })
+    .await
+    .map_err(|_| "Recording the exact Claim intent was interrupted.".to_string())?
+    .map_err(|error| format!("The exact Claim intent could not be recorded: {error:?}"));
+    current()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed while recording the Claim intent.".into());
+    }
+    result
+}
+
 /// One-use result of checking this exact unsigned construction and session.
 /// No serialization or clone: a delayed GUI result must be consumed afresh.
 #[derive(Debug)]
