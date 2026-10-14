@@ -88,6 +88,30 @@ pub struct ScanDescriptor {
     branch: Branch,
 }
 impl ScanDescriptor {
+    /// Scan a known COINCUBE Vault policy without applying the narrower
+    /// foreign-wallet signing-shape filter. `CoincubeDescriptor` has already
+    /// validated the complete policy and split its public receive/change
+    /// paths. This grants only address discovery, never foreign signing or
+    /// Claim authorization.
+    pub(crate) fn for_cube(
+        branch: Branch,
+        cube: &coincube_core::descriptors::CoincubeDescriptor,
+    ) -> Result<Self, ScanError> {
+        let text = match branch {
+            Branch::External => cube.receive_descriptor().to_string(),
+            Branch::Internal => cube.change_descriptor().to_string(),
+        };
+        let descriptor = Descriptor::<DescriptorPublicKey>::from_str(&text)
+            .map_err(|_| ScanError::Descriptor)?;
+        descriptor
+            .sanity_check()
+            .map_err(|_| ScanError::Descriptor)?;
+        if descriptor.to_string() != text {
+            return Err(ScanError::Descriptor);
+        }
+        Ok(Self { descriptor, branch })
+    }
+
     pub fn parse(branch: Branch, text: &str) -> Result<Self, ScanError> {
         if text.len() > 16_384 {
             return Err(ScanError::Descriptor);
