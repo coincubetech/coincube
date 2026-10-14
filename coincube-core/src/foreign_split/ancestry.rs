@@ -64,6 +64,15 @@ impl AncestrySplitStep1 {
     pub fn funding_prevout(&self) -> OutPoint {
         self.funding
     }
+    pub fn funding_derivation(&self) -> Option<(SplitBranch, u32)> {
+        self.psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .zip(&self.inputs)
+            .find(|(input, _)| input.previous_output == self.funding)
+            .map(|(_, derivation)| *derivation)
+    }
     /// Exactly the shared pre-fork inputs that BTCB2 step 2 must also spend.
     pub fn claimed_prevouts(&self) -> &[OutPoint] {
         &self.shared

@@ -175,6 +175,9 @@ impl CollectedFundingPair {
             || step1.source() != step2.source()
             || step1.funding_prevout() != self.bitcoin.selected
             || step2.funding_prevout() != self.fork.selected
+            || step1.funding_derivation()
+                != Some((bitcoin_candidate.branch, bitcoin_candidate.index))
+            || step2.funding_derivation() != Some((fork_candidate.branch, fork_candidate.index))
             || step1.claimed_prevouts() != step2.claimed_prevouts()
             || step1.claimed_prevouts().is_empty()
             || step1.fork_height() != step2.fork_height()

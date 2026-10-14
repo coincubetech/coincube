@@ -291,6 +291,10 @@ fn ancestry_step1_builds_exact_shared_plus_funding_and_signs_every_shape() {
                 .script_pubkey()
         );
         assert_eq!(step.funding_prevout(), funding.outpoint);
+        assert_eq!(
+            step.funding_derivation(),
+            Some((funding.branch, funding.index))
+        );
         assert_eq!(step.fee().to_sat(), step.maximum_signed_vbytes() * FEERATE);
         assert_eq!(step.psbt().inputs.len(), 3);
         assert!(!step.psbt().outputs[0].bip32_derivation.is_empty());
@@ -450,6 +454,10 @@ fn ancestry_step2_builds_exact_shared_plus_funding_and_signs_every_shape() {
         assert_eq!(tx.output.len(), 1);
         assert_eq!(tx.output[0].script_pubkey, target);
         assert_eq!(step.funding_prevout(), funding.outpoint);
+        assert_eq!(
+            step.funding_derivation(),
+            Some((funding.branch, funding.index))
+        );
         assert_eq!(step.fee().to_sat(), step.maximum_signed_vbytes() * FEERATE);
         assert_eq!(step.psbt().inputs.len(), 3);
         assert_eq!(

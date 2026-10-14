@@ -50,6 +50,15 @@ impl AncestrySplitStep2 {
     pub fn funding_prevout(&self) -> OutPoint {
         self.funding
     }
+    pub fn funding_derivation(&self) -> Option<(SplitBranch, u32)> {
+        self.psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .zip(&self.inputs)
+            .find(|(input, _)| input.previous_output == self.funding)
+            .map(|(_, derivation)| *derivation)
+    }
     pub fn fork_height(&self) -> u64 {
         self.fork_height
     }
