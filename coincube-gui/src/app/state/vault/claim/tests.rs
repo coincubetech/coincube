@@ -285,8 +285,22 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     let (fork_sender, fork_receiver) = watch::channel(1);
     let fork_daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
     let mut p = panel(SINGLE_WSH);
+    let fork_wallet =
+        Arc::new(Wallet::new(p.wallet.main_descriptor.clone()).with_chain(ChainId::BitcoinBlake2b));
     p.generation = receiver;
-    p.bind_fork_daemon(Some(ClaimForkBinding::new(&fork_daemon, fork_receiver)));
+    p.bind_fork_daemon(Some(ClaimForkBinding::new(
+        &fork_daemon,
+        &fork_wallet,
+        fork_receiver,
+    )));
+    assert_eq!(
+        p.fork_daemon
+            .as_ref()
+            .and_then(ClaimForkBinding::wallet)
+            .as_ref()
+            .map(|wallet| wallet.chain),
+        Some(ChainId::BitcoinBlake2b)
+    );
     p.connect = Some(ConnectSession {
         client: CoincubeClient::new(),
         account: "account".into(),
@@ -374,6 +388,20 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(p.funding_status.is_none());
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
     assert!(matches!(p.stage, Stage::Preconditions));
+}
+
+#[test]
+fn claim_fork_pairing_expires_when_the_open_wallet_is_dropped() {
+    let (_sender, receiver) = watch::channel(1);
+    let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
+    let fork_wallet = Arc::new(
+        Wallet::new(wallet(SINGLE_WSH).main_descriptor.clone()).with_chain(ChainId::BitcoinBlake2b),
+    );
+    let binding = ClaimForkBinding::new(&daemon, &fork_wallet, receiver);
+    assert!(binding.current());
+    drop(fork_wallet);
+    assert!(!binding.current());
+    assert!(binding.wallet().is_none());
 }
 
 fn checked_ok(now: i64) -> Checked {

@@ -112,8 +112,11 @@ a replayable spend.
    and token before a deposit check, and stores only a weak reference plus the
    fork tab's revocable session generation. Closing or changing that tab
    invalidates an in-flight reservation or preview, including a result waiting
-   to be delivered to the Bitcoin UI. After
-   both proofs pass, it asks both daemons for durable change indices and
+   to be delivered to the Bitcoin UI.
+   The binding also carries a weak reference to the exact paired BTCB2 wallet.
+   Deposit review refuses a dropped wallet, a changed chain ID or a changed
+   descriptor; this prepares the separate BTCB2 signer without granting it
+   signing authority. After both proofs pass, it asks both daemons for durable change indices and
    constructs a read-only exact PSBT preview. The separate legacy
    remote-wallet backend still cannot atomically reserve change indices.
    The preview is not signer admission and is discarded after 30 seconds.

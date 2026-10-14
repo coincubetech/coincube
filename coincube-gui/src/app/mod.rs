@@ -4454,6 +4454,7 @@ impl App {
             .then(|| {
                 state::vault::claim::ClaimForkBinding::new(
                     daemon,
+                    wallet,
                     self.panels.claim_generation.subscribe(),
                 )
             })

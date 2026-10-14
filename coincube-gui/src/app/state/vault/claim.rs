@@ -293,6 +293,7 @@ pub struct ClaimDepositProgress {
 #[derive(Clone)]
 pub(crate) struct ClaimForkBinding {
     daemon: Weak<dyn Daemon + Sync + Send>,
+    wallet: Weak<Wallet>,
     generation: watch::Receiver<u64>,
     expected: u64,
 }
@@ -300,11 +301,13 @@ pub(crate) struct ClaimForkBinding {
 impl ClaimForkBinding {
     pub(crate) fn new(
         daemon: &Arc<dyn Daemon + Sync + Send>,
+        wallet: &Arc<Wallet>,
         generation: watch::Receiver<u64>,
     ) -> Self {
         let expected = *generation.borrow();
         Self {
             daemon: Arc::downgrade(daemon),
+            wallet: Arc::downgrade(wallet),
             generation,
             expected,
         }
@@ -313,10 +316,16 @@ impl ClaimForkBinding {
     pub(crate) fn current(&self) -> bool {
         matches!(self.generation.has_changed(), Ok(false))
             && *self.generation.borrow() == self.expected
+            && self.daemon.strong_count() > 0
+            && self.wallet.strong_count() > 0
     }
 
     fn upgrade(&self) -> Option<Arc<dyn Daemon + Sync + Send>> {
         self.current().then(|| self.daemon.upgrade()).flatten()
+    }
+
+    fn wallet(&self) -> Option<Arc<Wallet>> {
+        self.current().then(|| self.wallet.upgrade()).flatten()
     }
 
     fn generation_guard(&self) -> (&watch::Receiver<u64>, u64) {
@@ -1565,6 +1574,15 @@ impl ClaimStep1Panel {
                         "The paired BTCB2 Cube closed or its Connect session changed. Reopen it and check deposits again."
                             .to_string()
                     })?;
+                    let fork_wallet = fork_binding.wallet().ok_or_else(|| {
+                        "The paired BTCB2 Vault closed or its Connect session changed. Reopen it and check deposits again."
+                            .to_string()
+                    })?;
+                    if fork_wallet.chain != ChainId::BitcoinBlake2b
+                        || fork_wallet.main_descriptor != descriptor
+                    {
+                        return Err("The paired BTCB2 Vault no longer matches this Claim. Reopen both Cubes and check deposits again.".into());
+                    }
                     inventory
                         .reconcile_fork_daemon(&*fork_daemon, saved.indices.btcb2_deposit)
                         .await
