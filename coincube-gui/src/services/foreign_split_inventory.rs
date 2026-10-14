@@ -27,8 +27,8 @@ use std::{
 
 use coincube_core::{
     chain::ChainId,
-    claim::BlockRef,
-    foreign_split::{SplitBranch, SplitCoin},
+    claim::{BlockRef, PreflightTips},
+    foreign_split::{SplitBranch, SplitCoin, SplitSource},
     miniscript::bitcoin::{BlockHash, OutPoint},
 };
 use tokio::sync::watch;
@@ -593,6 +593,110 @@ pub struct TwoChainScan {
     pub inventory: SplitInventory,
 }
 
+impl TwoChainScan {
+    /// Reconcile a fresh foreign-source scan after the Bitcoin side of an
+    /// ordinary Split confirms. The exact shared inputs must now be absent
+    /// from Bitcoin's scanned UTXO set but remain confirmed and unspent in
+    /// the BTCB2 source; the reserved BTCB2-only input must also remain there.
+    /// Chain ancestry, the exact signed Bitcoin spend, target reservation and
+    /// BTCB2 policy are separate checks for the stage-two coordinator.
+    #[allow(dead_code)] // The stage-two coordinator is not wired yet.
+    pub fn reconcile_post_bitcoin_split(
+        &self,
+        source: &SplitSource,
+        shared: &[OutPoint],
+        fork_funding: OutPoint,
+        fork_funding_index: u32,
+        expected_generation: u64,
+        tips: PreflightTips,
+    ) -> Result<(), InventoryError> {
+        let expected: BTreeSet<_> = shared.iter().copied().collect();
+        let spent_on_bitcoin: BTreeSet<_> = self
+            .inventory
+            .spent_on_bitcoin()
+            .iter()
+            .map(|coin| coin.outpoint)
+            .collect();
+        let fork_pre_fork: BTreeSet<_> = self
+            .btcb2
+            .coins()
+            .iter()
+            .filter(|coin| self.btcb2.fork_side(coin) == ForkSide::PreFork)
+            .map(|coin| coin.outpoint)
+            .collect();
+        if self.bitcoin.chain() != ChainId::Bitcoin
+            || self.btcb2.chain() != ChainId::BitcoinBlake2b
+            || self.bitcoin.generation() != expected_generation
+            || self.btcb2.generation() != expected_generation
+            || self.inventory.generation() != expected_generation
+            || self.bitcoin.tip() != tips.bitcoin.hash
+            || u64::from(self.bitcoin.tip_height()) != tips.bitcoin.height
+            || self.btcb2.tip() != tips.fork.hash
+            || u64::from(self.btcb2.tip_height()) != tips.fork.height
+            || expected.is_empty()
+            || expected.len() != shared.len()
+            || expected.contains(&fork_funding)
+            || expected != spent_on_bitcoin
+            || expected != fork_pre_fork
+        {
+            return Err(InventoryError::Stale);
+        }
+        let funding = self
+            .inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, fork_funding)
+            .ok_or(InventoryError::Stale)?;
+        if funding.branch != SplitBranch::External || funding.index != fork_funding_index {
+            return Err(InventoryError::Stale);
+        }
+        for outpoint in expected
+            .iter()
+            .copied()
+            .chain(std::iter::once(fork_funding))
+        {
+            let coin = self
+                .btcb2
+                .coins()
+                .iter()
+                .find(|coin| coin.outpoint == outpoint)
+                .ok_or(InventoryError::Stale)?;
+            let other_coverage = self
+                .bitcoin
+                .coverage(coin.branch)
+                .ok_or(InventoryError::Stale)?;
+            let fork_coverage = self
+                .btcb2
+                .coverage(coin.branch)
+                .ok_or(InventoryError::Stale)?;
+            let descriptor = match coin.branch {
+                Branch::External => source.external(),
+                Branch::Internal => source.internal().ok_or(InventoryError::Stale)?,
+            };
+            let owned_script = descriptor
+                .at_derivation_index(coin.index)
+                .map_err(|_| InventoryError::Stale)?
+                .script_pubkey();
+            if !other_coverage.contains(coin.index)
+                || !fork_coverage.contains(coin.index)
+                || !coin.confirmed
+                || coin
+                    .block_height
+                    .is_none_or(|height| height > self.btcb2.tip_height())
+                || coin.previous.compute_txid() != outpoint.txid
+                || coin.previous.output.get(outpoint.vout as usize) != Some(&coin.output)
+                || coin.output.script_pubkey != owned_script
+                || (outpoint == fork_funding
+                    && (coin.branch != Branch::External
+                        || coin.index != fork_funding_index
+                        || self.btcb2.fork_side(coin) != ForkSide::PostFork))
+                || (outpoint != fork_funding && self.btcb2.fork_side(coin) != ForkSide::PreFork)
+            {
+                return Err(InventoryError::Stale);
+            }
+        }
+        Ok(())
+    }
+}
+
 /// Scan both chains under one generation. Cancelling the generation cancels
 /// both scans; any incomplete scan is an error.
 pub async fn scan(
@@ -657,6 +761,8 @@ mod tests {
         secp256k1::Secp256k1,
         transaction, Amount, Transaction, TxIn, TxOut,
     };
+    use coincube_core::miniscript::{Descriptor, DescriptorPublicKey};
+    use std::str::FromStr;
 
     const FORK: u64 = 100;
 
@@ -670,6 +776,16 @@ mod tests {
 
     fn descriptor() -> ScanDescriptor {
         descriptor_at("*")
+    }
+
+    fn source(seed: u8) -> SplitSource {
+        let xpub = Xpub::from_priv(
+            &Secp256k1::new(),
+            &Xpriv::new_master(bitcoin::Network::Bitcoin, &[seed; 32]).unwrap(),
+        );
+        let external =
+            Descriptor::<DescriptorPublicKey>::from_str(&format!("wpkh({xpub}/0/*)")).unwrap();
+        SplitSource::new(external, None).unwrap()
     }
 
     fn hash(height: u32) -> BlockHash {
@@ -901,6 +1017,101 @@ mod tests {
                 btcb2_deposit: 7,
                 bitcoin_return: 8,
             })
+        );
+    }
+
+    #[test]
+    fn post_bitcoin_split_rechecks_exact_source_coins_and_fork_funding() {
+        let shared = coin(1, 0, 10_000, Some(90));
+        let funding = coin(2, 1, 10_000, Some(150));
+        let bitcoin = report(ChainId::Bitcoin, vec![], walk(10, Some(1))).with_tip_height(200);
+        let btcb2 = report(
+            ChainId::BitcoinBlake2b,
+            vec![shared.clone(), funding.clone()],
+            walk(10, Some(1)),
+        )
+        .with_tip_height(200);
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        let scan = TwoChainScan {
+            bitcoin,
+            btcb2,
+            inventory,
+        };
+        let tips = PreflightTips {
+            bitcoin: BlockRef {
+                height: 200,
+                hash: hash(200),
+            },
+            fork: BlockRef {
+                height: 200,
+                hash: hash(200),
+            },
+        };
+        assert_eq!(
+            scan.reconcile_post_bitcoin_split(
+                &source(42),
+                &[shared.outpoint],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            ),
+            Ok(())
+        );
+        for (source, shared, index) in [
+            (source(43), vec![shared.outpoint], 1),
+            (source(42), vec![], 1),
+            (source(42), vec![shared.outpoint], 2),
+        ] {
+            assert_eq!(
+                scan.reconcile_post_bitcoin_split(
+                    &source,
+                    &shared,
+                    funding.outpoint,
+                    index,
+                    5,
+                    tips,
+                ),
+                Err(InventoryError::Stale)
+            );
+        }
+        assert_eq!(
+            scan.reconcile_post_bitcoin_split(
+                &source(42),
+                &[shared.outpoint],
+                funding.outpoint,
+                1,
+                5,
+                PreflightTips {
+                    fork: BlockRef {
+                        height: 201,
+                        hash: hash(201),
+                    },
+                    ..tips
+                },
+            ),
+            Err(InventoryError::Stale)
+        );
+        let spent_funding_scan = TwoChainScan {
+            bitcoin: scan.bitcoin.clone(),
+            btcb2: report(
+                ChainId::BitcoinBlake2b,
+                vec![shared.clone()],
+                walk(10, Some(1)),
+            )
+            .with_tip_height(200),
+            inventory: scan.inventory.clone(),
+        };
+        assert_eq!(
+            spent_funding_scan.reconcile_post_bitcoin_split(
+                &source(42),
+                &[shared.outpoint],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            ),
+            Err(InventoryError::Stale)
         );
     }
 

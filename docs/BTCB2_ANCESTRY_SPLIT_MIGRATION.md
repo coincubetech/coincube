@@ -528,6 +528,12 @@ marker spend cases remain.
    the BTCB2 Vault, and the exact reserved BTCB2 funding output must still be
    confirmed and unspent. The stage-two coordinator must join that check with
    the collector, saved reservation, final signature and new policy evidence.
+   Foreign Split now has an equivalent read-only post-Bitcoin source-scan
+   recheck: the exact shared set must have left Bitcoin while remaining
+   confirmed and unspent on BTCB2, and the exact reserved BTCB2 funding coin
+   must remain there with its source descriptor derivation. It also binds the
+   scan generation and both current tips. This is not yet joined to the
+   stage-two collector, target reservation or signed BTCB2 transaction.
    The Claim and Split pair finalizers now issue an opaque, controller-bound
    initial proof only after validating the exact signed pair against the saved
    intent and fresh two-chain collection. Recording a possible Bitcoin send
