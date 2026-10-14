@@ -294,8 +294,10 @@ a replayable spend.
    reconciliation before Claim preview: its explicit chain ID, descriptor,
    sync and address coverage must agree, every shared coin must still be
    owned and unspent at its BTCB2 block height, and the reserved BTCB2
-   funding coin must match the fork scan. Signer admission must repeat both
-   wallet reads.
+   funding coin must match the fork scan. After reserving both change
+   branches and constructing the preview PSBTs, Claim rereads both complete
+   wallet coin sets; a spend or new shared coin during construction withdraws
+   the preview. Signer admission must repeat both wallet reads.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks

@@ -1645,6 +1645,25 @@ impl ClaimStep1Panel {
                         proof.fork.outpoint,
                     )
                     .map_err(str::to_owned)?;
+                    // Reserving both change branches and constructing the PSBTs
+                    // can race a wallet update. Re-read each complete wallet
+                    // before displaying the pair; a changed shared or funding
+                    // coin must not appear as a current preview. Signing will
+                    // still require a separate fresh admission check.
+                    inventory
+                        .reconcile_daemon(&*daemon, saved.indices.bitcoin_deposit)
+                        .await
+                        .map_err(|_| {
+                            "The Bitcoin Vault changed while preparing the Claim preview. Check deposits again."
+                                .to_string()
+                        })?;
+                    inventory
+                        .reconcile_fork_daemon(&*fork_daemon, saved.indices.btcb2_deposit)
+                        .await
+                        .map_err(|_| {
+                            "The paired BTCB2 Vault changed while preparing the Claim preview. Check deposits again."
+                                .to_string()
+                        })?;
                     Some(
                         view::vault::ancestry_coins::VerifiedCoinPairReview::new(
                             coins,

@@ -549,7 +549,6 @@ fn plan_view<'a>(
     Column::new()
         .spacing(20)
         .push(header(if panel.is_resuming() { "Review this recorded claim" } else { "Review the transaction, then sign it with this Vault's keys" }))
-        .push_maybe(built.selected_ancestry_input().is_none().then(|| card::warning(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.to_string())))
         .push(
             Container::new(summary)
                 .padding(20)

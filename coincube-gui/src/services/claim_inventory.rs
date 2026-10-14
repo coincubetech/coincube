@@ -406,9 +406,10 @@ impl ClaimInventory {
         Ok(())
     }
 
-    /// Read the daemon's complete coin set immediately before paired proof
-    /// discovery. This is a review prerequisite, not signer admission: tips,
-    /// ancestry and unspent state need a fresh recheck when Sign is pressed.
+    /// Read the daemon's complete coin set for paired proof discovery or
+    /// preview construction. This is a review prerequisite, not signer
+    /// admission: tips, ancestry and unspent state need a fresh recheck when
+    /// Sign is pressed.
     pub async fn reconcile_daemon(
         &self,
         daemon: &(dyn Daemon + Send + Sync),
