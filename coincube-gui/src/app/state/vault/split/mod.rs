@@ -109,6 +109,9 @@ pub enum Stage {
     /// #568 B4b-3c: a started panel chooses the two-step split or the
     /// single step signed with seeds (`unified`).
     ChooseRoute,
+    /// Fresh two-chain address checks passed; deposits are still candidates,
+    /// never signing authority until both ancestry proofs are collected.
+    FundingDeposits,
     /// #568 B4b-3c: the single-step (fork-only) route.
     Unified(unified::UnifiedStage),
     /// A task is running.
@@ -163,6 +166,7 @@ pub enum Step2Stage {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Work {
+    ReservingFunding,
     Checking,
     Building,
     Exporting,
@@ -309,6 +313,7 @@ pub type ResumeResult = Result<(Box<Resumed>, Driver), Box<Unresumed>>;
 /// it carries released).
 #[derive(Debug)]
 pub enum SplitEvent {
+    FundingPrepared(u64, Result<step1::CheckedFundingAddresses, String>),
     Checked(u64, Result<Box<Prepared>, Refusal>),
     Built(u64, Result<Box<SplitStep1>, String>),
     Exported(u64, Result<Option<PathBuf>, String>),
@@ -495,6 +500,7 @@ pub struct SplitPanel {
     hidden: bool,
     /// Fresh start only.
     intent: Option<Arc<SplitIntent>>,
+    funding_addresses: Option<step1::CheckedFundingAddresses>,
     prepared: Option<Box<Prepared>>,
     construction: Option<Box<SplitStep1>>,
     files: Vec<Psbt>,
@@ -618,6 +624,7 @@ impl SplitPanel {
             stage: Stage::NeedsSession,
             hidden: false,
             intent: None,
+            funding_addresses: None,
             prepared: None,
             construction: None,
             files: Vec::new(),
@@ -714,6 +721,9 @@ impl SplitPanel {
 
     pub fn stage(&self) -> &Stage {
         &self.stage
+    }
+    pub fn funding_addresses(&self) -> Option<&step1::CheckedFundingAddresses> {
+        self.funding_addresses.as_ref()
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden
@@ -863,6 +873,7 @@ impl SplitPanel {
         // B4b-3c: the seeds are cleared, dropped and their inputs emptied.
         self.revoke_unified();
         self.device.close();
+        self.funding_addresses = None;
         self.driver = None;
         self.review = None;
         self.abandon_checked = false;
@@ -968,14 +979,58 @@ impl SplitPanel {
         let Some(intent) = self.intent.clone() else {
             return Task::none();
         };
-        // B4b-3c: a started panel chooses its route first.
-        if self.unified.route() != Some(unified::Route::TwoStep) {
+        // Recorded-route fixtures exercise the retired coordinator in tests.
+        // Production always enters the two-deposit flow below.
+        if self.legacy_flow_fixture() && self.unified.route() != Some(unified::Route::TwoStep) {
             self.stage = Stage::ChooseRoute;
             return Task::none();
         }
         if !self.legacy_flow_fixture() {
-            self.stage = Stage::Refused(Refusal::final_(step1::RETIRED_MARKER));
-            return Task::none();
+            let source = match crate::services::split_source::split_source(
+                &intent.external,
+                intent.internal.as_ref(),
+            ) {
+                Ok(source) => source,
+                Err(error) => {
+                    self.stage = Stage::Refused(Refusal::final_(error.to_string()));
+                    return Task::none();
+                }
+            };
+            let directory = step1::journal_directory(&self.journal_root, source.digest());
+            let target = self.target_cube.clone();
+            self.stage = Stage::Working(Work::ReservingFunding);
+            return self.spawn(
+                async move {
+                    if !connect.session_current() {
+                        return Err(
+                            "The Connect session changed before reserving deposit addresses."
+                                .into(),
+                        );
+                    }
+                    let context = connect.context();
+                    let inventory = intent.inventory.clone();
+                    let for_reservation = source.clone();
+                    let for_directory = directory.clone();
+                    let for_target = target.clone();
+                    tokio::task::spawn_blocking(move || {
+                        crate::services::claim_workflow::reserve_split_funding(
+                            &for_directory,
+                            &for_reservation,
+                            &for_target,
+                            &context,
+                            &inventory,
+                        )
+                    })
+                    .await
+                    .map_err(|_| "Saving the funding addresses was interrupted.".to_string())?
+                    .map_err(|_| {
+                        "The funding addresses could not be reserved for this wallet.".to_string()
+                    })?;
+                    step1::check_reserved_funding_addresses(&*connect, directory, &source, &target)
+                        .await
+                },
+                SplitEvent::FundingPrepared,
+            );
         }
         self.stage = Stage::Working(Work::Checking);
         self.spawn(
@@ -1424,6 +1479,15 @@ impl SplitPanel {
             return Task::none();
         }
         match event {
+            SplitEvent::FundingPrepared(_, Ok(addresses)) => {
+                self.funding_addresses = Some(addresses);
+                self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::FundingPrepared(_, Err(reason)) => {
+                self.stage = Stage::Refused(Refusal::retry(reason));
+                Task::none()
+            }
             SplitEvent::Checked(_, Ok(prepared)) => {
                 self.stage = Stage::Working(Work::Building);
                 let for_build = prepared.clone();
@@ -1779,7 +1843,8 @@ impl SplitPanel {
 impl SplitEvent {
     fn seq(&self) -> u64 {
         match self {
-            Self::Checked(seq, _)
+            Self::FundingPrepared(seq, _)
+            | Self::Checked(seq, _)
             | Self::Built(seq, _)
             | Self::Exported(seq, _)
             | Self::Imported(seq, _)

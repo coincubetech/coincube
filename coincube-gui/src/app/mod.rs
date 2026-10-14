@@ -9388,7 +9388,7 @@ fn split_review_overlay<'a>(
     target: &'a crate::services::foreign_psbt::TargetAddressEvidence,
     address: &'a str,
     sweep: crate::services::foreign_psbt::SweepInputs,
-    economics: Option<crate::services::foreign_psbt::SweepEconomics>,
+    _economics: Option<crate::services::foreign_psbt::SweepEconomics>,
 ) -> Element<'a, view::Message> {
     use coincube_ui::component::text::*;
     use coincube_ui::component::{button, card};
@@ -9399,53 +9399,28 @@ fn split_review_overlay<'a>(
     let review = Column::new()
         .spacing(10)
         .max_width(620)
-        .push(h3("Review foreign-wallet sweep"))
+        .push(h3("Review source wallet for a two-chain split"))
         .push(
             p1_regular(
-                "This is a read-only estimate from the exact authenticated scan. No transaction, PSBT, signature, submission, or broadcast has been created.",
+                "This scan identifies coins shared by Bitcoin and Bitcoin Blake2b. Start split will reserve separate deposit addresses in this source wallet and check both chains before showing them. Nothing is signed or broadcast here.",
             )
-            .style(theme::text::warning),
+            .style(theme::text::secondary),
         )
         .push(p1_bold(format!(
-            "{} confirmed pre-fork input(s)",
+            "{} confirmed shared pre-fork coin(s)",
             sweep.inputs
         )))
         .push(p1_regular(format!(
-            "Excluded: {} confirmed after the fork (not part of this split; may still be replayable), {} without a confirming height",
+            "Outside this split: {} confirmed after the fork, {} without a confirming height",
             sweep.excluded_post_fork, sweep.excluded_unknown
         )))
         .push(p1_regular(format!(
-            "Pre-fork total: {} sats",
+            "Shared total: {} sats",
             sweep.total.to_sat()
-        )))
-        .push(p1_regular(format!(
-            "Maximum signed size: {} vB",
-            sweep.maximum_signed_vbytes
         )));
-    let review = match economics {
-        Some(economics) => review
-            .push(p1_regular(format!(
-                "Bounded fee rate: {} sat/vB",
-                economics.feerate_sat_vb
-            )))
-            .push(p1_regular(format!(
-                "Maximum fee: {} sats",
-                economics.fee.to_sat()
-            )))
-            .push(p1_bold(format!(
-                "Estimated destination amount: {} sats",
-                economics.destination.to_sat()
-            ))),
-        None => review.push(
-            p1_regular(
-                "Fees unavailable: Tenshu has no Bitcoin Blake2b fee estimate yet, and Bitcoin mainnet fees do not apply to this sweep. No fee or destination amount can be reviewed.",
-            )
-            .style(theme::text::warning),
-        ),
-    };
     let review = review
         .push(Space::new().height(Length::Fixed(4.0)))
-        .push(caption(format!("Reserved destination: {address}")))
+        .push(caption(format!("Target Vault address reserved: {address}")))
         .push(caption(format!(
             "Cube {} · Vault {} · receive index {}",
             target.cube_id(),
@@ -9460,13 +9435,13 @@ fn split_review_overlay<'a>(
         )))
         .push(
             caption(
-                "The later poison confirmation, six-confirmation recheck, reorg handling, signing, import/export, hardware, finalization, and broadcast gates remain required before funds can move.",
+                "The Bitcoin-only and BTCB2-only funding deposits must be confirmed, unspent, owned by the source wallet and proven to have chain-specific ancestry before either transaction can be signed.",
             )
             .style(theme::text::secondary),
         )
         .push(
             caption(
-                "Start split opens the split in this Vault. You choose how it is signed next; both chains are checked again before anything is built, and nothing is sent without its own review.",
+                "Start split reserves separate Bitcoin and Bitcoin Blake2b deposit addresses in the source wallet. Both addresses are checked on both chains before they are shown. No transaction is built or sent here.",
             )
             .style(theme::text::secondary),
         )

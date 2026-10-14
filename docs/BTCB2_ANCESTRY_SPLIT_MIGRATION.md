@@ -152,7 +152,13 @@ a replayable spend.
    pre-display check now reloads that record, binds it to the current Connect
    identity, and checks all three addresses on both chains under one timeout;
    any used address or failed read refuses the instructions. The production
-   wizard has not yet been wired to this check. Claim now independently reserves
+   Split's production "Start split" now stores this reservation under the
+   source digest, performs all six two-chain address-history reads off the UI
+   thread, and shows distinct Bitcoin and BTCB2 deposit addresses only when
+   the check succeeds. The old route picker is bypassed for fresh production
+   splits and cannot open a retired signer path. Deposit progress, exact
+   funding minimums, proof refresh, restart recovery of funding-only records
+   and ordinary signer admission remain to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal
    bound to both Cubes, the Vault descriptor and the Connect identity. Its
    pre-display check reloads that exact record and requires fresh unused

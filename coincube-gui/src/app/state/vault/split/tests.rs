@@ -631,25 +631,52 @@ async fn begin_two_step(panel: &mut SplitPanel) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn new_split_routes_cannot_create_the_retired_transactions() {
+async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() {
     for route in [unified::Route::TwoStep, unified::Route::Seeds] {
         let scan = Scan::new(Shape::Wpkh);
         let connect = FakeConnect::new(&scan.coins);
         let temp = Temp::new();
         let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
-        panel.set_connect(Some(connect as Arc<dyn SplitConnect>));
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
         let task = panel.begin();
         drive(&mut panel, task).await;
-        assert_eq!(panel.stage(), &Stage::ChooseRoute);
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        let addresses = panel.funding_addresses().expect("checked addresses");
+        assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
+        assert_ne!(addresses.bitcoin_deposit, addresses.bitcoin_return);
+        assert_ne!(addresses.btcb2_deposit, addresses.bitcoin_return);
+        assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 6);
         let task = panel.update(SplitMessage::Unified(unified::UnifiedMessage::Choose(
             route,
         )));
         drive(&mut panel, task).await;
-        assert_eq!(panel.stage(), &Stage::ChooseRoute);
-        assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
         assert!(panel.construction().is_none());
-        assert!(!temp.root().exists());
+        assert!(temp.root().exists());
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn used_split_deposit_address_is_never_displayed_or_signed() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.set_connect(Some(connect as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert!(matches!(panel.stage(), Stage::Refused(_)));
+    assert!(panel.funding_addresses().is_none());
+    assert!(panel.construction().is_none());
+    assert!(
+        temp.root().exists(),
+        "the address reservation is not rerolled"
+    );
 }
 
 #[test]

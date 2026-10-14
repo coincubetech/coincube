@@ -43,6 +43,7 @@ fn primary(label: &'static str, message: SplitMessage) -> Element<'static, Messa
 
 fn working(work: Work) -> &'static str {
     match work {
+        Work::ReservingFunding => "Saving fresh deposit addresses and checking both chains for prior use…",
         Work::Checking => "Checking the fork, fees and the fresh address…",
         Work::Building => "Building step 1…",
         Work::Exporting => "Saving the PSBT file…",
@@ -511,6 +512,18 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let mut actions = Row::new().spacing(10).align_y(Alignment::Center);
 
     match panel.stage() {
+        Stage::FundingDeposits => {
+            if let Some(addresses) = panel.funding_addresses() {
+                body = body
+                    .push(p1_bold("Fund the source wallet on each chain"))
+                    .push(p1_regular("Send a small confirmed Bitcoin deposit to this Bitcoin address of the wallet being split:"))
+                    .push(caption(addresses.bitcoin_deposit.clone()))
+                    .push(p1_regular("Send a separate small confirmed Bitcoin Blake2b deposit to this BTCB2 address of the same wallet:"))
+                    .push(caption(addresses.btcb2_deposit.clone()))
+                    .push(p1_regular("Send only the named coin to each address. These deposits are fee inputs, not the split itself. Both coins must later pass independent ancestry, ownership, confirmation and unspent checks before any transaction can be signed."))
+                    .push(caption("The Bitcoin return address is reserved separately and is not a deposit destination."));
+            }
+        }
         Stage::ChooseRoute => {
             body = body.push(p1_regular(step1::RETIRED_MARKER).style(theme::text::warning));
         }
