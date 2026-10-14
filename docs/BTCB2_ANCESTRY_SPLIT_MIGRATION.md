@@ -147,6 +147,15 @@ read-only and must be generated from the exact PSBT inputs being signed.
   post-fork coins are automatically safe or that the split covers unrelated
   wallet activity.
 
+The reusable read-only `CoinReview`/`CoinPairReview` model now derives shared
+and funding rows, subtotals, destination and fees from the exact unsigned
+PSBTs. It refuses missing amounts, duplicate or omitted inputs, mismatched
+shared coins across chains and OP_RETURN outputs. The recorded Claim step-one
+review uses its Bitcoin side and labels the marker as an unverified candidate.
+The paired Claim and Split wizard stages still need to consume the model only
+after fresh two-chain proof, source ownership and reservations are bound; the
+model alone cannot enable signing.
+
 Build this as a reusable *read-only* coin summary for Claim and foreign Split,
 using the existing amount formatting and badge components. Keep the normal
 Send selector unchanged. Test the row mapping against the actual unsigned PSBT

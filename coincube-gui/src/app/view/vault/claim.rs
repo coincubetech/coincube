@@ -25,7 +25,11 @@ use crate::{
             claim::{ClaimStep1Panel, CoinSet, Preconditions, Refusal, StageView},
             psbt::{PsbtModal, PsbtState},
         },
-        view::{dashboard, message::*, vault::psbt},
+        view::{
+            dashboard,
+            message::*,
+            vault::{ancestry_coins::CoinReview, psbt},
+        },
     },
     services::{
         claim_coordinator::{Outcome, ReviewSnapshot},
@@ -307,6 +311,16 @@ fn plan_view<'a>(
     built: &'a crate::app::state::vault::claim::construction::Construction,
 ) -> Element<'a, Message> {
     let tx = &built.psbt().unsigned_tx;
+    let coin_review = match built {
+        crate::app::state::vault::claim::construction::Construction::Ancestry {
+            transfer, ..
+        } => Some(CoinReview::from_psbt(
+            built.psbt(),
+            transfer.claimed_prevouts(),
+            transfer.poison_input(),
+        )),
+        crate::app::state::vault::claim::construction::Construction::OpReturn(_) => None,
+    };
     let inputs: Amount = built
         .psbt()
         .inputs
@@ -358,8 +372,40 @@ fn plan_view<'a>(
             );
         }
     }
-    if let Some(outpoint) = built.selected_ancestry_input() {
-        summary = summary.push(row("Bitcoin-only input", p1_regular(format!("{outpoint}"))));
+    match &coin_review {
+        Some(Ok(review)) => {
+            summary = summary.push(
+                p1_regular(format!(
+                    "Before fork · present on both chains — {} shared coin{} · {}",
+                    review.shared.len(),
+                    if review.shared.len() == 1 { "" } else { "s" },
+                    format_amount(review.shared_total, cache),
+                ))
+                .bold(),
+            );
+            for coin in &review.shared {
+                summary = summary.push(row(
+                    "Shared coin",
+                    p2_regular(format!(
+                        "{} · {}",
+                        coin.outpoint,
+                        format_amount(coin.amount, cache)
+                    )),
+                ));
+            }
+            summary = summary.push(row(
+                "Bitcoin funding coin",
+                p2_regular(format!(
+                    "{} · {} · post-fork candidate",
+                    review.funding.outpoint,
+                    format_amount(review.funding.amount, cache),
+                )),
+            ));
+        }
+        Some(Err(reason)) => {
+            summary = summary.push(card::warning((*reason).to_string()));
+        }
+        None => {}
     }
     summary = summary.push(row(
         "Fee",
@@ -404,7 +450,7 @@ fn plan_view<'a>(
                 )
                 .push(
                     button::primary(None, "Sign")
-                        .on_press_maybe((panel.can_sign_or_submit() && return_address.is_ok() && built.selected_ancestry_input().is_some()).then_some(Message::Claim(ClaimMessage::Sign)))
+                        .on_press_maybe((panel.can_sign_or_submit() && return_address.is_ok() && matches!(coin_review, Some(Ok(_)))).then_some(Message::Claim(ClaimMessage::Sign)))
                         .width(Length::Fixed(150.0)),
                 ),
         )
