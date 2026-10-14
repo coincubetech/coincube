@@ -520,6 +520,7 @@ mod tests {
         let mut info = model::GetInfoResult {
             version: "test".into(),
             network: Network::Bitcoin,
+            chain_id: Some(coincube_core::chain::ChainId::Bitcoin),
             block_height: 130,
             sync: 1.0,
             descriptors: coincubed::commands::GetInfoDescriptors {

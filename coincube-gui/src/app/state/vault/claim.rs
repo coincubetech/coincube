@@ -279,6 +279,12 @@ impl ClaimSession {
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
 pub enum ClaimEvent {
+    FundingPrepared(
+        u64,
+        u64,
+        u64,
+        Result<claim_workflow::CheckedClaimFundingAddresses, String>,
+    ),
     Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
@@ -324,6 +330,8 @@ enum RestartedState {
 
 enum Stage {
     Preconditions,
+    FundingChecking,
+    FundingDeposits(claim_workflow::CheckedClaimFundingAddresses),
     /// Built and shown; nothing signed yet.
     Plan {
         built: Box<Construction>,
@@ -396,6 +404,8 @@ struct FinalizeAttempt {
 /// Read-only view of the panel's stage, for rendering.
 pub enum StageView<'a> {
     Preconditions(&'a Preconditions, Option<Refusal>),
+    FundingChecking,
+    FundingDeposits(&'a claim_workflow::CheckedClaimFundingAddresses),
     Plan(&'a Construction),
     CheckingSign,
     Sign {
@@ -424,6 +434,7 @@ pub struct ClaimStep1Panel {
     generation: watch::Receiver<u64>,
     connect: Option<ConnectSession>,
     pre: Preconditions,
+    funding_error: Option<String>,
     stage: Stage,
     /// The live coordinator's revoker, kept outside the session so a
     /// revocation lands synchronously even while a task holds the session.
@@ -469,6 +480,7 @@ impl ClaimStep1Panel {
             generation,
             connect,
             pre: Preconditions::default(),
+            funding_error: None,
             stage: Stage::Preconditions,
             revoker: None,
             revoked: false,
@@ -513,6 +525,21 @@ impl ClaimStep1Panel {
             || crate::services::claim_ancestry_gate::authorization().is_some()
     }
 
+    pub fn can_prepare_funding(&self) -> bool {
+        matches!(self.stage, Stage::Preconditions)
+            && self.pre.target.is_some()
+            && self.pre.shape.is_none()
+            && !self.restart_pending
+            && !self.pre.checking
+            && self.backend_ready()
+            && self.connect.is_some()
+            && !self.legacy_flow_fixture()
+    }
+
+    pub fn funding_error(&self) -> Option<&str> {
+        self.funding_error.as_deref()
+    }
+
     /// The App's hook for a Connect session change. Returns whether a
     /// session the panel was working under was removed or replaced — a
     /// sign-out, or a different account or client identity — in which case
@@ -544,6 +571,13 @@ impl ClaimStep1Panel {
     pub fn revoke(&mut self) {
         self.revoked = true;
         self.revocations = self.revocations.wrapping_add(1);
+        if matches!(
+            self.stage,
+            Stage::FundingChecking | Stage::FundingDeposits(_)
+        ) {
+            self.stage = Stage::Preconditions;
+            self.funding_error = None;
+        }
         if self.building.take().is_some() {
             self.pre.checking = false;
         }
@@ -753,6 +787,8 @@ impl ClaimStep1Panel {
     pub fn stage(&self) -> StageView<'_> {
         match &self.stage {
             Stage::Preconditions => StageView::Preconditions(&self.pre, self.refusal()),
+            Stage::FundingChecking => StageView::FundingChecking,
+            Stage::FundingDeposits(addresses) => StageView::FundingDeposits(addresses),
             Stage::Plan { built } => StageView::Plan(built),
             Stage::CheckingSign(_) => StageView::CheckingSign,
             Stage::Sign {
@@ -1054,6 +1090,120 @@ impl ClaimStep1Panel {
         Task::perform(
             async move { Box::new(probe(daemon, connect, wallet, generation, feerate).await) },
             move |checked| Message::Claim(ClaimEvent::Checked(seq, checked)),
+        )
+    }
+
+    fn prepare_funding(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if !self.can_prepare_funding() {
+            return Task::none();
+        }
+        let (Some(connect), Some(fork_cube)) = (self.connect.clone(), self.pre.target.clone())
+        else {
+            return Task::none();
+        };
+        self.check_seq = self.check_seq.wrapping_add(1);
+        let seq = self.check_seq;
+        let expected = *self.generation.borrow();
+        let revocations = self.revocations;
+        let generation = self.generation.clone();
+        let descriptor = self.wallet.main_descriptor.clone();
+        let bitcoin_cube = self.bitcoin_cube.clone();
+        let directory = journal_directory(&self.datadir, &self.wallet);
+        self.funding_error = None;
+        self.stage = Stage::FundingChecking;
+        Task::perform(
+            async move {
+                use coincube_core::miniscript::bitcoin::hashes::sha256;
+                let production = Production::new(
+                    connect.client.clone(),
+                    daemon.clone(),
+                    connect.account,
+                    expected,
+                    generation.clone(),
+                )
+                .map_err(|_| "The Connect claim session is unavailable.".to_string())?;
+                let context = production.context().clone();
+                let identity = claim_workflow::WalletIdentity {
+                    bitcoin_cube,
+                    fork_cube,
+                    descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+                };
+                let info = daemon
+                    .get_info()
+                    .await
+                    .map_err(|_| "The Bitcoin Vault is unavailable.".to_string())?;
+                if info.network != Network::Bitcoin
+                    || info.chain_id != Some(coincube_core::chain::ChainId::Bitcoin)
+                    || info.descriptors.main != descriptor
+                    || info.rescan_progress.is_some()
+                    || info.chain_divergence
+                    || info.refused_reorg_depth.is_some()
+                    || info.history_sync.full_scan_in_progress
+                    || info.history_sync.last_failure.is_some()
+                {
+                    return Err(
+                        "The Bitcoin Vault is not ready to reserve deposit addresses.".into(),
+                    );
+                }
+                let highest = info.receive_index.max(info.change_index);
+                let end_exclusive = highest.saturating_add(128).max(256);
+                if end_exclusive > 20_000 {
+                    return Err(
+                        "The Vault's address range is too large for this bounded scan.".into(),
+                    );
+                }
+                let inventory = crate::services::claim_inventory::ClaimInventory::scan(
+                    connect.client.clone(),
+                    &descriptor,
+                    end_exclusive,
+                    64,
+                    expected,
+                    generation.clone(),
+                )
+                .await
+                .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+                if inventory.shared().is_empty() {
+                    return Err("No shared pre-fork coins were found in this Vault.".into());
+                }
+                let for_reservation = (
+                    directory.clone(),
+                    descriptor.clone(),
+                    identity.clone(),
+                    context.clone(),
+                );
+                tokio::task::spawn_blocking(move || {
+                    let (directory, descriptor, identity, context) = for_reservation;
+                    claim_workflow::reserve_claim_funding(
+                        &directory,
+                        &descriptor,
+                        &identity,
+                        &context,
+                        &inventory,
+                    )
+                })
+                .await
+                .map_err(|_| "Saving the Claim deposit addresses was interrupted.".to_string())?
+                .map_err(|_| "The Claim deposit addresses could not be reserved.".to_string())?;
+                claim_workflow::prepare_claim_deposit_instructions(
+                    directory,
+                    descriptor,
+                    identity,
+                    context,
+                    connect.client,
+                    generation,
+                    &*daemon,
+                )
+                .await
+                .map_err(|_| "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.".to_string())
+            },
+            move |result| {
+                Message::Claim(ClaimEvent::FundingPrepared(
+                    seq,
+                    expected,
+                    revocations,
+                    result,
+                ))
+            },
         )
     }
 
@@ -1642,6 +1792,10 @@ impl ClaimStep1Panel {
                 // reservation is durable, so the next build reserves anew.
                 self.pre.checked = None;
             }
+            Stage::FundingChecking | Stage::FundingDeposits(_) => {
+                self.check_seq = self.check_seq.wrapping_add(1);
+                self.stage = Stage::Preconditions;
+            }
             Stage::Preconditions | Stage::Review { .. } | Stage::Track { .. } => {}
         }
     }
@@ -1650,6 +1804,25 @@ impl ClaimStep1Panel {
     /// session travelling inside one is never dropped for want of it.
     fn apply(&mut self, event: ClaimEvent) -> Task<Message> {
         match event {
+            ClaimEvent::FundingPrepared(seq, generation, revocations, result) => {
+                if seq != self.check_seq || !matches!(self.stage, Stage::FundingChecking) {
+                    return Task::none();
+                }
+                if !self.authorized(generation, revocations) || !self.backend_ready() {
+                    self.stage = Stage::Preconditions;
+                    self.funding_error =
+                        Some("The Claim session changed during the address check.".into());
+                    return Task::none();
+                }
+                match result {
+                    Ok(addresses) => self.stage = Stage::FundingDeposits(addresses),
+                    Err(reason) => {
+                        self.stage = Stage::Preconditions;
+                        self.funding_error = Some(reason);
+                    }
+                }
+                Task::none()
+            }
             ClaimEvent::Restarted(id, result) => {
                 let Some(attempt) = self.restarting.filter(|a| a.id == id) else {
                     return Task::none();
@@ -2153,6 +2326,10 @@ impl State for ClaimStep1Panel {
                     self.handoff_pending = false;
                 }
                 match intent {
+                    view::ClaimMessage::StartFunding => match daemon {
+                        Some(daemon) => self.prepare_funding(daemon),
+                        None => node_unavailable(),
+                    },
                     view::ClaimMessage::Recheck => match daemon {
                         Some(daemon) => self.probe(daemon),
                         None => node_unavailable(),
@@ -2248,7 +2425,11 @@ impl State for ClaimStep1Panel {
                 self.recover(Some(daemon))
             }
             Stage::Track { .. } => self.reconcile(),
-            Stage::Plan { .. } | Stage::CheckingSign(_) | Stage::Review { .. } => Task::none(),
+            Stage::FundingChecking
+            | Stage::FundingDeposits(_)
+            | Stage::Plan { .. }
+            | Stage::CheckingSign(_)
+            | Stage::Review { .. } => Task::none(),
         }
     }
 }

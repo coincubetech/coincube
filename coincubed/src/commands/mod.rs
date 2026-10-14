@@ -956,6 +956,7 @@ impl DaemonControl {
         GetInfoResult {
             version: VERSION.to_string(),
             network: self.config.bitcoin_config.network,
+            chain_id: Some(self.config.bitcoin_config.chain),
             block_height,
             // Read the poller's lock-free mirror rather than
             // `self.bitcoin.sync_progress()`, which would block on the
@@ -2044,6 +2045,11 @@ pub struct GetInfoDescriptors {
 pub struct GetInfoResult {
     pub version: String,
     pub network: bitcoin::Network,
+    /// Explicit chain identity. Bitcoin and BTCB2 share address encoding, so
+    /// `network` alone cannot safely identify the daemon's chain. Older
+    /// daemons omit this field and must not be treated as Bitcoin by default.
+    #[serde(default)]
+    pub chain_id: Option<coincube_core::chain::ChainId>,
     pub block_height: i32,
     pub sync: f64,
     pub descriptors: GetInfoDescriptors,
@@ -4963,14 +4969,16 @@ mod tests {
         assert_eq!(reported.addresses_expected, 10);
     }
 
-    /// Older daemons send no `history_sync`; the app must still parse their `get_info`.
+    /// Older daemons send neither `history_sync` nor an explicit chain ID.
     #[test]
     fn get_info_result_without_history_sync_still_parses() {
         let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
         let mut value = serde_json::to_value(dummy.control().get_info()).unwrap();
         value.as_object_mut().unwrap().remove("history_sync");
+        value.as_object_mut().unwrap().remove("chain_id");
         let info: GetInfoResult = serde_json::from_value(value).unwrap();
         assert_eq!(info.history_sync, crate::bitcoin::HistorySync::default());
+        assert_eq!(info.chain_id, None);
     }
 
     mod chain_keyed_spend {

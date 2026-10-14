@@ -63,6 +63,7 @@ fn ensure_claim_wallet_ready(
     saved: &ClaimFundingReservation,
 ) -> Result<(), ClaimAddressError> {
     if info.network != Network::Bitcoin
+        || info.chain_id != Some(coincube_core::chain::ChainId::Bitcoin)
         || info.descriptors.main.to_string() != saved.descriptor
         || info.rescan_progress.is_some()
         || info.chain_divergence
@@ -511,12 +512,6 @@ pub async fn prepare_claim_deposit_instructions(
         .indices
         .bitcoin_deposit
         .max(saved.indices.btcb2_deposit);
-    if !daemon.config().is_some_and(|config| {
-        config.bitcoin_config.chain == coincube_core::chain::ChainId::Bitcoin
-            && config.main_descriptor.to_string() == saved.descriptor
-    }) {
-        return Err(ClaimAddressError::WalletState);
-    }
     let info = daemon
         .get_info()
         .await
@@ -689,6 +684,7 @@ mod tests {
         let mut info = model::GetInfoResult {
             version: "test".into(),
             network: Network::Bitcoin,
+            chain_id: Some(ChainId::Bitcoin),
             block_height: 1,
             sync: 1.0,
             descriptors: coincubed::commands::GetInfoDescriptors {
@@ -704,6 +700,17 @@ mod tests {
             change_index: 0,
         };
         assert_eq!(ensure_claim_wallet_ready(&info, &saved), Ok(()));
+        info.chain_id = None;
+        assert_eq!(
+            ensure_claim_wallet_ready(&info, &saved),
+            Err(ClaimAddressError::WalletState)
+        );
+        info.chain_id = Some(ChainId::BitcoinBlake2b);
+        assert_eq!(
+            ensure_claim_wallet_ready(&info, &saved),
+            Err(ClaimAddressError::WalletState)
+        );
+        info.chain_id = Some(ChainId::Bitcoin);
         info.chain_divergence = true;
         assert_eq!(
             ensure_claim_wallet_ready(&info, &saved),

@@ -48,6 +48,29 @@ pub fn view<'a>(
         StageView::Preconditions(pre, refusal) => {
             dashboard(menu, cache, preconditions_view(cache, panel, pre, refusal))
         }
+        StageView::FundingChecking => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Checking two-chain deposit addresses…"))
+                .push(p1_regular("Tenshu is scanning this Vault, saving two distinct receive addresses and checking their history on both chains."))
+                .push(button::secondary(None, "Cancel").on_press(Message::Claim(ClaimMessage::Cancel))),
+        ),
+        StageView::FundingDeposits(addresses) => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Prepare Bitcoin and Bitcoin Blake2b deposits"))
+                .push(p1_regular("These are separate receive addresses in this Vault. The Bitcoin Vault is prepared to detect funds at both indices."))
+                .push(p1_bold("Bitcoin deposit address"))
+                .push(address_row(addresses.bitcoin_deposit.clone(), "Copied Bitcoin deposit address to clipboard"))
+                .push(p1_bold("Bitcoin Blake2b deposit address"))
+                .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
+                .push(p1_regular("Send only Bitcoin to the Bitcoin address and only BTCB2 to the BTCB2 address. Both deposits must later pass independent ancestry, confirmation, ownership and unspent checks; neither deposit by itself splits the coins."))
+                .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
+        ),
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),
         StageView::CheckingSign => dashboard(
             menu,
@@ -132,6 +155,10 @@ fn row<'a>(label: &'static str, value: impl Into<Element<'a, Message>>) -> Eleme
 }
 
 fn return_address_row<'a>(address: String) -> Element<'a, Message> {
+    address_row(address, "Copied return address to clipboard")
+}
+
+fn address_row<'a>(address: String, notice: &'static str) -> Element<'a, Message> {
     Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -147,10 +174,8 @@ fn return_address_row<'a>(address: String) -> Element<'a, Message> {
             .max_width(750.0),
         )
         .push(
-            button::secondary_compact(None, "Copy address").on_press(Message::CopyWithToast(
-                address,
-                "Copied return address to clipboard".to_string(),
-            )),
+            button::secondary_compact(None, "Copy address")
+                .on_press(Message::CopyWithToast(address, notice.to_string())),
         )
         .into()
 }
@@ -206,11 +231,6 @@ fn preconditions_view<'a>(
             },
         ))
         .push(check_row(
-            "Replay protection",
-            Some(false),
-            "Waiting for the new two-chain funding and proof flow.".to_string(),
-        ))
-        .push(check_row(
             "Coins to split",
             coins.map(|c| !c.pre_fork.is_empty()),
             match (checked.map(|c| &c.coins), coins) {
@@ -230,33 +250,51 @@ fn preconditions_view<'a>(
             },
         ));
 
-    let action: Element<'a, Message> = match refusal {
-        Some(Refusal { reason, retry }) => Column::new()
+    let action: Element<'a, Message> = if !panel.can_sign_or_submit() {
+        Column::new()
             .spacing(15)
-            .push(card::warning(reason))
-            .push_maybe(retry.then(|| {
-                button::secondary(Some(icon::reload_icon()), "Check again").on_press_maybe(
-                    (!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)),
-                )
-            }))
-            .into(),
-        None => Row::new()
-            .spacing(15)
+            .push_maybe(
+                panel
+                    .funding_error()
+                    .map(|reason| card::warning(reason.to_string())),
+            )
             .push(
-                button::secondary(Some(icon::reload_icon()), "Check again").on_press_maybe(
-                    (!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)),
+                button::primary(None, "Prepare two deposit addresses").on_press_maybe(
+                    panel
+                        .can_prepare_funding()
+                        .then_some(Message::Claim(ClaimMessage::StartFunding)),
                 ),
             )
-            .push(
-                button::primary(None, "Build the transaction")
-                    .on_press_maybe(
-                        panel
-                            .can_build()
-                            .then_some(Message::Claim(ClaimMessage::Build)),
+            .into()
+    } else {
+        match refusal {
+            Some(Refusal { reason, retry }) => Column::new()
+                .spacing(15)
+                .push(card::warning(reason))
+                .push_maybe(retry.then(|| {
+                    button::secondary(Some(icon::reload_icon()), "Check again").on_press_maybe(
+                        (!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)),
                     )
-                    .width(Length::Fixed(240.0)),
-            )
-            .into(),
+                }))
+                .into(),
+            None => Row::new()
+                .spacing(15)
+                .push(
+                    button::secondary(Some(icon::reload_icon()), "Check again").on_press_maybe(
+                        (!pre.checking).then_some(Message::Claim(ClaimMessage::Recheck)),
+                    ),
+                )
+                .push(
+                    button::primary(None, "Build the transaction")
+                        .on_press_maybe(
+                            panel
+                                .can_build()
+                                .then_some(Message::Claim(ClaimMessage::Build)),
+                        )
+                        .width(Length::Fixed(240.0)),
+                )
+                .into(),
+        }
     };
 
     Column::new()

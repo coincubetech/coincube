@@ -9877,6 +9877,7 @@ mod tests {
                 Ok(model::GetInfoResult {
                     version: String::new(),
                     network: Network::Bitcoin,
+                    chain_id: Some(coincube_core::chain::ChainId::Bitcoin),
                     block_height: 1_000,
                     sync: 1.0,
                     descriptors: coincubed::commands::GetInfoDescriptors {

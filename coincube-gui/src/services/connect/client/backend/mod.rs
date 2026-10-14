@@ -583,6 +583,10 @@ impl Daemon for BackendWalletClient {
 
         Ok(GetInfoResult {
             network: self.inner.network,
+            // The current Connect wallet API exposes only Bitcoin-compatible
+            // address encoding here. Until it reports an authenticated chain
+            // identity, consumers that require one must fail closed.
+            chain_id: None,
             version: "".to_string(),
             block_height: wallet.tip_height.unwrap_or(0),
             descriptors: GetInfoDescriptors {

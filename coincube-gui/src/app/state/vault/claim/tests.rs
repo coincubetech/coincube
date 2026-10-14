@@ -198,6 +198,35 @@ fn panel(descriptor: &str) -> ClaimStep1Panel {
     )
 }
 
+#[test]
+fn claim_funding_results_require_the_current_panel_and_session() {
+    let (_sender, receiver) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = receiver;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    p.pre.target = Some("fork-cube".into());
+    p.pre.shape = None;
+    assert!(p.can_prepare_funding());
+    p.stage = Stage::FundingChecking;
+    p.check_seq = 11;
+    let addresses = claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "bitcoin-address".into(),
+        btcb2_deposit: "btcb2-address".into(),
+    };
+    drop(p.apply(ClaimEvent::FundingPrepared(10, 7, 0, Ok(addresses.clone()))));
+    assert!(matches!(p.stage, Stage::FundingChecking));
+    drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
+    assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
+    assert!(!p.can_sign_or_submit());
+    p.revoke();
+    assert!(matches!(p.stage, Stage::Preconditions));
+    drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
+    assert!(matches!(p.stage, Stage::Preconditions));
+}
+
 fn checked_ok(now: i64) -> Checked {
     Checked {
         window: evaluate_anchor(
@@ -654,6 +683,7 @@ mod flow {
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
+                chain_id: Some(coincube_core::chain::ChainId::Bitcoin),
                 block_height: self
                     .ancestry_coin
                     .as_ref()

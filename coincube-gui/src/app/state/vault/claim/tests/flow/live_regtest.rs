@@ -20,6 +20,7 @@ impl LiveTransport {
         GetInfoResult {
             version: "synthetic-regtest-adapter".into(),
             network: Network::Bitcoin,
+            chain_id: Some(config.bitcoin_config.chain),
             block_height: self.height,
             sync: 1.0,
             descriptors: GetInfoDescriptors {

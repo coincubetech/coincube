@@ -165,7 +165,16 @@ a replayable spend.
    address history on both chains for both addresses. A preparation step also
    checks the Bitcoin Vault descriptor and advances its receive index through
    both reserved addresses before returning the deposit instructions, so its
-   daemon can discover incoming funds. Creation of a version-10
+   daemon can discover incoming funds. The production Claim preconditions now
+   offer a bounded two-chain Vault scan, persist that reservation and prepare
+   the Bitcoin daemon's receive range before displaying the two copyable
+   deposit addresses. Stale results and session revocations withdraw them;
+   this stage cannot sign. Deposit progress, exact funding minimums,
+   funding-only restart recovery and ordinary transaction admission remain.
+   Coincubed `getinfo` now reports an explicit chain ID; older daemon
+   responses and the remote Connect wallet API still report none, so address
+   preparation refuses those backends. Connect must return an authenticated
+   wallet chain ID before Connect-backed Claim deposits are usable. Creation of a version-10
    paired Claim intent now requires that saved record and checks both funding
    derivations against its exact external indices under the journal lock. The
    paired Claim discovery now searches only funding outputs at the two
@@ -176,8 +185,7 @@ a replayable spend.
    paired scan. It also requires the reserved Bitcoin funding output to be
    present and unspent in that wallet. A missing coin, incomplete address
    coverage, unsynced wallet or changed spend state refuses review. The Claim
-   wizard has not yet been
-   wired to these checks or to the paired transaction builder.
+   wizard does not yet call paired funding discovery or the transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,
