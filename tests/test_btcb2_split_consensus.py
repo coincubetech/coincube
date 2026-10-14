@@ -1044,9 +1044,16 @@ def split_two_chain_class():
 
 @pytest.fixture(scope="module")
 def split_chains(request, test_base_dir):
-    from test_framework.btcb2 import missing_binaries
+    from test_framework.btcb2 import KNOTS_LEGACY_PATH, KNOTS_BLAKE2B_PATH
 
-    missing = missing_binaries()
+    # SplitTwoChain starts only the two nodes. Requiring electrs here prevents
+    # running the consensus vectors even though no indexer is constructed.
+    missing = [
+        name for name, path in (
+            ("KNOTS_LEGACY_PATH", KNOTS_LEGACY_PATH),
+            ("KNOTS_BLAKE2B_PATH", KNOTS_BLAKE2B_PATH),
+        ) if not (path and os.access(path, os.X_OK))
+    ]
     if missing:
         msg = f"BTCB2 harness binaries unset or not executable: {', '.join(missing)}"
         if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
@@ -1212,6 +1219,16 @@ def test_split_ancestry_pair_consensus(split_chains, shape, record_property):
     b.generate_block(1, wait_for_mempool=signed["btcb2_txid"])
     assert a.rpc.sendrawtransaction(signed["bitcoin_raw"]) == signed["bitcoin_txid"]
     a.generate_block(1, wait_for_mempool=signed["bitcoin_txid"])
+    if shape == "wpkh":
+        # Bitcoin losing its confirmation must not make the already-confirmed
+        # BTCB2 transaction replayable: F is still absent on Bitcoin.
+        block = a.rpc.getbestblockhash()
+        a.rpc.invalidateblock(block)
+        assert a.rpc.gettxout(bitcoin_marker["txid"], bitcoin_marker["vout"], False)
+        rejected = a.rpc.testmempoolaccept([signed["btcb2_raw"]])[0]
+        assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+        a.rpc.reconsiderblock(block)
+        assert a.rpc.getbestblockhash() == block
 
 
 def confirmed_step1(split_chains, shape):

@@ -180,10 +180,14 @@ two-chain harness, including BTCB2-first broadcast. It still needs execution
 against the pinned Knots and electrs binaries, and restart/reorg cases remain.
 The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
 pair from distinct coinbase dependencies. All five supported foreign source
-shapes pass the offline signed-PSBT vectors. A two-chain test mines separate
-post-fork coinbases into the foreign source, tests both signed transactions
-against each node, and confirms BTCB2 first. That test still needs execution
-with the pinned Knots/electrs binaries; its restart and reorg cases remain.
+shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.
+The latter mines separate post-fork coinbases into the foreign source, tests
+both signed transactions against each node, confirms BTCB2 first, and checks
+that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin
+confirmation is reorganized out.
+The Split-only fixture needs the two pinned Knots binaries, not electrs.
+Coordinator restart, stale observation, marker spend and deeper reorg cases
+remain.
 - Exercise Claim and Split through their actual GUI intents and signed-PSBT
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device
