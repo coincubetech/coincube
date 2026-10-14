@@ -1116,6 +1116,19 @@ impl Controller {
         fork_height: u64,
         context: Context,
     ) -> Result<Self, Error> {
+        // Keep version-8 records readable for exact historical recovery, but
+        // never persist a newly signed OP_RETURN Split in production.
+        if !cfg!(test) {
+            let _ = (
+                &directory,
+                &target_cube,
+                &construction,
+                &signed,
+                &fork_height,
+                &context,
+            );
+            return Err(Error::Unchecked);
+        }
         let bitcoin_chain = construction.chain();
         let fork_chain = fork_chain(bitcoin_chain).ok_or(Error::InvalidPlan)?;
         let step1 = construction.psbt().unsigned_tx.clone();
