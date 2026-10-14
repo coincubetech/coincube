@@ -1194,6 +1194,30 @@ impl Controller {
         {
             return Err(Error::Conflict);
         }
+        if let Some(record) = intent
+            .split
+            .as_ref()
+            .filter(|record| record.kind == SplitKind::Ancestry)
+        {
+            let source = record
+                .descriptors
+                .as_ref()
+                .ok_or(Error::InvalidPlan)?
+                .source()?;
+            let funding = record.funding.as_ref().ok_or(Error::InvalidPlan)?;
+            let reserved = journal
+                .load_split_funding_reservation()?
+                .ok_or(Error::InvalidPlan)?;
+            if !reserved.matches(&source, &record.target_cube, &context)
+                || funding.bitcoin.is_change
+                || funding.fork.is_change
+                || funding.bitcoin.index != reserved.indices.bitcoin_deposit
+                || funding.fork.index != reserved.indices.btcb2_deposit
+                || record.destination != reserved.indices.bitcoin_return
+            {
+                return Err(Error::InvalidPlan);
+            }
+        }
         journal.store(&intent)?;
         Ok(Self {
             id: controller_id()?,

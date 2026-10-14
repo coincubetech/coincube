@@ -197,6 +197,10 @@ fn construction_at(wallet: &Wallet, feerate: u64) -> SplitStep1 {
 
 #[test]
 fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path() {
+    use crate::services::{
+        foreign_scan::{Branch, BranchCoverage, ScanReport},
+        foreign_split_inventory::SplitInventory,
+    };
     use coincube_core::{
         claim_ancestry::{retained::RetainedPath, search::OwnedLink},
         descriptors::CoincubeDescriptor,
@@ -221,7 +225,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         hash: hash(0x44),
     });
     bitcoin_marker.btcb2_block = None;
-    let mut fork_marker = coin(&wallet.source, SplitBranch::Internal, 3, 150_000);
+    let mut fork_marker = coin(&wallet.source, SplitBranch::External, 3, 150_000);
     fork_marker.previous.input[0].previous_output = OutPoint::null();
     fork_marker.outpoint = OutPoint::new(fork_marker.previous.compute_txid(), 0);
     fork_marker.bitcoin_block = None;
@@ -249,7 +253,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             funding: &bitcoin_marker,
             dependency: &bitcoin_path.reverify().unwrap(),
             fork_height: FORK,
-            destination: 5,
+            destination: 4,
         },
         2,
         LockTime::from_height(TIP).unwrap(),
@@ -280,6 +284,63 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     )
     .unwrap();
     let temp = Temp::new();
+    assert!(matches!(
+        Controller::create_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            4,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let report = |chain, byte| {
+        ScanReport::for_test(chain, 1, hash(byte), Vec::new()).with_coverage(vec![BranchCoverage {
+            branch: Branch::External,
+            start: 0,
+            end_exclusive: 10,
+            last_used: Some(1),
+        }])
+    };
+    let inventory = SplitInventory::join(
+        &report(ChainId::BitcoinBlake2b, 3).with_fork_height(Some(FORK)),
+        &report(ChainId::Bitcoin, 4),
+        1,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        inventory.fresh_funding_addresses(),
+        Some(
+            crate::services::foreign_split_inventory::FreshFundingAddresses {
+                bitcoin_deposit: 2,
+                btcb2_deposit: 3,
+                bitcoin_return: 4,
+            }
+        )
+    );
+    super::super::reserve_split_funding(&temp.0, &wallet.source, TARGET, &context(), &inventory)
+        .unwrap();
+    let mut changed_account = context();
+    changed_account.account = "another-account".into();
+    assert!(matches!(
+        Controller::create_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            4,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            changed_account,
+        ),
+        Err(Error::InvalidPlan)
+    ));
     let controller = Controller::create_ancestry_split(
         &temp.0,
         TARGET.into(),

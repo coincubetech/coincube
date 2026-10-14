@@ -106,7 +106,11 @@ a replayable spend.
    A read-only paired construction now takes the qualified funding result and
    builds both ordinary PSBTs together, then validates them against the paired
    observation. It requires the exact source receive index and target script
-   supplied by their owners, and refuses if scan tips have changed.
+   supplied by their owners, and refuses if scan tips have changed. Journal
+   creation now also requires the saved pre-deposit record and checks that the
+   Bitcoin funding index, BTCB2 funding index and Bitcoin return index match
+   its three distinct source addresses and Connect identity. It still does
+   not grant live proof or signer access.
    Next update coordinator transport and preflight to carry both typed live
    proofs. Keep the unified signature fallback separate and labeled with its
    actual replay properties.
