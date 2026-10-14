@@ -3,7 +3,9 @@
 //! admission all agree. Neither this type nor a foreign scanner grants signing.
 
 use super::{
-    claim_observation::http::{DiscoveryError, HttpObservationSource, OwnedClaimFunding},
+    claim_observation::http::{
+        ClaimPairError, DiscoveryError, FundingContext, HttpObservationSource, OwnedClaimFunding,
+    },
     coincube::CoincubeClient,
     foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanError, ScanPlan},
     foreign_split_inventory::{self, FreshDepositAddresses, InventoryError, TwoChainScan},
@@ -12,10 +14,13 @@ use crate::daemon::{model, Daemon};
 use coincube_core::{
     chain::ChainId,
     claim::Policy,
+    claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
     foreign_split::{SplitBranch, SplitCoin},
-    miniscript::bitcoin::{bip32::ChildNumber, secp256k1::Secp256k1, Network, OutPoint},
-    spend::CandidateCoin,
+    miniscript::bitcoin::{
+        bip32::ChildNumber, secp256k1::Secp256k1, Network, OutPoint, Transaction, Txid,
+    },
+    spend::{CandidateCoin, TxGetter},
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -41,6 +46,14 @@ pub struct ClaimInventory {
     shared: Vec<CandidateCoin>,
     bitcoin_funding: Vec<CandidateCoin>,
     fork_funding: Vec<CandidateCoin>,
+}
+
+struct ScannedTransactions(BTreeMap<Txid, Transaction>);
+
+impl TxGetter for ScannedTransactions {
+    fn get_tx(&mut self, txid: &Txid) -> Option<Transaction> {
+        self.0.get(txid).cloned()
+    }
 }
 
 fn owned_candidate(
@@ -176,6 +189,63 @@ impl ClaimInventory {
     }
     pub fn fork_funding(&self) -> &[CandidateCoin] {
         &self.fork_funding
+    }
+
+    fn scanned_transactions(&self) -> Result<ScannedTransactions, ClaimPairError> {
+        let mut transactions = BTreeMap::new();
+        for coin in self
+            .scan
+            .inventory
+            .splittable_coins()
+            .into_iter()
+            .chain(self.scan.inventory.funding_candidates(ChainId::Bitcoin))
+            .chain(
+                self.scan
+                    .inventory
+                    .funding_candidates(ChainId::BitcoinBlake2b),
+            )
+        {
+            if coin.previous.compute_txid() != coin.outpoint.txid
+                || coin
+                    .previous
+                    .output
+                    .get(coin.outpoint.vout as usize)
+                    .is_none()
+            {
+                return Err(ClaimPairError::Changed);
+            }
+            match transactions.insert(coin.outpoint.txid, coin.previous.clone()) {
+                Some(previous) if previous != coin.previous => return Err(ClaimPairError::Changed),
+                _ => {}
+            }
+        }
+        Ok(ScannedTransactions(transactions))
+    }
+
+    /// Build an exact pair for a read-only review from the transactions in
+    /// the same paired scan that supplied the owned coins. The two change
+    /// indices are supplied by the wallet owner; this does not reserve them
+    /// or admit either PSBT for signing.
+    #[allow(clippy::too_many_arguments)]
+    pub fn construct_pair_for_review(
+        &self,
+        funding: &OwnedClaimFunding,
+        bitcoin_change: ChildNumber,
+        fork_change: ChildNumber,
+        bitcoin_feerate_vb: u64,
+        fork_feerate_vb: u64,
+        context: FundingContext<'_>,
+    ) -> Result<(AncestrySelfTransfer, ClaimForkSweep), ClaimPairError> {
+        funding.construct_claim_pair(
+            &self.descriptor,
+            &mut self.scanned_transactions()?,
+            &self.shared,
+            bitcoin_change,
+            fork_change,
+            bitcoin_feerate_vb,
+            fork_feerate_vb,
+            context,
+        )
     }
 
     /// Compare the paired scan with the Bitcoin Vault daemon's full wallet
@@ -512,6 +582,15 @@ mod tests {
             },
         )
         .unwrap();
+        let mut previous = scan.scanned_transactions().unwrap();
+        assert_eq!(
+            previous.get_tx(&outpoint.txid).unwrap().output[0].value,
+            Amount::from_sat(50_000)
+        );
+        assert_eq!(
+            previous.get_tx(&funding_outpoint.txid).unwrap().output[0].value,
+            Amount::from_sat(10_000)
+        );
         let mut info = model::GetInfoResult {
             version: "test".into(),
             network: Network::Bitcoin,

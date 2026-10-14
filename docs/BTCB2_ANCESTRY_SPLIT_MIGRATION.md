@@ -92,9 +92,12 @@ a replayable spend.
    Claim pair constructor builds the exact ordinary Bitcoin and BTCB2 PSBTs
    from that paired result, current shared wallet coins, previous transactions
    and separately reserved change indices. It refuses a changed shared set or
-   output before returning the pair. The production Claim deposit check invokes
-   paired discovery for read-only status, but does not construct the pair or
-   admit it to signers.
+   output before returning the pair. `ClaimInventory::construct_pair_for_review`
+   now supplies previous transactions from the same paired scan, rejecting a
+   missing or conflicting transaction before delegating to that constructor.
+   The production Claim deposit check invokes paired discovery for read-only
+   status, but cannot construct or display the pair until both change
+   destinations are durably reserved; it does not admit it to signers.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly
