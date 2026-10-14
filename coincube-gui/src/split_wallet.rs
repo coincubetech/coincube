@@ -73,8 +73,9 @@ pub struct InventorySummary {
     pub spent_on_bitcoin: usize,
     pub spent_on_btcb2: usize,
     pub btcb2_post_fork: usize,
-    /// Possible input poisons only; never poison proof.
+    /// Seen on one chain within both scans' coverage; never ancestry proof.
     pub bitcoin_only_candidates: usize,
+    pub btcb2_only_candidates: usize,
     pub pending: usize,
     pub fresh_receive: FreshIndex,
 }
@@ -95,6 +96,7 @@ impl InventorySummary {
             spent_on_btcb2: inventory.spent_on_btcb2().len(),
             btcb2_post_fork: inventory.btcb2_post_fork().len(),
             bitcoin_only_candidates: inventory.bitcoin_only_post_fork().len(),
+            btcb2_only_candidates: inventory.btcb2_only_post_fork().len(),
             pending: inventory.pending().len(),
             fresh_receive: inventory.fresh_receive(),
         })
@@ -659,8 +661,9 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 summary.inventory.pending,
             )))
             .push(caption(format!(
-                "Bitcoin-only coins received after the fork: {} (possible input poison; not yet verified, display only). {}",
+                "Post-fork funding candidates: {} seen only on Bitcoin · {} seen only on Bitcoin Blake2b. These still need verification before a split. {}",
                 summary.inventory.bitcoin_only_candidates,
+                summary.inventory.btcb2_only_candidates,
                 fresh_index_copy(summary.inventory.fresh_receive),
             )).style(theme::text::secondary))
             .push(caption(format!(
@@ -1015,6 +1018,7 @@ mod tests {
                 spent_on_btcb2: 0,
                 btcb2_post_fork: 1,
                 bitcoin_only_candidates: 1,
+                btcb2_only_candidates: 1,
                 pending: 1,
                 fresh_receive: FreshIndex::FixedDescriptor,
             }

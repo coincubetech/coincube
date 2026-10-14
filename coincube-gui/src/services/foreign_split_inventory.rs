@@ -84,12 +84,10 @@ impl InventoryCoin {
     }
 }
 
-/// A Bitcoin output confirmed at or after the observed fork height. Shown to
-/// the user as a possible input poison; never proof that it is absent from
-/// BTCB2 (see `coincube_core::claim`). It carries no prevout data, but that
-/// does not stop a caller re-fetching the outpoint. Step 1 (A3) must instead
-/// require a positive poison-proof type built from verified ancestry, never
-/// this candidate.
+/// An output confirmed at or after the observed fork height and seen only on
+/// one chain within both scans' address coverage. This is a display hint,
+/// never proof that the transaction cannot be replayed onto the other chain.
+/// It carries no prevout data, and cannot be used for transaction construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonCandidate(InventoryCoin);
 
@@ -125,6 +123,7 @@ pub struct SplitInventory {
     spent_on_btcb2: Vec<InventoryCoin>,
     btcb2_post_fork: Vec<InventoryCoin>,
     bitcoin_only_post_fork: Vec<PoisonCandidate>,
+    btcb2_only_post_fork: Vec<PoisonCandidate>,
     pending: Vec<InventoryCoin>,
     fresh_receive: FreshIndex,
 }
@@ -181,6 +180,11 @@ impl SplitInventory {
     pub fn bitcoin_only_post_fork(&self) -> &[PoisonCandidate] {
         &self.bitcoin_only_post_fork
     }
+    /// Display-only candidates seen on BTCB2 but not in Bitcoin's covered
+    /// address range. Positive two-chain ancestry is still required.
+    pub fn btcb2_only_post_fork(&self) -> &[PoisonCandidate] {
+        &self.btcb2_only_post_fork
+    }
     /// Unconfirmed on either chain, or present on both after the fork.
     pub fn pending(&self) -> &[InventoryCoin] {
         &self.pending
@@ -226,6 +230,7 @@ impl SplitInventory {
             spent_on_btcb2: Vec::new(),
             btcb2_post_fork: Vec::new(),
             bitcoin_only_post_fork: Vec::new(),
+            btcb2_only_post_fork: Vec::new(),
             pending: Vec::new(),
             fresh_receive: fresh_receive(btcb2, bitcoin, external_ranged),
         };
@@ -237,7 +242,14 @@ impl SplitInventory {
                         covered(bitcoin, coin)?;
                         inventory.spent_on_bitcoin.push(InventoryCoin::of(coin));
                     }
-                    ForkSide::PostFork => inventory.btcb2_post_fork.push(InventoryCoin::of(coin)),
+                    ForkSide::PostFork => {
+                        inventory.btcb2_post_fork.push(InventoryCoin::of(coin));
+                        if covered(bitcoin, coin).is_ok() {
+                            inventory
+                                .btcb2_only_post_fork
+                                .push(PoisonCandidate(InventoryCoin::of(coin)));
+                        }
+                    }
                     ForkSide::Unconfirmed | ForkSide::Unknown => {
                         inventory.pending.push(InventoryCoin::of(coin))
                     }
@@ -275,9 +287,13 @@ impl SplitInventory {
                     covered(btcb2, coin)?;
                     inventory.spent_on_btcb2.push(InventoryCoin::of(coin));
                 }
-                ForkSide::PostFork => inventory
-                    .bitcoin_only_post_fork
-                    .push(PoisonCandidate(InventoryCoin::of(coin))),
+                ForkSide::PostFork => {
+                    if covered(btcb2, coin).is_ok() {
+                        inventory
+                            .bitcoin_only_post_fork
+                            .push(PoisonCandidate(InventoryCoin::of(coin)));
+                    }
+                }
                 ForkSide::Unconfirmed | ForkSide::Unknown => {
                     inventory.pending.push(InventoryCoin::of(coin))
                 }
@@ -590,10 +606,34 @@ mod tests {
             vec![bitcoin_post.outpoint]
         );
         assert_eq!(
+            inventory
+                .btcb2_only_post_fork()
+                .iter()
+                .map(|c| c.display().outpoint)
+                .collect::<Vec<_>>(),
+            vec![btcb2_post.outpoint]
+        );
+        assert_eq!(
             outpoints(inventory.pending()),
             vec![replayed.outpoint, bitcoin_unconfirmed.outpoint]
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
+    }
+
+    #[test]
+    fn post_fork_candidate_requires_other_chains_address_coverage() {
+        let fork_coin = coin(8, 8, 2_000, Some(150));
+        let bitcoin_coin = coin(9, 9, 3_000, Some(151));
+        let btcb2 = report(
+            ChainId::BitcoinBlake2b,
+            vec![fork_coin.clone()],
+            walk(9, Some(8)),
+        );
+        let bitcoin = report(ChainId::Bitcoin, vec![bitcoin_coin.clone()], walk(8, None));
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        assert_eq!(inventory.btcb2_post_fork().len(), 1);
+        assert!(inventory.btcb2_only_post_fork().is_empty());
+        assert!(inventory.bitcoin_only_post_fork().is_empty());
     }
 
     /// #568 B1a: each splittable coin is a step-1 input with its previous
@@ -960,7 +1000,7 @@ mod tests {
     /// No code outside this module and the Split panel's display may name a
     /// poison candidate: absence on BTCB2 is never poison proof.
     #[test]
-    fn split_bitcoin_only_candidates_are_display_only() {
+    fn split_funding_candidates_are_display_only() {
         fn walk_dir(dir: &std::path::Path, hits: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -968,7 +1008,10 @@ mod tests {
                     walk_dir(&path, hits);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
-                    if text.contains("PoisonCandidate") || text.contains("bitcoin_only_post_fork") {
+                    if text.contains("PoisonCandidate")
+                        || text.contains("bitcoin_only_post_fork")
+                        || text.contains("btcb2_only_post_fork")
+                    {
                         hits.push(path.file_name().unwrap().to_string_lossy().into_owned());
                     }
                 }
@@ -985,7 +1028,9 @@ mod tests {
         let panel = include_str!("../split_wallet.rs");
         let uses: Vec<_> = panel
             .lines()
-            .filter(|line| line.contains("bitcoin_only_post_fork"))
+            .filter(|line| {
+                line.contains("bitcoin_only_post_fork") || line.contains("btcb2_only_post_fork")
+            })
             .collect();
         assert!(!uses.is_empty());
         assert!(

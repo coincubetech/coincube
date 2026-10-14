@@ -49,8 +49,9 @@ a replayable spend.
    coinbase on **both** chains and require distinct txids; the same-height
    coinbase could otherwise have been copied across the fork. The currently displayed Split
    `bitcoin_only_post_fork` candidates are hints only. Add symmetrical
-   BTCB2-only candidates and promote neither to proof without the ancestry
-   collector. Bind both proofs to one account/session, source descriptor,
+   BTCB2-only candidates for display (now present) and promote neither to
+   proof without the ancestry collector. Bind both proofs to one
+   account/session, source descriptor,
    source UTXO set and current two-chain tips.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
