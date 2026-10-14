@@ -443,6 +443,14 @@ pub enum ClaimPostBitcoinError {
     Wallet(ClaimInventoryError),
 }
 
+/// Only the full saved-reservation, source-observation and BTCB2 Vault
+/// requalification below can create this value. It still expires and does
+/// not by itself authorize signing or a network attempt.
+#[allow(dead_code)] // The paired stage-two coordinator is not wired yet.
+pub struct RequalifiedPostBitcoinClaim {
+    pub(super) observed: CollectedPostBitcoinInputs,
+}
+
 fn change_wallet_ready(
     info: &model::GetInfoResult,
     chain: coincube_core::chain::ChainId,
@@ -858,7 +866,7 @@ impl ClaimFundingReservation {
         signed_bitcoin: &Transaction,
         bitcoin_path: &RetainedPath,
         fork_path: &RetainedPath,
-    ) -> Result<CollectedPostBitcoinInputs, ClaimPostBitcoinError> {
+    ) -> Result<RequalifiedPostBitcoinClaim, ClaimPostBitcoinError> {
         source
             .validate_context(&context.provider, context.generation)
             .map_err(ClaimPostBitcoinError::Observation)?;
@@ -1005,7 +1013,9 @@ impl ClaimFundingReservation {
                 },
             )
             .map_err(ClaimPostBitcoinError::Observation)?;
-        Ok(collected)
+        Ok(RequalifiedPostBitcoinClaim {
+            observed: collected,
+        })
     }
 
     pub(super) fn matches_pair(

@@ -63,6 +63,13 @@ pub enum SplitPostBitcoinError {
     Observation(FailureKind),
 }
 
+/// Only the saved foreign source/target reservation and fresh stage-two
+/// requalification below can create this value. It remains read-only.
+#[allow(dead_code)] // The paired stage-two coordinator is not wired yet.
+pub struct RequalifiedPostBitcoinSplit {
+    pub(super) observed: CollectedPostBitcoinInputs,
+}
+
 /// The destination Vault address already authenticated and reserved when
 /// the user accepted the Split handoff. This is an immutable destination
 /// binding, not a fresh unused-address proof at signing time.
@@ -578,7 +585,7 @@ impl SplitFundingReservation {
         signed_bitcoin: &Transaction,
         bitcoin_path: &RetainedPath,
         fork_path: &RetainedPath,
-    ) -> Result<CollectedPostBitcoinInputs, SplitPostBitcoinError> {
+    ) -> Result<RequalifiedPostBitcoinSplit, SplitPostBitcoinError> {
         observations
             .validate_context(&context.provider, context.generation)
             .map_err(|_| SplitPostBitcoinError::Changed)?;
@@ -716,7 +723,9 @@ impl SplitFundingReservation {
                 },
             )
             .map_err(SplitPostBitcoinError::Observation)?;
-        Ok(collected)
+        Ok(RequalifiedPostBitcoinSplit {
+            observed: collected,
+        })
     }
 }
 

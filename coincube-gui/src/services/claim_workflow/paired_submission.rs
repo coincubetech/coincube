@@ -5,7 +5,8 @@
 //! permission to send either transaction again.
 
 use super::{
-    paired_recovery::BitcoinConfirmation, split, validate as validate_intent, Context, Controller,
+    claim_funding::RequalifiedPostBitcoinClaim, paired_recovery::BitcoinConfirmation, split,
+    split_funding::RequalifiedPostBitcoinSplit, validate as validate_intent, Context, Controller,
     Error, Intent, Phase,
 };
 use crate::services::claim_observation::http::{CollectedPostBitcoinInputs, FundingContext};
@@ -376,12 +377,67 @@ impl Controller {
         self.intent.paired_submission.as_ref()
     }
 
-    /// Recheck the post-Bitcoin collector against the saved signed pair and
-    /// canonical Bitcoin confirmation. The collector checks spent Bitcoin
-    /// inputs and unspent BTCB2 inputs; this result expires and is not journaled.
+    /// Only a Claim requalification that checked the saved funding reservation
+    /// and complete BTCB2 Vault may enter the version-10 stage-two boundary.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // Stage-two coordinator remains gated.
-    pub(super) fn post_bitcoin_ancestry_proof(
+    pub(crate) fn post_bitcoin_claim_proof(
+        &mut self,
+        current: &Context,
+        requalified: &RequalifiedPostBitcoinClaim,
+        fork_psbt: &Psbt,
+        confirmation: &BitcoinConfirmation,
+        policy: Policy,
+        now: i64,
+        tips: PreflightTips,
+    ) -> Result<PostBitcoinAncestryProof, Error> {
+        if self.intent.version != 10 || self.intent.split.is_some() {
+            return Err(Error::WrongIdentity);
+        }
+        self.post_bitcoin_ancestry_proof(
+            current,
+            &requalified.observed,
+            fork_psbt,
+            confirmation,
+            policy,
+            now,
+            tips,
+        )
+    }
+
+    /// Only a Split requalification that checked the saved source and target
+    /// reservation may enter the version-11 stage-two boundary.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Stage-two coordinator remains gated.
+    pub(crate) fn post_bitcoin_split_proof(
+        &mut self,
+        current: &Context,
+        requalified: &RequalifiedPostBitcoinSplit,
+        fork_psbt: &Psbt,
+        confirmation: &BitcoinConfirmation,
+        policy: Policy,
+        now: i64,
+        tips: PreflightTips,
+    ) -> Result<PostBitcoinAncestryProof, Error> {
+        if self.intent.version != 11 || self.intent.split.is_none() {
+            return Err(Error::WrongIdentity);
+        }
+        self.post_bitcoin_ancestry_proof(
+            current,
+            &requalified.observed,
+            fork_psbt,
+            confirmation,
+            policy,
+            now,
+            tips,
+        )
+    }
+
+    /// Recheck post-Bitcoin evidence against the saved signed pair and
+    /// canonical Bitcoin confirmation. This private boundary accepts only
+    /// the observations inside a Claim or Split requalification.
+    #[allow(clippy::too_many_arguments)]
+    fn post_bitcoin_ancestry_proof(
         &mut self,
         current: &Context,
         observed: &CollectedPostBitcoinInputs,
