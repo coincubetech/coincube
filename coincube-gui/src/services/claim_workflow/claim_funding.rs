@@ -168,8 +168,11 @@ impl ClaimFundingReservation {
         {
             return Err(Error::InvalidPlan);
         }
-        self.address(&descriptor, self.indices.bitcoin_deposit)?;
-        self.address(&descriptor, self.indices.btcb2_deposit)?;
+        let bitcoin_address = self.address(&descriptor, self.indices.bitcoin_deposit)?;
+        let fork_address = self.address(&descriptor, self.indices.btcb2_deposit)?;
+        if bitcoin_address == fork_address {
+            return Err(Error::InvalidPlan);
+        }
         Ok(())
     }
 
