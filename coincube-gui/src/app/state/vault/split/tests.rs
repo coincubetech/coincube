@@ -1822,7 +1822,7 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
         .map(|(file, text)| (file, crate::utils::source_text::lf_only(&checkout(&text))))
         .collect();
     for (file, text) in &files {
-        let starts = text.matches("SplitPanel::start").count();
+        let starts = text.matches("SplitPanel::start(").count();
         if !file.starts_with("app/state/vault/split/") {
             match file.as_str() {
                 "app/mod.rs" => assert_eq!(starts, 1, "{}", file),
@@ -1838,11 +1838,18 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
             assert!(!text.contains("StartSplit"), "{} names StartSplit", file);
         }
         let resumes =
-            text.matches("SplitPanel::resume").count() + text.matches("SplitPanel::{").count();
+            text.matches("SplitPanel::resume(").count() + text.matches("SplitPanel::{").count();
+        let funding_resumes = text.matches("SplitPanel::resume_funding(").count();
         if !file.starts_with("app/state/vault/split/") {
             match file.as_str() {
-                "app/mod.rs" => assert_eq!(resumes, 1, "{}", file),
-                _ => assert_eq!(resumes, 0, "{} constructs the Split panel", file),
+                "app/mod.rs" => {
+                    assert_eq!(resumes, 1, "{}", file);
+                    assert_eq!(funding_resumes, 1, "{}", file);
+                }
+                _ => {
+                    assert_eq!(resumes, 0, "{} constructs the Split panel", file);
+                    assert_eq!(funding_resumes, 0, "{} resumes funding", file);
+                }
             }
         }
     }
@@ -1852,16 +1859,18 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     let discovery = &discovery[..discovery.find("\n}\n").unwrap()];
     // #568 D19: the resumable journal, passing over a recorded completion.
     assert!(discovery.contains(
-        "step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)?"
+        "step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)"
     ));
+    assert!(discovery.contains("step1::discover_funding(&root, &cube_settings.id)?"));
     assert!(discovery.contains("SplitPanel::resume("));
-    assert!(!discovery.contains("SplitPanel::start"));
+    assert!(discovery.contains("SplitPanel::resume_funding("));
+    assert!(!discovery.contains("SplitPanel::start("));
     // #568 B5c-2: the start is `start_split_from_review`'s, after every one
     // of its checks, each of which refuses (consuming the handoff) before
     // the panel is constructed; the handoff is consumed and the session
     // handed over after it.
     let production = &app[..app.find("\n#[cfg(test)]\n").unwrap()];
-    assert_eq!(production.matches("SplitPanel::start").count(), 1);
+    assert_eq!(production.matches("SplitPanel::start(").count(), 1);
     let start = &production[production.find("    fn start_split_from_review(").unwrap()..];
     let start = &start[..start.find("\n    }\n").unwrap()];
     let at = |marker: &str| {

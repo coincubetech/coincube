@@ -977,6 +977,30 @@ impl SplitConnect for ProductionConnect {
                     fork.funding_prevout(),
                 )
                 .map_err(str::to_owned)?;
+                // Constructing both transactions and their review can outlive
+                // the observations that qualified the deposits. A new block
+                // or an aged proof requires a fresh paired scan before the UI
+                // may describe either funding input as verified.
+                let (bitcoin_tip, fork_tip) = tokio::try_join!(
+                    self.observation.tip(ChainId::Bitcoin),
+                    self.observation.tip(ChainId::BitcoinBlake2b),
+                )
+                .map_err(|_| {
+                    "The chain tips could not be refreshed for the split preview. Check deposits again."
+                        .to_string()
+                })?;
+                let proof_age = self
+                    .observation
+                    .now()
+                    .checked_sub(found.inputs.observed_at());
+                if bitcoin_tip.value() != &tips.bitcoin
+                    || fork_tip.value() != &tips.fork
+                    || !proof_age.is_some_and(|age| {
+                        (0..=CHECK_POLICY.observations.max_observation_age_seconds).contains(&age)
+                    })
+                {
+                    return Err("The two-chain split proof changed or expired while preparing the preview. Check deposits again.".into());
+                }
                 Some(
                     crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview::new(
                         coins,
