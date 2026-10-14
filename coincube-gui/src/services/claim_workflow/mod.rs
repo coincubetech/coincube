@@ -657,6 +657,11 @@ impl Controller {
     pub(crate) fn is_paired_ancestry_claim(&self) -> bool {
         self.intent.version == 10 && self.intent.split.is_none()
     }
+    /// A version-11 Split has two ordinary signed transactions and must not
+    /// reopen through the legacy step-one or step-two resend coordinators.
+    pub(crate) fn is_paired_ancestry_split(&self) -> bool {
+        self.intent.version == 11 && self.intent.split.is_some()
+    }
     pub fn plan(&self) -> ClaimPlan {
         self.intent.plan.clone()
     }

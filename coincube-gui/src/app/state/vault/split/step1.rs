@@ -395,6 +395,11 @@ pub struct OpenRequest {
 #[async_trait]
 pub trait SplitConnect: Send + Sync {
     fn context(&self) -> Context;
+    /// The current session's two-chain reader for exact recorded witnesses.
+    /// Alternative transports cannot silently skip this read.
+    fn paired_observation(&self) -> Option<&HttpObservationSource> {
+        None
+    }
     /// Only a live account generation can release pre-deposit instructions.
     /// Mocks and alternative transports fail closed unless they implement it.
     fn session_current(&self) -> bool {
@@ -718,6 +723,9 @@ fn split_funding_quote_for_inventory(
 impl SplitConnect for ProductionConnect {
     fn context(&self) -> Context {
         self.context.clone()
+    }
+    fn paired_observation(&self) -> Option<&HttpObservationSource> {
+        Some(&self.observation)
     }
     fn session_current(&self) -> bool {
         self.generation.has_changed().is_ok() && *self.generation.borrow() == self.expected

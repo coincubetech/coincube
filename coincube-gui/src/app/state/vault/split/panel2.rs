@@ -1163,6 +1163,12 @@ impl SplitPanel {
 
     pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
         match event {
+            SplitEvent::Restarted(_, Ok(Restarted::PairedRecovery(recovery))) => {
+                self.paired_recovery = Some(recovery);
+                self.notice = None;
+                self.stage = Stage::PairedRecovery;
+                Task::none()
+            }
             SplitEvent::Restarted(_, Ok(Restarted::Step1)) => match self.connect.clone() {
                 Some(connect) => self.resume_journal(connect),
                 None => {
@@ -1228,6 +1234,11 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Restarted(_, Err(reason)) => {
+                if self.paired_recovery.is_some() {
+                    self.notice = Some(reason.reason);
+                    self.stage = Stage::PairedRecovery;
+                    return Task::none();
+                }
                 self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }

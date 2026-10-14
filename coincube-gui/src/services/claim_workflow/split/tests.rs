@@ -391,11 +391,13 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     )
     .unwrap();
     assert_eq!(controller.intent.version, ANCESTRY_VERSION);
+    assert!(controller.is_paired_ancestry_split());
     assert_eq!(controller.status(), Status::Unchecked);
     assert!(!controller.construction_verified);
     let identity = controller.identity().clone();
     drop(controller);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert!(reopened.is_paired_ancestry_split());
     assert_eq!(reopened.status(), Status::Unchecked);
     assert!(!reopened.construction_verified);
     let record = reopened.intent.split.as_ref().unwrap();
@@ -855,6 +857,19 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     downgraded.version = 8;
     assert!(matches!(validate(&downgraded), Err(Error::InvalidPlan)));
     drop(reopened);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let legacy_restart = runtime.block_on(crate::app::state::vault::split::step2::restart(
+        context(),
+        None,
+        None,
+        temp.0.clone(),
+        TARGET.into(),
+        identity.descriptor_digest,
+    ));
+    assert!(matches!(legacy_restart, Err(ref refusal) if !refusal.retry));
     fs::write(
         temp.0.join("intent.json"),
         serde_json::to_vec(&altered).unwrap(),

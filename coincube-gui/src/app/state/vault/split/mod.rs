@@ -113,6 +113,8 @@ pub enum Stage {
     /// Fresh two-chain address checks passed; deposits are still candidates,
     /// never signing authority until both ancestry proofs are collected.
     FundingDeposits,
+    /// A version-11 ordinary two-chain record, reopened for status only.
+    PairedRecovery,
     /// #568 B4b-3c: the single-step (fork-only) route.
     Unified(unified::UnifiedStage),
     /// A task is running.
@@ -276,6 +278,7 @@ impl fmt::Debug for Recon {
 #[derive(Debug)]
 pub enum Restarted {
     Step1,
+    PairedRecovery(PairedSplitRecovery),
     /// The reconciler, with the journal's step-2 dead end if it is in one,
     /// or else why a resend the journal allows could not be opened.
     /// The last field: the journal's descriptors are deleted (#662 F1).
@@ -286,6 +289,73 @@ pub enum Restarted {
     Closed,
     /// #568 B4b-3c: a fork-only record, opened by kind.
     Unified(unified::UnifiedRecord),
+}
+
+/// The exact saved witnesses are read under the current Connect session. A
+/// displayed status is never spend authority or permission to retry a send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairedSplitRecovery {
+    pub bitcoin_txid: Option<Txid>,
+    pub fork_txid: Option<Txid>,
+    pub bitcoin_status: String,
+    pub fork_status: String,
+}
+
+fn paired_side_status(report: crate::services::claim_workflow::PairedSideReport) -> String {
+    use crate::services::claim_workflow::{PairedChainState as State, PairedSideReport as Side};
+    match report {
+        Side::NotAttempted => "No broadcast attempt recorded.".into(),
+        Side::Observed(State::Absent) => "A possible broadcast was recorded, but this chain does not currently show the transaction. It will not be retried automatically.".into(),
+        Side::Observed(State::Unconfirmed) => "Transaction seen; awaiting confirmation.".into(),
+        Side::Observed(State::Confirmed { confirmations, .. }) =>
+            format!("Confirmed in the current chain view ({confirmations} confirmations)."),
+        Side::Indeterminate(_) => "The recorded transaction could not be verified against this chain. Check again when its node and indexer are available; no retry was sent.".into(),
+    }
+}
+
+async fn paired_recovery(
+    controller: &mut crate::services::claim_workflow::Controller,
+    connect: &dyn SplitConnect,
+) -> Result<PairedSplitRecovery, String> {
+    let context = connect.context();
+    let Some(record) = controller.recorded_signed_ancestry_pair() else {
+        if !connect.session_current() || connect.context() != context {
+            return Err("The Connect session changed while checking this split.".into());
+        }
+        return Ok(PairedSplitRecovery {
+            bitcoin_txid: None,
+            fork_txid: None,
+            bitcoin_status: "No signed Bitcoin transaction is recorded.".into(),
+            fork_status: "No signed BTCB2 transaction is recorded.".into(),
+        });
+    };
+    let bitcoin_txid = record.bitcoin_identity().0;
+    let fork_txid = record.fork_identity().0;
+    let source = connect.paired_observation().ok_or_else(|| {
+        "The two-chain status source is unavailable for this Connect session.".to_string()
+    })?;
+    let report = controller
+        .reconcile_possible_ancestry_attempts(
+            &context,
+            source,
+            crate::app::state::vault::claim::CHECK_POLICY
+                .observations
+                .max_observation_age_seconds,
+        )
+        .await
+        .map_err(|_| {
+            "The paired transaction status could not be read. No transaction was retried."
+                .to_string()
+        })?;
+    if !connect.session_current() || connect.context() != context {
+        return Err("The Connect session changed while checking this split.".into());
+    }
+    Ok(PairedSplitRecovery {
+        bitcoin_txid: Some(bitcoin_txid),
+        fork_txid: Some(fork_txid),
+        bitcoin_status: paired_side_status(report.bitcoin),
+        fork_status: paired_side_status(report.fork),
+    })
 }
 /// A step-2 handoff refused, with the preparation when still usable.
 pub type FinishResult = Result<Coord, (step2::Step2Refusal, Option<Prep>)>;
@@ -449,6 +519,7 @@ pub enum Recovered {
 #[derive(Debug, Clone)]
 pub enum SplitMessage {
     Retry,
+    CheckPaired,
     CheckDeposits,
     ExportUnsigned(Encoding),
     ImportSigned,
@@ -519,6 +590,7 @@ pub struct SplitPanel {
     funding_source: Option<SplitSource>,
     funding_addresses: Option<step1::CheckedFundingAddresses>,
     funding_progress: Option<step1::SplitDepositProgress>,
+    paired_recovery: Option<PairedSplitRecovery>,
     prepared: Option<Box<Prepared>>,
     construction: Option<Box<SplitStep1>>,
     files: Vec<Psbt>,
@@ -648,6 +720,7 @@ impl SplitPanel {
             funding_source: None,
             funding_addresses: None,
             funding_progress: None,
+            paired_recovery: None,
             prepared: None,
             construction: None,
             files: Vec::new(),
@@ -776,6 +849,9 @@ impl SplitPanel {
     }
     pub fn funding_progress(&self) -> Option<&step1::SplitDepositProgress> {
         self.funding_progress.as_ref()
+    }
+    pub fn paired_recovery(&self) -> Option<&PairedSplitRecovery> {
+        self.paired_recovery.as_ref()
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden
@@ -930,6 +1006,7 @@ impl SplitPanel {
         self.device.close();
         self.funding_addresses = None;
         self.funding_progress = None;
+        self.paired_recovery = None;
         self.funding_source = None;
         self.funding_target_binding = None;
         self.driver = None;
@@ -998,9 +1075,30 @@ impl SplitPanel {
             self.stage = Stage::Working(Work::Restarting);
             let target = self.target_cube.clone();
             let (context, recon) = (connect.context(), self.recon_port.clone());
-            let resend = self.step2_port.clone().map(|port| (port, connect));
+            let resend = self.step2_port.clone().map(|port| (port, connect.clone()));
             return self.spawn(
                 async move {
+                    let identity =
+                        crate::services::claim_workflow::split_identity(target.clone(), digest);
+                    let mut controller =
+                        crate::services::claim_workflow::Controller::reopen_settling(
+                            &directory,
+                            &identity,
+                            context.clone(),
+                        )
+                        .await
+                        .map_err(|error| {
+                            step2::Step2Refusal::retry(step1::describe(
+                                crate::services::claim_coordinator::Error::Journal(error),
+                            ))
+                        })?;
+                    if controller.is_paired_ancestry_split() {
+                        let recovery = paired_recovery(&mut controller, &*connect)
+                            .await
+                            .map_err(step2::Step2Refusal::retry)?;
+                        return Ok(Restarted::PairedRecovery(recovery));
+                    }
+                    drop(controller);
                     step2::restart(context, recon, resend, directory, target, digest)
                         .await
                         .map(|restart| match restart {
@@ -1316,6 +1414,10 @@ impl SplitPanel {
         }
         let seq = self.seq;
         match message {
+            SplitMessage::CheckPaired if self.stage == Stage::PairedRecovery => {
+                self.stage = Stage::NeedsSession;
+                self.begin()
+            }
             SplitMessage::CheckDeposits if self.stage == Stage::FundingDeposits => {
                 let (Some(connect), Some(source), Some((_, directory))) = (
                     self.connect.clone(),

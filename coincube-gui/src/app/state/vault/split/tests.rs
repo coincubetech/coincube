@@ -832,6 +832,31 @@ async fn used_split_deposit_address_is_never_displayed_or_signed() {
 }
 
 #[test]
+fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
+    let mut panel = SplitPanel::empty(TARGET.into(), PathBuf::from("unused-split-journals"));
+    panel.journal = Some((sha256::Hash::all_zeros(), PathBuf::from("recorded-split")));
+    panel.stage = Stage::PairedRecovery;
+    panel.paired_recovery = Some(PairedSplitRecovery {
+        bitcoin_txid: None,
+        fork_txid: None,
+        bitcoin_status: "No broadcast attempt recorded.".into(),
+        fork_status: "No broadcast attempt recorded.".into(),
+    });
+    for message in [
+        SplitMessage::ExportUnsigned(Encoding::Binary),
+        SplitMessage::ImportSigned,
+        SplitMessage::Confirm,
+        SplitMessage::ConfirmResend,
+    ] {
+        let _ = panel.update(message);
+        assert_eq!(panel.stage(), &Stage::PairedRecovery);
+    }
+    panel.revoke();
+    assert!(panel.paired_recovery().is_none());
+    assert_eq!(panel.stage(), &Stage::NeedsSession);
+}
+
+#[test]
 fn recorded_legacy_split_cannot_export_sign_or_submit_again() {
     let mut panel = SplitPanel::empty(TARGET.into(), PathBuf::from("unused-split-journals"));
     panel.stage = Stage::Sign;

@@ -407,7 +407,10 @@ marker spend cases remain.
    through a separate read-only recovery screen, checks each recorded possible
    send against its own chain, and shows exact transaction IDs and independent
    statuses. It does not re-enable signing or retry an absent transaction.
-   The foreign Split recovery screen still needs the same integration. The
+   The foreign Split wizard now also diverts version-11 journals away from
+   the legacy step-one/step-two restart routes. Its read-only recovery screen
+   checks the exact saved possible sends independently under the current
+   Connect identity and offers no signer, resend or broadcast action. The
    fork-attempt journal now also requires an opaque,
    short-lived Bitcoin six-confirmation result bound to the exact signed
    witness and session; the coordinator must still recollect live two-chain

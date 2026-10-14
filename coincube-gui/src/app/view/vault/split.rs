@@ -11,7 +11,7 @@ use coincube_core::{
 use coincube_ui::{
     component::{button, card, text::*},
     theme,
-    widget::Element,
+    widget::{ColumnExt, Element},
 };
 use iced::{
     widget::{Column, Container, Row, Space},
@@ -498,7 +498,9 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
         || panel.unified().record().is_some();
     let mut body = Column::new().spacing(10).max_width(640);
-    body = if single {
+    body = if matches!(panel.stage(), Stage::PairedRecovery) {
+        body.push(h3("Recorded two-chain split"))
+    } else if single {
         body.push(h3("Split")).push(
             p1_regular(
                 "Split moves the foreign wallet's pre-fork coins on Bitcoin Blake2b into this Vault so they can't be replayed on Bitcoin.",
@@ -516,6 +518,19 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let mut actions = Row::new().spacing(10).align_y(Alignment::Center);
 
     match panel.stage() {
+        Stage::PairedRecovery => {
+            body = body.push(p1_regular("This device has a two-chain split record. Each possible broadcast is checked against its own chain. This screen does not sign or resend either transaction."));
+            if let Some(recovery) = panel.paired_recovery() {
+                body = body
+                    .push(p1_bold("Bitcoin transaction"))
+                    .push_maybe(recovery.bitcoin_txid.map(|id| caption(id.to_string())))
+                    .push(p1_regular(recovery.bitcoin_status.clone()))
+                    .push(p1_bold("Bitcoin Blake2b transaction"))
+                    .push_maybe(recovery.fork_txid.map(|id| caption(id.to_string())))
+                    .push(p1_regular(recovery.fork_status.clone()));
+            }
+            actions = actions.push(action("Check again", SplitMessage::CheckPaired));
+        }
         Stage::FundingDeposits => {
             if let Some(addresses) = panel.funding_addresses() {
                 body = body
