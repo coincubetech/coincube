@@ -135,7 +135,11 @@ a replayable spend.
    and those three indices under the Split journal lock. Restart reloads the
    exact same addresses and refuses a changed selection or identity. This
    record alone does not prove freshness or authorize a spend; the wizard still
-   needs to recheck both chains' address history before showing it.
+   needs to recheck both chains' address history before showing it. A read-only
+   pre-display check now reloads that record, binds it to the current Connect
+   identity, and checks all three addresses on both chains under one timeout;
+   any used address or failed read refuses the instructions. The production
+   wizard has not yet been wired to this check.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,

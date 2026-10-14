@@ -363,6 +363,11 @@ pub struct OpenRequest {
 #[async_trait]
 pub trait SplitConnect: Send + Sync {
     fn context(&self) -> Context;
+    /// Only a live account generation can release pre-deposit instructions.
+    /// Mocks and alternative transports fail closed unless they implement it.
+    fn session_current(&self) -> bool {
+        false
+    }
     fn evidence(&self) -> &dyn SplitEvidenceSource;
     /// The fork's window from the authenticated anchor, with the fork marker.
     async fn window(&self) -> Result<ForkWindow, String>;
@@ -371,6 +376,70 @@ pub trait SplitConnect: Send + Sync {
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind>;
     /// Opens or creates the journal. Blocking: callers use `spawn_blocking`.
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error>;
+}
+
+/// Deposit instructions from an immutable local reservation, released only
+/// after fresh Connect reads find no history for any address on either chain.
+/// A later scan must still prove the deposits' chain-specific ancestry.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CheckedFundingAddresses {
+    pub bitcoin_deposit: String,
+    pub btcb2_deposit: String,
+    pub bitcoin_return: String,
+}
+
+pub async fn check_reserved_funding_addresses(
+    connect: &dyn SplitConnect,
+    directory: PathBuf,
+    source: &SplitSource,
+    target_cube: &str,
+) -> Result<CheckedFundingAddresses, String> {
+    if !connect.session_current() {
+        return Err("The Connect session changed before the address check.".into());
+    }
+    let context = connect.context();
+    let source = source.clone();
+    let target = target_cube.to_owned();
+    let expected = context.clone();
+    let saved = tokio::task::spawn_blocking(move || {
+        claim_workflow::load_split_funding(&directory, &source, &target, &expected)
+    })
+    .await
+    .map_err(|_| "Reading the saved funding addresses was interrupted.".to_string())?
+    .map_err(|_| "The saved funding addresses could not be verified.".to_string())?
+    .ok_or_else(|| "No funding addresses were reserved for this wallet.".to_string())?;
+    let [bitcoin_deposit, btcb2_deposit, bitcoin_return] = saved
+        .addresses()
+        .map_err(|_| "The saved funding addresses are invalid.".to_string())?;
+    let addresses = [
+        bitcoin_deposit.as_str(),
+        btcb2_deposit.as_str(),
+        bitcoin_return.as_str(),
+    ];
+    tokio::time::timeout(std::time::Duration::from_secs(20), async {
+        for address in addresses {
+            for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                let used = connect
+                    .address_used(chain, address)
+                    .await
+                    .map_err(|_| "Address history could not be checked on both chains.".to_string())?;
+                if used {
+                    return Err("A reserved address already has chain history. Review the funding plan before sending coins.".to_string());
+                }
+            }
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|_| "Checking both chains' address history timed out.".to_string())??;
+    if !connect.session_current() || connect.context() != context {
+        return Err("The Connect session changed during the address check.".into());
+    }
+    Ok(CheckedFundingAddresses {
+        bitcoin_deposit,
+        btcb2_deposit,
+        bitcoin_return,
+    })
 }
 
 /// The production Connect side: Claim's observation source and anchor, the
@@ -433,6 +502,9 @@ impl ProductionConnect {
 impl SplitConnect for ProductionConnect {
     fn context(&self) -> Context {
         self.context.clone()
+    }
+    fn session_current(&self) -> bool {
+        self.generation.has_changed().is_ok() && *self.generation.borrow() == self.expected
     }
     fn evidence(&self) -> &dyn SplitEvidenceSource {
         &self.evidence

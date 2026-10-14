@@ -336,6 +336,9 @@ impl SplitConnect for FakeConnect {
     fn context(&self) -> Context {
         self.context.clone()
     }
+    fn session_current(&self) -> bool {
+        true
+    }
     fn evidence(&self) -> &dyn SplitEvidenceSource {
         &self.chains
     }
@@ -529,6 +532,47 @@ impl Scan {
     pub(super) fn intent(&self) -> SplitIntent {
         self.intent_with(|report| report)
     }
+}
+
+#[tokio::test]
+async fn reserved_split_deposit_addresses_require_six_fresh_history_checks() {
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    crate::services::claim_workflow::reserve_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+    )
+    .unwrap();
+    let addresses = step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .unwrap();
+    assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
+    assert_ne!(addresses.bitcoin_return, addresses.bitcoin_deposit);
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 6);
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    assert!(
+        step1::check_reserved_funding_addresses(connect.as_ref(), directory, &source, TARGET,)
+            .await
+            .is_err()
+    );
 }
 
 /// Run a task the panel returned; collect the Split events it produced.
