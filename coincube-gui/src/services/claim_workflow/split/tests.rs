@@ -480,20 +480,119 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         target: &target_script,
     };
     let secp = Secp256k1::new();
-    let sign_pair = |psbt: &Psbt| {
+    let sign_one = |psbt: &Psbt, signer: &Xpriv| {
         let mut signed = psbt.clone();
-        for signer in wallet.signers.iter().take(2) {
-            signed.sign(signer, &secp).unwrap();
-        }
+        signed.sign(signer, &secp).unwrap();
         signed
     };
+    let bitcoin_files: Vec<_> = wallet
+        .signers
+        .iter()
+        .take(2)
+        .map(|signer| sign_one(bitcoin.psbt(), signer))
+        .collect();
+    let fork_files: Vec<_> = wallet
+        .signers
+        .iter()
+        .take(2)
+        .map(|signer| sign_one(fork.psbt(), signer))
+        .collect();
+    let partial = crate::services::split_psbt_file::combine_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_files[..1],
+        &fork,
+        &fork_inputs,
+        &fork_files[..1],
+    )
+    .unwrap();
+    assert!(!partial.complete);
+    let bitcoin_only = crate::services::split_psbt_file::combine_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_files,
+        &fork,
+        &fork_inputs,
+        &[],
+    )
+    .unwrap();
+    assert!(!bitcoin_only.complete);
+    assert_eq!(bitcoin_only.fork, *fork.psbt());
+    let combined = crate::services::split_psbt_file::combine_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_files,
+        &fork,
+        &fork_inputs,
+        &fork_files,
+    )
+    .unwrap();
+    assert!(combined.complete);
+    let mut changed = bitcoin_files[0].clone();
+    changed.unsigned_tx.output[0].value = coincube_core::miniscript::bitcoin::Amount::from_sat(1);
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &[changed],
+            &fork,
+            &fork_inputs,
+            &fork_files,
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::Bitcoin(
+            _
+        ))
+    ));
+    let mut changed_fork = fork_files[0].clone();
+    changed_fork.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_files,
+            &fork,
+            &fork_inputs,
+            &[changed_fork],
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::BitcoinBlake2b(_))
+    ));
+    let mut non_all = bitcoin_files[0].clone();
+    non_all.inputs[0].sighash_type = Some(
+        coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from(EcdsaSighashType::None),
+    );
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &[non_all],
+            &fork,
+            &fork_inputs,
+            &fork_files,
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::Bitcoin(
+            _
+        ))
+    ));
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork_files[..1],
+            &fork,
+            &fork_inputs,
+            &bitcoin_files[..1],
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::Bitcoin(
+            _
+        ))
+    ));
     let signed = coincube_core::foreign_split::finalize_ancestry_split_pair(
         &bitcoin,
         &bitcoin_inputs,
-        &sign_pair(bitcoin.psbt()),
+        &combined.bitcoin,
         &fork,
         &fork_inputs,
-        &sign_pair(fork.psbt()),
+        &combined.fork,
         &Secp256k1::verification_only(),
     )
     .unwrap();

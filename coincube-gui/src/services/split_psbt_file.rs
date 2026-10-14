@@ -1,4 +1,5 @@
-//! PSBT files for Split step 1 (#568 owner decision D6: files and text only).
+//! PSBT files for legacy Split step 1 and ordinary paired Split signing
+//! (#568 owner decision D6: files and text only).
 //!
 //! - Save the unsigned construction as BIP 174 binary or base64 text.
 //! - Load a returned file with a size cap, detecting binary or base64 text.
@@ -6,7 +7,7 @@
 //!   it is used, and combine the signatures of N returned files (one per
 //!   cosigner) into one PSBT that is again verified.
 //!
-//! Verification is `coincube_core::foreign_split::finalize_split_step1`'s own
+//! Legacy verification is `coincube_core::foreign_split::finalize_split_step1`'s own
 //! check, run per file: everything except `partial_sigs` and an absent or
 //! explicit `SIGHASH_ALL` request must equal the construction, and every
 //! supplied signature must verify for its input. A file that satisfies every
@@ -17,12 +18,18 @@
 //! itself). Anything else, including another transaction, changed metadata,
 //! a non-`ALL` sighash or a bad signature, refuses the file by position. Nothing here finalizes for
 //! broadcast, persists state or reads a chain; a PSBT holds only public data.
+//! The ordinary paired importer checks each returned `S+B` and `S+F` PSBT
+//! through its own core finalizer and keeps completion dependent on both.
 
 use std::{fmt, io::Read, path::Path};
 
 use base64::Engine;
 use coincube_core::{
-    foreign_split::{finalize_split_step1, FinalizeError, SplitStep1},
+    foreign_split::{
+        finalize_ancestry_split_step1, finalize_ancestry_split_step2, finalize_split_step1,
+        validate_ancestry_split_pair_signing, AncestrySplitInputs, AncestrySplitStep1,
+        AncestrySplitStep2, AncestrySplitStep2Inputs, FinalizeError, SplitStep1,
+    },
     miniscript::bitcoin::{psbt::Psbt, secp256k1},
 };
 
@@ -196,6 +203,138 @@ pub fn combine(construction: &SplitStep1, files: &[Psbt]) -> Result<Psbt, FileEr
     }
     verify(construction, &combined)?;
     Ok(combined)
+}
+
+/// A signed return file is accepted only for its exact ordinary Split side.
+/// Both sides are kept together so a caller cannot treat a complete Bitcoin
+/// signature set as permission to omit the BTCB2 transaction.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PairedFileError {
+    Bitcoin(FileError),
+    BitcoinBlake2b(FileError),
+    Pair(FinalizeError),
+}
+
+impl fmt::Display for PairedFileError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Bitcoin(error) => write!(f, "Bitcoin signed PSBT: {error}"),
+            Self::BitcoinBlake2b(error) => write!(f, "Bitcoin Blake2b signed PSBT: {error}"),
+            Self::Pair(error) => write!(f, "The two Split PSBTs no longer match: {error:?}"),
+        }
+    }
+}
+
+impl std::error::Error for PairedFileError {}
+
+#[derive(Debug)]
+pub struct CombinedAncestrySplit {
+    pub bitcoin: Psbt,
+    pub fork: Psbt,
+    pub complete: bool,
+}
+
+/// Combine signers' returned PSBTs for the exact `S+B` and `S+F` pair.
+/// Every returned partial signature is checked cryptographically by the
+/// corresponding core finalizer before it is merged. An empty side stays
+/// unsigned until its signatures arrive. This is only a file/import check;
+/// live funding proof, journal identity, session and preflight must be
+/// requalified before each signing dispatch and any submission.
+#[allow(clippy::too_many_arguments)]
+pub fn combine_ancestry_split_pair(
+    bitcoin: &AncestrySplitStep1,
+    bitcoin_inputs: &AncestrySplitInputs<'_>,
+    bitcoin_files: &[Psbt],
+    fork: &AncestrySplitStep2,
+    fork_inputs: &AncestrySplitStep2Inputs<'_>,
+    fork_files: &[Psbt],
+) -> Result<CombinedAncestrySplit, PairedFileError> {
+    let secp = secp256k1::Secp256k1::verification_only();
+    let bitcoin_signed = combine_ancestry_side(bitcoin.psbt(), bitcoin_files, |signed| {
+        finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, signed, &secp).map(|_| ())
+    })
+    .map_err(PairedFileError::Bitcoin)?;
+    let fork_signed = combine_ancestry_side(fork.psbt(), fork_files, |signed| {
+        finalize_ancestry_split_step2(fork, fork_inputs, signed, &secp).map(|_| ())
+    })
+    .map_err(PairedFileError::BitcoinBlake2b)?;
+    validate_ancestry_split_pair_signing(
+        bitcoin,
+        bitcoin_inputs,
+        &bitcoin_signed,
+        fork,
+        fork_inputs,
+        &fork_signed,
+    )
+    .map_err(PairedFileError::Pair)?;
+    let bitcoin_complete =
+        match finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, &bitcoin_signed, &secp) {
+            Ok(_) => true,
+            Err(FinalizeError::Unsatisfied) => false,
+            Err(error) => return Err(PairedFileError::Bitcoin(FileError::Refused(error))),
+        };
+    let fork_complete = match finalize_ancestry_split_step2(fork, fork_inputs, &fork_signed, &secp)
+    {
+        Ok(_) => true,
+        Err(FinalizeError::Unsatisfied) => false,
+        Err(error) => return Err(PairedFileError::BitcoinBlake2b(FileError::Refused(error))),
+    };
+    Ok(CombinedAncestrySplit {
+        bitcoin: bitcoin_signed,
+        fork: fork_signed,
+        complete: bitcoin_complete && fork_complete,
+    })
+}
+
+fn combine_ancestry_side(
+    construction: &Psbt,
+    files: &[Psbt],
+    verify: impl Fn(&Psbt) -> Result<(), FinalizeError>,
+) -> Result<Psbt, FileError> {
+    if files.is_empty() {
+        return Ok(construction.clone());
+    }
+    if files.len() > MAX_COMBINED_FILES {
+        return Err(FileError::TooManyFiles);
+    }
+    for (index, file) in files.iter().enumerate() {
+        verify_ancestry_returned(file, &verify)
+            .map_err(|error| FileError::File(index, Box::new(error)))?;
+    }
+    let mut combined = construction.clone();
+    for file in files {
+        for (input, signed) in combined.inputs.iter_mut().zip(&file.inputs) {
+            for (key, signature) in &signed.partial_sigs {
+                input.partial_sigs.entry(*key).or_insert(*signature);
+            }
+        }
+    }
+    verify_ancestry_returned(&combined, verify)?;
+    Ok(combined)
+}
+
+fn verify_ancestry_returned(
+    psbt: &Psbt,
+    verify: impl Fn(&Psbt) -> Result<(), FinalizeError>,
+) -> Result<(), FileError> {
+    if psbt
+        .inputs
+        .iter()
+        .any(|input| input.final_script_sig.is_some() || input.final_script_witness.is_some())
+    {
+        return Err(FileError::Finalized);
+    }
+    if psbt
+        .inputs
+        .iter()
+        .all(|input| input.partial_sigs.is_empty())
+    {
+        return Err(FileError::Unsigned);
+    }
+    match verify(psbt) {
+        Ok(()) | Err(FinalizeError::Unsatisfied) => Ok(()),
+        Err(error) => Err(FileError::Refused(error)),
+    }
 }
 
 #[cfg(test)]

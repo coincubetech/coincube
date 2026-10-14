@@ -439,6 +439,11 @@ marker spend cases remain.
    bind the two constructions and reject changes to transaction outputs,
    prevout metadata or sighash policy after a signer round trip. These checks
    do not replace live two-chain proof at each signer dispatch.
+   The desktop Split PSBT file service now has a paired importer for ordinary
+   `S+B` and `S+F` constructions. It cryptographically checks each returned
+   partial signature against its exact side, combines multisig returns, and
+   marks the pair complete only when both sides finalize. It still needs the
+   production signer UI and fresh admission at every export or device call.
    The version-10 Claim and version-11 Split journals now expose a review-only
    path that first validates a fresh paired funding collection against the
    exact saved intent and then invokes the corresponding pair finalizer.
