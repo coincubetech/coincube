@@ -25,10 +25,12 @@ use std::{fmt, io::Read, path::Path};
 
 use base64::Engine;
 use coincube_core::{
+    chain::ChainId,
     foreign_split::{
+        combine_ancestry_split_pair as combine_core_ancestry_split_pair,
         finalize_ancestry_split_step1, finalize_ancestry_split_step2, finalize_split_step1,
-        validate_ancestry_split_pair_signing, AncestrySplitInputs, AncestrySplitStep1,
-        AncestrySplitStep2, AncestrySplitStep2Inputs, FinalizeError, SplitStep1,
+        AncestrySplitInputs, AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs,
+        CombineAncestrySplitError, FinalizeError, SplitStep1,
     },
     miniscript::bitcoin::{psbt::Psbt, secp256k1},
 };
@@ -213,6 +215,7 @@ pub enum PairedFileError {
     Bitcoin(FileError),
     BitcoinBlake2b(FileError),
     Pair(FinalizeError),
+    ConflictingSignature { chain: ChainId, input: usize },
 }
 
 impl fmt::Display for PairedFileError {
@@ -221,6 +224,10 @@ impl fmt::Display for PairedFileError {
             Self::Bitcoin(error) => write!(f, "Bitcoin signed PSBT: {error}"),
             Self::BitcoinBlake2b(error) => write!(f, "Bitcoin Blake2b signed PSBT: {error}"),
             Self::Pair(error) => write!(f, "The two Split PSBTs no longer match: {error:?}"),
+            Self::ConflictingSignature { chain, input } => write!(
+                f,
+                "Two {chain:?} signer files disagree on a signature for input {input}. Re-export the unsigned PSBT and sign that exact file again."
+            ),
         }
     }
 }
@@ -250,67 +257,50 @@ pub fn combine_ancestry_split_pair(
     fork_files: &[Psbt],
 ) -> Result<CombinedAncestrySplit, PairedFileError> {
     let secp = secp256k1::Secp256k1::verification_only();
-    let bitcoin_signed = combine_ancestry_side(bitcoin.psbt(), bitcoin_files, |signed| {
-        finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, signed, &secp).map(|_| ())
-    })
-    .map_err(PairedFileError::Bitcoin)?;
-    let fork_signed = combine_ancestry_side(fork.psbt(), fork_files, |signed| {
-        finalize_ancestry_split_step2(fork, fork_inputs, signed, &secp).map(|_| ())
-    })
-    .map_err(PairedFileError::BitcoinBlake2b)?;
-    validate_ancestry_split_pair_signing(
+    for (index, file) in bitcoin_files.iter().enumerate() {
+        verify_ancestry_returned(file, |signed| {
+            finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, signed, &secp).map(|_| ())
+        })
+        .map_err(|error| PairedFileError::Bitcoin(FileError::File(index, Box::new(error))))?;
+    }
+    for (index, file) in fork_files.iter().enumerate() {
+        verify_ancestry_returned(file, |signed| {
+            finalize_ancestry_split_step2(fork, fork_inputs, signed, &secp).map(|_| ())
+        })
+        .map_err(|error| {
+            PairedFileError::BitcoinBlake2b(FileError::File(index, Box::new(error)))
+        })?;
+    }
+    let combined = combine_core_ancestry_split_pair(
         bitcoin,
         bitcoin_inputs,
-        &bitcoin_signed,
+        bitcoin_files,
         fork,
         fork_inputs,
-        &fork_signed,
+        fork_files,
+        &secp,
     )
-    .map_err(PairedFileError::Pair)?;
-    let bitcoin_complete =
-        match finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, &bitcoin_signed, &secp) {
-            Ok(_) => true,
-            Err(FinalizeError::Unsatisfied) => false,
-            Err(error) => return Err(PairedFileError::Bitcoin(FileError::Refused(error))),
-        };
-    let fork_complete = match finalize_ancestry_split_step2(fork, fork_inputs, &fork_signed, &secp)
-    {
-        Ok(_) => true,
-        Err(FinalizeError::Unsatisfied) => false,
-        Err(error) => return Err(PairedFileError::BitcoinBlake2b(FileError::Refused(error))),
-    };
-    Ok(CombinedAncestrySplit {
-        bitcoin: bitcoin_signed,
-        fork: fork_signed,
-        complete: bitcoin_complete && fork_complete,
-    })
-}
-
-fn combine_ancestry_side(
-    construction: &Psbt,
-    files: &[Psbt],
-    verify: impl Fn(&Psbt) -> Result<(), FinalizeError>,
-) -> Result<Psbt, FileError> {
-    if files.is_empty() {
-        return Ok(construction.clone());
-    }
-    if files.len() > MAX_COMBINED_FILES {
-        return Err(FileError::TooManyFiles);
-    }
-    for (index, file) in files.iter().enumerate() {
-        verify_ancestry_returned(file, &verify)
-            .map_err(|error| FileError::File(index, Box::new(error)))?;
-    }
-    let mut combined = construction.clone();
-    for file in files {
-        for (input, signed) in combined.inputs.iter_mut().zip(&file.inputs) {
-            for (key, signature) in &signed.partial_sigs {
-                input.partial_sigs.entry(*key).or_insert(*signature);
+    .map_err(|error| match error {
+        CombineAncestrySplitError::ConflictingSignature { chain, input } => {
+            PairedFileError::ConflictingSignature { chain, input }
+        }
+        CombineAncestrySplitError::TooManyReturns => {
+            if bitcoin_files.len() > MAX_COMBINED_FILES {
+                PairedFileError::Bitcoin(FileError::TooManyFiles)
+            } else {
+                PairedFileError::BitcoinBlake2b(FileError::TooManyFiles)
             }
         }
-    }
-    verify_ancestry_returned(&combined, verify)?;
-    Ok(combined)
+        CombineAncestrySplitError::UnsignedReturn => {
+            PairedFileError::Pair(FinalizeError::Unsatisfied)
+        }
+        CombineAncestrySplitError::Invalid(error) => PairedFileError::Pair(error),
+    })?;
+    Ok(CombinedAncestrySplit {
+        bitcoin: combined.bitcoin,
+        fork: combined.fork,
+        complete: combined.complete,
+    })
 }
 
 fn verify_ancestry_returned(
