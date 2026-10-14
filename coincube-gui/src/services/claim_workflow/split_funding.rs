@@ -78,6 +78,14 @@ impl SplitTargetBinding {
         {
             return Err(Error::InvalidPlan);
         }
+        if self
+            .descriptor
+            .split_once('#')
+            .map(|(_, checksum)| checksum)
+            != Some(self.vault_id.descriptor_checksum.as_str())
+        {
+            return Err(Error::InvalidPlan);
+        }
         self.script().map(|_| ())
     }
 

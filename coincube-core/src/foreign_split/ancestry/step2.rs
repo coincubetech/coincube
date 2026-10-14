@@ -80,6 +80,7 @@ struct Plan2 {
     selected: Vec<Selected>,
     shared: Vec<OutPoint>,
     total: u64,
+    funding_amount: u64,
     maximum_signed_vbytes: u64,
 }
 
@@ -124,8 +125,9 @@ fn plan(inputs: &AncestrySplitStep2Inputs<'_>) -> Result<Plan2, Error> {
     if definite.script_pubkey() != output.script_pubkey {
         return Err(Error::ScriptMismatch(funding.outpoint));
     }
+    let funding_amount = output.value.to_sat();
     let total = total
-        .checked_add(output.value.to_sat())
+        .checked_add(funding_amount)
         .filter(|sum| *sum <= Amount::MAX_MONEY.to_sat())
         .ok_or(Error::Economics)?;
     selected.push(Selected {
@@ -153,6 +155,7 @@ fn plan(inputs: &AncestrySplitStep2Inputs<'_>) -> Result<Plan2, Error> {
         selected,
         shared: outpoints.into_iter().collect(),
         total,
+        funding_amount,
         maximum_signed_vbytes,
     })
 }
@@ -206,6 +209,11 @@ pub fn create_ancestry_split_step2(
         .maximum_signed_vbytes
         .checked_mul(feerate_vb)
         .ok_or(Error::Economics)?;
+    if plan.funding_amount < fee {
+        return Err(Error::InvalidFunding(
+            "BTCB2-only funding input does not cover the transaction fee",
+        ));
+    }
     let value = plan.total.checked_sub(fee).ok_or(Error::Economics)?;
     check_economics(plan.total, value, inputs.target, plan.maximum_signed_vbytes)?;
     build(inputs, plan, Amount::from_sat(value), locktime, feerate_vb)

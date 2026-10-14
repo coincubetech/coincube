@@ -93,6 +93,7 @@ struct Plan {
     shared: Vec<OutPoint>,
     destination: Descriptor<DefiniteDescriptorKey>,
     total: u64,
+    funding_amount: u64,
     maximum_signed_vbytes: u64,
 }
 
@@ -133,8 +134,9 @@ fn plan(inputs: &AncestrySplitInputs<'_>) -> Result<Plan, Error> {
     if definite.script_pubkey() != output.script_pubkey {
         return Err(Error::ScriptMismatch(funding.outpoint));
     }
+    let funding_amount = output.value.to_sat();
     let total = total
-        .checked_add(output.value.to_sat())
+        .checked_add(funding_amount)
         .filter(|sum| *sum <= Amount::MAX_MONEY.to_sat())
         .ok_or(Error::Economics)?;
     selected.push(Selected {
@@ -168,6 +170,7 @@ fn plan(inputs: &AncestrySplitInputs<'_>) -> Result<Plan, Error> {
         shared: outpoints.into_iter().collect(),
         destination,
         total,
+        funding_amount,
         maximum_signed_vbytes,
     })
 }
@@ -226,6 +229,11 @@ pub fn create_ancestry_split_step1(
         .maximum_signed_vbytes
         .checked_mul(feerate_vb)
         .ok_or(Error::Economics)?;
+    if plan.funding_amount < fee {
+        return Err(Error::InvalidFunding(
+            "Bitcoin-only funding input does not cover the transaction fee",
+        ));
+    }
     let value = plan.total.checked_sub(fee).ok_or(Error::Economics)?;
     check_economics(
         plan.total,

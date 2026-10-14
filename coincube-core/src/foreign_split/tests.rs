@@ -351,6 +351,14 @@ fn ancestry_step1_refuses_missing_duplicate_and_changed_funding() {
         create_ancestry_split_step1(inputs, FEERATE, LockTime::ZERO, TIP)
     };
     let step = create(&inputs).unwrap();
+    let funding_amount = funding.previous.output[funding.outpoint.vout as usize]
+        .value
+        .to_sat();
+    let fee_from_shared = funding_amount / step.maximum_signed_vbytes() + 1;
+    assert!(matches!(
+        create_ancestry_split_step1(&inputs, fee_from_shared, LockTime::ZERO, TIP),
+        Err(Error::InvalidFunding(_))
+    ));
     let mut altered = step.psbt().unsigned_tx.clone();
     altered.output[0].value = Amount::from_sat(altered.output[0].value.to_sat() - 1);
     assert!(matches!(
@@ -517,6 +525,14 @@ fn ancestry_step2_refuses_wrong_claimed_or_funding_and_changed_fee() {
         create_ancestry_split_step2(inputs, FEERATE, LockTime::ZERO, TIP)
     };
     let step = create(&inputs).unwrap();
+    let funding_amount = funding.previous.output[funding.outpoint.vout as usize]
+        .value
+        .to_sat();
+    let fee_from_shared = funding_amount / step.maximum_signed_vbytes() + 1;
+    assert!(matches!(
+        create_ancestry_split_step2(&inputs, fee_from_shared, LockTime::ZERO, TIP),
+        Err(Error::InvalidFunding(_))
+    ));
     let mut altered = step.psbt().unsigned_tx.clone();
     altered.output[0].value = Amount::from_sat(altered.output[0].value.to_sat() - 1);
     assert!(matches!(

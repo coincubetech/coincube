@@ -114,6 +114,11 @@ a replayable spend.
    ordinary destination output and an explicit `claimed_prevouts = S`.
    Its BTCB2 counterpart builds `S + F` and authenticates `F` against the
    foreign source descriptor even though its destination is the target Cube.
+   Both ordinary Split builders now refuse a marker whose value is smaller
+   than that chain's computed worst-case transaction fee. Claim's ordinary
+   Bitcoin and BTCB2 builders apply the same fee-cover check to their selected
+   chain-specific inputs. Deposit screens still need to quote the expected
+   minimum before requesting funds and reprice at review.
    Both rebuild exact PSBTs from fresh coins and the persisted fee rate,
    rejecting changed scripts, amounts, input sets, destinations and fees.
    These are structural builders only; the old OP_RETURN types remain for
