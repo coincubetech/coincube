@@ -453,6 +453,183 @@ impl ClaimInventory {
         self.reconcile_fork_wallet_snapshot(&info, &coins.coins, fork_funding_index)
     }
 
+    /// After the exact Bitcoin transaction confirms, shared outputs no longer
+    /// belong to the two-chain `splittable` set. Require the complete BTCB2
+    /// wallet's pre-fork unspent set to equal the claimed inputs, with each
+    /// coin appearing in the paired scan's `spent_on_bitcoin` classification.
+    /// The separate post-Bitcoin collector still proves that the *exact*
+    /// signed Bitcoin witness spent them and that both chain tips are fresh.
+    #[allow(dead_code)] // The stage-two coordinator is not wired yet.
+    pub fn reconcile_post_bitcoin_fork_snapshot(
+        &self,
+        info: &model::GetInfoResult,
+        coins: &[model::Coin],
+        shared: &[OutPoint],
+        fork_funding: OutPoint,
+        fork_funding_index: u32,
+    ) -> Result<(), ClaimInventoryError> {
+        let stale = || ClaimInventoryError::WalletState;
+        let report = &self.scan.btcb2;
+        if info.network != Network::Bitcoin
+            || info.chain_id != Some(ChainId::BitcoinBlake2b)
+            || info.descriptors.main != self.descriptor
+            || !info.sync.is_finite()
+            || info.sync < 0.9999
+            || info.block_height < 0
+            || u64::try_from(info.block_height).map_err(|_| stale())?
+                < u64::from(report.tip_height())
+            || info.rescan_progress.is_some()
+            || info.refused_reorg_depth.is_some()
+            || info.chain_divergence
+            || info.history_sync.full_scan_in_progress
+            || info.history_sync.last_failure.is_some()
+        {
+            return Err(stale());
+        }
+        for scanned in [&self.scan.bitcoin, &self.scan.btcb2] {
+            for (branch, revealed) in [
+                (Branch::External, info.receive_index),
+                (Branch::Internal, info.change_index),
+            ] {
+                let coverage = scanned.coverage(branch).ok_or_else(stale)?;
+                if coverage.start != 0 || !coverage.contains(revealed) {
+                    return Err(stale());
+                }
+            }
+        }
+        let fork_height = self.scan.inventory.fork_height();
+        let expected: BTreeSet<_> = shared.iter().copied().collect();
+        let spent_on_bitcoin: BTreeSet<_> = self
+            .scan
+            .inventory
+            .spent_on_bitcoin()
+            .iter()
+            .map(|coin| coin.outpoint)
+            .collect();
+        if expected.is_empty()
+            || expected.len() != shared.len()
+            || expected != spent_on_bitcoin
+            || expected.contains(&fork_funding)
+            || !self.fork_funding.iter().any(|candidate| {
+                candidate.outpoint == fork_funding
+                    && !candidate.is_change
+                    && candidate.deriv_index
+                        == ChildNumber::Normal {
+                            index: fork_funding_index,
+                        }
+            })
+        {
+            return Err(stale());
+        }
+        let scan_pre_fork: BTreeSet<_> = report
+            .coins()
+            .iter()
+            .filter(|coin| report.fork_side(coin) == super::foreign_scan::ForkSide::PreFork)
+            .map(|coin| coin.outpoint)
+            .collect();
+        if scan_pre_fork != expected {
+            return Err(stale());
+        }
+        let mut wallet = BTreeMap::new();
+        for coin in coins {
+            if wallet.insert(coin.outpoint, coin).is_some() {
+                return Err(stale());
+            }
+        }
+        let wallet_pre_fork: BTreeSet<_> = wallet
+            .values()
+            .filter(|coin| {
+                coin.spend_info.is_none()
+                    && coin
+                        .block_height
+                        .is_some_and(|height| height >= 0 && (height as u64) < fork_height)
+            })
+            .map(|coin| coin.outpoint)
+            .collect();
+        if wallet_pre_fork != expected {
+            return Err(stale());
+        }
+        for outpoint in expected
+            .iter()
+            .copied()
+            .chain(std::iter::once(fork_funding))
+        {
+            let coin = wallet.get(&outpoint).ok_or_else(stale)?;
+            let scanned = report
+                .coins()
+                .iter()
+                .find(|candidate| candidate.outpoint == outpoint)
+                .ok_or_else(stale)?;
+            let side = report.fork_side(scanned);
+            if scanned.previous.compute_txid() != outpoint.txid
+                || scanned.previous.output.get(outpoint.vout as usize) != Some(&scanned.output)
+                || !scanned.confirmed
+                || (outpoint == fork_funding
+                    && (side != super::foreign_scan::ForkSide::PostFork
+                        || scanned.branch != Branch::External
+                        || scanned.index != fork_funding_index))
+                || (outpoint != fork_funding && side != super::foreign_scan::ForkSide::PreFork)
+                || coin.spend_info.is_some()
+                || coin.is_immature
+                || coin.block_height != scanned.block_height.and_then(|h| i32::try_from(h).ok())
+                || coin.amount != scanned.output.value
+                || coin.derivation_index
+                    != (ChildNumber::Normal {
+                        index: scanned.index,
+                    })
+                || coin.is_change != (scanned.branch == Branch::Internal)
+                || coin.address.script_pubkey() != scanned.output.script_pubkey
+                || owned_candidate(
+                    &self.descriptor,
+                    &SplitCoin {
+                        outpoint,
+                        branch: if scanned.branch == Branch::Internal {
+                            SplitBranch::Internal
+                        } else {
+                            SplitBranch::External
+                        },
+                        index: scanned.index,
+                        previous: scanned.previous.clone(),
+                        bitcoin_block: None,
+                        btcb2_block: None,
+                    },
+                )
+                .is_err()
+            {
+                return Err(stale());
+            }
+        }
+        Ok(())
+    }
+
+    /// The asynchronous wallet read used immediately before a future BTCB2
+    /// submission. Its result remains read-only until the exact fork witness,
+    /// ancestry, reservation, policy and review are joined by the coordinator.
+    #[allow(dead_code)] // The stage-two coordinator is not wired yet.
+    pub async fn reconcile_post_bitcoin_fork_daemon(
+        &self,
+        daemon: &(dyn Daemon + Send + Sync),
+        shared: &[OutPoint],
+        fork_funding: OutPoint,
+        fork_funding_index: u32,
+    ) -> Result<(), ClaimInventoryError> {
+        let info = daemon
+            .get_info()
+            .await
+            .map_err(|_| ClaimInventoryError::WalletState)?;
+        let coins = daemon
+            .list_coins(&[], &[])
+            .await
+            .map_err(|_| ClaimInventoryError::WalletState)?;
+        self.reconcile_post_bitcoin_fork_snapshot(
+            &info,
+            &coins.coins,
+            shared,
+            fork_funding,
+            fork_funding_index,
+        )
+    }
+
     /// Reconcile both complete Vault coin sets against one exact ordinary
     /// Claim pair, then read both tips *after* those wallet checks. The
     /// collected funding and shared-input proof must still match the pair and
@@ -717,14 +894,19 @@ mod tests {
             })
             .collect::<Vec<_>>();
         let tip = BlockHash::all_zeros();
-        let bitcoin = ScanReport::for_test(ChainId::Bitcoin, 1, tip, vec![shared.clone(), funding])
-            .with_tip_height(130)
-            .with_coverage(coverage.clone());
+        let bitcoin = ScanReport::for_test(
+            ChainId::Bitcoin,
+            1,
+            tip,
+            vec![shared.clone(), funding.clone()],
+        )
+        .with_tip_height(130)
+        .with_coverage(coverage.clone());
         let btcb2 =
             ScanReport::for_test(ChainId::BitcoinBlake2b, 1, tip, vec![shared, fork_funding])
                 .with_fork_height(Some(100))
                 .with_tip_height(130)
-                .with_coverage(coverage);
+                .with_coverage(coverage.clone());
         let inventory =
             foreign_split_inventory::SplitInventory::join(&btcb2, &bitcoin, 1, true).unwrap();
         let scan = ClaimInventory::from_scan(
@@ -733,6 +915,22 @@ mod tests {
                 bitcoin,
                 btcb2,
                 inventory,
+            },
+        )
+        .unwrap();
+        let bitcoin_after = ScanReport::for_test(ChainId::Bitcoin, 1, tip, vec![funding])
+            .with_tip_height(130)
+            .with_coverage(coverage);
+        let btcb2_after = scan.scan_report().btcb2.clone();
+        let inventory_after =
+            foreign_split_inventory::SplitInventory::join(&btcb2_after, &bitcoin_after, 1, true)
+                .unwrap();
+        let post_bitcoin = ClaimInventory::from_scan(
+            &descriptor,
+            TwoChainScan {
+                bitcoin: bitcoin_after,
+                btcb2: btcb2_after,
+                inventory: inventory_after,
             },
         )
         .unwrap();
@@ -805,6 +1003,36 @@ mod tests {
         assert_eq!(
             scan.reconcile_fork_wallet_snapshot(&fork_info, &[coin.clone(), fork_coin.clone()], 5),
             Ok(())
+        );
+        assert_eq!(
+            post_bitcoin.reconcile_post_bitcoin_fork_snapshot(
+                &fork_info,
+                &[coin.clone(), fork_coin.clone()],
+                &[outpoint],
+                fork_outpoint,
+                5,
+            ),
+            Ok(())
+        );
+        assert_eq!(
+            post_bitcoin.reconcile_post_bitcoin_fork_snapshot(
+                &fork_info,
+                std::slice::from_ref(&fork_coin),
+                &[outpoint],
+                fork_outpoint,
+                5,
+            ),
+            Err(ClaimInventoryError::WalletState)
+        );
+        assert_eq!(
+            post_bitcoin.reconcile_post_bitcoin_fork_snapshot(
+                &fork_info,
+                &[coin.clone(), fork_coin.clone()],
+                &[outpoint],
+                fork_outpoint,
+                6,
+            ),
+            Err(ClaimInventoryError::WalletState)
         );
         assert_eq!(
             scan.reconcile_fork_wallet_snapshot(&fork_info, std::slice::from_ref(&fork_coin), 5),

@@ -521,7 +521,13 @@ marker spend cases remain.
    PSBT: it compares every shared and BTCB2-only input's saved amount and
    script with the newly observed source transaction, and requires that PSBT's
    unsigned transaction to match the exact signed journal record. This does
-   not yet reconcile the current source wallet or its reservation.
+   not itself reconcile the current source wallet or its reservation. A
+   separate Claim wallet snapshot check now compares the full BTCB2 Vault coin
+   set with a fresh paired scan after Bitcoin spends: every claimed pre-fork
+   output must be absent from Bitcoin's scanned UTXOs, present and unspent in
+   the BTCB2 Vault, and the exact reserved BTCB2 funding output must still be
+   confirmed and unspent. The stage-two coordinator must join that check with
+   the collector, saved reservation, final signature and new policy evidence.
    The Claim and Split pair finalizers now issue an opaque, controller-bound
    initial proof only after validating the exact signed pair against the saved
    intent and fresh two-chain collection. Recording a possible Bitcoin send
