@@ -332,7 +332,7 @@ impl PreflightClient {
     /// Require positive policy acceptance for both exact signed transactions
     /// under this one Connect generation. A one-sided acceptance cannot be
     /// promoted to paired evidence. No transaction is broadcast here.
-    pub async fn observe_ancestry_pair(
+    async fn observe_ancestry_pair(
         &self,
         bitcoin: &Transaction,
         fork: &Transaction,
