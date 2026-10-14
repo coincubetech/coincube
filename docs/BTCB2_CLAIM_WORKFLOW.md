@@ -1,26 +1,32 @@
-# Dormant Claim intent journal
+# Claim and Split intent journals
 
-`services::claim_workflow` is a bookkeeping prerequisite, not an enabled Claim
-wizard. No UI caller, signing, broadcast, foreign-seed import or existing-wallet
-write is installed. `Step2Authorization` is an empty enum: saved phases, txids and
-observation eligibility cannot construct a spend permission.
+`services::claim_workflow` records Claim and foreign Split intents. The current
+desktop shows two-deposit preparation and read-only checks, but the ordinary
+ancestry pair is not yet admitted to production signing or broadcast. The
+90-byte OP_RETURN path is retired for new transactions. Existing legacy
+records remain readable for reconciliation. `Step2Authorization` is an empty
+enum: saved phases, txids and observation eligibility cannot construct a
+spend permission.
 
-Initial admission requires `claim_spend::PoisonSelfTransfer`, the opaque owned
-native-P2WSH builder artifact. It binds exact unsigned transaction bytes, source
-and target ChainId, claimed prevouts, distinct Cube identities and a canonical
-descriptor digest. Input-ancestry poison remains unsupported. The builder proves
-construction ownership, not live UTXO availability, reserved-index freshness,
-RDTS activation or signature/mempool validity. No timestamp or missing other-chain
-transaction proves chain-exclusive funds.
+Version-10 Claim and version-11 Split intents bind two ordinary unsigned
+transactions: all shared pre-fork inputs plus a verified Bitcoin-only funding
+input on Bitcoin, and the same shared inputs plus a verified BTCB2-only funding
+input on BTCB2. Their descriptors, reserved indices, destinations, fee rates,
+retained ancestry paths and account/provider identities are recorded and
+checked on reopen. Core construction proves wallet ownership and transaction
+shape; the live two-chain collector must separately prove both funding
+dependencies, canonical shared inputs and current spendability. A timestamp or
+an absent transaction on the other chain is never such proof.
 
-The private versioned journal stores the ClaimPlan, unsigned transaction digest,
-phase, signed step-one txid and last known inclusion. It stores a digest binding
-the non-secret account/provider identities, not account tokens. It stores no seed,
-private key, signed witnesses or cached spend authorization. Reopening requires
-matching wallet and account/provider identities, starts unchecked, and discards
-all observation state. A new process generation is allowed, but initial
-construction must be revalidated against a freshly reconstructed opaque artifact
-before recording any new broadcast intent.
+The private versioned journal stores no seed, private key, account token or
+cached spend authority. A version-10/11 record may atomically retain both
+finalized signed witnesses and their exact txid/wtxid before any possible
+network attempt. Each possible attempt is separately persisted before I/O and
+cannot be cleared or repeated after restart. Reopening requires matching
+wallet and account/provider identities, starts unchecked, and discards live
+ancestry, preflight and approval state. The exact witnesses are recovery data,
+not permission to send. The older single-step journals retain their own
+legacy reconstruction and reconciliation rules.
 
 The caller supplies a private, owned directory dedicated to this intent. This
 module never creates a wallet directory or chooses a production path. Unix mode
@@ -48,7 +54,7 @@ tips; the result's previous assessment is ignored. Stale, unavailable, reorg and
 changed views replace eligibility. Prior inclusion is retained as evidence of a
 reorg, not silently erased to permit progression.
 
-`record_broadcast_intent` consumes fresh observations, rechecks them and durably
+For legacy records, `record_broadcast_intent` consumes fresh observations, rechecks them and durably
 records `BroadcastUncertain` with the witness-bound native-segwit txid *before*
 any future external broadcast attempt. It verifies unsigned-byte identity and
 nonempty witnesses only; it does not verify signatures or grant permission to
@@ -61,13 +67,21 @@ Transaction replacement has no in-place API: a different transaction requires an
 explicit new builder plan and separately owned intent directory; the old uncertain
 transaction must still be reconciled before any future live workflow proceeds.
 
+Paired possible-attempt recording additionally requires a short-lived,
+controller-bound ancestry result for the exact two signed witnesses and
+matching node-policy tips. After Bitcoin confirms, a different collector
+checks the exact canonical six-deep Bitcoin witness and that the BTCB2 inputs
+remain unspent. Its result must agree with the independently recovered Bitcoin
+confirmation block. Neither result is restored from the journal. The paired
+coordinator must still connect wallet reservations, fresh review, explicit
+approval and the one-use transport gates before production can send.
+
 Synthetic temporary-directory fixtures cover public artifact admission, restart,
 uncertain broadcast, reorg/stale/unavailable observations, account/provider and
 controller-ticket isolation, replacement, conflicting writers and write failure.
-Local checks compile fixtures only. Full GUI runtime tests must run in ephemeral
-pinned CI; no existing wallet or host secret-store fixtures are authorized here.
-Remaining launch gates include UI lifecycle integration, fresh-indexer acceptance,
-signature/final-witness and mempool preflight, live endpoint readiness, reorg recovery
-policy and end-to-end synthetic create/sign/confirm/restart validation. No production
-flag or service configuration is changed. Rollback leaves this module dormant and
-preserves journal evidence; never delete an uncertain broadcast record automatically.
+Local unit tests exercise the journal and recovery readers; pinned two-chain
+regtest covers the ordinary signed transactions. Production still needs the
+paired coordinator, wallet reservation backend, UI signing and recovery route,
+fresh preflight, and end-to-end create/sign/confirm/restart acceptance. No
+production signer gate or service configuration has been opened. Never delete
+an uncertain broadcast record automatically.

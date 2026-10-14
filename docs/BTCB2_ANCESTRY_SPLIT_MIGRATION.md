@@ -420,7 +420,8 @@ marker spend cases remain.
    post-Bitcoin proof is issued only after the stage-two collector agrees with
    the saved witnesses, exact canonical Bitcoin confirmation block, input set
    and current two-chain tips. Recording the possible BTCB2 send requires
-   this new proof as well as fresh fork policy and the six-confirmation token.
+   this new proof as well as fresh fork policy and the *same* six-confirmation
+   block token, so a reorg between collection and submission forces a new read.
    Neither proof survives restart or grants transport access by itself.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired

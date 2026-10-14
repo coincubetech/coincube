@@ -520,6 +520,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         signed.bitcoin().transaction(),
         signed.fork().transaction(),
+        &confirmation,
         hash(7),
         100,
     );
@@ -656,6 +657,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         signed.bitcoin().transaction(),
         signed.fork().transaction(),
+        &confirmation,
         hash(7),
         100,
     );
@@ -692,6 +694,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         signed.bitcoin().transaction(),
         signed.fork().transaction(),
+        &refreshed_confirmation,
         hash(8),
         200,
     );
@@ -723,6 +726,24 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             &refreshed_post_proof,
             refreshed_fork.fork(),
             &confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let reorged_confirmation =
+        refreshed_confirmation
+            .clone()
+            .with_block_for_test(coincube_core::claim::BlockRef {
+                height: 2,
+                hash: hash(9),
+            });
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &reorged_confirmation,
             freshness,
             200,
         ),

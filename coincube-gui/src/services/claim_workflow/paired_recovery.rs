@@ -68,6 +68,12 @@ impl BitcoinConfirmation {
         self.block
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_block_for_test(mut self, block: BlockRef) -> Self {
+        self.block = block;
+        self
+    }
+
     pub(crate) fn accepted_for(
         &self,
         current: &Context,

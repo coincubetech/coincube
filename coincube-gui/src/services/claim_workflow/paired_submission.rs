@@ -12,7 +12,7 @@ use crate::services::claim_observation::http::{CollectedPostBitcoinInputs, Fundi
 use crate::services::claim_preflight::{Evidence, FreshnessPolicy, PairEvidence};
 use coincube_core::{
     chain::ChainId,
-    claim::{Policy, PreflightTips},
+    claim::{BlockRef, Policy, PreflightTips},
     claim_finalize::VerifiedAncestryClaimPair,
     foreign_split::VerifiedAncestrySplitPair,
     miniscript::bitcoin::{BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
@@ -83,6 +83,7 @@ pub(crate) struct PostBitcoinAncestryProof {
     bitcoin: (Txid, Wtxid),
     fork: (Txid, Wtxid),
     tips: PreflightTips,
+    confirmed_bitcoin_block: BlockRef,
     observed_at: i64,
     max_age_seconds: i64,
 }
@@ -94,6 +95,7 @@ impl PostBitcoinAncestryProof {
         current: &Context,
         record: &PairedSubmissionRecord,
         preflight: &Evidence,
+        confirmation: &BitcoinConfirmation,
         now: i64,
     ) -> bool {
         self.controller == controller.id
@@ -101,6 +103,7 @@ impl PostBitcoinAncestryProof {
             && self.bitcoin == record.bitcoin_identity()
             && self.fork == record.fork_identity()
             && self.tips.fork.hash == preflight.tip()
+            && self.confirmed_bitcoin_block == confirmation.block()
             && proof_fresh(self.observed_at, now, self.max_age_seconds)
     }
 }
@@ -149,6 +152,7 @@ pub(super) fn post_bitcoin_proof_for_test(
     current: &Context,
     bitcoin: &Transaction,
     fork: &Transaction,
+    confirmation: &BitcoinConfirmation,
     tip: BlockHash,
     observed_at: i64,
 ) -> PostBitcoinAncestryProof {
@@ -168,6 +172,7 @@ pub(super) fn post_bitcoin_proof_for_test(
                 hash: tip,
             },
         },
+        confirmed_bitcoin_block: confirmation.block(),
         observed_at,
         max_age_seconds: MAX_PROOF_AGE_SECONDS,
     }
@@ -428,6 +433,7 @@ impl Controller {
             bitcoin: saved.bitcoin_identity(),
             fork: saved.fork_identity(),
             tips,
+            confirmed_bitcoin_block: confirmation.block(),
             observed_at: observed.observed_at(),
             max_age_seconds: policy.max_observation_age_seconds,
         })
@@ -494,7 +500,7 @@ impl Controller {
             .paired_submission
             .as_ref()
             .ok_or(Error::Unchecked)?;
-        if !ancestry.accepted_for(self, current, saved, preflight, now) {
+        if !ancestry.accepted_for(self, current, saved, preflight, confirmation, now) {
             return Err(Error::LateObservation);
         }
         if !confirmation.accepted_for(current, saved.bitcoin(), now) {
