@@ -6,6 +6,7 @@ use super::{
     claim_observation::http::{
         ClaimPairError, DiscoveryError, FundingContext, HttpObservationSource, OwnedClaimFunding,
     },
+    claim_observation::{FailureKind, ObservationSource},
     coincube::CoincubeClient,
     foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanError, ScanPlan},
     foreign_split_inventory::{self, FreshDepositAddresses, InventoryError, TwoChainScan},
@@ -35,6 +36,13 @@ pub enum ClaimInventoryError {
     Ownership,
     TooManyFundingCandidates,
     WalletState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClaimPairSnapshotError {
+    WalletState,
+    Observation(FailureKind),
+    Changed,
 }
 
 /// The full paired scan is retained for status and coverage reporting. The
@@ -443,6 +451,71 @@ impl ClaimInventory {
             .await
             .map_err(|_| ClaimInventoryError::WalletState)?;
         self.reconcile_fork_wallet_snapshot(&info, &coins.coins, fork_funding_index)
+    }
+
+    /// Reconcile both complete Vault coin sets against one exact ordinary
+    /// Claim pair, then read both tips *after* those wallet checks. The
+    /// collected funding and shared-input proof must still match the pair and
+    /// current session at the end. A signer dispatch must recollect the proof
+    /// and rerun this operation; this result is never cached authority.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn reconcile_pair_snapshot(
+        &self,
+        bitcoin_daemon: &(dyn Daemon + Send + Sync),
+        fork_daemon: &(dyn Daemon + Send + Sync),
+        bitcoin_funding_index: u32,
+        fork_funding_index: u32,
+        funding: &OwnedClaimFunding,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        source: &HttpObservationSource,
+        context: FundingContext<'_>,
+    ) -> Result<(), ClaimPairSnapshotError> {
+        let validate = |now| {
+            funding
+                .inputs
+                .validate_for_claim(
+                    &funding.bitcoin_path,
+                    &funding.fork_path,
+                    &funding.bitcoin,
+                    &funding.fork,
+                    bitcoin,
+                    fork,
+                    FundingContext { now, ..context },
+                )
+                .map_err(ClaimPairSnapshotError::Observation)
+        };
+        validate(source.now())?;
+        tokio::try_join!(
+            async {
+                self.reconcile_daemon(bitcoin_daemon, bitcoin_funding_index)
+                    .await
+                    .map_err(|_| ClaimPairSnapshotError::WalletState)
+            },
+            async {
+                self.reconcile_fork_daemon(fork_daemon, fork_funding_index)
+                    .await
+                    .map_err(|_| ClaimPairSnapshotError::WalletState)
+            },
+        )?;
+        let (bitcoin_tip, fork_tip) = tokio::try_join!(
+            async {
+                source
+                    .tip(ChainId::Bitcoin)
+                    .await
+                    .map_err(ClaimPairSnapshotError::Observation)
+            },
+            async {
+                source
+                    .tip(ChainId::BitcoinBlake2b)
+                    .await
+                    .map_err(ClaimPairSnapshotError::Observation)
+            },
+        )?;
+        if bitcoin_tip.value() != &context.tips.bitcoin || fork_tip.value() != &context.tips.fork {
+            return Err(ClaimPairSnapshotError::Changed);
+        }
+        validate(source.now())
     }
 
     /// Bind this scan's candidates to one fresh paired ancestry collection.

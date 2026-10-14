@@ -1699,43 +1699,33 @@ impl ClaimStep1Panel {
                         proof.fork.outpoint,
                     )
                     .map_err(str::to_owned)?;
-                    // Reserving both change branches and constructing the PSBTs
-                    // can race a wallet update. Re-read each complete wallet
-                    // before displaying the pair; a changed shared or funding
-                    // coin must not appear as a current preview. Signing will
-                    // still require a separate fresh admission check.
+                    // Reserving both change branches and constructing the
+                    // PSBTs can race a wallet update. This same paired
+                    // snapshot check is reusable at the signer boundary,
+                    // where it must follow a fresh proof collection.
                     inventory
-                        .reconcile_daemon(&*daemon, saved.indices.bitcoin_deposit)
+                        .reconcile_pair_snapshot(
+                            &*daemon,
+                            &*fork_daemon,
+                            saved.indices.bitcoin_deposit,
+                            saved.indices.btcb2_deposit,
+                            &proof,
+                            &bitcoin,
+                            &fork,
+                            &source,
+                            review_context,
+                        )
                         .await
-                        .map_err(|_| {
-                            "The Bitcoin Vault changed while preparing the Claim preview. Check deposits again."
-                                .to_string()
+                        .map_err(|error| match error {
+                            crate::services::claim_inventory::ClaimPairSnapshotError::WalletState =>
+                                "The Bitcoin or paired BTCB2 Vault changed while preparing the Claim preview. Check deposits again."
+                                    .to_string(),
+                            crate::services::claim_inventory::ClaimPairSnapshotError::Observation(error) =>
+                                funding_proof_refusal(crate::services::claim_observation::http::DiscoveryError::Observation(error)).to_string(),
+                            crate::services::claim_inventory::ClaimPairSnapshotError::Changed =>
+                                "The two-chain Claim proof changed while preparing the preview. Check deposits again."
+                                    .to_string(),
                         })?;
-                    inventory
-                        .reconcile_fork_daemon(&*fork_daemon, saved.indices.btcb2_deposit)
-                        .await
-                        .map_err(|_| {
-                            "The paired BTCB2 Vault changed while preparing the Claim preview. Check deposits again."
-                                .to_string()
-                        })?;
-                    let (bitcoin_tip, fork_tip) = tokio::try_join!(
-                        source.tip(ChainId::Bitcoin),
-                        source.tip(ChainId::BitcoinBlake2b),
-                    )
-                    .map_err(|_| {
-                        "The chain tips could not be refreshed for the Claim preview. Check deposits again."
-                            .to_string()
-                    })?;
-                    let proof_age = source.now().checked_sub(proof.inputs.observed_at());
-                    if bitcoin_tip.value() != &tips.bitcoin
-                        || fork_tip.value() != &tips.fork
-                        || !proof_age.is_some_and(|age| {
-                            (0..=CHECK_POLICY.observations.max_observation_age_seconds)
-                                .contains(&age)
-                        })
-                    {
-                        return Err("The two-chain Claim proof changed or expired while preparing the preview. Check deposits again.".into());
-                    }
                     let review = view::vault::ancestry_coins::VerifiedCoinPairReview::new(
                         coins,
                         proof.inputs.funding().bitcoin().block(),
