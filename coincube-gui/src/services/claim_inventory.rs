@@ -8,13 +8,18 @@ use super::{
     foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanError, ScanPlan},
     foreign_split_inventory::{self, FreshDepositAddresses, InventoryError, TwoChainScan},
 };
+use crate::daemon::{model, Daemon};
 use coincube_core::{
     chain::ChainId,
     claim::Policy,
     descriptors::CoincubeDescriptor,
     foreign_split::{SplitBranch, SplitCoin},
-    miniscript::bitcoin::{bip32::ChildNumber, secp256k1::Secp256k1},
+    miniscript::bitcoin::{bip32::ChildNumber, secp256k1::Secp256k1, Network, OutPoint},
     spend::CandidateCoin,
+};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    convert::TryFrom,
 };
 use tokio::sync::watch;
 
@@ -24,6 +29,7 @@ pub enum ClaimInventoryError {
     Scan(InventoryError),
     Ownership,
     TooManyFundingCandidates,
+    WalletState,
 }
 
 /// The full paired scan is retained for status and coverage reporting. The
@@ -172,6 +178,152 @@ impl ClaimInventory {
         &self.fork_funding
     }
 
+    /// Compare the paired scan with the Bitcoin Vault daemon's full wallet
+    /// state. A bounded address walk may miss an older pre-fork coin outside
+    /// its range; such a coin must stop the all-coins Claim. Callers must use
+    /// an unfiltered `list_coins` response, not a selected-coin subset.
+    pub fn reconcile_wallet_snapshot(
+        &self,
+        info: &model::GetInfoResult,
+        coins: &[model::Coin],
+        bitcoin_funding_index: u32,
+    ) -> Result<(), ClaimInventoryError> {
+        let stale = || ClaimInventoryError::WalletState;
+        let reports = [&self.scan.bitcoin, &self.scan.btcb2];
+        if info.network != Network::Bitcoin
+            || info.descriptors.main != self.descriptor
+            || !info.sync.is_finite()
+            || info.sync < 0.9999
+            || info.block_height < 0
+            || u64::try_from(info.block_height).map_err(|_| stale())?
+                < u64::from(self.scan.bitcoin.tip_height())
+            || info.rescan_progress.is_some()
+            || info.refused_reorg_depth.is_some()
+            || info.chain_divergence
+            || info.history_sync.full_scan_in_progress
+            || info.history_sync.last_failure.is_some()
+        {
+            return Err(stale());
+        }
+        for report in reports {
+            for (branch, revealed) in [
+                (Branch::External, info.receive_index),
+                (Branch::Internal, info.change_index),
+            ] {
+                let coverage = report.coverage(branch).ok_or_else(stale)?;
+                if coverage.start != 0 || !coverage.contains(revealed) {
+                    return Err(stale());
+                }
+            }
+        }
+        let fork_height = self.scan.inventory.fork_height();
+        let expected: BTreeMap<OutPoint, &CandidateCoin> = self
+            .shared
+            .iter()
+            .map(|coin| (coin.outpoint, coin))
+            .collect();
+        let scan_shared = self.scan.inventory.splittable_coins();
+        if expected.len() != self.shared.len() || expected.len() != scan_shared.len() {
+            return Err(stale());
+        }
+        let mut all = BTreeMap::new();
+        let mut current_shared = BTreeSet::new();
+        for coin in coins {
+            if all.insert(coin.outpoint, coin).is_some() {
+                return Err(stale());
+            }
+            if coin.spend_info.is_none()
+                && coin
+                    .block_height
+                    .is_some_and(|height| height >= 0 && (height as u64) < fork_height)
+            {
+                if coin.is_immature || !expected.contains_key(&coin.outpoint) {
+                    return Err(stale());
+                }
+                current_shared.insert(coin.outpoint);
+            }
+        }
+        if current_shared.len() != expected.len() {
+            return Err(stale());
+        }
+        for scanned in scan_shared {
+            let coin = all.get(&scanned.outpoint).ok_or_else(stale)?;
+            let candidate = expected.get(&scanned.outpoint).ok_or_else(stale)?;
+            let height = scanned.bitcoin_block.ok_or_else(stale)?.height;
+            let output = scanned
+                .previous
+                .output
+                .get(scanned.outpoint.vout as usize)
+                .ok_or_else(stale)?;
+            if scanned.btcb2_block.is_none()
+                || coin.spend_info.is_some()
+                || coin.is_immature
+                || coin.block_height != i32::try_from(height).ok()
+                || coin.amount != candidate.amount
+                || coin.derivation_index != candidate.deriv_index
+                || coin.is_change != candidate.is_change
+                || coin.address.script_pubkey() != output.script_pubkey
+            {
+                return Err(stale());
+            }
+        }
+        for candidate in self.bitcoin_funding.iter().filter(|candidate| {
+            !candidate.is_change
+                && candidate.deriv_index
+                    == ChildNumber::Normal {
+                        index: bitcoin_funding_index,
+                    }
+        }) {
+            let coin = all.get(&candidate.outpoint).ok_or_else(stale)?;
+            let scanned = self
+                .scan
+                .bitcoin
+                .coins()
+                .iter()
+                .find(|coin| coin.outpoint == candidate.outpoint)
+                .ok_or_else(stale)?;
+            if coin.spend_info.is_some()
+                || coin.is_immature
+                || coin.block_height != scanned.block_height.and_then(|h| i32::try_from(h).ok())
+                || !coin
+                    .block_height
+                    .is_some_and(|h| h >= 0 && (h as u64) >= fork_height)
+                || coin.amount != candidate.amount
+                || coin.derivation_index != candidate.deriv_index
+                || coin.is_change
+                || coin.address.script_pubkey() != scanned.output.script_pubkey
+            {
+                return Err(stale());
+            }
+        }
+        Ok(())
+    }
+
+    /// Read the daemon's complete coin set immediately before paired proof
+    /// discovery. This is a review prerequisite, not signer admission: tips,
+    /// ancestry and unspent state need a fresh recheck when Sign is pressed.
+    pub async fn reconcile_daemon(
+        &self,
+        daemon: &(dyn Daemon + Send + Sync),
+        bitcoin_funding_index: u32,
+    ) -> Result<(), ClaimInventoryError> {
+        if !daemon.config().is_some_and(|config| {
+            config.bitcoin_config.chain == ChainId::Bitcoin
+                && config.main_descriptor == self.descriptor
+        }) {
+            return Err(ClaimInventoryError::WalletState);
+        }
+        let info = daemon
+            .get_info()
+            .await
+            .map_err(|_| ClaimInventoryError::WalletState)?;
+        let coins = daemon
+            .list_coins(&[], &[])
+            .await
+            .map_err(|_| ClaimInventoryError::WalletState)?;
+        self.reconcile_wallet_snapshot(&info, &coins.coins, bitcoin_funding_index)
+    }
+
     /// Bind this scan's candidates to one fresh paired ancestry collection.
     /// The selected result remains review-only; the complete wallet UTXO set,
     /// reservations and current spend preflight still need separate admission.
@@ -195,13 +347,15 @@ impl ClaimInventory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::foreign_scan::{BranchCoverage, DiscoveredCoin, ScanReport};
     use coincube_core::{
         bip39::Mnemonic,
         descriptors::{CoincubePolicy, PathInfo},
         miniscript::{
             bitcoin::{
-                absolute::LockTime, bip32::DerivationPath, secp256k1, transaction::Version, Amount,
-                Network, OutPoint, Transaction, TxIn, TxOut,
+                absolute::LockTime, bip32::DerivationPath, hashes::Hash, secp256k1,
+                transaction::Version, Address, Amount, BlockHash, Network, OutPoint, Transaction,
+                TxIn, TxOut,
             },
             DescriptorPublicKey,
         },
@@ -281,5 +435,185 @@ mod tests {
                 Err(ClaimInventoryError::Ownership)
             );
         }
+    }
+
+    #[test]
+    fn wallet_reconciliation_refuses_unscanned_shared_coin_and_incomplete_coverage() {
+        let descriptor = descriptor();
+        let script = descriptor
+            .receive_descriptor()
+            .derive(3.into(), &Secp256k1::verification_only())
+            .script_pubkey();
+        let previous = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: script.clone(),
+            }],
+        };
+        let outpoint = OutPoint::new(previous.compute_txid(), 0);
+        let shared = DiscoveredCoin {
+            branch: Branch::External,
+            index: 3,
+            outpoint,
+            output: previous.output[0].clone(),
+            previous,
+            confirmed: true,
+            block_height: Some(90),
+            block_hash: Some(BlockHash::all_zeros()),
+        };
+        let funding_script = descriptor
+            .receive_descriptor()
+            .derive(4.into(), &Secp256k1::verification_only())
+            .script_pubkey();
+        let funding_previous = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: funding_script.clone(),
+            }],
+        };
+        let funding_outpoint = OutPoint::new(funding_previous.compute_txid(), 0);
+        let funding = DiscoveredCoin {
+            branch: Branch::External,
+            index: 4,
+            outpoint: funding_outpoint,
+            output: funding_previous.output[0].clone(),
+            previous: funding_previous,
+            confirmed: true,
+            block_height: Some(110),
+            block_hash: Some(BlockHash::all_zeros()),
+        };
+        let coverage = [Branch::External, Branch::Internal]
+            .iter()
+            .copied()
+            .map(|branch| BranchCoverage {
+                branch,
+                start: 0,
+                end_exclusive: 10,
+                last_used: None,
+            })
+            .collect::<Vec<_>>();
+        let tip = BlockHash::all_zeros();
+        let bitcoin = ScanReport::for_test(ChainId::Bitcoin, 1, tip, vec![shared.clone(), funding])
+            .with_tip_height(130)
+            .with_coverage(coverage.clone());
+        let btcb2 = ScanReport::for_test(ChainId::BitcoinBlake2b, 1, tip, vec![shared])
+            .with_fork_height(Some(100))
+            .with_tip_height(130)
+            .with_coverage(coverage);
+        let inventory =
+            foreign_split_inventory::SplitInventory::join(&btcb2, &bitcoin, 1, true).unwrap();
+        let scan = ClaimInventory::from_scan(
+            &descriptor,
+            TwoChainScan {
+                bitcoin,
+                btcb2,
+                inventory,
+            },
+        )
+        .unwrap();
+        let mut info = model::GetInfoResult {
+            version: "test".into(),
+            network: Network::Bitcoin,
+            block_height: 130,
+            sync: 1.0,
+            descriptors: coincubed::commands::GetInfoDescriptors {
+                main: descriptor.clone(),
+            },
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: Some(1),
+            history_sync: Default::default(),
+            receive_index: 3,
+            change_index: 3,
+        };
+        let coin = model::Coin {
+            amount: Amount::from_sat(50_000),
+            outpoint,
+            address: Address::from_script(&script, Network::Bitcoin).unwrap(),
+            block_height: Some(90),
+            derivation_index: ChildNumber::Normal { index: 3 },
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        let funding_coin = model::Coin {
+            amount: Amount::from_sat(10_000),
+            outpoint: funding_outpoint,
+            address: Address::from_script(&funding_script, Network::Bitcoin).unwrap(),
+            block_height: Some(110),
+            derivation_index: ChildNumber::Normal { index: 4 },
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[coin.clone(), funding_coin.clone()], 4),
+            Ok(())
+        );
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[funding_coin.clone()], 4),
+            Err(ClaimInventoryError::WalletState)
+        );
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[coin.clone()], 4),
+            Err(ClaimInventoryError::WalletState)
+        );
+        let extra = model::Coin {
+            outpoint: OutPoint::null(),
+            ..coin.clone()
+        };
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[coin.clone(), funding_coin.clone(), extra], 4),
+            Err(ClaimInventoryError::WalletState)
+        );
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(
+                &info,
+                &[
+                    model::Coin {
+                        spend_info: Some(coincubed::commands::LCSpendInfo {
+                            txid: coincube_core::miniscript::bitcoin::Txid::all_zeros(),
+                            height: None,
+                        }),
+                        ..coin.clone()
+                    },
+                    funding_coin.clone()
+                ],
+                4
+            ),
+            Err(ClaimInventoryError::WalletState)
+        );
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(
+                &info,
+                &[
+                    coin.clone(),
+                    model::Coin {
+                        spend_info: Some(coincubed::commands::LCSpendInfo {
+                            txid: coincube_core::miniscript::bitcoin::Txid::all_zeros(),
+                            height: None,
+                        }),
+                        ..funding_coin.clone()
+                    }
+                ],
+                4
+            ),
+            Err(ClaimInventoryError::WalletState)
+        );
+        info.receive_index = 10;
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[coin, funding_coin], 4),
+            Err(ClaimInventoryError::WalletState)
+        );
     }
 }

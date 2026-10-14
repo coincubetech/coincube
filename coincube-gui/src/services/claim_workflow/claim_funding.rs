@@ -3,8 +3,9 @@
 //! of chain exclusivity or a permission to sign.
 
 use super::{journal::Journal, Context, Error, WalletIdentity};
+use crate::daemon::{model, Daemon};
 use crate::services::{
-    claim_inventory::ClaimInventory,
+    claim_inventory::{ClaimInventory, ClaimInventoryError},
     claim_observation::{
         http::{DiscoveryError, HttpObservationSource, OwnedClaimFunding},
         CollectionContext, FailureKind,
@@ -57,6 +58,23 @@ fn select_reserved_candidates(
     )
 }
 
+fn ensure_claim_wallet_ready(
+    info: &model::GetInfoResult,
+    saved: &ClaimFundingReservation,
+) -> Result<(), ClaimAddressError> {
+    if info.network != Network::Bitcoin
+        || info.descriptors.main.to_string() != saved.descriptor
+        || info.rescan_progress.is_some()
+        || info.chain_divergence
+        || info.refused_reorg_depth.is_some()
+        || info.history_sync.full_scan_in_progress
+        || info.history_sync.last_failure.is_some()
+    {
+        return Err(ClaimAddressError::WalletState);
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimAddressError {
     InvalidReservation,
@@ -65,6 +83,7 @@ pub enum ClaimAddressError {
     ChangedSession,
     Used,
     Unavailable,
+    WalletState,
     Stale,
     Deadline,
 }
@@ -78,6 +97,7 @@ pub struct CheckedClaimFundingAddresses {
 #[derive(Debug)]
 pub enum ClaimFundingDiscoveryError {
     InvalidReservation(Error),
+    WalletState(ClaimInventoryError),
     Discovery(DiscoveryError),
 }
 
@@ -279,6 +299,7 @@ impl ClaimFundingReservation {
         inventory: &ClaimInventory,
         identity: &WalletIdentity,
         context: &Context,
+        daemon: &(dyn Daemon + Send + Sync),
         source: &HttpObservationSource,
         policy: Policy,
     ) -> Result<Option<OwnedClaimFunding>, ClaimFundingDiscoveryError> {
@@ -302,6 +323,13 @@ impl ClaimFundingReservation {
         let (bitcoin, fork) = self
             .reserved_candidates(inventory, identity, context)
             .map_err(ClaimFundingDiscoveryError::InvalidReservation)?;
+        tokio::time::timeout(
+            ADDRESS_CHECK_BUDGET,
+            inventory.reconcile_daemon(daemon, self.indices.bitcoin_deposit),
+        )
+        .await
+        .map_err(|_| ClaimFundingDiscoveryError::WalletState(ClaimInventoryError::WalletState))?
+        .map_err(ClaimFundingDiscoveryError::WalletState)?;
         if bitcoin.is_empty() || fork.is_empty() || inventory.shared().is_empty() {
             return Ok(None);
         }
@@ -439,6 +467,74 @@ pub async fn check_reserved_claim_addresses(
     checked_history(&esplora, addresses, &generation, expected).await
 }
 
+/// Prepare the Bitcoin Vault to notice deposits at both reserved receive
+/// indices, then release the already checked instructions. Revealing an index
+/// does not authorize a spend or assert chain-exclusive ancestry.
+#[allow(clippy::too_many_arguments)]
+pub async fn prepare_claim_deposit_instructions(
+    directory: PathBuf,
+    descriptor: CoincubeDescriptor,
+    identity: WalletIdentity,
+    context: Context,
+    client: CoincubeClient,
+    generation: watch::Receiver<u64>,
+    daemon: &(dyn Daemon + Send + Sync),
+) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
+    let checked = check_reserved_claim_addresses(
+        directory.clone(),
+        descriptor.clone(),
+        identity.clone(),
+        context.clone(),
+        client,
+        generation.clone(),
+    )
+    .await?;
+    let expected = context.generation;
+    let saved = tokio::task::spawn_blocking(move || {
+        load_claim_funding(&directory, &descriptor, &identity, &context)
+    })
+    .await
+    .map_err(|_| ClaimAddressError::Unavailable)?
+    .map_err(|_| ClaimAddressError::InvalidReservation)?
+    .ok_or(ClaimAddressError::MissingReservation)?;
+    if saved
+        .addresses()
+        .map_err(|_| ClaimAddressError::InvalidReservation)?
+        != [
+            checked.bitcoin_deposit.clone(),
+            checked.btcb2_deposit.clone(),
+        ]
+    {
+        return Err(ClaimAddressError::InvalidReservation);
+    }
+    let highest = saved
+        .indices
+        .bitcoin_deposit
+        .max(saved.indices.btcb2_deposit);
+    if !daemon.config().is_some_and(|config| {
+        config.bitcoin_config.chain == coincube_core::chain::ChainId::Bitcoin
+            && config.main_descriptor.to_string() == saved.descriptor
+    }) {
+        return Err(ClaimAddressError::WalletState);
+    }
+    let info = daemon
+        .get_info()
+        .await
+        .map_err(|_| ClaimAddressError::WalletState)?;
+    ensure_claim_wallet_ready(&info, &saved)?;
+    let updated = daemon
+        .update_deriv_indexes(Some(highest), None)
+        .await
+        .map_err(|_| ClaimAddressError::WalletState)?;
+    if updated.receive < highest {
+        return Err(ClaimAddressError::WalletState);
+    }
+    if !current(&generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    Ok(checked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -566,6 +662,65 @@ mod tests {
             )
             .unwrap(),
         )
+    }
+
+    #[test]
+    fn deposit_instructions_require_the_matching_healthy_bitcoin_wallet() {
+        let descriptor = descriptor();
+        let identity = WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+        };
+        let saved = ClaimFundingReservation::new(
+            &descriptor,
+            &identity,
+            &Context {
+                generation: 1,
+                account: "account".into(),
+                provider: "https://connect.example".into(),
+            },
+            FreshDepositAddresses {
+                bitcoin_deposit: 4,
+                btcb2_deposit: 5,
+            },
+        )
+        .unwrap();
+        let mut info = model::GetInfoResult {
+            version: "test".into(),
+            network: Network::Bitcoin,
+            block_height: 1,
+            sync: 1.0,
+            descriptors: coincubed::commands::GetInfoDescriptors {
+                main: descriptor.clone(),
+            },
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: None,
+            history_sync: Default::default(),
+            receive_index: 0,
+            change_index: 0,
+        };
+        assert_eq!(ensure_claim_wallet_ready(&info, &saved), Ok(()));
+        info.chain_divergence = true;
+        assert_eq!(
+            ensure_claim_wallet_ready(&info, &saved),
+            Err(ClaimAddressError::WalletState)
+        );
+        info.chain_divergence = false;
+        info.history_sync.full_scan_in_progress = true;
+        assert_eq!(
+            ensure_claim_wallet_ready(&info, &saved),
+            Err(ClaimAddressError::WalletState)
+        );
+        info.history_sync.full_scan_in_progress = false;
+        info.network = Network::Testnet;
+        assert_eq!(
+            ensure_claim_wallet_ready(&info, &saved),
+            Err(ClaimAddressError::WalletState)
+        );
     }
 
     #[test]

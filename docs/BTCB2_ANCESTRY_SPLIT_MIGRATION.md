@@ -156,12 +156,21 @@ a replayable spend.
    two distinct receive indices from its paired Cube scan in a private journal
    bound to both Cubes, the Vault descriptor and the Connect identity. Its
    pre-display check reloads that exact record and requires fresh unused
-   address history on both chains for both addresses. Creation of a version-10
+   address history on both chains for both addresses. A preparation step also
+   checks the Bitcoin Vault descriptor and advances its receive index through
+   both reserved addresses before returning the deposit instructions, so its
+   daemon can discover incoming funds. Creation of a version-10
    paired Claim intent now requires that saved record and checks both funding
    derivations against its exact external indices under the journal lock. The
    paired Claim discovery now searches only funding outputs at the two
    reserved receive indices, so a different post-fork Vault coin cannot
-   silently replace a planned deposit. The Claim wizard has not yet been
+   silently replace a planned deposit. Before that search it reads the
+   Bitcoin Vault daemon's unfiltered coin set and compares every current
+   pre-fork coin, amount, derivation, address and confirmation height to the
+   paired scan. It also requires the reserved Bitcoin funding output to be
+   present and unspent in that wallet. A missing coin, incomplete address
+   coverage, unsynced wallet or changed spend state refuses review. The Claim
+   wizard has not yet been
    wired to these checks or to the paired transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
