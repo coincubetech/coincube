@@ -22,12 +22,19 @@ use crate::{
 #[derive(Debug)]
 pub enum Error {
     InvalidRequest(&'static str),
+    FundingBelowFee(ChainId),
     Spend(SpendCreationError),
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::InvalidRequest(reason) => f.write_str(reason),
+            Self::FundingBelowFee(chain) => {
+                write!(
+                    f,
+                    "{chain:?} funding coin does not cover this transaction's fee"
+                )
+            }
             Self::Spend(error) => error.fmt(f),
         }
     }
@@ -356,9 +363,7 @@ pub fn create_ancestry_self_transfer(
         .find(|coin| coin.outpoint == poison_input)
         .ok_or(Error::InvalidRequest("Selected ancestry input is missing"))?;
     if selected.amount.to_sat() < owned_spend_fee(coins, transfer.psbt())? {
-        return Err(Error::InvalidRequest(
-            "Bitcoin-only funding input does not cover the transaction fee",
-        ));
+        return Err(Error::FundingBelowFee(ChainId::Bitcoin));
     }
     Ok(AncestrySelfTransfer {
         transfer,
@@ -628,9 +633,7 @@ fn create_fork_sweep(
             .find(|coin| coin.outpoint == marker)
             .ok_or(Error::InvalidRequest("Fork funding input is missing"))?;
         if funding.amount.to_sat() < owned_spend_fee(coins, &built.psbt)? {
-            return Err(Error::InvalidRequest(
-                "BTCB2-only funding input does not cover the transaction fee",
-            ));
+            return Err(Error::FundingBelowFee(ChainId::BitcoinBlake2b));
         }
     }
     Ok(ClaimForkSweep {
@@ -767,9 +770,7 @@ fn reconstruct_fork_sweep(
             .find(|coin| coin.outpoint == marker)
             .ok_or(Error::InvalidRequest("Fork funding input is missing"))?;
         if funding.amount.to_sat() < owned_spend_fee(coins, &rebuilt.psbt)? {
-            return Err(Error::InvalidRequest(
-                "BTCB2-only funding input does not cover the transaction fee",
-            ));
+            return Err(Error::FundingBelowFee(ChainId::BitcoinBlake2b));
         }
     }
     spend::reverify_spend_before_broadcast(source.descriptor(), &rebuilt.psbt)?;
@@ -820,9 +821,7 @@ pub fn reconstruct_ancestry_self_transfer(
         .find(|coin| coin.outpoint == dependency.selected())
         .ok_or(Error::InvalidRequest("Bitcoin funding input is missing"))?;
     if marker.amount.to_sat() < owned_spend_fee(coins, rebuilt.psbt())? {
-        return Err(Error::InvalidRequest(
-            "Bitcoin-only funding input does not cover the transaction fee",
-        ));
+        return Err(Error::FundingBelowFee(ChainId::Bitcoin));
     }
     spend::reverify_spend_before_broadcast(descriptor, rebuilt.psbt())?;
     Ok(rebuilt)
@@ -989,9 +988,7 @@ mod tests {
                 LockTime::ZERO,
                 &dependency,
             ),
-            Err(Error::InvalidRequest(
-                "Bitcoin-only funding input does not cover the transaction fee"
-            ))
+            Err(Error::FundingBelowFee(ChainId::Bitcoin))
         ));
         assert_eq!(built.poison_input(), selected);
         assert_eq!(
@@ -1257,9 +1254,7 @@ mod tests {
                 LockTime::ZERO,
                 &fork_dependency,
             ),
-            Err(Error::InvalidRequest(
-                "BTCB2-only funding input does not cover the transaction fee"
-            ))
+            Err(Error::FundingBelowFee(ChainId::BitcoinBlake2b))
         ));
         assert_eq!(fork.fork_marker(), Some(marker.outpoint));
         assert_eq!(fork.psbt().unsigned_tx.output.len(), 1);
@@ -1302,9 +1297,7 @@ mod tests {
                 &fork_dependency,
                 &underfunded,
             ),
-            Err(Error::InvalidRequest(
-                "BTCB2-only funding input does not cover the transaction fee"
-            ))
+            Err(Error::FundingBelowFee(ChainId::BitcoinBlake2b))
         ));
         for invalid in [
             vec![coins[1]],
@@ -1430,9 +1423,7 @@ mod tests {
                 &dependency,
                 &underfunded,
             ),
-            Err(Error::InvalidRequest(
-                "Bitcoin-only funding input does not cover the transaction fee"
-            ))
+            Err(Error::FundingBelowFee(ChainId::Bitcoin))
         ));
         let fork = create_ancestry_fork_sweep(
             &restored,
