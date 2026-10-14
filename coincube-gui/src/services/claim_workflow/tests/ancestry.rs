@@ -307,11 +307,21 @@ fn version_ten_pair_creation_reopens_without_live_spend_authority() {
             btcb2_deposit: 2,
         },
     )
-    .unwrap();
+    .unwrap()
+    .released_copy();
     {
         let mut journal = Journal::open(&temp.0).unwrap();
         journal
             .store_claim_funding_reservation(&reservation)
+            .unwrap();
+        journal
+            .record_claim_change_indices(
+                &reservation,
+                super::super::claim_funding::ClaimChangeIndices {
+                    bitcoin: 10,
+                    fork: 11,
+                },
+            )
             .unwrap();
     }
     for (bitcoin_rate, fork_rate) in [(6, 5), (5, 6)] {

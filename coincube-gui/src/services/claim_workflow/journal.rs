@@ -265,6 +265,30 @@ impl Journal {
         Ok(released)
     }
 
+    pub(super) fn record_claim_change_indices(
+        &mut self,
+        expected: &super::claim_funding::ClaimFundingReservation,
+        change: super::claim_funding::ClaimChangeIndices,
+    ) -> Result<super::claim_funding::ClaimFundingReservation, Error> {
+        self.ensure_current()?;
+        let saved = self
+            .load_claim_funding_reservation()?
+            .ok_or(Error::InvalidJournal)?;
+        if saved != *expected
+            || self.load()?.is_some()
+            || self.load_split_funding_reservation()?.is_some()
+            || std::fs::symlink_metadata(self.directory.join(super::SPLIT_TOMBSTONE)).is_ok()
+        {
+            return Err(Error::Conflict);
+        }
+        if saved.change_indices() == Some(change) {
+            return Ok(saved);
+        }
+        let recorded = saved.with_change_indices(change)?;
+        self.write_claim_funding_reservation(&recorded)?;
+        Ok(recorded)
+    }
+
     fn write_claim_funding_reservation(
         &mut self,
         reservation: &super::claim_funding::ClaimFundingReservation,

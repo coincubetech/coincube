@@ -10,8 +10,9 @@ mod split_funding;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
 pub use claim_funding::{
     load_claim_funding, prepare_claim_deposit_instructions, quote_claim_deposit_minimums,
-    reserve_claim_funding, CheckedClaimFundingAddresses, ClaimAddressError,
-    ClaimFundingDiscoveryError, ClaimFundingReservation,
+    reserve_claim_change_indices, reserve_claim_funding, CheckedClaimFundingAddresses,
+    ClaimAddressError, ClaimChangeError, ClaimChangeIndices, ClaimFundingDiscoveryError,
+    ClaimFundingReservation,
 };
 use coincube_core::{
     chain::ChainId,
@@ -458,6 +459,14 @@ impl Controller {
                 &context,
                 intent.ancestry.as_ref().ok_or(Error::InvalidPlan)?,
                 &intent.funding_plan.as_ref().ok_or(Error::InvalidPlan)?.fork,
+                claim_funding::ClaimChangeIndices {
+                    bitcoin: bitcoin_change_index.ok_or(Error::InvalidPlan)?,
+                    fork: intent
+                        .funding_plan
+                        .as_ref()
+                        .ok_or(Error::InvalidPlan)?
+                        .fork_change_index,
+                },
             ) {
                 return Err(Error::WrongIdentity);
             }
@@ -488,6 +497,31 @@ impl Controller {
         validate(&intent)?;
         if &intent.identity != identity || intent.context_digest != context_digest(&context) {
             return Err(Error::WrongIdentity);
+        }
+        if intent.version == 10 {
+            let saved = journal
+                .load_claim_funding_reservation()?
+                .ok_or(Error::InvalidJournal)?;
+            if !saved.matches_pair(
+                &intent.identity,
+                &context,
+                intent.ancestry.as_ref().ok_or(Error::InvalidJournal)?,
+                &intent
+                    .funding_plan
+                    .as_ref()
+                    .ok_or(Error::InvalidJournal)?
+                    .fork,
+                claim_funding::ClaimChangeIndices {
+                    bitcoin: intent.bitcoin_change_index.ok_or(Error::InvalidJournal)?,
+                    fork: intent
+                        .funding_plan
+                        .as_ref()
+                        .ok_or(Error::InvalidJournal)?
+                        .fork_change_index,
+                },
+            ) {
+                return Err(Error::WrongIdentity);
+            }
         }
         Ok(Self {
             id: controller_id()?,

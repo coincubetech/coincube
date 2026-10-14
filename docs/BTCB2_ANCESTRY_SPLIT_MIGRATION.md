@@ -98,6 +98,16 @@ a replayable spend.
    The production Claim deposit check invokes paired discovery for read-only
    status, but cannot construct or display the pair until both change
    destinations are durably reserved; it does not admit it to signers.
+   The Claim funding journal now has a version-3 record for two distinct
+   change indices. A reservation service asks the Bitcoin and BTCB2 wallet
+   backends to advance their own change branches, checks their explicit chain
+   identities and descriptor, then writes both indices under the Claim lock.
+   A partial failure burns any already allocated index. Version-10 Claim
+   creation and restart require the exact saved pair. The production wizard
+   does not yet invoke this service because it has no authenticated BTCB2
+   wallet daemon handle, and the current Connect wallet backend cannot
+   atomically reserve change indices; both conditions must be resolved before
+   the preview or signing path is enabled.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly

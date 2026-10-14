@@ -257,6 +257,42 @@ pub struct ClaimFundingReservation {
     /// that initial check or silently rotate addresses.
     #[serde(default)]
     released: bool,
+    /// Present only after both wallet backends durably advanced separate
+    /// change indices. A partial reservation burns its index but never writes
+    /// this pair, so a restart cannot infer authority from one side alone.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    change: Option<ClaimChangeIndices>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaimChangeIndices {
+    pub bitcoin: u32,
+    pub fork: u32,
+}
+
+#[derive(Debug)]
+pub enum ClaimChangeError {
+    Journal(Error),
+    WalletState,
+    Cancelled,
+}
+
+fn change_wallet_ready(
+    info: &model::GetInfoResult,
+    chain: coincube_core::chain::ChainId,
+    descriptor: &CoincubeDescriptor,
+    reserved: Option<u32>,
+) -> bool {
+    info.network == Network::Bitcoin
+        && info.chain_id == Some(chain)
+        && info.descriptors.main == *descriptor
+        && info.rescan_progress.is_none()
+        && !info.chain_divergence
+        && info.refused_reorg_depth.is_none()
+        && !info.history_sync.full_scan_in_progress
+        && info.history_sync.last_failure.is_none()
+        && reserved.is_none_or(|index| info.change_index >= index)
 }
 
 impl ClaimFundingReservation {
@@ -274,14 +310,22 @@ impl ClaimFundingReservation {
             descriptor: descriptor.to_string(),
             indices,
             released: false,
+            change: None,
         };
         saved.validate()?;
         Ok(saved)
     }
 
     pub(super) fn validate(&self) -> Result<(), Error> {
-        if !matches!(self.version, 1 | 2)
+        if !matches!(self.version, 1..=3)
             || (self.version == 1 && self.released)
+            || (self.version == 3) != self.change.is_some()
+            || self.change.is_some_and(|change| {
+                !self.released
+                    || change.bitcoin >= 1 << 31
+                    || change.fork >= 1 << 31
+                    || change.bitcoin == change.fork
+            })
             || self.identity.bitcoin_cube.is_empty()
             || self.identity.fork_cube.is_empty()
             || self.identity.bitcoin_cube.len() > 256
@@ -343,9 +387,24 @@ impl ClaimFundingReservation {
 
     pub(super) fn released_copy(&self) -> Self {
         let mut copy = self.clone();
-        copy.version = 2;
+        copy.version = if copy.change.is_some() { 3 } else { 2 };
         copy.released = true;
         copy
+    }
+
+    pub fn change_indices(&self) -> Option<ClaimChangeIndices> {
+        self.change
+    }
+
+    pub(super) fn with_change_indices(&self, change: ClaimChangeIndices) -> Result<Self, Error> {
+        if !self.released || self.change.is_some() {
+            return Err(Error::InvalidPlan);
+        }
+        let mut copy = self.clone();
+        copy.version = 3;
+        copy.change = Some(change);
+        copy.validate()?;
+        Ok(copy)
     }
 
     fn matches(
@@ -476,8 +535,11 @@ impl ClaimFundingReservation {
         context: &Context,
         bitcoin: &super::ancestry::StoredAncestry,
         fork: &super::ancestry::StoredAncestry,
+        change: ClaimChangeIndices,
     ) -> bool {
-        self.identity == *identity
+        self.released
+            && self.change == Some(change)
+            && self.identity == *identity
             && self.account == context.account
             && self.provider == context.provider
             && bitcoin.derivation.as_ref().is_some_and(|derivation| {
@@ -547,6 +609,135 @@ pub fn load_claim_funding(
         Some(_) => Err(Error::WrongIdentity),
         None => Ok(None),
     }
+}
+
+/// Ask each wallet backend to atomically advance its own change branch, then
+/// bind the resulting two indices to the released deposit record under the
+/// Claim journal lock. An index consumed before an error is deliberately
+/// burned. Reopening a completed reservation checks that both backends still
+/// report the bound chain, descriptor and at least the recorded indices.
+/// This does not prove destination address history or authorize signing.
+#[allow(clippy::too_many_arguments)]
+pub async fn reserve_claim_change_indices(
+    directory: PathBuf,
+    descriptor: &CoincubeDescriptor,
+    identity: &WalletIdentity,
+    context: &Context,
+    bitcoin_daemon: &(dyn Daemon + Send + Sync),
+    fork_daemon: &(dyn Daemon + Send + Sync),
+    generation: &watch::Receiver<u64>,
+) -> Result<ClaimChangeIndices, ClaimChangeError> {
+    use coincube_core::chain::ChainId;
+    if !current(generation, context.generation) {
+        return Err(ClaimChangeError::Cancelled);
+    }
+    let descriptor = descriptor.clone();
+    let identity = identity.clone();
+    let context = context.clone();
+    let saved = {
+        let directory = directory.clone();
+        let descriptor = descriptor.clone();
+        let identity = identity.clone();
+        let context = context.clone();
+        tokio::task::spawn_blocking(move || {
+            let journal = Journal::open(&directory)?;
+            if journal.load()?.is_some()
+                || journal.load_split_funding_reservation()?.is_some()
+                || std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok()
+            {
+                return Err(Error::Conflict);
+            }
+            let saved = journal
+                .load_claim_funding_reservation()?
+                .ok_or(Error::InvalidPlan)?;
+            if !saved.matches(&descriptor, &identity, &context) {
+                return Err(Error::WrongIdentity);
+            }
+            Ok(saved)
+        })
+        .await
+        .map_err(|_| ClaimChangeError::Journal(Error::InvalidJournal))?
+        .map_err(ClaimChangeError::Journal)?
+    };
+    if !saved.is_released() {
+        return Err(ClaimChangeError::Journal(Error::InvalidPlan));
+    }
+    let (bitcoin_info, fork_info) =
+        tokio::try_join!(bitcoin_daemon.get_info(), fork_daemon.get_info(),)
+            .map_err(|_| ClaimChangeError::WalletState)?;
+    if !change_wallet_ready(&bitcoin_info, ChainId::Bitcoin, &descriptor, None)
+        || !change_wallet_ready(&fork_info, ChainId::BitcoinBlake2b, &descriptor, None)
+    {
+        return Err(ClaimChangeError::WalletState);
+    }
+    if let Some(change) = saved.change_indices() {
+        return if current(generation, context.generation)
+            && change_wallet_ready(
+                &bitcoin_info,
+                ChainId::Bitcoin,
+                &descriptor,
+                Some(change.bitcoin),
+            )
+            && change_wallet_ready(
+                &fork_info,
+                ChainId::BitcoinBlake2b,
+                &descriptor,
+                Some(change.fork),
+            ) {
+            Ok(change)
+        } else {
+            Err(ClaimChangeError::WalletState)
+        };
+    }
+
+    let bitcoin = bitcoin_daemon
+        .reserve_change()
+        .await
+        .map_err(|_| ClaimChangeError::WalletState)?;
+    let mut fork = fork_daemon
+        .reserve_change()
+        .await
+        .map_err(|_| ClaimChangeError::WalletState)?;
+    if bitcoin == fork {
+        fork = fork_daemon
+            .reserve_change()
+            .await
+            .map_err(|_| ClaimChangeError::WalletState)?;
+    }
+    if bitcoin.is_hardened() || fork.is_hardened() || bitcoin == fork {
+        return Err(ClaimChangeError::WalletState);
+    }
+    let change = ClaimChangeIndices {
+        bitcoin: u32::from(bitcoin),
+        fork: u32::from(fork),
+    };
+    let (bitcoin_info, fork_info) =
+        tokio::try_join!(bitcoin_daemon.get_info(), fork_daemon.get_info(),)
+            .map_err(|_| ClaimChangeError::WalletState)?;
+    if !current(generation, context.generation) {
+        return Err(ClaimChangeError::Cancelled);
+    }
+    if !change_wallet_ready(
+        &bitcoin_info,
+        ChainId::Bitcoin,
+        &descriptor,
+        Some(change.bitcoin),
+    ) || !change_wallet_ready(
+        &fork_info,
+        ChainId::BitcoinBlake2b,
+        &descriptor,
+        Some(change.fork),
+    ) {
+        return Err(ClaimChangeError::WalletState);
+    }
+    tokio::task::spawn_blocking(move || {
+        let mut journal = Journal::open(&directory)?;
+        journal.record_claim_change_indices(&saved, change)?;
+        Ok(change)
+    })
+    .await
+    .map_err(|_| ClaimChangeError::Journal(Error::InvalidJournal))?
+    .map_err(ClaimChangeError::Journal)
 }
 
 /// Release saved deposit addresses for display only after authenticated
@@ -976,7 +1167,7 @@ mod tests {
         let addresses = saved.addresses().unwrap();
         assert_ne!(addresses[0], addresses[1]);
         super::super::prepare_directory(&directory).unwrap();
-        {
+        let recorded = {
             let mut journal = Journal::open(&directory).unwrap();
             journal.store_claim_funding_reservation(&saved).unwrap();
             let released = journal.release_claim_funding_reservation(&saved).unwrap();
@@ -992,14 +1183,40 @@ mod tests {
                 journal.release_claim_funding_reservation(&saved),
                 Err(Error::Conflict)
             ));
-        }
+            let change = ClaimChangeIndices {
+                bitcoin: 8,
+                fork: 9,
+            };
+            let recorded = journal
+                .record_claim_change_indices(&released, change)
+                .unwrap();
+            assert_eq!(recorded.change_indices(), Some(change));
+            assert_eq!(recorded.version, 3);
+            assert_eq!(
+                journal
+                    .record_claim_change_indices(&recorded, change)
+                    .unwrap(),
+                recorded
+            );
+            assert!(matches!(
+                journal.record_claim_change_indices(
+                    &released,
+                    ClaimChangeIndices {
+                        bitcoin: 8,
+                        fork: 10,
+                    },
+                ),
+                Err(Error::Conflict)
+            ));
+            recorded
+        };
         let mut restarted = context.clone();
         restarted.generation += 1;
         assert_eq!(
             load_claim_funding(&directory, &descriptor, &identity, &restarted)
                 .unwrap()
                 .unwrap(),
-            saved.released_copy()
+            recorded
         );
         let mut other = identity.clone();
         other.fork_cube = "other-cube".into();
@@ -1010,6 +1227,21 @@ mod tests {
         let mut bad = saved.clone();
         bad.indices.btcb2_deposit = bad.indices.bitcoin_deposit;
         assert!(matches!(bad.validate(), Err(Error::InvalidPlan)));
+        for change in [
+            ClaimChangeIndices {
+                bitcoin: 8,
+                fork: 8,
+            },
+            ClaimChangeIndices {
+                bitcoin: 1 << 31,
+                fork: 9,
+            },
+        ] {
+            assert!(matches!(
+                saved.released_copy().with_change_indices(change),
+                Err(Error::InvalidPlan)
+            ));
+        }
         std::fs::write(directory.join("claim-funding.json"), b"{}").unwrap();
         assert!(matches!(
             load_claim_funding(&directory, &descriptor, &identity, &context),
