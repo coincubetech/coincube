@@ -502,10 +502,16 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         max_age_seconds: 30,
         max_future_skew_seconds: 5,
     };
+    let confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.bitcoin().transaction(),
+        context(),
+        100,
+    );
     assert!(matches!(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
             preflight.fork(),
+            &confirmation,
             freshness,
             100,
         ),
@@ -546,6 +552,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
             preflight.fork(),
+            &confirmation,
             freshness,
             200,
         ),
@@ -558,8 +565,44 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         context().generation,
         200,
     );
+    let refreshed_confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.bitcoin().transaction(),
+        context(),
+        200,
+    );
+    let wrong_confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.fork().transaction(),
+        context(),
+        200,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            refreshed_fork.fork(),
+            &wrong_confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            refreshed_fork.fork(),
+            &confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
     reopened
-        .record_possible_ancestry_fork_attempt(&context(), refreshed_fork.fork(), freshness, 200)
+        .record_possible_ancestry_fork_attempt(
+            &context(),
+            refreshed_fork.fork(),
+            &refreshed_confirmation,
+            freshness,
+            200,
+        )
         .unwrap();
     assert!(reopened
         .recorded_signed_ancestry_pair()

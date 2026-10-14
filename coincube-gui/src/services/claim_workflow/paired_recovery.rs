@@ -9,9 +9,11 @@ use crate::services::claim_observation::{
 };
 use coincube_core::{
     chain::ChainId,
-    claim::BlockRef,
-    miniscript::bitcoin::{consensus, Transaction},
+    claim::{BlockRef, MIN_CONFIRMATIONS},
+    miniscript::bitcoin::{consensus, Transaction, Txid, Wtxid},
 };
+
+const MAX_CONFIRMATION_AGE_SECONDS: i64 = 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChainState {
@@ -33,10 +35,46 @@ pub(crate) enum SideReport {
     Indeterminate(ReconciliationError),
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct PairedReconciliation {
     pub bitcoin: SideReport,
     pub fork: SideReport,
+    bitcoin_confirmation: Option<BitcoinConfirmation>,
+}
+
+impl PairedReconciliation {
+    #[allow(dead_code)] // Consumed by the future gated coordinator.
+    pub(crate) fn bitcoin_confirmation(&self) -> Option<&BitcoinConfirmation> {
+        self.bitcoin_confirmation.as_ref()
+    }
+}
+
+/// Opaque, short-lived result of independently rechecking the exact Bitcoin
+/// witness against its canonical chain. It is still not proof of ancestry or
+/// permission to send on BTCB2.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct BitcoinConfirmation {
+    txid: Txid,
+    wtxid: Wtxid,
+    context: Context,
+    started_at: i64,
+}
+
+impl BitcoinConfirmation {
+    pub(crate) fn accepted_for(
+        &self,
+        current: &Context,
+        transaction: &Transaction,
+        now: i64,
+    ) -> bool {
+        self.context == *current
+            && self.txid == transaction.compute_txid()
+            && self.wtxid == transaction.compute_wtxid()
+            && self.started_at >= 0
+            && now
+                .checked_sub(self.started_at)
+                .is_some_and(|age| (0..=MAX_CONFIRMATION_AGE_SECONDS).contains(&age))
+    }
 }
 
 fn checked<T>(
@@ -174,20 +212,60 @@ impl Controller {
         source
             .validate_context(&current.provider, current.generation)
             .map_err(|_| Error::LateObservation)?;
+        let started_at = source.now();
         let record = self
             .intent
             .paired_submission
             .as_ref()
-            .ok_or(Error::Unchecked)?;
+            .ok_or(Error::Unchecked)?
+            .clone();
+        let max_age_seconds = max_age_seconds.min(MAX_CONFIRMATION_AGE_SECONDS);
         let (bitcoin, fork) = tokio::join!(
-            report_side(source, record, ChainId::Bitcoin, max_age_seconds),
-            report_side(source, record, ChainId::BitcoinBlake2b, max_age_seconds)
+            report_side(source, &record, ChainId::Bitcoin, max_age_seconds),
+            report_side(source, &record, ChainId::BitcoinBlake2b, max_age_seconds)
         );
         self.ensure_context(current)?;
         source
             .validate_context(&current.provider, current.generation)
             .map_err(|_| Error::LateObservation)?;
-        Ok(PairedReconciliation { bitcoin, fork })
+        let finished_at = source.now();
+        let bitcoin_confirmation = match bitcoin {
+            SideReport::Observed(ChainState::Confirmed { confirmations, .. })
+                if confirmations >= MIN_CONFIRMATIONS
+                    && started_at >= 0
+                    && finished_at
+                        .checked_sub(started_at)
+                        .is_some_and(|age| (0..=MAX_CONFIRMATION_AGE_SECONDS).contains(&age)) =>
+            {
+                let (txid, wtxid) = record.bitcoin_identity();
+                Some(BitcoinConfirmation {
+                    txid,
+                    wtxid,
+                    context: current.clone(),
+                    started_at,
+                })
+            }
+            _ => None,
+        };
+        Ok(PairedReconciliation {
+            bitcoin,
+            fork,
+            bitcoin_confirmation,
+        })
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn confirmed_bitcoin_for_test(
+    transaction: &Transaction,
+    context: Context,
+    started_at: i64,
+) -> BitcoinConfirmation {
+    BitcoinConfirmation {
+        txid: transaction.compute_txid(),
+        wtxid: transaction.compute_wtxid(),
+        context,
+        started_at,
     }
 }
 
@@ -236,6 +314,27 @@ mod tests {
         then.header("x-coincube-observation", "fresh")
             .header("x-cache", "BYPASS")
             .header("cache-control", "no-store")
+    }
+
+    #[test]
+    fn six_confirmation_token_is_bound_to_session_witness_and_short_lifetime() {
+        let signed = transaction();
+        let context = Context {
+            generation: 4,
+            account: "account".into(),
+            provider: "bitcoin|https://api.example/api/v1/esplora/bitcoin/mainnet".into(),
+        };
+        let token = confirmed_bitcoin_for_test(&signed, context.clone(), 100);
+        assert!(token.accepted_for(&context, &signed, 130));
+        assert!(!token.accepted_for(&context, &signed, 131));
+        let mut changed_session = context.clone();
+        changed_session.generation += 1;
+        assert!(!token.accepted_for(&changed_session, &signed, 100));
+        let mut changed_witness = signed.clone();
+        changed_witness.input[0].witness.clear();
+        changed_witness.input[0].witness.push([2u8; 32]);
+        assert_eq!(signed.compute_txid(), changed_witness.compute_txid());
+        assert!(!token.accepted_for(&context, &changed_witness, 100));
     }
 
     #[tokio::test]

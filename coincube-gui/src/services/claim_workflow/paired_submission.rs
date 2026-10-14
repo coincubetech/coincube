@@ -4,7 +4,10 @@
 //! destination binding. Loading it never restores proof, signer authority or
 //! permission to send either transaction again.
 
-use super::{split, validate as validate_intent, Context, Controller, Error, Intent, Phase};
+use super::{
+    paired_recovery::BitcoinConfirmation, split, validate as validate_intent, Context, Controller,
+    Error, Intent, Phase,
+};
 use crate::services::claim_preflight::{Evidence, FreshnessPolicy, PairEvidence};
 use coincube_core::{
     chain::ChainId,
@@ -253,15 +256,27 @@ impl Controller {
     /// The BTCB2 attempt needs a new policy read of its exact witness after
     /// Bitcoin confirms. A fresh Bitcoin mempool preflight would be invalid
     /// once that transaction is mined. The coordinator must also establish a
-    /// current six-confirmation Bitcoin observation and fresh two-chain proof.
+    /// fresh two-chain ancestry proof and explicit approval. The confirmation
+    /// token is rechecked here against this exact signed Bitcoin witness.
     #[allow(dead_code)] // Staged with the disabled paired submission coordinator.
     pub(crate) fn record_possible_ancestry_fork_attempt(
         &mut self,
         current: &Context,
         preflight: &Evidence,
+        confirmation: &BitcoinConfirmation,
         policy: FreshnessPolicy,
         now: i64,
     ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        let saved = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if !confirmation.accepted_for(current, saved.bitcoin(), now) {
+            return Err(Error::LateObservation);
+        }
         self.record_possible_ancestry_attempt(
             current,
             ChainId::BitcoinBlake2b,

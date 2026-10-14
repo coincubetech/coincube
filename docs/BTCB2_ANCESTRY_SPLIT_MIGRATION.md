@@ -391,8 +391,11 @@ marker spend cases remain.
    exact signed witness bytes, canonical block mapping and stable chain tip.
    Absent, stale, mismatched or unavailable observations never permit an
    automatic retry. This collector is not yet connected to the wizard's
-   recovery screen. Acceptance on one chain never implies acceptance on the
-   other.
+   recovery screen. The fork-attempt journal now also requires an opaque,
+   short-lived Bitcoin six-confirmation result bound to the exact signed
+   witness and session; the coordinator must still recollect live two-chain
+   ancestry and obtain explicit approval before either send. Acceptance on
+   one chain never implies acceptance on the other.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.
