@@ -259,7 +259,13 @@ a replayable spend.
    descriptor and reports a ready wallet state; they no longer require the old
    embedded-daemon submission adapter. The current remote Connect wallet API
    does not yet supply `chain_id`, so Connect-backed Claim address preparation
-   still refuses it. Connect must return the positive identity
+   still refuses it. The preparation path now advances a Connect-backed
+   Bitcoin Vault's receive branch with durable one-at-a-time new-address
+   requests, verifies every returned derivation, then reads back both exact
+   reserved addresses and repeats the two-chain unused-history check before
+   releasing the journal record. It refuses an
+   advance of more than 256 indices in one attempt. Connect must return the
+   positive identity
    before those deposits are usable. Creation of a version-10
    paired Claim intent now requires that saved record and checks both funding
    derivations against its exact external indices under the journal lock. The

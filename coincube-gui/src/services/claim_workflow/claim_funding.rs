@@ -37,6 +37,10 @@ use tokio::sync::watch;
 
 const ADDRESS_CHECK_BUDGET: Duration = Duration::from_secs(20);
 const MAX_ADDRESS_AGE_SECONDS: i64 = 60;
+// A remote wallet exposes durable get-new-address but not Coincubed's bulk
+// update-derivation-index command. Refuse a pathological gap instead of
+// issuing an unbounded series of remote writes from the Claim screen.
+const MAX_REMOTE_RECEIVE_ADVANCES: u32 = 256;
 
 fn at_reserved_receive_index(coin: &CandidateCoin, index: u32) -> bool {
     !coin.is_change && coin.deriv_index == ChildNumber::Normal { index }
@@ -124,6 +128,9 @@ fn ensure_claim_wallet_ready(
     if info.network != Network::Bitcoin
         || info.chain_id != Some(coincube_core::chain::ChainId::Bitcoin)
         || info.descriptors.main.to_string() != saved.descriptor
+        || info.block_height <= 0
+        || !info.sync.is_finite()
+        || info.sync < 0.9999
         || info.rescan_progress.is_some()
         || info.chain_divergence
         || info.refused_reorg_depth.is_some()
@@ -131,6 +138,112 @@ fn ensure_claim_wallet_ready(
         || info.history_sync.last_failure.is_some()
     {
         return Err(ClaimAddressError::WalletState);
+    }
+    Ok(())
+}
+
+/// Make both already reserved receive addresses visible to the wallet's own
+/// scanner. Connect's remote backend advances one address at a time; local
+/// Coincubed can advance directly. Either way, read back the exact two
+/// derivations before marking the journal reservation released.
+async fn reveal_claim_receive_addresses(
+    daemon: &(dyn Daemon + Send + Sync),
+    saved: &ClaimFundingReservation,
+    generation: &watch::Receiver<u64>,
+    expected: u64,
+) -> Result<(), ClaimAddressError> {
+    let mut info = daemon
+        .get_info()
+        .await
+        .map_err(|_| ClaimAddressError::WalletState)?;
+    ensure_claim_wallet_ready(&info, saved)?;
+    let highest = saved
+        .indices
+        .bitcoin_deposit
+        .max(saved.indices.btcb2_deposit);
+    if !current(generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    if info.receive_index < highest {
+        if daemon.backend().is_remote() {
+            let advances = highest - info.receive_index;
+            if advances > MAX_REMOTE_RECEIVE_ADVANCES {
+                return Err(ClaimAddressError::WalletState);
+            }
+            let descriptor = saved
+                .descriptor()
+                .map_err(|_| ClaimAddressError::InvalidReservation)?;
+            let mut last = info.receive_index;
+            for _ in 0..advances {
+                if !current(generation, expected) {
+                    return Err(ClaimAddressError::ChangedSession);
+                }
+                let generated = daemon
+                    .get_new_address()
+                    .await
+                    .map_err(|_| ClaimAddressError::WalletState)?;
+                let ChildNumber::Normal { index } = generated.derivation_index else {
+                    return Err(ClaimAddressError::WalletState);
+                };
+                if index <= last
+                    || generated.address.to_string()
+                        != saved
+                            .address(&descriptor, index)
+                            .map_err(|_| ClaimAddressError::InvalidReservation)?
+                {
+                    return Err(ClaimAddressError::WalletState);
+                }
+                last = index;
+                if last >= highest {
+                    break;
+                }
+            }
+            if last < highest {
+                return Err(ClaimAddressError::WalletState);
+            }
+        } else {
+            let updated = daemon
+                .update_deriv_indexes(Some(highest), None)
+                .await
+                .map_err(|_| ClaimAddressError::WalletState)?;
+            if updated.receive < highest {
+                return Err(ClaimAddressError::WalletState);
+            }
+        }
+    }
+    if !current(generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
+    }
+    info = daemon
+        .get_info()
+        .await
+        .map_err(|_| ClaimAddressError::WalletState)?;
+    ensure_claim_wallet_ready(&info, saved)?;
+    if info.receive_index < highest {
+        return Err(ClaimAddressError::WalletState);
+    }
+    let addresses = saved
+        .addresses()
+        .map_err(|_| ClaimAddressError::InvalidReservation)?;
+    for (index, address) in [
+        (saved.indices.bitcoin_deposit, &addresses[0]),
+        (saved.indices.btcb2_deposit, &addresses[1]),
+    ] {
+        if !current(generation, expected) {
+            return Err(ClaimAddressError::ChangedSession);
+        }
+        let listed = daemon
+            .list_revealed_addresses(false, false, 1, Some(ChildNumber::Normal { index }))
+            .await
+            .map_err(|_| ClaimAddressError::WalletState)?;
+        if !listed.addresses.iter().any(|entry| {
+            entry.index == ChildNumber::Normal { index } && entry.address.to_string() == *address
+        }) {
+            return Err(ClaimAddressError::WalletState);
+        }
+    }
+    if !current(generation, expected) {
+        return Err(ClaimAddressError::ChangedSession);
     }
     Ok(())
 }
@@ -860,7 +973,7 @@ pub async fn prepare_claim_deposit_instructions(
     let bitcoin_rate = bitcoin_step1_feerate(&bitcoin_fees)
         .await
         .ok_or(ClaimAddressError::FeeUnavailable)?;
-    let btcb2_fees = btcb2_fee_source(Some(client));
+    let btcb2_fees = btcb2_fee_source(Some(client.clone()));
     let btcb2_rate = btcb2_sweep_feerate(&*btcb2_fees)
         .await
         .ok_or(ClaimAddressError::FeeUnavailable)?;
@@ -882,26 +995,22 @@ pub async fn prepare_claim_deposit_instructions(
         bitcoin_rate_sat_vb: bitcoin_rate,
         btcb2_rate_sat_vb: btcb2_rate,
     };
-    let highest = saved
-        .indices
-        .bitcoin_deposit
-        .max(saved.indices.btcb2_deposit);
-    let info = daemon
-        .get_info()
-        .await
-        .map_err(|_| ClaimAddressError::WalletState)?;
-    ensure_claim_wallet_ready(&info, &saved)?;
-    let updated = daemon
-        .update_deriv_indexes(Some(highest), None)
-        .await
-        .map_err(|_| ClaimAddressError::WalletState)?;
-    if updated.receive < highest {
-        return Err(ClaimAddressError::WalletState);
-    }
+    reveal_claim_receive_addresses(daemon, &saved, &generation, expected).await?;
     if !current(&generation, expected) {
         return Err(ClaimAddressError::ChangedSession);
     }
     if !saved.is_released() {
+        // An address could acquire history while a remote wallet is advancing
+        // its receive branch. Do not make that earlier unused check durable.
+        let esplora = ConnectEsplora::new(
+            &client,
+            CollectionContext {
+                expected_generation: expected,
+                generation: generation.clone(),
+            },
+        )
+        .map_err(|_| ClaimAddressError::Unavailable)?;
+        checked_history(&esplora, addresses, &generation, expected, true).await?;
         tokio::task::spawn_blocking(move || {
             let mut journal = Journal::open(&directory)?;
             journal.release_claim_funding_reservation(&saved)
@@ -919,6 +1028,11 @@ pub async fn prepare_claim_deposit_instructions(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        daemon::{DaemonBackend, DaemonError},
+        dir::CoincubeDirectory,
+    };
+    use coincube_core::miniscript::bitcoin::{address, psbt::Psbt, Address, Txid};
     use coincube_core::{
         bip39::Mnemonic,
         chain::ChainId,
@@ -928,6 +1042,14 @@ mod tests {
             DescriptorPublicKey,
         },
         signer::MasterSigner,
+    };
+    use coincubed::{
+        bip329::Labels,
+        commands::{CoinStatus, LabelItem, UpdateDerivIndexesResult},
+    };
+    use std::{
+        collections::{HashMap, HashSet},
+        sync::Mutex,
     };
 
     #[test]
@@ -1063,6 +1185,280 @@ mod tests {
         )
     }
 
+    #[derive(Debug)]
+    struct ReceiveWallet {
+        descriptor: CoincubeDescriptor,
+        backend: DaemonBackend,
+        receive: Mutex<u32>,
+        wrong_generated_address: bool,
+        omit_revealed_address: bool,
+    }
+
+    impl ReceiveWallet {
+        fn new(descriptor: CoincubeDescriptor, backend: DaemonBackend) -> Self {
+            Self {
+                descriptor,
+                backend,
+                receive: Mutex::new(3),
+                wrong_generated_address: false,
+                omit_revealed_address: false,
+            }
+        }
+
+        fn address(&self, index: u32) -> Address {
+            self.descriptor
+                .receive_descriptor()
+                .derive(
+                    ChildNumber::Normal { index },
+                    &secp256k1::Secp256k1::verification_only(),
+                )
+                .address(Network::Bitcoin)
+        }
+    }
+
+    #[async_trait]
+    impl Daemon for ReceiveWallet {
+        fn backend(&self) -> DaemonBackend {
+            self.backend.clone()
+        }
+
+        fn config(&self) -> Option<&coincubed::config::Config> {
+            None
+        }
+
+        async fn is_alive(&self, _: &CoincubeDirectory, _: Network) -> Result<(), DaemonError> {
+            Ok(())
+        }
+
+        async fn stop(&self) -> Result<(), DaemonError> {
+            Ok(())
+        }
+
+        async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
+            Ok(model::GetInfoResult {
+                version: String::new(),
+                network: Network::Bitcoin,
+                chain_id: Some(ChainId::Bitcoin),
+                block_height: 100,
+                sync: 1.0,
+                descriptors: coincubed::commands::GetInfoDescriptors {
+                    main: self.descriptor.clone(),
+                },
+                rescan_progress: None,
+                refused_reorg_depth: None,
+                chain_divergence: false,
+                timestamp: 0,
+                last_poll_timestamp: None,
+                history_sync: Default::default(),
+                receive_index: *self.receive.lock().unwrap(),
+                change_index: 0,
+            })
+        }
+
+        async fn request_sync(&self) -> Result<(), DaemonError> {
+            Ok(())
+        }
+
+        async fn get_new_address(&self) -> Result<model::GetAddressResult, DaemonError> {
+            let mut current = self.receive.lock().unwrap();
+            *current += 1;
+            let index = *current;
+            Ok(model::GetAddressResult {
+                address: self.address(if self.wrong_generated_address {
+                    0
+                } else {
+                    index
+                }),
+                derivation_index: ChildNumber::Normal { index },
+            })
+        }
+
+        async fn list_revealed_addresses(
+            &self,
+            _: bool,
+            _: bool,
+            _: usize,
+            start_index: Option<ChildNumber>,
+        ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
+            let index = match start_index {
+                Some(ChildNumber::Normal { index }) => index,
+                _ => return Err(DaemonError::NotImplemented),
+            };
+            let addresses = if index <= *self.receive.lock().unwrap() && !self.omit_revealed_address
+            {
+                vec![coincubed::commands::ListRevealedAddressesEntry {
+                    index: ChildNumber::Normal { index },
+                    address: self.address(index),
+                    label: None,
+                    used_count: 0,
+                }]
+            } else {
+                Vec::new()
+            };
+            Ok(model::ListRevealedAddressesResult {
+                addresses,
+                continue_from: None,
+            })
+        }
+
+        async fn update_deriv_indexes(
+            &self,
+            receive: Option<u32>,
+            _: Option<u32>,
+        ) -> Result<UpdateDerivIndexesResult, DaemonError> {
+            if self.backend.is_remote() {
+                return Err(DaemonError::NotImplemented);
+            }
+            let mut current = self.receive.lock().unwrap();
+            *current = (*current).max(receive.unwrap_or(*current));
+            Ok(UpdateDerivIndexesResult {
+                receive: *current,
+                change: 0,
+            })
+        }
+
+        async fn list_coins(
+            &self,
+            _: &[CoinStatus],
+            _: &[OutPoint],
+        ) -> Result<model::ListCoinsResult, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn list_spend_txs(&self) -> Result<model::ListSpendResult, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn create_spend_tx(
+            &self,
+            _: &[OutPoint],
+            _: &HashMap<Address<address::NetworkUnchecked>, u64>,
+            _: u64,
+            _: Option<Address<address::NetworkUnchecked>>,
+        ) -> Result<model::CreateSpendResult, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn rbf_psbt(
+            &self,
+            _: &Txid,
+            _: bool,
+            _: Option<u64>,
+        ) -> Result<model::CreateSpendResult, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn update_spend_tx(&self, _: &Psbt) -> Result<(), DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn delete_spend_tx(&self, _: &Txid) -> Result<(), DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn broadcast_spend_tx(&self, _: &Txid) -> Result<(), DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn start_rescan(&self, _: u32) -> Result<(), DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn list_confirmed_txs(
+            &self,
+            _: u32,
+            _: u32,
+            _: u64,
+        ) -> Result<model::ListTransactionsResult, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn create_recovery(
+            &self,
+            _: Address<address::NetworkUnchecked>,
+            _: &[OutPoint],
+            _: u64,
+            _: Option<u16>,
+        ) -> Result<Psbt, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn list_txs(&self, _: &[Txid]) -> Result<model::ListTransactionsResult, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn get_labels(
+            &self,
+            _: &HashSet<LabelItem>,
+        ) -> Result<HashMap<String, String>, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn update_labels(
+            &self,
+            _: &HashMap<LabelItem, Option<String>>,
+        ) -> Result<(), DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+
+        async fn get_labels_bip329(&self, _: u32, _: u32) -> Result<Labels, DaemonError> {
+            Err(DaemonError::NotImplemented)
+        }
+    }
+
+    #[tokio::test]
+    async fn connect_claim_reveals_and_reads_back_both_reserved_receive_addresses() {
+        let descriptor = descriptor();
+        let identity = WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+        };
+        let saved = ClaimFundingReservation::new(
+            &descriptor,
+            &identity,
+            &Context {
+                generation: 1,
+                account: "account".into(),
+                provider: "https://connect.example".into(),
+            },
+            FreshDepositAddresses {
+                bitcoin_deposit: 4,
+                btcb2_deposit: 5,
+            },
+        )
+        .unwrap();
+        let (sender, generation) = watch::channel(1);
+        let remote = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+        reveal_claim_receive_addresses(&remote, &saved, &generation, 1)
+            .await
+            .unwrap();
+        assert_eq!(*remote.receive.lock().unwrap(), 5);
+
+        let mut wrong = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+        wrong.wrong_generated_address = true;
+        assert_eq!(
+            reveal_claim_receive_addresses(&wrong, &saved, &generation, 1).await,
+            Err(ClaimAddressError::WalletState)
+        );
+        let mut missing = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+        missing.omit_revealed_address = true;
+        assert_eq!(
+            reveal_claim_receive_addresses(&missing, &saved, &generation, 1).await,
+            Err(ClaimAddressError::WalletState)
+        );
+        let embedded = ReceiveWallet::new(descriptor, DaemonBackend::EmbeddedCoincubed(None));
+        reveal_claim_receive_addresses(&embedded, &saved, &generation, 1)
+            .await
+            .unwrap();
+        assert_eq!(*embedded.receive.lock().unwrap(), 5);
+        sender.send(2).unwrap();
+        assert_eq!(
+            reveal_claim_receive_addresses(&remote, &saved, &generation, 1).await,
+            Err(ClaimAddressError::ChangedSession)
+        );
+    }
+
     #[test]
     fn deposit_instructions_require_the_matching_healthy_bitcoin_wallet() {
         let descriptor = descriptor();
@@ -1127,6 +1523,12 @@ mod tests {
             Err(ClaimAddressError::WalletState)
         );
         info.history_sync.full_scan_in_progress = false;
+        info.block_height = 0;
+        assert_eq!(
+            ensure_claim_wallet_ready(&info, &saved),
+            Err(ClaimAddressError::WalletState)
+        );
+        info.block_height = 1;
         info.network = Network::Testnet;
         assert_eq!(
             ensure_claim_wallet_ready(&info, &saved),
