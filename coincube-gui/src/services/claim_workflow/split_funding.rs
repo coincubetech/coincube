@@ -6,19 +6,26 @@
 use super::{journal::Journal, Context, Error};
 use crate::app::settings::WalletId;
 use crate::services::{
-    claim_observation::http::{DiscoveryError, HttpObservationSource, OwnedSplitFunding},
+    claim_observation::{
+        http::{
+            DiscoveryError, FundingContext, HttpObservationSource, OwnedSplitFunding,
+            SplitPairError,
+        },
+        ObservationSource,
+    },
     foreign_psbt::TargetAddressEvidence,
     foreign_split_inventory::{FreshFundingAddresses, SplitInventory},
 };
 use coincube_core::{
-    claim::Policy,
+    chain::ChainId,
+    claim::{Policy, PreflightTips},
     descriptors::CoincubeDescriptor,
-    foreign_split::SplitSource,
+    foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitSource},
     miniscript::{
         bitcoin::{
             bip32::ChildNumber,
             hashes::{sha256, Hash},
-            Address, Network, ScriptBuf,
+            Address, Network, OutPoint, ScriptBuf,
         },
         Descriptor, DescriptorPublicKey,
     },
@@ -34,6 +41,17 @@ pub enum SplitFundingDiscoveryError {
     InvalidReservation(Error),
     Changed,
     Discovery(DiscoveryError),
+}
+
+/// Read-only evidence for the exact reviewed pair. Signer dispatch must
+/// re-run this against a freshly completed two-chain source scan and apply
+/// its own wallet, session and preflight checks before exposing either PSBT.
+#[derive(Debug)]
+#[allow(dead_code)] // The paired signer dispatch is not wired yet.
+pub enum SplitPairRequalificationError {
+    Discovery(SplitFundingDiscoveryError),
+    Construction(SplitPairError),
+    Changed,
 }
 
 /// The destination Vault address already authenticated and reserved when
@@ -336,6 +354,31 @@ impl SplitFundingReservation {
         policy: Policy,
         minimums: (u64, u64),
     ) -> Result<Option<OwnedSplitFunding>, SplitFundingDiscoveryError> {
+        self.discover_reserved_funding_at_outpoints(
+            directory,
+            source,
+            context,
+            inventory,
+            observations,
+            policy,
+            minimums,
+            None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn discover_reserved_funding_at_outpoints(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        context: &Context,
+        inventory: &SplitInventory,
+        observations: &HttpObservationSource,
+        policy: Policy,
+        minimums: (u64, u64),
+        selected: Option<(OutPoint, OutPoint)>,
+    ) -> Result<Option<OwnedSplitFunding>, SplitFundingDiscoveryError> {
         observations
             .validate_context(&context.provider, context.generation)
             .map_err(|_| SplitFundingDiscoveryError::Changed)?;
@@ -345,7 +388,7 @@ impl SplitFundingReservation {
         let source_for_load = source.clone();
         let context_for_load = context.clone();
         let inventory_for_load = inventory.clone();
-        let reserved = tokio::task::spawn_blocking(move || {
+        let mut reserved = tokio::task::spawn_blocking(move || {
             reservation.checked_reserved_inventory(
                 &directory,
                 &source_for_load,
@@ -356,6 +399,9 @@ impl SplitFundingReservation {
         })
         .await
         .map_err(|_| SplitFundingDiscoveryError::Changed)??;
+        if let Some((bitcoin, fork)) = selected {
+            reserved = reserved.funding_at_outpoints(bitcoin, fork);
+        }
         if reserved
             .funding_candidates(coincube_core::chain::ChainId::Bitcoin)
             .is_empty()
@@ -373,6 +419,133 @@ impl SplitFundingReservation {
             .validate_context(&context.provider, context.generation)
             .map_err(|_| SplitFundingDiscoveryError::Changed)?;
         Ok(found)
+    }
+
+    /// Recollect only the exact two selected deposits, reconstruct both
+    /// ordinary transactions and compare complete PSBTs. The caller must
+    /// supply a newly completed two-chain source scan, not a saved preview.
+    /// This is a prerequisite for signer admission, not an authorization.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The paired signer dispatch is not wired yet.
+    pub async fn requalify_exact_pair(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_vault: (&WalletId, &CoincubeDescriptor),
+        context: &Context,
+        inventory: &SplitInventory,
+        observations: &HttpObservationSource,
+        policy: Policy,
+        minimums: (u64, u64),
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        rates: (u64, u64),
+    ) -> Result<OwnedSplitFunding, SplitPairRequalificationError> {
+        observations
+            .validate_context(&context.provider, context.generation)
+            .map_err(|_| SplitPairRequalificationError::Changed)?;
+        let binding = self
+            .target_binding
+            .as_ref()
+            .filter(|binding| binding.matches_vault(target_vault.0, target_vault.1))
+            .ok_or(SplitPairRequalificationError::Changed)?;
+        let target = binding
+            .script_pubkey()
+            .map_err(|_| SplitPairRequalificationError::Changed)?;
+        if !self.released
+            || !self.matches(source, &self.target_cube, context)
+            || bitcoin.source() != source
+            || fork.source() != source
+            || bitcoin.destination() != self.indices.bitcoin_return
+            || bitcoin.funding_derivation()
+                != Some((
+                    coincube_core::foreign_split::SplitBranch::External,
+                    self.indices.bitcoin_deposit,
+                ))
+            || fork.funding_derivation()
+                != Some((
+                    coincube_core::foreign_split::SplitBranch::External,
+                    self.indices.btcb2_deposit,
+                ))
+            || fork.target() != target.as_script()
+        {
+            return Err(SplitPairRequalificationError::Changed);
+        }
+        let selected = (bitcoin.funding_prevout(), fork.funding_prevout());
+        let funding = self
+            .discover_reserved_funding_at_outpoints(
+                directory.clone(),
+                source,
+                context,
+                inventory,
+                observations,
+                policy,
+                minimums,
+                Some(selected),
+            )
+            .await
+            .map_err(SplitPairRequalificationError::Discovery)?
+            .ok_or(SplitPairRequalificationError::Changed)?;
+        let tips = PreflightTips {
+            bitcoin: funding
+                .inputs
+                .funding()
+                .bitcoin()
+                .ancestry()
+                .pair()
+                .bitcoin()
+                .tip,
+            fork: funding.inputs.funding().fork().ancestry().pair().fork().tip,
+        };
+        let review = FundingContext {
+            provider: &context.provider,
+            generation: context.generation,
+            now: observations.now(),
+            max_age_seconds: policy.max_observation_age_seconds,
+            tips,
+        };
+        let (rebuilt_bitcoin, rebuilt_fork) = funding
+            .construct_split_pair(
+                inventory,
+                source,
+                self.indices.bitcoin_return,
+                target.as_script(),
+                rates.0,
+                rates.1,
+                review,
+            )
+            .map_err(SplitPairRequalificationError::Construction)?;
+        if rebuilt_bitcoin.psbt() != bitcoin.psbt() || rebuilt_fork.psbt() != fork.psbt() {
+            return Err(SplitPairRequalificationError::Changed);
+        }
+        let (bitcoin_tip, fork_tip) = tokio::try_join!(
+            observations.tip(ChainId::Bitcoin),
+            observations.tip(ChainId::BitcoinBlake2b),
+        )
+        .map_err(|_| SplitPairRequalificationError::Changed)?;
+        let age = observations.now().checked_sub(funding.inputs.observed_at());
+        if bitcoin_tip.value() != &tips.bitcoin
+            || fork_tip.value() != &tips.fork
+            || !age.is_some_and(|age| (0..=policy.max_observation_age_seconds).contains(&age))
+        {
+            return Err(SplitPairRequalificationError::Changed);
+        }
+        let saved_source = source.clone();
+        let saved_target = self.target_cube.clone();
+        let saved_context = context.clone();
+        let current = tokio::task::spawn_blocking(move || {
+            load_split_funding(&directory, &saved_source, &saved_target, &saved_context)
+        })
+        .await
+        .map_err(|_| SplitPairRequalificationError::Changed)?
+        .map_err(|_| SplitPairRequalificationError::Changed)?;
+        if current.as_ref() != Some(self) {
+            return Err(SplitPairRequalificationError::Changed);
+        }
+        observations
+            .validate_context(&context.provider, context.generation)
+            .map_err(|_| SplitPairRequalificationError::Changed)?;
+        Ok(funding)
     }
 }
 

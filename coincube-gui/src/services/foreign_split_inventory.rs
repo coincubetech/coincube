@@ -245,6 +245,19 @@ impl SplitInventory {
         });
         restricted
     }
+    /// Narrow an already reserved funding search to the exact two reviewed
+    /// outpoints. A second deposit to either saved address must never replace
+    /// a coin between review and signer admission.
+    pub fn funding_at_outpoints(&self, bitcoin: OutPoint, btcb2: OutPoint) -> Self {
+        let mut restricted = self.clone();
+        restricted
+            .bitcoin_funding_candidates
+            .retain(|outpoint, _| *outpoint == bitcoin);
+        restricted
+            .btcb2_funding_candidates
+            .retain(|outpoint, _| *outpoint == btcb2);
+        restricted
+    }
     /// Exclude deposits that cannot individually pay the estimated fee for
     /// their chain. A later eligible output to the same reserved address must
     /// remain selectable even if an earlier, smaller output sorts first.
@@ -812,12 +825,32 @@ mod tests {
         with_earlier_small_deposit
             .bitcoin_funding_candidates
             .insert(small.outpoint, small.clone());
+        let mut later = bitcoin_funding.clone();
+        later.previous.output[0].value = Amount::from_sat(6_000);
+        later.outpoint.txid = later.previous.compute_txid();
+        with_earlier_small_deposit
+            .bitcoin_funding_candidates
+            .insert(later.outpoint, later.clone());
+        let exact = with_earlier_small_deposit
+            .funding_at_outpoints(bitcoin_funding.outpoint, fork_funding.outpoint);
         assert_eq!(
-            with_earlier_small_deposit
-                .funding_covering_estimated_fees(4_000, 5_000)
-                .funding_candidates(ChainId::Bitcoin),
+            exact.funding_candidates(ChainId::Bitcoin),
             vec![bitcoin_funding.clone()]
         );
+        assert_eq!(
+            exact.funding_candidates(ChainId::BitcoinBlake2b),
+            vec![fork_funding.clone()]
+        );
+        assert!(with_earlier_small_deposit
+            .funding_at_outpoints(OutPoint::null(), fork_funding.outpoint)
+            .funding_candidates(ChainId::Bitcoin)
+            .is_empty());
+        let eligible = with_earlier_small_deposit
+            .funding_covering_estimated_fees(4_000, 5_000)
+            .funding_candidates(ChainId::Bitcoin);
+        assert_eq!(eligible.len(), 2);
+        assert!(eligible.contains(&bitcoin_funding));
+        assert!(eligible.contains(&later));
         let bitcoin_too_small = reserved.funding_covering_estimated_fees(4_001, 5_000);
         assert!(bitcoin_too_small
             .funding_candidates(ChainId::Bitcoin)

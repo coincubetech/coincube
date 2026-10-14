@@ -81,6 +81,13 @@ a replayable spend.
    the released reservation under the current Connect identity before
    returning a read-only result from a completed paired scan. The production
    Split panel calls it for a read-only deposit check; it cannot authorize signing.
+   A separate read-only Split signer prerequisite now restricts a fresh
+   paired proof to the exact two outpoints in the retained PSBT pair. It
+   reloads the source and target address reservation, verifies the current
+   target Vault binding, reconstructs and compares both complete PSBTs, then
+   refreshes both tips, proof age and Connect generation. This operation is
+   not yet called by signer dispatch and does not reconcile a full source
+   wallet or permit a send.
    Claim now has an equivalent read-only paired search that binds the selected
    Bitcoin and BTCB2 funding outputs and every shared output to its Vault
    descriptor. A Cube-specific entry point to the bounded two-chain scanner
