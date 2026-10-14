@@ -55,9 +55,10 @@ a replayable spend.
    canonical block mappings, maturity, unspent status and two-chain tips under
    one session; it is not yet bound to the source wallet or signing intent.
    The foreign inventory now retains previous transactions for covered,
-   post-fork funding candidates. A review-only validator compares those bytes,
-   block assignments, retained paths, session, source construction and two
-   current tips. Signer admission still needs fresh source-UTXO authentication,
+   post-fork funding candidates. Review-only validators compare those bytes,
+   retained paths, session, source constructions and two current tips for
+   Split and Claim; Split also binds the candidates' block assignments.
+   Signer admission still needs fresh source-UTXO authentication,
    reservations and a durable intent binding; no candidate or validator result
    is cached spend authority.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a

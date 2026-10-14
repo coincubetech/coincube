@@ -508,6 +508,82 @@ impl Controller {
             .map(Option::flatten)
     }
 
+    /// Check a fresh two-chain marker collection against this exact saved
+    /// pair and owned constructions. This is review-only: the controller stays
+    /// unchecked until current shared UTXOs, reservations and a second
+    /// preflight are bound by the signer admission path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_ancestry_pair_observation(
+        &mut self,
+        current: &Context,
+        pair: &crate::services::claim_observation::http::CollectedFundingPair,
+        bitcoin_coin: &CandidateCoin,
+        fork_coin: &CandidateCoin,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        if self.intent.version != 10 || self.intent.phase != Phase::Intent {
+            return Err(Error::Unchecked);
+        }
+        let funding = self
+            .intent
+            .funding_plan
+            .as_ref()
+            .ok_or(Error::InvalidJournal)?;
+        let bitcoin_hint = self
+            .intent
+            .ancestry
+            .as_ref()
+            .and_then(|stored| stored.derivation.as_ref())
+            .ok_or(Error::InvalidJournal)?;
+        let fork_hint = funding
+            .fork
+            .derivation
+            .as_ref()
+            .ok_or(Error::InvalidJournal)?;
+        let bitcoin_path = self.recorded_ancestry()?.ok_or(Error::InvalidJournal)?;
+        let fork_path = funding.fork.decode()?;
+        if bitcoin.psbt().unsigned_tx != self.intent.plan.step1
+            || fork.psbt().unsigned_tx != funding.step2_unsigned
+            || bitcoin.poison_input() != bitcoin_path.selected()
+            || fork.fork_marker() != Some(fork_path.selected())
+            || bitcoin.claimed_prevouts() != self.intent.plan.claimed_prevouts
+            || (bitcoin_hint.index, bitcoin_hint.is_change)
+                != (u32::from(bitcoin_coin.deriv_index), bitcoin_coin.is_change)
+            || (fork_hint.index, fork_hint.is_change)
+                != (u32::from(fork_coin.deriv_index), fork_coin.is_change)
+            || u32::from(bitcoin.change_index())
+                != self.intent.bitcoin_change_index.unwrap_or(u32::MAX)
+            || u32::from(fork.change_index()) != funding.fork_change_index
+            || sha256::Hash::hash(bitcoin.descriptor().to_string().as_bytes())
+                != self.intent.identity.descriptor_digest
+        {
+            return Err(Error::WrongIdentity);
+        }
+        pair.validate_for_claim(
+            &bitcoin_path,
+            &fork_path,
+            bitcoin_coin,
+            fork_coin,
+            bitcoin,
+            fork,
+            crate::services::claim_observation::http::FundingContext {
+                provider: &current.provider,
+                generation: current.generation,
+                now,
+                max_age_seconds: policy.max_observation_age_seconds,
+                tips,
+            },
+        )
+        .map_err(|_| Error::Unchecked)
+    }
+
     /// Bind a new positive ancestry collection to the saved intent. This clears
     /// prior checks and never makes the controller eligible by itself.
     pub fn validate_ancestry_observation(

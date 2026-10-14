@@ -6,9 +6,13 @@ use super::*;
 use coincube_core::{
     claim::{PreflightTips, MIN_CONFIRMATIONS},
     claim_ancestry::retained::RetainedPath,
+    claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
+    descriptors::CoincubeDescriptor,
     foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitCoin},
     miniscript::bitcoin::{consensus::deserialize, Transaction},
+    spend::CandidateCoin,
 };
+use std::collections::BTreeSet;
 
 const COINBASE_MATURITY: u64 = 100;
 
@@ -102,6 +106,45 @@ impl CollectedFundingCoin {
             _ => Err(FailureKind::Changed),
         }
     }
+
+    fn validate_claim_coin(
+        &self,
+        path: &RetainedPath,
+        coin: &CandidateCoin,
+        descriptor: &CoincubeDescriptor,
+    ) -> Result<(), FailureKind> {
+        let raw = path.links().first().ok_or(FailureKind::Malformed)?;
+        let previous: Transaction =
+            deserialize(&raw.transaction).map_err(|_| FailureKind::Malformed)?;
+        let output = previous
+            .output
+            .get(self.selected.vout as usize)
+            .ok_or(FailureKind::Malformed)?;
+        let derived = if coin.is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        }
+        .derive(
+            coin.deriv_index,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        );
+        if path.selected() != self.selected
+            || self
+                .ancestry
+                .retained_path()
+                .map_err(|_| FailureKind::Malformed)?
+                .encode()
+                != path.encode()
+            || coin.outpoint != self.selected
+            || previous.compute_txid() != self.selected.txid
+            || coin.amount != output.value
+            || derived.script_pubkey() != output.script_pubkey
+        {
+            return Err(FailureKind::Changed);
+        }
+        Ok(())
+    }
 }
 
 /// Current two-chain review context. A stored journal must not persist this
@@ -136,20 +179,7 @@ impl CollectedFundingPair {
         self.observed_at
     }
 
-    /// Bind the two fresh funding observations to exactly the same ordinary
-    /// constructions, retained paths and scan-derived wallet coins. This is a
-    /// review check, not a signing capability: source ownership is established
-    /// by the core builders, and reservations/fresh preflight remain required.
-    pub fn validate_for_split(
-        &self,
-        bitcoin_path: &RetainedPath,
-        fork_path: &RetainedPath,
-        bitcoin_candidate: &SplitCoin,
-        fork_candidate: &SplitCoin,
-        step1: &AncestrySplitStep1,
-        step2: &AncestrySplitStep2,
-        context: FundingContext<'_>,
-    ) -> Result<(), FailureKind> {
+    fn validate_session(&self, context: FundingContext<'_>) -> Result<(), FailureKind> {
         let a = self.bitcoin.ancestry.pair();
         if context.max_age_seconds <= 0
             || !super::super::super::fresh(self.observed_at, context.now, context.max_age_seconds)
@@ -170,7 +200,92 @@ impl CollectedFundingPair {
             || context.tips.fork != a.fork().tip
             || self.bitcoin.tip != a.bitcoin().tip
             || self.fork.tip != a.fork().tip
-            || step1.chain() != ChainId::Bitcoin
+        {
+            return Err(FailureKind::Changed);
+        }
+        Ok(())
+    }
+
+    /// Review-only binding for a paired Claim. The candidate metadata is
+    /// checked against each raw funding transaction and the source Vault;
+    /// neither this result nor the retained paths grants signing authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_for_claim(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        bitcoin_coin: &CandidateCoin,
+        fork_coin: &CandidateCoin,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        self.validate_session(context)?;
+        if self.bitcoin.chain != ChainId::Bitcoin
+            || self.fork.chain != ChainId::BitcoinBlake2b
+            || self.bitcoin.ancestry.pair().root_chain() != ChainId::Bitcoin
+            || self.fork.ancestry.pair().root_chain() != ChainId::BitcoinBlake2b
+            || bitcoin.chain() != ChainId::Bitcoin
+            || fork.chain() != ChainId::BitcoinBlake2b
+            || fork.descriptor() != bitcoin.descriptor()
+            || bitcoin.poison_input() != self.bitcoin.selected
+            || fork.fork_marker() != Some(self.fork.selected)
+            || fork.bitcoin_step1() != bitcoin.psbt().unsigned_tx.compute_txid()
+            || bitcoin.poison_derivation() != (bitcoin_coin.deriv_index, bitcoin_coin.is_change)
+            || bitcoin.claimed_prevouts().is_empty()
+            || self.bitcoin.selected == self.fork.selected
+        {
+            return Err(FailureKind::Changed);
+        }
+        let shared: BTreeSet<_> = bitcoin.claimed_prevouts().iter().copied().collect();
+        let mut first: BTreeSet<_> = bitcoin
+            .psbt()
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        let mut second: BTreeSet<_> = fork
+            .psbt()
+            .unsigned_tx
+            .input
+            .iter()
+            .map(|input| input.previous_output)
+            .collect();
+        if shared.len() != bitcoin.claimed_prevouts().len()
+            || first.len() != bitcoin.psbt().unsigned_tx.input.len()
+            || second.len() != fork.psbt().unsigned_tx.input.len()
+            || !first.remove(&self.bitcoin.selected)
+            || !second.remove(&self.fork.selected)
+            || first != shared
+            || second != shared
+        {
+            return Err(FailureKind::Changed);
+        }
+        self.bitcoin
+            .validate_claim_coin(bitcoin_path, bitcoin_coin, bitcoin.descriptor())?;
+        self.fork
+            .validate_claim_coin(fork_path, fork_coin, bitcoin.descriptor())?;
+        Ok(())
+    }
+
+    /// Bind the two fresh funding observations to exactly the same ordinary
+    /// constructions, retained paths and scan-derived wallet coins. This is a
+    /// review check, not a signing capability: source ownership is established
+    /// by the core builders, and reservations/fresh preflight remain required.
+    pub fn validate_for_split(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        bitcoin_candidate: &SplitCoin,
+        fork_candidate: &SplitCoin,
+        step1: &AncestrySplitStep1,
+        step2: &AncestrySplitStep2,
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        self.validate_session(context)?;
+        let a = self.bitcoin.ancestry.pair();
+        if step1.chain() != ChainId::Bitcoin
             || step2.chain() != ChainId::BitcoinBlake2b
             || step1.source() != step2.source()
             || step1.funding_prevout() != self.bitcoin.selected
