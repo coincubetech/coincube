@@ -1,7 +1,8 @@
 //! Signature evidence for an ancestry construction; no chain qualification.
 use super::*;
 use crate::claim_spend::AncestrySelfTransfer;
-use bitcoin::OutPoint;
+use bitcoin::{psbt::Psbt, OutPoint};
+use std::collections::BTreeSet;
 
 /// Kept distinct from OP_RETURN evidence so callers must explicitly integrate
 /// fresh ancestry qualification before using it in a submission workflow.
@@ -82,4 +83,84 @@ pub fn verify_ancestry_transaction<C: secp256k1::Verification>(
         secp,
     )
     .map(|verified| bind(construction, verified))
+}
+
+/// Both ordinary Claim transactions after cryptographic finalization. This
+/// does not include a current two-chain ancestry proof or submission consent.
+#[derive(Debug)]
+pub struct VerifiedAncestryClaimPair {
+    bitcoin: VerifiedAncestryTransfer,
+    fork: VerifiedClaimForkSweep,
+}
+impl VerifiedAncestryClaimPair {
+    pub fn bitcoin(&self) -> &VerifiedAncestryTransfer {
+        &self.bitcoin
+    }
+    pub fn fork(&self) -> &VerifiedClaimForkSweep {
+        &self.fork
+    }
+}
+
+#[derive(Debug)]
+pub enum ClaimPairFinalizeError {
+    ConstructionChanged,
+    Bitcoin(FinalizeError),
+    Fork(ClaimForkFinalizeError),
+}
+impl std::fmt::Display for ClaimPairFinalizeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Ancestry Claim pair finalization refused: {self:?}")
+    }
+}
+impl std::error::Error for ClaimPairFinalizeError {}
+
+/// Finalize the exact `S+B` and `S+F` Claim pair as one unit. In particular,
+/// the BTCB2 sweep must have the same shared inputs as the Bitcoin transfer,
+/// one *different* funding input, and its saved Bitcoin step-one txid. This
+/// verifies signatures but deliberately grants no live chain or signer access.
+pub fn finalize_ancestry_claim_pair<C: secp256k1::Verification>(
+    bitcoin: &AncestrySelfTransfer,
+    fork: &crate::claim_spend::ClaimForkSweep,
+    bitcoin_signed: &Psbt,
+    fork_signed: &crate::psbt_unified::UnifiedPsbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedAncestryClaimPair, ClaimPairFinalizeError> {
+    let shared: BTreeSet<_> = bitcoin.claimed_prevouts().iter().copied().collect();
+    let fork_inputs: BTreeSet<_> = fork
+        .psbt()
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .collect();
+    let marker = fork
+        .fork_marker()
+        .ok_or(ClaimPairFinalizeError::ConstructionChanged)?;
+    if bitcoin.chain() != ChainId::Bitcoin
+        || fork.chain() != ChainId::BitcoinBlake2b
+        || bitcoin.descriptor() != fork.descriptor()
+        || fork.bitcoin_step1() != bitcoin.psbt().unsigned_tx.compute_txid()
+        || marker == bitcoin.poison_input()
+        || shared.is_empty()
+        || shared.len() != bitcoin.claimed_prevouts().len()
+        || shared.contains(&marker)
+        || fork_inputs.len() != shared.len() + 1
+        || !shared.iter().all(|outpoint| fork_inputs.contains(outpoint))
+        || !fork_inputs.contains(&marker)
+        || bitcoin.psbt().unsigned_tx.output.len() != 1
+        || fork.psbt().unsigned_tx.output.len() != 1
+        || bitcoin.psbt().unsigned_tx.output[0]
+            .script_pubkey
+            .is_op_return()
+        || fork.psbt().unsigned_tx.output[0]
+            .script_pubkey
+            .is_op_return()
+    {
+        return Err(ClaimPairFinalizeError::ConstructionChanged);
+    }
+    let bitcoin = finalize_ancestry_transfer(bitcoin, bitcoin_signed, secp)
+        .map_err(ClaimPairFinalizeError::Bitcoin)?;
+    let fork =
+        finalize_claim_fork_sweep(fork, fork_signed, secp).map_err(ClaimPairFinalizeError::Fork)?;
+    Ok(VerifiedAncestryClaimPair { bitcoin, fork })
 }

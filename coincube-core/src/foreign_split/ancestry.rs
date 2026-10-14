@@ -401,6 +401,65 @@ pub fn verify_ancestry_split_step1_transaction<C: secp256k1::Verification>(
     })
 }
 
+/// Cryptographically finalized ordinary Split transactions, without current
+/// two-chain proof, reservations, or permission to broadcast either side.
+#[derive(Debug)]
+pub struct VerifiedAncestrySplitPair {
+    bitcoin: VerifiedSplitStep1,
+    fork: VerifiedAncestrySplitStep2,
+}
+impl VerifiedAncestrySplitPair {
+    pub fn bitcoin(&self) -> &VerifiedSplitStep1 {
+        &self.bitcoin
+    }
+    pub fn fork(&self) -> &VerifiedAncestrySplitStep2 {
+        &self.fork
+    }
+}
+
+/// Finalize both signed Split PSBTs as one exact `S+B` / `S+F` pair. A
+/// mismatched source, shared set, or funding input is refused before either
+/// artifact can be returned. Existing per-chain finalizers authenticate every
+/// signature and all PSBT metadata; this function does no chain reads.
+#[allow(clippy::too_many_arguments)]
+pub fn finalize_ancestry_split_pair<C: secp256k1::Verification>(
+    bitcoin: &AncestrySplitStep1,
+    bitcoin_inputs: &AncestrySplitInputs<'_>,
+    bitcoin_signed: &Psbt,
+    fork: &AncestrySplitStep2,
+    fork_inputs: &AncestrySplitStep2Inputs<'_>,
+    fork_signed: &Psbt,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedAncestrySplitPair, FinalizeError> {
+    let shared: BTreeSet<_> = bitcoin.claimed_prevouts().iter().copied().collect();
+    let fork_shared: BTreeSet<_> = fork.claimed_prevouts().iter().copied().collect();
+    if bitcoin.chain() != ChainId::Bitcoin
+        || fork.chain() != ChainId::BitcoinBlake2b
+        || bitcoin.source() != fork.source()
+        || bitcoin.fork_height() != fork.fork_height()
+        || shared.is_empty()
+        || shared.len() != bitcoin.claimed_prevouts().len()
+        || fork_shared.len() != fork.claimed_prevouts().len()
+        || shared != fork_shared
+        || shared.contains(&bitcoin.funding_prevout())
+        || shared.contains(&fork.funding_prevout())
+        || bitcoin.funding_prevout() == fork.funding_prevout()
+        || bitcoin.psbt().unsigned_tx.output.len() != 1
+        || fork.psbt().unsigned_tx.output.len() != 1
+        || bitcoin.psbt().unsigned_tx.output[0]
+            .script_pubkey
+            .is_op_return()
+        || fork.psbt().unsigned_tx.output[0]
+            .script_pubkey
+            .is_op_return()
+    {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    let bitcoin = finalize_ancestry_split_step1(bitcoin, bitcoin_inputs, bitcoin_signed, secp)?;
+    let fork = finalize_ancestry_split_step2(fork, fork_inputs, fork_signed, secp)?;
+    Ok(VerifiedAncestrySplitPair { bitcoin, fork })
+}
+
 fn check_bound(
     construction: &AncestrySplitStep1,
     inputs: &AncestrySplitInputs<'_>,

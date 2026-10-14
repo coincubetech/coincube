@@ -354,9 +354,15 @@ The paired Claim consensus vector passes against the pinned Knots and electrs
 two-chain harness, including BTCB2-first broadcast and one-block and six-block
 reorgs of either confirmation. Coordinator restart, stale observation and
 marker spend cases remain.
-The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
-pair from distinct coinbase dependencies. All five supported foreign source
-shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.
+   The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
+   pair from distinct coinbase dependencies. All five supported foreign source
+   shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.
+   Core also has typed pair finalizers for both Claim and Split. They require
+   the same shared input set, distinct chain-specific funding inputs, ordinary
+   outputs and valid signatures on both exact PSBTs before returning a pair.
+   These artifacts are cryptographic evidence only; the coordinator still must
+   bind them to the saved intent, fresh two-chain proof, reservations and paired
+   Connect preflight before either transaction can be submitted.
 The latter mines separate post-fork coinbases into the foreign source, tests
 both signed transactions against each node, confirms BTCB2 first, and checks
 that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin

@@ -211,6 +211,13 @@ fn finalize(step: &SplitStep1, signed: &Psbt) -> Result<VerifiedSplitStep1, Fina
 fn ancestry_funding(
     source: &SplitSource,
 ) -> (SplitCoin, crate::claim_ancestry::CoinbaseDependency) {
+    ancestry_funding_with_nonce(source, 1)
+}
+
+fn ancestry_funding_with_nonce(
+    source: &SplitSource,
+    nonce: u8,
+) -> (SplitCoin, crate::claim_ancestry::CoinbaseDependency) {
     use crate::claim_ancestry::{self, Link};
     use bitcoin::consensus::serialize;
 
@@ -219,7 +226,7 @@ fn ancestry_funding(
         lock_time: LockTime::ZERO,
         input: vec![TxIn {
             previous_output: OutPoint::null(),
-            script_sig: ScriptBuf::from_bytes(vec![2, 1, 1]),
+            script_sig: ScriptBuf::from_bytes(vec![2, 1, nonce]),
             ..TxIn::default()
         }],
         output: vec![TxOut {
@@ -227,7 +234,7 @@ fn ancestry_funding(
             script_pubkey: ScriptBuf::new(),
         }],
     };
-    let mut funding = coin(source, SplitBranch::External, 7, 30_000);
+    let mut funding = coin(source, SplitBranch::External, 6 + u32::from(nonce), 30_000);
     funding.previous.input[0].previous_output = OutPoint::new(root.compute_txid(), 0);
     funding.outpoint = OutPoint::new(funding.previous.compute_txid(), 1);
     funding.bitcoin_block = Some(block(FORK + 20));
@@ -524,6 +531,84 @@ fn ancestry_step2_builds_exact_shared_plus_funding_and_signs_every_shape() {
             step.fee()
         );
     }
+}
+
+#[test]
+fn ancestry_pair_finalizes_only_matching_signed_transactions() {
+    let wallet = wallet(Shape::WshMulti);
+    let shared = coins(&wallet.source);
+    let (bitcoin_funding, bitcoin_dependency) = ancestry_funding_with_nonce(&wallet.source, 1);
+    let (mut fork_funding, fork_dependency) = ancestry_funding_with_nonce(&wallet.source, 2);
+    fork_funding.bitcoin_block = None;
+    fork_funding.btcb2_block = Some(block(FORK + 21));
+    let bitcoin_inputs = AncestrySplitInputs {
+        chain: ChainId::Bitcoin,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &bitcoin_funding,
+        dependency: &bitcoin_dependency,
+        fork_height: FORK,
+        destination: 9,
+    };
+    let bitcoin =
+        create_ancestry_split_step1(&bitcoin_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
+    let target = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([42; 32]));
+    let fork_inputs = AncestrySplitStep2Inputs {
+        chain: ChainId::BitcoinBlake2b,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &fork_funding,
+        dependency: &fork_dependency,
+        fork_height: FORK,
+        claimed: bitcoin.claimed_prevouts(),
+        target: target.as_script(),
+    };
+    let fork = create_ancestry_split_step2(&fork_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
+    let bitcoin_signed = sign(bitcoin.psbt(), &wallet.signers);
+    let fork_signed = sign(fork.psbt(), &wallet.signers);
+    let secp = secp256k1::Secp256k1::verification_only();
+    let verified = finalize_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_signed,
+        &fork,
+        &fork_inputs,
+        &fork_signed,
+        &secp,
+    )
+    .unwrap();
+    assert_eq!(
+        verified.bitcoin().transaction().input.len(),
+        shared.len() + 1
+    );
+    assert_eq!(verified.fork().transaction().input.len(), shared.len() + 1);
+
+    let partial = sign(fork.psbt(), &wallet.signers[..1]);
+    assert!(finalize_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_signed,
+        &fork,
+        &fork_inputs,
+        &partial,
+        &secp,
+    )
+    .is_err());
+    let mut changed = fork_signed;
+    changed.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert_eq!(
+        finalize_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_signed,
+            &fork,
+            &fork_inputs,
+            &changed,
+            &secp,
+        )
+        .unwrap_err(),
+        FinalizeError::ConstructionChanged
+    );
 }
 
 #[test]

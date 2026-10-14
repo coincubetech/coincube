@@ -533,7 +533,8 @@ fn verify_retained_witness<C: secp256k1::Verification>(
 
 mod ancestry;
 pub use ancestry::{
-    finalize_ancestry_transfer, verify_ancestry_transaction, VerifiedAncestryTransfer,
+    finalize_ancestry_claim_pair, finalize_ancestry_transfer, verify_ancestry_transaction,
+    ClaimPairFinalizeError, VerifiedAncestryClaimPair, VerifiedAncestryTransfer,
 };
 
 #[cfg(test)]
