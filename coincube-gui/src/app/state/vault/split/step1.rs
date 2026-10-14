@@ -463,7 +463,7 @@ pub struct SplitDepositProgress {
     pub both_verified: bool,
     /// Derived from the exact paired unsigned transactions, never retained
     /// as spend authority or offered to a signer.
-    pub review: Option<crate::app::view::vault::ancestry_coins::CoinPairReview>,
+    pub review: Option<crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview>,
 }
 
 pub async fn check_reserved_funding_addresses(
@@ -969,13 +969,21 @@ impl SplitConnect for ProductionConnect {
                             _ => format!("The exact split transactions could not be reviewed: {error:?}"),
                         }
                     })?;
+                let coins = crate::app::view::vault::ancestry_coins::CoinPairReview::from_psbts(
+                    bitcoin.psbt(),
+                    fork.psbt(),
+                    bitcoin.claimed_prevouts(),
+                    bitcoin.funding_prevout(),
+                    fork.funding_prevout(),
+                )
+                .map_err(str::to_owned)?;
                 Some(
-                    crate::app::view::vault::ancestry_coins::CoinPairReview::from_psbts(
-                        bitcoin.psbt(),
-                        fork.psbt(),
-                        bitcoin.claimed_prevouts(),
-                        bitcoin.funding_prevout(),
-                        fork.funding_prevout(),
+                    crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview::new(
+                        coins,
+                        found.inputs.funding().bitcoin().block(),
+                        tips.bitcoin,
+                        found.inputs.funding().fork().block(),
+                        tips.fork,
                     )
                     .map_err(str::to_owned)?,
                 )

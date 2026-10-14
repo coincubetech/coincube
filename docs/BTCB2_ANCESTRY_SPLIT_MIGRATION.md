@@ -111,7 +111,8 @@ a replayable spend.
    It checks the exact Cube, descriptor, local data root, account, provider
    and token before a deposit check, and stores only a weak reference plus the
    fork tab's revocable session generation. Closing or changing that tab
-   invalidates an in-flight reservation or preview. After
+   invalidates an in-flight reservation or preview, including a result waiting
+   to be delivered to the Bitcoin UI. After
    both proofs pass, it asks both daemons for durable change indices and
    constructs a read-only exact PSBT preview. The separate legacy
    remote-wallet backend still cannot atomically reserve change indices.
@@ -304,8 +305,9 @@ a replayable spend.
    The Claim wizard now calls the paired transaction builder for a read-only
    preview once the BTCB2 Cube is open and both wallet change branches have
    been reserved. Claim and Split previews now show the source wallet's
-   signing threshold, the full destination and exact output value on each
-   chain. They do not hand the pair to signers.
+   signing threshold, each verified deposit's current confirmation count, the
+   full destination and exact output value on each chain. They do not hand
+   the pair to signers.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,

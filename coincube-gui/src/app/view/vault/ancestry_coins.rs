@@ -1,8 +1,11 @@
 //! Read-only split coin rows derived from the exact unsigned PSBT inputs.
 //! This is display data, never a proof of ancestry or spend authorization.
 
-use coincube_core::miniscript::bitcoin::{psbt::Psbt, Amount, OutPoint, TxOut};
-use std::collections::BTreeSet;
+use coincube_core::{
+    claim::BlockRef,
+    miniscript::bitcoin::{psbt::Psbt, Amount, OutPoint, TxOut},
+};
+use std::{collections::BTreeSet, ops::Deref};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoinRow {
@@ -107,6 +110,47 @@ pub struct CoinPairReview {
     pub fork: CoinReview,
 }
 
+/// Transient display data from a complete paired funding proof. This does not
+/// carry the proof or confer signer authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VerifiedCoinPairReview {
+    pub coins: CoinPairReview,
+    pub bitcoin_confirmations: u64,
+    pub fork_confirmations: u64,
+}
+
+impl VerifiedCoinPairReview {
+    pub fn new(
+        coins: CoinPairReview,
+        bitcoin_block: BlockRef,
+        bitcoin_tip: BlockRef,
+        fork_block: BlockRef,
+        fork_tip: BlockRef,
+    ) -> Result<Self, &'static str> {
+        let confirmations = |block: BlockRef, tip: BlockRef| {
+            tip.height
+                .checked_sub(block.height)?
+                .checked_add(1)
+                .filter(|depth| *depth > 0)
+        };
+        Ok(Self {
+            coins,
+            bitcoin_confirmations: confirmations(bitcoin_block, bitcoin_tip)
+                .ok_or("The Bitcoin funding confirmation height is invalid.")?,
+            fork_confirmations: confirmations(fork_block, fork_tip)
+                .ok_or("The BTCB2 funding confirmation height is invalid.")?,
+        })
+    }
+}
+
+impl Deref for VerifiedCoinPairReview {
+    type Target = CoinPairReview;
+
+    fn deref(&self) -> &Self::Target {
+        &self.coins
+    }
+}
+
 impl CoinPairReview {
     pub fn from_psbts(
         bitcoin: &Psbt,
@@ -186,6 +230,23 @@ mod tests {
         assert_eq!(review.fork.funding.amount.to_sat(), 3_000);
         assert_eq!(review.bitcoin.fee.to_sat(), 500);
         assert_eq!(review.fork.fee.to_sat(), 600);
+        let block = |height| BlockRef {
+            height,
+            hash: coincube_core::miniscript::bitcoin::BlockHash::from_byte_array([1; 32]),
+        };
+        let verified =
+            VerifiedCoinPairReview::new(review, block(100), block(105), block(110), block(112))
+                .unwrap();
+        assert_eq!(verified.bitcoin_confirmations, 6);
+        assert_eq!(verified.fork_confirmations, 3);
+        assert!(VerifiedCoinPairReview::new(
+            verified.coins,
+            block(106),
+            block(105),
+            block(110),
+            block(112),
+        )
+        .is_err());
     }
 
     #[test]

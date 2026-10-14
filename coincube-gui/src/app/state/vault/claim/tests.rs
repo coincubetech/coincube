@@ -282,8 +282,11 @@ fn panel(descriptor: &str) -> ClaimStep1Panel {
 #[test]
 fn claim_funding_results_require_the_current_panel_and_session() {
     let (_sender, receiver) = watch::channel(7);
+    let (fork_sender, fork_receiver) = watch::channel(1);
+    let fork_daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
     let mut p = panel(SINGLE_WSH);
     p.generation = receiver;
+    p.bind_fork_daemon(Some(ClaimForkBinding::new(&fork_daemon, fork_receiver)));
     p.connect = Some(ConnectSession {
         client: CoincubeClient::new(),
         account: "account".into(),
@@ -348,6 +351,24 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(status.contains("Bitcoin deposit: post-fork candidate found"));
     assert!(status.contains("Bitcoin Blake2b deposit: no confirmed candidate"));
     assert!(!p.can_sign_or_submit());
+    fork_sender.send_modify(|generation| *generation += 1);
+    p.funding_checking = true;
+    p.check_seq = 14;
+    drop(p.apply(ClaimEvent::FundingChecked(
+        14,
+        7,
+        0,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: true,
+            both_verified: true,
+            review: None,
+        }),
+    )));
+    assert!(p
+        .funding_status()
+        .unwrap()
+        .contains("paired BTCB2 Cube changed"));
     p.revoke();
     assert!(matches!(p.stage, Stage::Preconditions));
     assert!(p.funding_status.is_none());

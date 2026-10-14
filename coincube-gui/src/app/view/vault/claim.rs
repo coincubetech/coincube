@@ -29,7 +29,7 @@ use crate::{
             dashboard,
             message::*,
             vault::{
-                ancestry_coins::{CoinPairReview, CoinReview},
+                ancestry_coins::{CoinReview, VerifiedCoinPairReview},
                 psbt,
             },
         },
@@ -165,7 +165,10 @@ pub fn view<'a>(
     }
 }
 
-fn funding_review_view(review: &CoinPairReview, threshold: usize) -> Element<'static, Message> {
+fn funding_review_view(
+    review: &VerifiedCoinPairReview,
+    threshold: usize,
+) -> Element<'static, Message> {
     let address = |output: &TxOut| {
         Address::from_script(&output.script_pubkey, Network::Bitcoin)
             .map(|address| address.to_string())
@@ -192,7 +195,8 @@ fn funding_review_view(review: &CoinPairReview, threshold: usize) -> Element<'st
     }
     rows.push(p1_bold("Bitcoin transaction"))
         .push(p2_regular(format!(
-            "Bitcoin-only · verified: {} · {} sats",
+            "Bitcoin-only · verified ({} confirmations): {} · {} sats",
+            review.bitcoin_confirmations,
             review.bitcoin.funding.outpoint,
             review.bitcoin.funding.amount.to_sat()
         )))
@@ -204,7 +208,8 @@ fn funding_review_view(review: &CoinPairReview, threshold: usize) -> Element<'st
         .push(p2_regular(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
         .push(p1_bold("Bitcoin Blake2b transaction"))
         .push(p2_regular(format!(
-            "BTCB2-only · verified: {} · {} sats",
+            "BTCB2-only · verified ({} confirmations): {} · {} sats",
+            review.fork_confirmations,
             review.fork.funding.outpoint,
             review.fork.funding.amount.to_sat()
         )))

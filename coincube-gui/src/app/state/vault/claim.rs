@@ -284,7 +284,7 @@ pub struct ClaimDepositProgress {
     pub btcb2_candidate: bool,
     pub both_verified: bool,
     /// Derived from the exact ordinary PSBT pair. It is never signer authority.
-    pub review: Option<view::vault::ancestry_coins::CoinPairReview>,
+    pub review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
 }
 
 /// A borrowed fork daemon is valid only while the tab that supplied it stays
@@ -551,7 +551,7 @@ pub struct ClaimStep1Panel {
     pre: Preconditions,
     funding_error: Option<String>,
     funding_status: Option<String>,
-    funding_review: Option<view::vault::ancestry_coins::CoinPairReview>,
+    funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     funding_checking: bool,
     stage: Stage,
     /// The live coordinator's revoker, kept outside the session so a
@@ -701,11 +701,22 @@ impl ClaimStep1Panel {
     }
 
     pub fn funding_status(&self) -> Option<&str> {
+        if self.funding_review.is_some() && !self.fork_pair_current() {
+            return Some("The paired BTCB2 Cube changed. Reopen it and check both deposits again.");
+        }
         self.funding_status.as_deref()
     }
 
-    pub fn funding_review(&self) -> Option<&view::vault::ancestry_coins::CoinPairReview> {
-        self.funding_review.as_ref()
+    pub fn funding_review(&self) -> Option<&view::vault::ancestry_coins::VerifiedCoinPairReview> {
+        self.fork_pair_current()
+            .then_some(self.funding_review.as_ref())
+            .flatten()
+    }
+
+    fn fork_pair_current(&self) -> bool {
+        self.fork_daemon
+            .as_ref()
+            .is_some_and(ClaimForkBinding::current)
     }
 
     pub fn funding_checking(&self) -> bool {
@@ -1616,13 +1627,21 @@ impl ClaimStep1Panel {
                         .map_err(|error| {
                             format!("The exact Claim pair could not be reviewed: {error:?}")
                         })?;
+                    let coins = view::vault::ancestry_coins::CoinPairReview::from_psbts(
+                        bitcoin.psbt(),
+                        fork.psbt(),
+                        bitcoin.claimed_prevouts(),
+                        proof.bitcoin.outpoint,
+                        proof.fork.outpoint,
+                    )
+                    .map_err(str::to_owned)?;
                     Some(
-                        view::vault::ancestry_coins::CoinPairReview::from_psbts(
-                            bitcoin.psbt(),
-                            fork.psbt(),
-                            bitcoin.claimed_prevouts(),
-                            proof.bitcoin.outpoint,
-                            proof.fork.outpoint,
+                        view::vault::ancestry_coins::VerifiedCoinPairReview::new(
+                            coins,
+                            proof.inputs.funding().bitcoin().block(),
+                            tips.bitcoin,
+                            proof.inputs.funding().fork().block(),
+                            tips.fork,
                         )
                         .map_err(str::to_owned)?,
                     )
@@ -2275,6 +2294,14 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 let proof_complete = matches!(&result, Ok(progress) if progress.both_verified);
+                if proof_complete && !self.fork_pair_current() {
+                    self.funding_review = None;
+                    self.funding_status = Some(
+                        "The paired BTCB2 Cube changed during the deposit check. Reopen it and check both deposits again."
+                            .into(),
+                    );
+                    return Task::none();
+                }
                 self.funding_review = result
                     .as_ref()
                     .ok()
