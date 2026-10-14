@@ -507,9 +507,62 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         context(),
         100,
     );
+    let initial_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    let post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    let wrong_tip_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(8),
+        100,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &wrong_tip_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let wrong_witness_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.fork().transaction(),
+        signed.bitcoin().transaction(),
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &wrong_witness_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::LateObservation)
+    ));
     assert!(matches!(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
+            &post_proof,
             preflight.fork(),
             &confirmation,
             freshness,
@@ -518,13 +571,25 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         Err(Error::Conflict)
     ));
     assert!(matches!(
-        reopened.record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 200,),
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            200,
+        ),
         Err(Error::LateObservation)
     ));
     let moved = temp.0.with_extension("moved");
     fs::rename(&temp.0, &moved).unwrap();
     assert!(reopened
-        .record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 100)
+        .record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100
+        )
         .is_err());
     assert!(reopened
         .recorded_signed_ancestry_pair()
@@ -534,8 +599,32 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     fs::rename(moved, &temp.0).unwrap();
     drop(reopened);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let initial_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
     reopened
-        .record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 100)
+        .record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100,
+        )
         .unwrap();
     drop(reopened);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
@@ -544,13 +633,36 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .unwrap()
         .possible_attempt(ChainId::Bitcoin)
         .is_some());
+    let initial_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
     assert!(matches!(
-        reopened.record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 100,),
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
         Err(Error::Conflict)
     ));
+    let post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
     assert!(matches!(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
+            &post_proof,
             preflight.fork(),
             &confirmation,
             freshness,
@@ -575,9 +687,29 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         context(),
         200,
     );
+    let refreshed_post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(8),
+        200,
+    );
     assert!(matches!(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
+            &post_proof,
+            refreshed_fork.fork(),
+            &refreshed_confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
             refreshed_fork.fork(),
             &wrong_confirmation,
             freshness,
@@ -588,6 +720,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert!(matches!(
         reopened.record_possible_ancestry_fork_attempt(
             &context(),
+            &refreshed_post_proof,
             refreshed_fork.fork(),
             &confirmation,
             freshness,
@@ -598,6 +731,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     reopened
         .record_possible_ancestry_fork_attempt(
             &context(),
+            &refreshed_post_proof,
             refreshed_fork.fork(),
             &refreshed_confirmation,
             freshness,

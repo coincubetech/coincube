@@ -630,7 +630,8 @@ impl Controller {
     /// A coordinator still needs paired mempool preflight, revocable review,
     /// submission-intent journaling and reorg handling before broadcast.
     #[allow(clippy::too_many_arguments)]
-    pub fn finalize_ancestry_pair_for_review(
+    #[allow(dead_code)] // Paired signer route remains gated.
+    pub(crate) fn finalize_ancestry_pair_for_review(
         &mut self,
         current: &Context,
         pair: &crate::services::claim_observation::http::CollectedSpendInputs,
@@ -643,7 +644,13 @@ impl Controller {
         policy: Policy,
         now: i64,
         tips: coincube_core::claim::PreflightTips,
-    ) -> Result<coincube_core::claim_finalize::VerifiedAncestryClaimPair, Error> {
+    ) -> Result<
+        (
+            coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+            super::paired_submission::InitialAncestryProof,
+        ),
+        Error,
+    > {
         self.validate_ancestry_pair_observation(
             current,
             pair,
@@ -655,14 +662,24 @@ impl Controller {
             now,
             tips,
         )?;
-        coincube_core::claim_finalize::finalize_ancestry_claim_pair(
+        let signed = coincube_core::claim_finalize::finalize_ancestry_claim_pair(
             bitcoin,
             fork,
             bitcoin_signed,
             fork_signed,
             &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
         )
-        .map_err(|_| Error::InvalidPlan)
+        .map_err(|_| Error::InvalidPlan)?;
+        let proof = super::paired_submission::InitialAncestryProof::after_finalization(
+            self,
+            current,
+            signed.bitcoin().transaction(),
+            signed.fork().transaction(),
+            tips,
+            pair.observed_at(),
+            policy.max_observation_age_seconds,
+        );
+        Ok((signed, proof))
     }
 
     /// Bind a new positive ancestry collection to the saved intent. This clears

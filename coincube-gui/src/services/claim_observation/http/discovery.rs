@@ -15,8 +15,8 @@ use coincube_core::{
 };
 pub use collect::CollectedAncestry;
 pub use funding::{
-    ClaimPairError, CollectedFundingCoin, CollectedFundingPair, CollectedSpendInputs,
-    FundingContext, OwnedClaimFunding, OwnedSplitFunding, SplitPairError,
+    ClaimPairError, CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs,
+    CollectedSpendInputs, FundingContext, OwnedClaimFunding, OwnedSplitFunding, SplitPairError,
 };
 pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{

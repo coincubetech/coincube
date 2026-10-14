@@ -271,6 +271,14 @@ pub struct CollectedPostBitcoinInputs {
 }
 
 impl CollectedPostBitcoinInputs {
+    pub fn observed_at(&self) -> i64 {
+        self.observed_at
+    }
+
+    pub fn bitcoin_confirmation(&self) -> BlockRef {
+        self.bitcoin_confirmation
+    }
+
     /// Bind the post-confirmation observations to the same exact signed
     /// Bitcoin witness and intended fork input set. Ownership, reservations,
     /// finalized fork signatures and fresh node policy are separate checks.

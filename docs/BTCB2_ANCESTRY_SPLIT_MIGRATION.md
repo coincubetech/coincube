@@ -412,6 +412,16 @@ marker spend cases remain.
    Its distinct result type cannot enter the initial signer validator. It
    still needs wallet ownership, reservation, finalized fork signature and
    fresh policy checks in the stage-two coordinator.
+   The Claim and Split pair finalizers now issue an opaque, controller-bound
+   initial proof only after validating the exact signed pair against the saved
+   intent and fresh two-chain collection. Recording a possible Bitcoin send
+   requires that proof, matching preflight tip hashes, context and witnesses,
+   and the original observation-age limit (capped at 30 seconds). A separate
+   post-Bitcoin proof is issued only after the stage-two collector agrees with
+   the saved witnesses, exact canonical Bitcoin confirmation block, input set
+   and current two-chain tips. Recording the possible BTCB2 send requires
+   this new proof as well as fresh fork policy and the six-confirmation token.
+   Neither proof survives restart or grants transport access by itself.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

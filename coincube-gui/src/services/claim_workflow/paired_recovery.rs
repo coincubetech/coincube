@@ -7,6 +7,8 @@ use crate::services::claim_observation::{
     http::HttpObservationSource, FailureKind, FreshRead, ObservationSource, TransactionObservation,
     MAX_COLLECTION_TIME,
 };
+#[cfg(test)]
+use coincube_core::miniscript::bitcoin::hashes::Hash;
 use coincube_core::{
     chain::ChainId,
     claim::{BlockRef, MIN_CONFIRMATIONS},
@@ -56,11 +58,16 @@ impl PairedReconciliation {
 pub(crate) struct BitcoinConfirmation {
     txid: Txid,
     wtxid: Wtxid,
+    block: BlockRef,
     context: Context,
     started_at: i64,
 }
 
 impl BitcoinConfirmation {
+    pub(crate) fn block(&self) -> BlockRef {
+        self.block
+    }
+
     pub(crate) fn accepted_for(
         &self,
         current: &Context,
@@ -230,17 +237,20 @@ impl Controller {
             .map_err(|_| Error::LateObservation)?;
         let finished_at = source.now();
         let bitcoin_confirmation = match bitcoin {
-            SideReport::Observed(ChainState::Confirmed { confirmations, .. })
-                if confirmations >= MIN_CONFIRMATIONS
-                    && started_at >= 0
-                    && finished_at
-                        .checked_sub(started_at)
-                        .is_some_and(|age| (0..=MAX_CONFIRMATION_AGE_SECONDS).contains(&age)) =>
+            SideReport::Observed(ChainState::Confirmed {
+                block,
+                confirmations,
+            }) if confirmations >= MIN_CONFIRMATIONS
+                && started_at >= 0
+                && finished_at
+                    .checked_sub(started_at)
+                    .is_some_and(|age| (0..=MAX_CONFIRMATION_AGE_SECONDS).contains(&age)) =>
             {
                 let (txid, wtxid) = record.bitcoin_identity();
                 Some(BitcoinConfirmation {
                     txid,
                     wtxid,
+                    block,
                     context: current.clone(),
                     started_at,
                 })
@@ -264,6 +274,10 @@ pub(crate) fn confirmed_bitcoin_for_test(
     BitcoinConfirmation {
         txid: transaction.compute_txid(),
         wtxid: transaction.compute_wtxid(),
+        block: BlockRef {
+            height: 1,
+            hash: coincube_core::miniscript::bitcoin::BlockHash::all_zeros(),
+        },
         context,
         started_at,
     }

@@ -8,14 +8,170 @@ use super::{
     paired_recovery::BitcoinConfirmation, split, validate as validate_intent, Context, Controller,
     Error, Intent, Phase,
 };
+use crate::services::claim_observation::http::{CollectedPostBitcoinInputs, FundingContext};
 use crate::services::claim_preflight::{Evidence, FreshnessPolicy, PairEvidence};
 use coincube_core::{
     chain::ChainId,
+    claim::{Policy, PreflightTips},
     claim_finalize::VerifiedAncestryClaimPair,
     foreign_split::VerifiedAncestrySplitPair,
     miniscript::bitcoin::{BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
 };
 use serde::{Deserialize, Serialize};
+
+const MAX_PROOF_AGE_SECONDS: i64 = 30;
+
+/// A live, controller-bound result of checking both chain-specific and all
+/// shared inputs against the exact signed pair. Never serialized or restored.
+pub(crate) struct InitialAncestryProof {
+    controller: u64,
+    context: Context,
+    bitcoin: (Txid, Wtxid),
+    fork: (Txid, Wtxid),
+    tips: PreflightTips,
+    observed_at: i64,
+    max_age_seconds: i64,
+}
+
+impl InitialAncestryProof {
+    /// Only call after the Claim or Split finalizer validates the collected
+    /// inputs, saved intent, wallet ownership and both finalized signatures.
+    #[allow(dead_code)] // Called by the gated paired signer path.
+    pub(super) fn after_finalization(
+        controller: &Controller,
+        current: &Context,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        tips: PreflightTips,
+        observed_at: i64,
+        max_age_seconds: i64,
+    ) -> Self {
+        Self {
+            controller: controller.id,
+            context: current.clone(),
+            bitcoin: (bitcoin.compute_txid(), bitcoin.compute_wtxid()),
+            fork: (fork.compute_txid(), fork.compute_wtxid()),
+            tips,
+            observed_at,
+            max_age_seconds,
+        }
+    }
+
+    fn accepted_for(
+        &self,
+        controller: &Controller,
+        current: &Context,
+        record: &PairedSubmissionRecord,
+        preflight: &PairEvidence,
+        now: i64,
+    ) -> bool {
+        self.controller == controller.id
+            && self.context == *current
+            && self.bitcoin == record.bitcoin_identity()
+            && self.fork == record.fork_identity()
+            && self.tips.bitcoin.hash == preflight.bitcoin().tip()
+            && self.tips.fork.hash == preflight.fork().tip()
+            && proof_fresh(self.observed_at, now, self.max_age_seconds)
+    }
+}
+
+/// New proof after Bitcoin confirmation. It cannot be substituted for the
+/// initial all-unspent proof, and a restart cannot reconstitute it.
+pub(crate) struct PostBitcoinAncestryProof {
+    controller: u64,
+    context: Context,
+    bitcoin: (Txid, Wtxid),
+    fork: (Txid, Wtxid),
+    tips: PreflightTips,
+    observed_at: i64,
+    max_age_seconds: i64,
+}
+
+impl PostBitcoinAncestryProof {
+    fn accepted_for(
+        &self,
+        controller: &Controller,
+        current: &Context,
+        record: &PairedSubmissionRecord,
+        preflight: &Evidence,
+        now: i64,
+    ) -> bool {
+        self.controller == controller.id
+            && self.context == *current
+            && self.bitcoin == record.bitcoin_identity()
+            && self.fork == record.fork_identity()
+            && self.tips.fork.hash == preflight.tip()
+            && proof_fresh(self.observed_at, now, self.max_age_seconds)
+    }
+}
+
+fn proof_fresh(observed_at: i64, now: i64, max_age_seconds: i64) -> bool {
+    observed_at >= 0
+        && max_age_seconds > 0
+        && now
+            .checked_sub(observed_at)
+            .is_some_and(|age| (0..=max_age_seconds.min(MAX_PROOF_AGE_SECONDS)).contains(&age))
+}
+
+#[cfg(test)]
+pub(super) fn initial_proof_for_test(
+    controller: &Controller,
+    current: &Context,
+    bitcoin: &Transaction,
+    fork: &Transaction,
+    tip: BlockHash,
+    observed_at: i64,
+) -> InitialAncestryProof {
+    use coincube_core::claim::BlockRef;
+    InitialAncestryProof::after_finalization(
+        controller,
+        current,
+        bitcoin,
+        fork,
+        PreflightTips {
+            bitcoin: BlockRef {
+                height: 1,
+                hash: tip,
+            },
+            fork: BlockRef {
+                height: 1,
+                hash: tip,
+            },
+        },
+        observed_at,
+        MAX_PROOF_AGE_SECONDS,
+    )
+}
+
+#[cfg(test)]
+pub(super) fn post_bitcoin_proof_for_test(
+    controller: &Controller,
+    current: &Context,
+    bitcoin: &Transaction,
+    fork: &Transaction,
+    tip: BlockHash,
+    observed_at: i64,
+) -> PostBitcoinAncestryProof {
+    use coincube_core::claim::BlockRef;
+    PostBitcoinAncestryProof {
+        controller: controller.id,
+        context: current.clone(),
+        bitcoin: (bitcoin.compute_txid(), bitcoin.compute_wtxid()),
+        fork: (fork.compute_txid(), fork.compute_wtxid()),
+        tips: PreflightTips {
+            bitcoin: BlockRef {
+                height: 1,
+                hash: tip,
+            },
+            fork: BlockRef {
+                height: 1,
+                hash: tip,
+            },
+        },
+        observed_at,
+        max_age_seconds: MAX_PROOF_AGE_SECONDS,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -218,12 +374,72 @@ impl Controller {
         self.intent.paired_submission.as_ref()
     }
 
+    /// Recheck the post-Bitcoin collector against the saved signed pair and
+    /// canonical Bitcoin confirmation. The collector checks spent Bitcoin
+    /// inputs and unspent BTCB2 inputs; this result expires and is not journaled.
+    #[allow(dead_code)] // Stage-two coordinator remains gated.
+    pub(super) fn post_bitcoin_ancestry_proof(
+        &mut self,
+        current: &Context,
+        observed: &CollectedPostBitcoinInputs,
+        confirmation: &BitcoinConfirmation,
+        policy: Policy,
+        now: i64,
+        tips: PreflightTips,
+    ) -> Result<PostBitcoinAncestryProof, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        if !proof_fresh(
+            observed.observed_at(),
+            now,
+            policy.max_observation_age_seconds,
+        ) {
+            return Err(Error::LateObservation);
+        }
+        let saved = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if saved.bitcoin_attempt.is_none()
+            || saved.fork_attempt.is_some()
+            || !confirmation.accepted_for(current, saved.bitcoin(), now)
+            || confirmation.block() != observed.bitcoin_confirmation()
+        {
+            return Err(Error::Conflict);
+        }
+        observed
+            .validate_for_transactions(
+                saved.bitcoin(),
+                saved.fork(),
+                &self.intent.plan.claimed_prevouts,
+                FundingContext {
+                    provider: &current.provider,
+                    generation: current.generation,
+                    now,
+                    max_age_seconds: policy.max_observation_age_seconds,
+                    tips,
+                },
+            )
+            .map_err(|_| Error::Unchecked)?;
+        Ok(PostBitcoinAncestryProof {
+            controller: self.id,
+            context: current.clone(),
+            bitcoin: saved.bitcoin_identity(),
+            fork: saved.fork_identity(),
+            tips,
+            observed_at: observed.observed_at(),
+            max_age_seconds: policy.max_observation_age_seconds,
+        })
+    }
+
     /// Initial Bitcoin attempt requires both exact signed witnesses to have
     /// passed one fresh paired preflight. No previous attempt can be retried.
     #[allow(dead_code)] // Staged with the disabled paired submission coordinator.
     pub(crate) fn record_possible_ancestry_bitcoin_attempt(
         &mut self,
         current: &Context,
+        ancestry: &InitialAncestryProof,
         preflight: &PairEvidence,
         policy: FreshnessPolicy,
         now: i64,
@@ -235,6 +451,9 @@ impl Controller {
             .paired_submission
             .as_ref()
             .ok_or(Error::Unchecked)?;
+        if !ancestry.accepted_for(self, current, saved, preflight, now) {
+            return Err(Error::LateObservation);
+        }
         if !preflight.accepted_for(
             saved.bitcoin(),
             saved.fork(),
@@ -262,6 +481,7 @@ impl Controller {
     pub(crate) fn record_possible_ancestry_fork_attempt(
         &mut self,
         current: &Context,
+        ancestry: &PostBitcoinAncestryProof,
         preflight: &Evidence,
         confirmation: &BitcoinConfirmation,
         policy: FreshnessPolicy,
@@ -274,6 +494,9 @@ impl Controller {
             .paired_submission
             .as_ref()
             .ok_or(Error::Unchecked)?;
+        if !ancestry.accepted_for(self, current, saved, preflight, now) {
+            return Err(Error::LateObservation);
+        }
         if !confirmation.accepted_for(current, saved.bitcoin(), now) {
             return Err(Error::LateObservation);
         }
