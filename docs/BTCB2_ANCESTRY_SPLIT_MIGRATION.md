@@ -253,9 +253,13 @@ a replayable spend.
    history nonempty; it never chooses replacements on retry.
    Coincubed `getinfo` now reports an explicit chain ID. The desktop accepts
    an authenticated `chain_id` on a Connect wallet record, checks its address
-   network, and keeps an omitted field unknown. The current remote Connect
-   wallet API does not yet supply this field, so Connect-backed Claim address
-   preparation still refuses it. Connect must return the positive identity
+   network, and keeps an omitted field unknown. The Claim deposit probe and
+   read-only checks now admit a Connect-backed Bitcoin Vault when its wallet
+   record positively identifies the Bitcoin chain, matches the Vault
+   descriptor and reports a ready wallet state; they no longer require the old
+   embedded-daemon submission adapter. The current remote Connect wallet API
+   does not yet supply `chain_id`, so Connect-backed Claim address preparation
+   still refuses it. Connect must return the positive identity
    before those deposits are usable. Creation of a version-10
    paired Claim intent now requires that saved record and checks both funding
    derivations against its exact external indices under the journal lock. The

@@ -43,6 +43,7 @@ use coincube_core::{
     claim::{self, Assessment, ForkTransactionPresence, Policy},
     claim_finalize::{finalize_poison_transfer, verify_poison_transaction},
     claim_spend::{reconstruct_poison_self_transfer, PoisonSelfTransfer},
+    descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
         address, bip32::ChildNumber, hashes::Hash, psbt::Psbt, secp256k1, Address, BlockHash,
         Network, OutPoint, Transaction, Txid,
@@ -205,8 +206,8 @@ pub struct Checked {
     pub window: Result<ForkWindow, String>,
     pub coins: Result<CoinSet, String>,
     pub feerate_vb: Result<u64, String>,
-    /// [`Production::new`]'s answer for this daemon and client: the one
-    /// place the backend and endpoint constraints are decided.
+    /// Whether the current Connect session and Bitcoin Vault can support the
+    /// read-only two-chain funding flow. Submission is admitted separately.
     pub backend: Result<(), String>,
 }
 
@@ -580,9 +581,47 @@ impl ClaimStep1Panel {
             && self.pre.shape.is_none()
             && !self.restart_pending
             && !self.pre.checking
+            && self
+                .pre
+                .checked
+                .as_ref()
+                .is_some_and(|checked| checked.backend.is_ok())
             && self.backend_ready()
             && self.connect.is_some()
             && !self.legacy_flow_fixture()
+    }
+
+    /// The deposit workflow reads both chains through the current Connect
+    /// account, regardless of whether this Vault's daemon is embedded or a
+    /// Connect wallet backend. The latter must still report a positive Bitcoin
+    /// chain identity before any address is prepared; the old submission
+    /// backend admission is deliberately not reused for a read-only scan.
+    fn funding_context(
+        connect: &ConnectSession,
+        expected: u64,
+        generation: watch::Receiver<u64>,
+    ) -> Result<Context, String> {
+        if connect.account.is_empty()
+            || generation.has_changed().is_err()
+            || *generation.borrow() != expected
+        {
+            return Err("The Connect claim session is unavailable.".into());
+        }
+        let source = HttpObservationSource::new(
+            connect.client.clone(),
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: expected,
+                generation,
+            },
+        )
+        .map_err(|_| "The Connect two-chain observation source is unavailable.".to_string())?;
+        Ok(Context {
+            generation: expected,
+            account: connect.account.clone(),
+            provider: source.provider_identity(),
+        })
     }
 
     pub fn funding_error(&self) -> Option<&str> {
@@ -1173,15 +1212,7 @@ impl ClaimStep1Panel {
         Task::perform(
             async move {
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
-                let production = Production::new(
-                    connect.client.clone(),
-                    daemon.clone(),
-                    connect.account,
-                    expected,
-                    generation.clone(),
-                )
-                .map_err(|_| "The Connect claim session is unavailable.".to_string())?;
-                let context = production.context().clone();
+                let context = Self::funding_context(&connect, expected, generation.clone())?;
                 let identity = claim_workflow::WalletIdentity {
                     bitcoin_cube,
                     fork_cube,
@@ -1191,15 +1222,7 @@ impl ClaimStep1Panel {
                     .get_info()
                     .await
                     .map_err(|_| "The Bitcoin Vault is unavailable.".to_string())?;
-                if info.network != Network::Bitcoin
-                    || info.chain_id != Some(coincube_core::chain::ChainId::Bitcoin)
-                    || info.descriptors.main != descriptor
-                    || info.rescan_progress.is_some()
-                    || info.chain_divergence
-                    || info.refused_reorg_depth.is_some()
-                    || info.history_sync.full_scan_in_progress
-                    || info.history_sync.last_failure.is_some()
-                {
+                if !bitcoin_funding_wallet_ready(&info, &descriptor) {
                     return Err(
                         "The Bitcoin Vault is not ready to reserve deposit addresses.".into(),
                     );
@@ -1301,15 +1324,7 @@ impl ClaimStep1Panel {
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
                 let fork_cube =
                     fork_cube.ok_or_else(|| "The paired BTCB2 Cube is missing.".to_string())?;
-                let production = Production::new(
-                    connect.client.clone(),
-                    daemon.clone(),
-                    connect.account,
-                    expected,
-                    generation.clone(),
-                )
-                .map_err(|_| "The Connect claim session is unavailable.".to_string())?;
-                let context = production.context().clone();
+                let context = Self::funding_context(&connect, expected, generation.clone())?;
                 let identity = claim_workflow::WalletIdentity {
                     bitcoin_cube,
                     fork_cube,
@@ -1319,12 +1334,7 @@ impl ClaimStep1Panel {
                     .get_info()
                     .await
                     .map_err(|_| "The Bitcoin Vault is unavailable.".to_string())?;
-                if info.chain_id != Some(ChainId::Bitcoin)
-                    || info.descriptors.main != descriptor
-                    || info.rescan_progress.is_some()
-                    || info.chain_divergence
-                    || info.refused_reorg_depth.is_some()
-                {
+                if !bitcoin_funding_wallet_ready(&info, &descriptor) {
                     return Err(
                         "The Bitcoin Vault is not ready for a two-chain deposit check.".into(),
                     );
@@ -2863,6 +2873,26 @@ fn unix_now() -> i64 {
         .unwrap_or(-1)
 }
 
+/// Funding admission depends on authenticated wallet identity and current
+/// state, not on which daemon implementation supplies those reads. In
+/// particular a Connect wallet may pass once its API reports `chain_id`.
+fn bitcoin_funding_wallet_ready(
+    info: &model::GetInfoResult,
+    descriptor: &CoincubeDescriptor,
+) -> bool {
+    info.network == Network::Bitcoin
+        && info.chain_id == Some(ChainId::Bitcoin)
+        && &info.descriptors.main == descriptor
+        && info.block_height > 0
+        && info.sync.is_finite()
+        && info.sync >= 0.9999
+        && info.rescan_progress.is_none()
+        && !info.chain_divergence
+        && info.refused_reorg_depth.is_none()
+        && !info.history_sync.full_scan_in_progress
+        && info.history_sync.last_failure.is_none()
+}
+
 async fn probe(
     daemon: Arc<dyn Daemon + Sync + Send>,
     connect: ConnectSession,
@@ -2871,17 +2901,7 @@ async fn probe(
     feerate: FeerateSource,
 ) -> Checked {
     let expected = *generation.borrow();
-    // The backend and endpoint constraints, decided by the one function that
-    // owns them. A `Production` built here is dropped: it is a probe.
-    let backend = Production::new(
-        connect.client.clone(),
-        daemon.clone(),
-        connect.account.clone(),
-        expected,
-        generation.clone(),
-    )
-    .map(|_| ())
-    .map_err(describe_production);
+    let funding_context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone());
     let window = async {
         let source = HttpObservationSource::new(
             connect.client.clone(),
@@ -2916,12 +2936,8 @@ async fn probe(
             .map_err(|e| e.to_string())?
             .coins;
         wallet.apply_coin_overrides(&mut coins);
-        let tip = daemon
-            .get_info()
-            .await
-            .map_err(|e| e.to_string())?
-            .block_height;
-        Ok::<_, String>((coins, tip))
+        let info = daemon.get_info().await.map_err(|e| e.to_string())?;
+        Ok::<_, String>((coins, info))
     };
     let feerate = async {
         match feerate {
@@ -2934,13 +2950,21 @@ async fn probe(
         }
     };
     let (window, coins, feerate_vb) = tokio::join!(window, coins, feerate);
+    let backend = funding_context.and_then(|_| match &coins {
+        Ok((_, info)) if bitcoin_funding_wallet_ready(info, &wallet.main_descriptor) => Ok(()),
+        _ => Err("The Bitcoin Vault must identify its chain and be fully synchronized before preparing deposits.".into()),
+    });
     let coins = match (&window, coins) {
-        (Ok(window), Ok((coins, tip))) => Ok(partition_coins(coins, window.fork_height, tip)),
-        (Err(_), Ok((coins, tip))) => Ok(CoinSet {
+        (Ok(window), Ok((coins, info))) => Ok(partition_coins(
+            coins,
+            window.fork_height,
+            info.block_height,
+        )),
+        (Err(_), Ok((coins, info))) => Ok(CoinSet {
             pre_fork: Vec::new(),
             post_fork: coins.len(),
             ancestry_candidates: Vec::new(),
-            tip_height: tip,
+            tip_height: info.block_height,
         }),
         (_, Err(reason)) => Err(reason),
     };

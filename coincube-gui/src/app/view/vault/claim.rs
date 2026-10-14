@@ -230,7 +230,7 @@ fn preconditions_view<'a>(
             checked.map(|c| c.backend.is_ok()),
             match checked.map(|c| &c.backend) {
                 None => "Checking…".to_string(),
-                Some(Ok(())) => "Coincube's Bitcoin service.".to_string(),
+                Some(Ok(())) => "Bitcoin Vault identified; deposit checks available.".to_string(),
                 Some(Err(_)) => "Not usable for a claim.".to_string(),
             },
         ))

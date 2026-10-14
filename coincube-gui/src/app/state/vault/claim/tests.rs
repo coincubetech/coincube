@@ -22,6 +22,43 @@ fn wallet(descriptor: &str) -> Arc<Wallet> {
     ))
 }
 
+#[test]
+fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backend() {
+    let descriptor = CoincubeDescriptor::from_str(SINGLE_WSH).unwrap();
+    let mut info = model::GetInfoResult {
+        version: String::new(),
+        network: Network::Bitcoin,
+        chain_id: Some(ChainId::Bitcoin),
+        block_height: 1_000,
+        sync: 1.0,
+        descriptors: coincubed::commands::GetInfoDescriptors {
+            main: descriptor.clone(),
+        },
+        rescan_progress: None,
+        refused_reorg_depth: None,
+        chain_divergence: false,
+        timestamp: 0,
+        last_poll_timestamp: None,
+        history_sync: Default::default(),
+        receive_index: 1,
+        change_index: 1,
+    };
+    assert!(bitcoin_funding_wallet_ready(&info, &descriptor));
+
+    // Bitcoin and BTCB2 share mainnet address encoding. An older Connect
+    // response with no explicit chain identity must not pass by inference.
+    info.chain_id = None;
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+    info.chain_id = Some(ChainId::BitcoinBlake2b);
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+    info.chain_id = Some(ChainId::Bitcoin);
+    info.sync = 0.9;
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+    info.sync = 1.0;
+    info.block_height = 0;
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+}
+
 fn coin(height: Option<i32>, spent: bool, immature: bool, n: u32) -> Coin {
     Coin {
         amount: Amount::from_sat(10_000 + u64::from(n)),
@@ -219,6 +256,7 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     });
     p.pre.target = Some("fork-cube".into());
     p.pre.shape = None;
+    p.pre.checked = Some(checked_ok(1_000_000));
     assert!(p.can_prepare_funding());
     p.stage = Stage::FundingChecking;
     p.check_seq = 11;
