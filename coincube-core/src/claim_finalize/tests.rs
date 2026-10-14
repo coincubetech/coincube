@@ -799,6 +799,29 @@ fn ordinary_claim_pair_requires_both_signed_transactions() {
         verified.fork().bitcoin_step1(),
         verified.bitcoin().construction_txid()
     );
+    let restored = verify_ancestry_claim_pair_transactions(
+        &bitcoin,
+        verified.bitcoin().transaction(),
+        &fork,
+        verified.fork().transaction(),
+        &verify,
+    )
+    .unwrap();
+    assert_eq!(
+        restored.bitcoin().transaction(),
+        verified.bitcoin().transaction()
+    );
+    assert_eq!(restored.fork().transaction(), verified.fork().transaction());
+    let mut altered_bitcoin = verified.bitcoin().transaction().clone();
+    altered_bitcoin.input[0].witness.clear();
+    assert!(verify_ancestry_claim_pair_transactions(
+        &bitcoin,
+        &altered_bitcoin,
+        &fork,
+        verified.fork().transaction(),
+        &verify,
+    )
+    .is_err());
 
     let incomplete =
         UnifiedPsbt::from_psbt(signers[0].sign_psbt(fork.psbt().clone(), &secp).unwrap()).unwrap();

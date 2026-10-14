@@ -1198,10 +1198,10 @@ pub use ancestry::{
     estimate_ancestry_signed_vbytes, finalize_ancestry_split_pair, finalize_ancestry_split_step1,
     finalize_ancestry_split_step2, reconstruct_ancestry_split_step1,
     reconstruct_ancestry_split_step2, validate_ancestry_split_pair_signing,
-    verify_ancestry_split_step1_transaction, verify_ancestry_split_step2_transaction,
-    AncestrySplitInputs, AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs,
-    CombineAncestrySplitError, CombinedAncestrySplitPair, VerifiedAncestrySplitPair,
-    VerifiedAncestrySplitStep2,
+    verify_ancestry_split_pair_transactions, verify_ancestry_split_step1_transaction,
+    verify_ancestry_split_step2_transaction, AncestrySplitInputs, AncestrySplitStep1,
+    AncestrySplitStep2, AncestrySplitStep2Inputs, CombineAncestrySplitError,
+    CombinedAncestrySplitPair, VerifiedAncestrySplitPair, VerifiedAncestrySplitStep2,
 };
 
 mod unified;

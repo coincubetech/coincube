@@ -15,7 +15,11 @@ use coincube_core::{
     chain::ChainId,
     claim::{BlockRef, Policy, PreflightTips},
     claim_finalize::VerifiedAncestryClaimPair,
-    foreign_split::VerifiedAncestrySplitPair,
+    claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
+    foreign_split::{
+        AncestrySplitInputs, AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs,
+        VerifiedAncestrySplitPair,
+    },
     miniscript::bitcoin::{psbt::Psbt, BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
 };
 use coincubed::poison_broadcast::{SubmissionGate, SubmissionRevoker};
@@ -368,6 +372,86 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
 }
 
 impl Controller {
+    /// Reverify the two saved Claim witnesses against their exact rebuilt
+    /// wallet constructions. This is read-only signature evidence; it grants
+    /// no live chain proof and cannot re-enable a submission after restart.
+    #[allow(dead_code)] // Stage-two coordinator will consume this after rebuilding the pair.
+    pub(crate) fn verify_recorded_ancestry_claim_pair(
+        &mut self,
+        current: &Context,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+    ) -> Result<VerifiedAncestryClaimPair, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        if self.intent.version != 10 || self.intent.split.is_some() {
+            return Err(Error::WrongIdentity);
+        }
+        let saved = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if bitcoin.psbt().unsigned_tx != self.intent.plan.step1
+            || self
+                .intent
+                .funding_plan
+                .as_ref()
+                .is_none_or(|funding| fork.psbt().unsigned_tx != funding.step2_unsigned)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        coincube_core::claim_finalize::verify_ancestry_claim_pair_transactions(
+            bitcoin,
+            saved.bitcoin(),
+            fork,
+            saved.fork(),
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        )
+        .map_err(|_| Error::InvalidPlan)
+    }
+
+    /// Reverify the exact saved ordinary Split witnesses after restart. This
+    /// reads no chain state, and deliberately returns no live ancestry proof
+    /// or transport token. The caller must supply freshly reconstructed,
+    /// owned source inputs before any later stage-two qualification.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Stage-two coordinator will consume this after rebuilding the pair.
+    pub(crate) fn verify_recorded_ancestry_split_pair(
+        &mut self,
+        current: &Context,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_inputs: &AncestrySplitInputs<'_>,
+        fork: &AncestrySplitStep2,
+        fork_inputs: &AncestrySplitStep2Inputs<'_>,
+    ) -> Result<VerifiedAncestrySplitPair, Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        if self.intent.version != 11 || self.intent.split.is_none() {
+            return Err(Error::WrongIdentity);
+        }
+        let saved = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if bitcoin.psbt().unsigned_tx != self.intent.plan.step1
+            || Some(&fork.psbt().unsigned_tx) != split::ancestry_step2_unsigned(&self.intent)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        coincube_core::foreign_split::verify_ancestry_split_pair_transactions(
+            bitcoin,
+            bitcoin_inputs,
+            saved.bitcoin(),
+            fork,
+            fork_inputs,
+            saved.fork(),
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        )
+        .map_err(|_| Error::InvalidPlan)
+    }
+
     fn record_signed_pair(
         &mut self,
         current: &Context,

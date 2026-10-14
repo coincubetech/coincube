@@ -3,7 +3,8 @@
 //! of chain exclusivity or a permission to sign.
 
 use super::{
-    journal::Journal, paired_signing_permit::PairedSigningPermit, Context, Error, WalletIdentity,
+    journal::Journal, paired_signing_permit::PairedSigningPermit, Context, Controller, Error,
+    WalletIdentity,
 };
 use crate::daemon::{model, Daemon};
 use crate::services::{
@@ -69,6 +70,53 @@ pub(crate) struct RequalifiedInitialClaim {
 }
 
 impl RequalifiedInitialClaim {
+    /// Reauthenticate the journaled Claim witnesses after a fresh complete
+    /// wallet and two-chain scan. The result can populate a new broadcast
+    /// review, but is not policy acceptance, approval or a transport gate.
+    #[allow(dead_code)] // The paired submission review will consume this boundary.
+    pub(crate) fn reverify_recorded_pair_for_review(
+        &self,
+        controller: &mut Controller,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        policy: Policy,
+        now: i64,
+    ) -> Result<
+        (
+            coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+            super::paired_submission::InitialAncestryProof,
+        ),
+        Error,
+    > {
+        if !self.matches_pair(bitcoin, fork) || self.checked_at.elapsed() >= Duration::from_secs(10)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        controller.validate_ancestry_pair_observation(
+            &self.context,
+            &self.funding.inputs,
+            &self.funding.bitcoin,
+            &self.funding.fork,
+            bitcoin,
+            fork,
+            policy,
+            now,
+            self.tips,
+        )?;
+        let verified =
+            controller.verify_recorded_ancestry_claim_pair(&self.context, bitcoin, fork)?;
+        let proof = super::paired_submission::InitialAncestryProof::after_finalization(
+            controller,
+            &self.context,
+            verified.bitcoin().transaction(),
+            verified.fork().transaction(),
+            self.tips,
+            self.funding.inputs.observed_at(),
+            policy.max_observation_age_seconds,
+        );
+        Ok((verified, proof))
+    }
+
     pub(crate) fn funding(&self) -> &OwnedClaimFunding {
         &self.funding
     }

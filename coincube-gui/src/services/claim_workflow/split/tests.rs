@@ -621,6 +621,18 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert_eq!(recorded.fork(), signed.fork().transaction());
     assert_eq!(reopened.status(), Status::Unchecked);
     assert!(!reopened.construction_verified);
+    let reverified = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    assert_eq!(reverified.bitcoin().transaction(), recorded.bitcoin());
+    assert_eq!(reverified.fork().transaction(), recorded.fork());
+    assert_eq!(reopened.status(), Status::Unchecked);
     let preflight = crate::services::claim_preflight::accepted_pair_for_test(
         signed.bitcoin().transaction(),
         signed.fork().transaction(),

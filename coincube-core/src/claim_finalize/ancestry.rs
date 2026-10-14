@@ -143,6 +143,26 @@ pub fn finalize_ancestry_claim_pair<C: secp256k1::Verification>(
     Ok(VerifiedAncestryClaimPair { bitcoin, fork })
 }
 
+/// Reauthenticate both exact signed transactions after a restart. Rebuilding
+/// the PSBTs proves the wallet construction, while these checks prove the
+/// retained witnesses still satisfy it; current two-chain evidence is separate.
+pub fn verify_ancestry_claim_pair_transactions<C: secp256k1::Verification>(
+    bitcoin: &AncestrySelfTransfer,
+    bitcoin_transaction: &Transaction,
+    fork: &crate::claim_spend::ClaimForkSweep,
+    fork_transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedAncestryClaimPair, ClaimPairFinalizeError> {
+    let unsigned_fork = crate::psbt_unified::UnifiedPsbt::from_psbt(fork.psbt().clone())
+        .map_err(|_| ClaimPairFinalizeError::ConstructionChanged)?;
+    validate_ancestry_claim_pair_signing(bitcoin, fork, bitcoin.psbt(), &unsigned_fork)?;
+    let bitcoin = verify_ancestry_transaction(bitcoin, bitcoin_transaction, secp)
+        .map_err(ClaimPairFinalizeError::Bitcoin)?;
+    let fork = verify_claim_fork_transaction(fork, fork_transaction, secp)
+        .map_err(ClaimPairFinalizeError::Fork)?;
+    Ok(VerifiedAncestryClaimPair { bitcoin, fork })
+}
+
 /// Validate the exact paired construction after each signer round trip.
 /// Incomplete signatures are allowed. This is not live ancestry evidence or
 /// permission to offer either transaction to a signer or network.

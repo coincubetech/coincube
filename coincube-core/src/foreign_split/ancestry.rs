@@ -444,6 +444,38 @@ pub fn finalize_ancestry_split_pair<C: secp256k1::Verification>(
     Ok(VerifiedAncestrySplitPair { bitcoin, fork })
 }
 
+/// Reauthenticate both retained signed witnesses after a restart against the
+/// newly rebuilt ordinary constructions. A journal's saved txids or witness
+/// bytes alone are never enough to make a pair eligible for submission.
+/// Live ancestry, reservations and current node policy remain separate checks.
+#[allow(clippy::too_many_arguments)]
+pub fn verify_ancestry_split_pair_transactions<C: secp256k1::Verification>(
+    bitcoin: &AncestrySplitStep1,
+    bitcoin_inputs: &AncestrySplitInputs<'_>,
+    bitcoin_transaction: &Transaction,
+    fork: &AncestrySplitStep2,
+    fork_inputs: &AncestrySplitStep2Inputs<'_>,
+    fork_transaction: &Transaction,
+    secp: &secp256k1::Secp256k1<C>,
+) -> Result<VerifiedAncestrySplitPair, FinalizeError> {
+    validate_ancestry_split_pair_signing(
+        bitcoin,
+        bitcoin_inputs,
+        bitcoin.psbt(),
+        fork,
+        fork_inputs,
+        fork.psbt(),
+    )?;
+    let bitcoin = verify_ancestry_split_step1_transaction(
+        bitcoin,
+        bitcoin_inputs,
+        bitcoin_transaction,
+        secp,
+    )?;
+    let fork = verify_ancestry_split_step2_transaction(fork, fork_inputs, fork_transaction, secp)?;
+    Ok(VerifiedAncestrySplitPair { bitcoin, fork })
+}
+
 /// Check a partially signed Split pair against the exact two ordinary
 /// constructions and current source inputs. Incomplete signatures are
 /// allowed; live ancestry, wallet reservations and signer admission remain

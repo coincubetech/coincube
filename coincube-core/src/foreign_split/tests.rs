@@ -751,6 +751,34 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
             shared.len() + 1
         );
         assert_eq!(verified.fork().transaction().input.len(), shared.len() + 1);
+        let restored = verify_ancestry_split_pair_transactions(
+            &bitcoin,
+            &bitcoin_inputs,
+            verified.bitcoin().transaction(),
+            &fork,
+            &fork_inputs,
+            verified.fork().transaction(),
+            &secp,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.bitcoin().transaction(),
+            verified.bitcoin().transaction()
+        );
+        assert_eq!(restored.fork().transaction(), verified.fork().transaction());
+        let mut altered_fork = verified.fork().transaction().clone();
+        altered_fork.input[0].witness.clear();
+        altered_fork.input[0].script_sig = ScriptBuf::new();
+        assert!(verify_ancestry_split_pair_transactions(
+            &bitcoin,
+            &bitcoin_inputs,
+            verified.bitcoin().transaction(),
+            &fork,
+            &fork_inputs,
+            &altered_fork,
+            &secp,
+        )
+        .is_err());
 
         let partial = sign(fork.psbt(), &wallet.signers[..wallet.threshold - 1]);
         assert!(finalize_ancestry_split_pair(

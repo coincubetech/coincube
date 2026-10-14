@@ -76,6 +76,14 @@ fn signed_pair_destination(psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt
         .unwrap_or_else(|| "Unavailable; inspect the PSBT output on your signer".into())
 }
 
+fn signed_pair_amount(psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt) -> String {
+    psbt.unsigned_tx
+        .output
+        .first()
+        .map(|output| format!("{} sats", output.value.to_sat()))
+        .unwrap_or_else(|| "Unavailable; inspect the PSBT output on your signer".into())
+}
+
 fn working(work: Work) -> &'static str {
     match work {
         Work::ReservingFunding => "Saving fresh deposit addresses and checking both chains for prior use…",
@@ -683,11 +691,17 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         Stage::PairedSign => {
             body = body.push(p1_regular("Both ordinary transactions are bound to the same source coins and separately verified chain-specific deposits. Recheck the full destination and fee on each signing device. Nothing has been sent."));
             if let Some((bitcoin, fork, bitcoin_files, fork_files)) = panel.paired_signing_view() {
+                body = body.push(p1_regular(format!(
+                    "Both transactions spend the same {} shared pre-fork coin(s).",
+                    bitcoin.claimed_prevouts().len()
+                )));
+                if let Some(threshold) = panel.funding_signing_threshold() {
+                    body = body.push(caption(format!(
+                        "Signing threshold: {threshold} signature{} for each input on both chains",
+                        if threshold == 1 { "" } else { "s" }
+                    )));
+                }
                 body = body
-                    .push(p1_regular(format!(
-                        "Both transactions spend the same {} shared pre-fork coin(s).",
-                        bitcoin.claimed_prevouts().len()
-                    )))
                     .push(p1_bold("Bitcoin transaction"))
                     .push(caption(format!(
                         "Unsigned txid {} · Bitcoin-only input {} · fee {} sats · {} signer return(s)",
@@ -697,8 +711,9 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         bitcoin_files,
                     )))
                     .push(caption(format!(
-                        "Return address: {}",
-                        signed_pair_destination(bitcoin.psbt())
+                        "Return to source wallet: {} · {}",
+                        signed_pair_destination(bitcoin.psbt()),
+                        signed_pair_amount(bitcoin.psbt())
                     )))
                     .push(p1_bold("Bitcoin Blake2b transaction"))
                     .push(caption(format!(
@@ -709,8 +724,9 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         fork_files,
                     )))
                     .push(caption(format!(
-                        "Target address: {}",
-                        signed_pair_destination(fork.psbt())
+                        "Target BTCB2 Cube: {} · {}",
+                        signed_pair_destination(fork.psbt()),
+                        signed_pair_amount(fork.psbt())
                     )));
                 for coin in bitcoin.claimed_prevouts() {
                     body = body.push(caption(format!("Shared input: {coin}")));

@@ -382,6 +382,9 @@ a replayable spend.
    reopens read-only recovery. This route does not yet have paired preflight,
    a submission coordinator or broadcast, and device support still needs
    independent hardware smoke tests.
+   The signing review repeats the source threshold and the exact output
+   amount beside each full destination, so a signer can compare both sides
+   without relying on the earlier deposit preview.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks
@@ -632,6 +635,12 @@ marker spend cases remain.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.
+   Core can now reverify both retained signed Claim or Split witnesses as one
+   typed ordinary pair against freshly rebuilt constructions after restart.
+   A workflow reader checks the exact saved unsigned templates and context
+   before returning that read-only pair. Neither path restores live proof or
+   send authority; the stage-two coordinator must still invoke it after
+   rebuilding source-owned inputs and refreshing both chains.
 The latter mines separate post-fork coinbases into the foreign source, tests
 both signed transactions against each node, confirms BTCB2 first, and checks
 that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin

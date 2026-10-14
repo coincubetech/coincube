@@ -275,6 +275,100 @@ impl RequalifiedInitialSplit {
         Ok(verified)
     }
 
+    /// Reauthenticate both journaled witnesses for a new submission review.
+    /// This repeats the complete source, reservation and two-chain check used
+    /// for signing, then checks the saved raw signatures against the rebuilt
+    /// PSBTs. The result is evidence only; policy, approval and a durable
+    /// possible-attempt record are still required before transport.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The paired submission review will consume this boundary.
+    pub(crate) fn reverify_recorded_pair_for_review(
+        &self,
+        controller: &mut Controller,
+        target: &CoincubeDescriptor,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        policy: Policy,
+        now: i64,
+    ) -> Result<
+        (
+            VerifiedAncestrySplitPair,
+            super::paired_submission::InitialAncestryProof,
+        ),
+        Error,
+    > {
+        if !self.matches_pair(target, bitcoin, fork)
+            || self.checked_at.elapsed() >= Duration::from_secs(10)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let bitcoin_dependency = self
+            .funding
+            .bitcoin_path
+            .reverify()
+            .map_err(|_| Error::Unchecked)?;
+        let fork_dependency = self
+            .funding
+            .fork_path
+            .reverify()
+            .map_err(|_| Error::Unchecked)?;
+        let bitcoin_inputs = AncestrySplitInputs {
+            chain: bitcoin.chain(),
+            source: bitcoin.source(),
+            shared: &self.shared,
+            funding: &self.funding.bitcoin,
+            dependency: &bitcoin_dependency,
+            fork_height: bitcoin.fork_height(),
+            destination: bitcoin.destination(),
+        };
+        let fork_inputs = AncestrySplitStep2Inputs {
+            chain: fork.chain(),
+            source: fork.source(),
+            shared: &self.shared,
+            funding: &self.funding.fork,
+            dependency: &fork_dependency,
+            fork_height: fork.fork_height(),
+            claimed: bitcoin.claimed_prevouts(),
+            target: fork
+                .psbt()
+                .unsigned_tx
+                .output
+                .first()
+                .ok_or(Error::InvalidPlan)?
+                .script_pubkey
+                .as_script(),
+        };
+        controller.validate_ancestry_split_observation(
+            &self.context,
+            &self.funding.inputs,
+            target,
+            &self.funding.bitcoin,
+            &self.funding.fork,
+            bitcoin,
+            fork,
+            policy,
+            now,
+            self.tips,
+        )?;
+        let verified = controller.verify_recorded_ancestry_split_pair(
+            &self.context,
+            bitcoin,
+            &bitcoin_inputs,
+            fork,
+            &fork_inputs,
+        )?;
+        let proof = super::paired_submission::InitialAncestryProof::after_finalization(
+            controller,
+            &self.context,
+            verified.bitcoin().transaction(),
+            verified.fork().transaction(),
+            self.tips,
+            self.funding.inputs.observed_at(),
+            policy.max_observation_age_seconds,
+        );
+        Ok((verified, proof))
+    }
+
     /// Authenticate independent file or device returns under the current
     /// two-chain source scan. This result is only a signature aggregate;
     /// final recording repeats the live scan and journal check.
