@@ -442,6 +442,7 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     // no change hints, and a reservation of the right shape.
     if intent.version != record.kind.version()
         || intent.ancestry.is_some()
+        || intent.funding_plan.is_some()
         || p.poison != Poison::OpReturn
         || !intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
@@ -643,6 +644,7 @@ impl Controller {
         let intent = Intent {
             version: SplitKind::Split.version(),
             ancestry: None,
+            funding_plan: None,
             identity: split_identity(target_cube.clone(), source_digest),
             plan: ClaimPlan {
                 bitcoin_chain,
@@ -723,6 +725,7 @@ impl Controller {
         let intent = Intent {
             version: SplitKind::Unified.version(),
             ancestry: None,
+            funding_plan: None,
             identity: split_identity(target_cube.clone(), source_digest),
             plan: ClaimPlan {
                 bitcoin_chain,

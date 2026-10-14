@@ -85,6 +85,8 @@ struct Intent {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ancestry: Option<ancestry::StoredAncestry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    funding_plan: Option<ancestry::StoredFundingPlan>,
     identity: WalletIdentity,
     plan: ClaimPlan,
     unsigned_digest: sha256::Hash,
@@ -200,7 +202,10 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             | (3 | 5 | 6, true, Some(0..=0x7fff_ffff), None)
             | (4..=7, false, None, Some(0..=0x7fff_ffff))
             | (4..=7, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
+            | (10, false, None, Some(0..=0x7fff_ffff))
+            | (10, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
+        || (intent.version == 10) != intent.funding_plan.is_some()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
         || intent.identity.fork_cube.len() > 256
@@ -243,7 +248,15 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         if intent.phase != Phase::Tracking
             || intent.signed_txid.is_none()
             || inputs.len() != sweep.input.len()
-            || inputs != claimed
+            || if intent.version == 10 {
+                intent.funding_plan.as_ref().is_none_or(|record| {
+                    let mut expected = claimed.clone();
+                    expected.insert(record.fork_selected());
+                    inputs != expected
+                })
+            } else {
+                inputs != claimed
+            }
             || sweep
                 .input
                 .iter()
@@ -316,6 +329,10 @@ impl Controller {
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
+        if self.intent.version == 10 {
+            self.construction_verified = false;
+            return Err(Error::Unchecked);
+        }
         if self.intent.split.is_some() {
             self.construction_verified = false;
             return Err(Error::WrongIdentity);
@@ -375,6 +392,7 @@ impl Controller {
             context,
             bitcoin_change_index,
             None,
+            None,
         )
     }
     fn create_intent_with_ancestry(
@@ -384,9 +402,12 @@ impl Controller {
         context: Context,
         bitcoin_change_index: Option<u32>,
         ancestry: Option<ancestry::StoredAncestry>,
+        funding_plan: Option<ancestry::StoredFundingPlan>,
     ) -> Result<Self, Error> {
         let intent = Intent {
-            version: if ancestry.is_some() {
+            version: if funding_plan.is_some() {
+                10
+            } else if ancestry.is_some() {
                 7
             } else if bitcoin_change_index.is_some() {
                 4
@@ -394,6 +415,7 @@ impl Controller {
                 1
             },
             ancestry,
+            funding_plan,
             identity,
             unsigned_digest: digest(&plan.step1),
             context_digest: context_digest(&context),
@@ -416,10 +438,11 @@ impl Controller {
             return Err(Error::Conflict);
         }
         journal.store(&intent)?;
+        let construction_verified = intent.version != 10;
         Ok(Self {
             id: controller_id()?,
             revoked: false,
-            construction_verified: true,
+            construction_verified,
             journal,
             intent,
             context,
@@ -518,12 +541,17 @@ impl Controller {
             other => other,
         }
     }
-    /// Claim-only operations take Claim artifacts; a Split intent refuses them
-    /// before any check could compare a Claim artifact with a Split record.
+    /// Legacy Claim operations cannot advance a paired-funding intent: its
+    /// Bitcoin and fork constructions must be revalidated together.
     fn claim_only(&mut self) -> Result<(), Error> {
         if self.intent.split.is_some() {
             self.clear_check();
             return Err(Error::WrongIdentity);
+        }
+        if self.intent.version == 10 {
+            self.clear_check();
+            self.construction_verified = false;
+            return Err(Error::Unchecked);
         }
         Ok(())
     }

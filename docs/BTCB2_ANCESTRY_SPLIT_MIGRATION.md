@@ -68,9 +68,11 @@ a replayable spend.
    ownership, not live chain exclusivity. Production discovery and signer
    dispatch remain gated in `claim_ancestry_gate`. Add a separately typed
    BTCB2 live proof and preserve exact unsigned-PSBT and finalized witness
-   checks. Version the Claim journal to retain both *structural* paths
-   and marker outpoints, never cached spend authority. On restart, reconstruct
-   both transactions and recollect live proofs before sign, broadcast or
+   checks. The version-10 Claim journal now retains both *structural* paths,
+   marker outpoints and exact unsigned transactions; paired restore rebuilds
+   both against current owned coins while keeping signing and submission
+   unavailable. Next bind the live two-chain collector and reservations to
+   this intent. On restart, recollect live proofs before sign, broadcast or
    completion. Keep legacy reconstruction and verification only for recorded
    intents and possibly broadcast transactions. Remove them after journal
    migration and reconciliation are complete.
