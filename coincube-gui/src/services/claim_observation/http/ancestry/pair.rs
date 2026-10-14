@@ -790,6 +790,39 @@ mod tests {
                             ),
                             Ok(())
                         );
+                        let mut fork_psbt =
+                            coincube_core::miniscript::bitcoin::psbt::Psbt::from_unsigned_tx(
+                                fork_spend.clone(),
+                            )
+                            .unwrap();
+                        fork_psbt.inputs[0].witness_utxo = Some(shared_tx.output[0].clone());
+                        let fork_funding: coincube_core::miniscript::bitcoin::Transaction =
+                            coincube_core::miniscript::bitcoin::consensus::deserialize(
+                                &fork_path.links()[0].transaction,
+                            )
+                            .unwrap();
+                        fork_psbt.inputs[1].witness_utxo =
+                            Some(fork_funding.output[fork_path.selected().vout as usize].clone());
+                        assert_eq!(
+                            post_bitcoin.validate_for_fork_psbt(
+                                &bitcoin_spend,
+                                &fork_psbt,
+                                &[shared],
+                                funding_context,
+                            ),
+                            Ok(())
+                        );
+                        fork_psbt.inputs[0].witness_utxo.as_mut().unwrap().value =
+                            coincube_core::miniscript::bitcoin::Amount::from_sat(1);
+                        assert_eq!(
+                            post_bitcoin.validate_for_fork_psbt(
+                                &bitcoin_spend,
+                                &fork_psbt,
+                                &[shared],
+                                funding_context,
+                            ),
+                            Err(FailureKind::Changed)
+                        );
                         fork_spend.input[1].previous_output = root_path.selected();
                         assert_eq!(
                             post_bitcoin.validate_for_transactions(

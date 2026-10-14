@@ -517,6 +517,11 @@ marker spend cases remain.
    Its distinct result type cannot enter the initial signer validator. It
    still needs wallet ownership, reservation, finalized fork signature and
    fresh policy checks in the stage-two coordinator.
+   The post-Bitcoin proof boundary now also requires the reconstructed BTCB2
+   PSBT: it compares every shared and BTCB2-only input's saved amount and
+   script with the newly observed source transaction, and requires that PSBT's
+   unsigned transaction to match the exact signed journal record. This does
+   not yet reconcile the current source wallet or its reservation.
    The Claim and Split pair finalizers now issue an opaque, controller-bound
    initial proof only after validating the exact signed pair against the saved
    intent and fresh two-chain collection. Recording a possible Bitcoin send

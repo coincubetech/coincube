@@ -15,7 +15,7 @@ use coincube_core::{
     claim::{BlockRef, Policy, PreflightTips},
     claim_finalize::VerifiedAncestryClaimPair,
     foreign_split::VerifiedAncestrySplitPair,
-    miniscript::bitcoin::{BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
+    miniscript::bitcoin::{psbt::Psbt, BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
 };
 use serde::{Deserialize, Serialize};
 
@@ -379,11 +379,13 @@ impl Controller {
     /// Recheck the post-Bitcoin collector against the saved signed pair and
     /// canonical Bitcoin confirmation. The collector checks spent Bitcoin
     /// inputs and unspent BTCB2 inputs; this result expires and is not journaled.
+    #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // Stage-two coordinator remains gated.
     pub(super) fn post_bitcoin_ancestry_proof(
         &mut self,
         current: &Context,
         observed: &CollectedPostBitcoinInputs,
+        fork_psbt: &Psbt,
         confirmation: &BitcoinConfirmation,
         policy: Policy,
         now: i64,
@@ -412,9 +414,9 @@ impl Controller {
             return Err(Error::Conflict);
         }
         observed
-            .validate_for_transactions(
+            .validate_for_fork_psbt(
                 saved.bitcoin(),
-                saved.fork(),
+                fork_psbt,
                 &self.intent.plan.claimed_prevouts,
                 FundingContext {
                     provider: &current.provider,
@@ -425,6 +427,9 @@ impl Controller {
                 },
             )
             .map_err(|_| Error::Unchecked)?;
+        if fork_psbt.unsigned_tx != unsigned(saved.fork()) {
+            return Err(Error::WrongIdentity);
+        }
         Ok(PostBitcoinAncestryProof {
             controller: self.id,
             context: current.clone(),

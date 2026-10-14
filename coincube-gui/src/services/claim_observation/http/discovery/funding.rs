@@ -356,6 +356,39 @@ impl CollectedPostBitcoinInputs {
         }
         Ok(())
     }
+
+    /// At the fork-send boundary, authenticate the saved fork construction's
+    /// shared and chain-specific prevout metadata against the freshly read
+    /// transactions. A transaction-only comparison would allow a caller to
+    /// attach unrelated PSBT amounts or scripts after the Bitcoin spend.
+    /// Wallet ownership and its durable address reservation remain separate.
+    #[allow(dead_code)] // Consumed by the future stage-two coordinator.
+    pub fn validate_for_fork_psbt(
+        &self,
+        signed_bitcoin: &Transaction,
+        fork: &Psbt,
+        claimed: &[OutPoint],
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        self.validate_for_transactions(signed_bitcoin, &fork.unsigned_tx, claimed, context)?;
+        validate_shared_psbt(fork, &self.shared_outputs)?;
+        let path = self
+            .fork
+            .ancestry
+            .retained_path()
+            .map_err(|_| FailureKind::Malformed)?;
+        let raw = path.links().first().ok_or(FailureKind::Malformed)?;
+        let previous: Transaction =
+            deserialize(&raw.transaction).map_err(|_| FailureKind::Malformed)?;
+        if previous.compute_txid() != self.fork.selected.txid {
+            return Err(FailureKind::Changed);
+        }
+        let output = previous
+            .output
+            .get(self.fork.selected.vout as usize)
+            .ok_or(FailureKind::Changed)?;
+        validate_shared_psbt(fork, &[(self.fork.selected, output.clone())])
+    }
 }
 
 /// Read-only foreign Split discovery, joined to the exact scan-derived coins
