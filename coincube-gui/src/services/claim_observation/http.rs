@@ -15,7 +15,8 @@ mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 pub use discovery::{
     AncestryContext, CollectedAncestry, CollectedAncestrySweep, CollectedFundingCoin,
-    CollectedFundingPair, DiscoveredAncestry, DiscoveryError, MAX_ANCESTRY_CANDIDATES,
+    CollectedFundingPair, DiscoveredAncestry, DiscoveryError, FundingContext,
+    MAX_ANCESTRY_CANDIDATES,
 };
 
 const BODY_LIMIT: usize = 256 * 1024;

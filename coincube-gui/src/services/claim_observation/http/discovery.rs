@@ -14,7 +14,7 @@ use coincube_core::{
     miniscript::bitcoin::OutPoint,
 };
 pub use collect::CollectedAncestry;
-pub use funding::{CollectedFundingCoin, CollectedFundingPair};
+pub use funding::{CollectedFundingCoin, CollectedFundingPair, FundingContext};
 pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

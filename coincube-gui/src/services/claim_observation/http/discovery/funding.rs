@@ -3,7 +3,12 @@
 //! reservation, signer admission or broadcast authority.
 
 use super::*;
-use coincube_core::{claim::MIN_CONFIRMATIONS, claim_ancestry::retained::RetainedPath};
+use coincube_core::{
+    claim::{PreflightTips, MIN_CONFIRMATIONS},
+    claim_ancestry::retained::RetainedPath,
+    foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitCoin},
+    miniscript::bitcoin::{consensus::deserialize, Transaction},
+};
 
 const COINBASE_MATURITY: u64 = 100;
 
@@ -54,6 +59,59 @@ impl CollectedFundingCoin {
     pub fn observed_at(&self) -> i64 {
         self.observed_at
     }
+
+    pub(crate) fn validate_candidate(
+        &self,
+        path: &RetainedPath,
+        candidate: &SplitCoin,
+    ) -> Result<(), FailureKind> {
+        let raw = path.links().first().ok_or(FailureKind::Malformed)?;
+        let selected_tx: Transaction =
+            deserialize(&raw.transaction).map_err(|_| FailureKind::Malformed)?;
+        if path.selected() != self.selected
+            || self
+                .ancestry
+                .retained_path()
+                .map_err(|_| FailureKind::Malformed)?
+                .encode()
+                != path.encode()
+            || candidate.outpoint != self.selected
+            || candidate.previous != selected_tx
+            || candidate.previous.compute_txid() != self.selected.txid
+            || candidate
+                .previous
+                .output
+                .get(self.selected.vout as usize)
+                .is_none()
+        {
+            return Err(FailureKind::Changed);
+        }
+        match self.chain {
+            ChainId::Bitcoin
+                if candidate.bitcoin_block == Some(self.block)
+                    && candidate.btcb2_block.is_none() =>
+            {
+                Ok(())
+            }
+            ChainId::BitcoinBlake2b
+                if candidate.btcb2_block == Some(self.block)
+                    && candidate.bitcoin_block.is_none() =>
+            {
+                Ok(())
+            }
+            _ => Err(FailureKind::Changed),
+        }
+    }
+}
+
+/// Current two-chain review context. A stored journal must not persist this
+/// as authority: regenerate it from a fresh session and fresh chain tips.
+pub struct FundingContext<'a> {
+    pub provider: &'a str,
+    pub generation: u64,
+    pub now: i64,
+    pub max_age_seconds: i64,
+    pub tips: PreflightTips,
 }
 
 /// Both chain-specific inputs observed under one provider and session, with
@@ -76,6 +134,58 @@ impl CollectedFundingPair {
     }
     pub fn observed_at(&self) -> i64 {
         self.observed_at
+    }
+
+    /// Bind the two fresh funding observations to exactly the same ordinary
+    /// constructions, retained paths and scan-derived wallet coins. This is a
+    /// review check, not a signing capability: source ownership is established
+    /// by the core builders, and reservations/fresh preflight remain required.
+    pub fn validate_for_split(
+        &self,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+        bitcoin_candidate: &SplitCoin,
+        fork_candidate: &SplitCoin,
+        step1: &AncestrySplitStep1,
+        step2: &AncestrySplitStep2,
+        context: FundingContext<'_>,
+    ) -> Result<(), FailureKind> {
+        let a = self.bitcoin.ancestry.pair();
+        if context.max_age_seconds <= 0
+            || !super::super::super::fresh(self.observed_at, context.now, context.max_age_seconds)
+        {
+            return Err(FailureKind::Stale);
+        }
+        if context.provider.trim_end_matches('/') != self.bitcoin.ancestry.provider
+            || self.bitcoin.ancestry.provider != self.fork.ancestry.provider
+            || context.generation != a.generation()
+            || *self.bitcoin.ancestry.live_generation.borrow() != context.generation
+            || self.bitcoin.ancestry.live_generation.has_changed().is_err()
+            || *self.fork.ancestry.live_generation.borrow() != context.generation
+            || self.fork.ancestry.live_generation.has_changed().is_err()
+        {
+            return Err(FailureKind::Cancelled);
+        }
+        if context.tips.bitcoin != a.bitcoin().tip
+            || context.tips.fork != a.fork().tip
+            || self.bitcoin.tip != a.bitcoin().tip
+            || self.fork.tip != a.fork().tip
+            || step1.chain() != ChainId::Bitcoin
+            || step2.chain() != ChainId::BitcoinBlake2b
+            || step1.source() != step2.source()
+            || step1.funding_prevout() != self.bitcoin.selected
+            || step2.funding_prevout() != self.fork.selected
+            || step1.claimed_prevouts() != step2.claimed_prevouts()
+            || step1.claimed_prevouts().is_empty()
+            || step1.fork_height() != step2.fork_height()
+            || step1.fork_height() != a.anchor().observation.fork.as_ref().map_or(0, |f| f.height)
+        {
+            return Err(FailureKind::Changed);
+        }
+        self.bitcoin
+            .validate_candidate(bitcoin_path, bitcoin_candidate)?;
+        self.fork.validate_candidate(fork_path, fork_candidate)?;
+        Ok(())
     }
 }
 

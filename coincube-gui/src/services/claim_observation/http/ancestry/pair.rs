@@ -602,6 +602,35 @@ mod tests {
                         assert_eq!(pair_funding.fork().selected(), fork_path.selected());
                         assert_eq!(pair_funding.fork().chain(), ChainId::BitcoinBlake2b);
                         assert!(pair_funding.observed_at() <= source.now());
+                        let bitcoin_candidate = coincube_core::foreign_split::SplitCoin {
+                            outpoint: root_path.selected(),
+                            branch: coincube_core::foreign_split::SplitBranch::External,
+                            index: 0,
+                            previous: bitcoin.clone(),
+                            bitcoin_block: Some(pair_funding.bitcoin().block()),
+                            btcb2_block: None,
+                        };
+                        assert!(pair_funding
+                            .bitcoin()
+                            .validate_candidate(&root_path, &bitcoin_candidate)
+                            .is_ok());
+                        let mut changed = bitcoin_candidate.clone();
+                        changed.btcb2_block = changed.bitcoin_block;
+                        assert_eq!(
+                            pair_funding
+                                .bitcoin()
+                                .validate_candidate(&root_path, &changed),
+                            Err(FailureKind::Changed)
+                        );
+                        changed = bitcoin_candidate;
+                        changed.previous.output[0].value +=
+                            coincube_core::miniscript::bitcoin::Amount::from_sat(1);
+                        assert_eq!(
+                            pair_funding
+                                .bitcoin()
+                                .validate_candidate(&root_path, &changed),
+                            Err(FailureKind::Changed)
+                        );
                         fork_status.assert_hits(2);
                         fork_unspent.assert_hits(1);
                         // The first input leads to a positively observed pre-fork
