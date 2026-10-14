@@ -175,9 +175,10 @@ survive a rebuilt transaction.
   rejects the exact signed bytes on the other chain. Repeat after restart,
   stale observations, marker spend, shallow/deep reorg and step-order changes.
 
-The paired Claim consensus vector is now implemented in the test bridge and
-two-chain harness, including BTCB2-first broadcast. It still needs execution
-against the pinned Knots and electrs binaries, and restart/reorg cases remain.
+The paired Claim consensus vector passes against the pinned Knots and electrs
+two-chain harness, including BTCB2-first broadcast and one-block reorgs of
+either confirmation. Coordinator restart, stale observation, marker spend and
+deeper reorg cases remain.
 The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
 pair from distinct coinbase dependencies. All five supported foreign source
 shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.

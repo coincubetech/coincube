@@ -116,5 +116,16 @@ def test_claim_pair_uses_distinct_chain_specific_inputs(two_chain, record_proper
     fork.generate_block(1, wait_for_mempool=signed["fork_txid"])
     assert bitcoin.rpc.sendrawtransaction(bitcoin_raw) == signed["step1_txid"]
     bitcoin.generate_block(1, wait_for_mempool=signed["step1_txid"])
+    # A confirmation on either chain can be reorganized out without making
+    # the other chain's exact signed bytes valid there: the foreign marker
+    # remains absent, independent of which shared inputs become unspent.
+    for own, other_raw in ((bitcoin, fork_raw), (fork, bitcoin_raw)):
+        confirmed = own.rpc.getbestblockhash()
+        own.rpc.invalidateblock(confirmed)
+        rejected = own.rpc.testmempoolaccept([other_raw])[0]
+        assert not rejected["allowed"], rejected
+        assert rejected["reject-reason"] == "missing-inputs", rejected
+        own.rpc.reconsiderblock(confirmed)
+        assert own.rpc.getbestblockhash() == confirmed
     record_property("ordinary_claim_bitcoin_txid", signed["step1_txid"])
     record_property("ordinary_claim_fork_txid", signed["fork_txid"])
