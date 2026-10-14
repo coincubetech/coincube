@@ -127,5 +127,17 @@ def test_claim_pair_uses_distinct_chain_specific_inputs(two_chain, record_proper
         assert rejected["reject-reason"] == "missing-inputs", rejected
         own.rpc.reconsiderblock(confirmed)
         assert own.rpc.getbestblockhash() == confirmed
+        # Remove the transaction's confirmation and five successors as a
+        # deeper reorg. The shared outpoints may become unspent, but the
+        # opposite chain's funding coin still does not exist here.
+        own.generate_block(5)
+        six_deep_tip = own.rpc.getbestblockhash()
+        first_confirmation = own.rpc.getblockhash(own.rpc.getblockcount() - 5)
+        own.rpc.invalidateblock(first_confirmation)
+        rejected = own.rpc.testmempoolaccept([other_raw])[0]
+        assert not rejected["allowed"], rejected
+        assert rejected["reject-reason"] == "missing-inputs", rejected
+        own.rpc.reconsiderblock(first_confirmation)
+        assert own.rpc.getbestblockhash() == six_deep_tip
     record_property("ordinary_claim_bitcoin_txid", signed["step1_txid"])
     record_property("ordinary_claim_fork_txid", signed["fork_txid"])

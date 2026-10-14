@@ -326,9 +326,9 @@ survive a rebuilt transaction.
   stale observations, marker spend, shallow/deep reorg and step-order changes.
 
 The paired Claim consensus vector passes against the pinned Knots and electrs
-two-chain harness, including BTCB2-first broadcast and one-block reorgs of
-either confirmation. Coordinator restart, stale observation, marker spend and
-deeper reorg cases remain.
+two-chain harness, including BTCB2-first broadcast and one-block and six-block
+reorgs of either confirmation. Coordinator restart, stale observation and
+marker spend cases remain.
 The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
 pair from distinct coinbase dependencies. All five supported foreign source
 shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.
