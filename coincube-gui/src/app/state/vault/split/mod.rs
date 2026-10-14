@@ -305,6 +305,8 @@ pub enum Restarted {
 pub struct PairedSplitRecovery {
     pub bitcoin_txid: Option<Txid>,
     pub fork_txid: Option<Txid>,
+    pub bitcoin_output: Option<super::paired_summary::PairedOutputSummary>,
+    pub fork_output: Option<super::paired_summary::PairedOutputSummary>,
     pub bitcoin_status: String,
     pub fork_status: String,
 }
@@ -333,12 +335,16 @@ async fn paired_recovery(
         return Ok(PairedSplitRecovery {
             bitcoin_txid: None,
             fork_txid: None,
+            bitcoin_output: None,
+            fork_output: None,
             bitcoin_status: "No signed Bitcoin transaction is recorded.".into(),
             fork_status: "No signed BTCB2 transaction is recorded.".into(),
         });
     };
     let bitcoin_txid = record.bitcoin_identity().0;
     let fork_txid = record.fork_identity().0;
+    let bitcoin_output = super::paired_summary::PairedOutputSummary::from_signed(record.bitcoin());
+    let fork_output = super::paired_summary::PairedOutputSummary::from_signed(record.fork());
     let source = connect.paired_observation().ok_or_else(|| {
         "The two-chain status source is unavailable for this Connect session.".to_string()
     })?;
@@ -361,6 +367,8 @@ async fn paired_recovery(
     Ok(PairedSplitRecovery {
         bitcoin_txid: Some(bitcoin_txid),
         fork_txid: Some(fork_txid),
+        bitcoin_output,
+        fork_output,
         bitcoin_status: paired_side_status(report.bitcoin),
         fork_status: paired_side_status(report.fork),
     })

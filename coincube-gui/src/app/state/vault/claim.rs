@@ -469,7 +469,7 @@ pub enum ClaimEvent {
         Result<crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit, String>,
     ),
     PairedAuthorizedPsbt(u64, ChainId, Box<Message>),
-    PairedSigned(u64, u64, u64, Result<(Txid, Txid), String>),
+    PairedSigned(u64, u64, u64, Result<SignedPairDetails, String>),
     Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
@@ -521,8 +521,18 @@ enum RestartedState {
 pub struct PairedClaimRecovery {
     pub bitcoin_txid: Option<Txid>,
     pub fork_txid: Option<Txid>,
+    pub bitcoin_output: Option<super::paired_summary::PairedOutputSummary>,
+    pub fork_output: Option<super::paired_summary::PairedOutputSummary>,
     pub bitcoin_status: String,
     pub fork_status: String,
+}
+
+#[derive(Debug)]
+pub struct SignedPairDetails {
+    bitcoin_txid: Txid,
+    fork_txid: Txid,
+    bitcoin_output: Option<super::paired_summary::PairedOutputSummary>,
+    fork_output: Option<super::paired_summary::PairedOutputSummary>,
 }
 
 fn paired_side_status(report: claim_workflow::PairedSideReport) -> String {
@@ -2874,10 +2884,12 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 match result {
-                    Ok((bitcoin_txid, fork_txid)) => {
+                    Ok(details) => {
                         self.stage = Stage::PairedRecovery(PairedClaimRecovery {
-                            bitcoin_txid: Some(bitcoin_txid),
-                            fork_txid: Some(fork_txid),
+                            bitcoin_txid: Some(details.bitcoin_txid),
+                            fork_txid: Some(details.fork_txid),
+                            bitcoin_output: details.bitcoin_output,
+                            fork_output: details.fork_output,
                             bitcoin_status:
                                 "Signed and recorded; no Bitcoin broadcast attempt has been made."
                                     .into(),
@@ -4144,10 +4156,14 @@ async fn restore_recorded_claim(
             },
         )
         .map_err(|_| "The two-chain status source is unavailable.".to_string())?;
-        let (bitcoin_txid, fork_txid, bitcoin_status, fork_status) =
+        let (bitcoin_txid, fork_txid, bitcoin_output, fork_output, bitcoin_status, fork_status) =
             if let Some(record) = controller.recorded_signed_ancestry_pair() {
                 let bitcoin_txid = record.bitcoin_identity().0;
                 let fork_txid = record.fork_identity().0;
+                let bitcoin_output =
+                    super::paired_summary::PairedOutputSummary::from_signed(record.bitcoin());
+                let fork_output =
+                    super::paired_summary::PairedOutputSummary::from_signed(record.fork());
                 let report = controller
                 .reconcile_possible_ancestry_attempts(
                     &context,
@@ -4162,11 +4178,15 @@ async fn restore_recorded_claim(
                 (
                     Some(bitcoin_txid),
                     Some(fork_txid),
+                    bitcoin_output,
+                    fork_output,
                     paired_side_status(report.bitcoin),
                     paired_side_status(report.fork),
                 )
             } else {
                 (
+                    None,
+                    None,
                     None,
                     None,
                     "No signed Bitcoin transaction is recorded.".into(),
@@ -4181,6 +4201,8 @@ async fn restore_recorded_claim(
             state: RestartedState::PairedRecovery(PairedClaimRecovery {
                 bitcoin_txid,
                 fork_txid,
+                bitcoin_output,
+                fork_output,
                 bitcoin_status,
                 fork_status,
             }),

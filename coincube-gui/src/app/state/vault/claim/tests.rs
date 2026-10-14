@@ -66,6 +66,8 @@ fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
         Stage::PairedRecovery(PairedClaimRecovery {
             bitcoin_txid: None,
             fork_txid: None,
+            bitcoin_output: None,
+            fork_output: None,
             bitcoin_status: "No broadcast attempt recorded.".into(),
             fork_status: "No broadcast attempt recorded.".into(),
         })

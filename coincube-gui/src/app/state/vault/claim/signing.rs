@@ -194,13 +194,7 @@ pub(super) async fn record_exact_signed_pair(
     connect: ConnectSession,
     expected: u64,
     generation: watch::Receiver<u64>,
-) -> Result<
-    (
-        coincube_core::miniscript::bitcoin::Txid,
-        coincube_core::miniscript::bitcoin::Txid,
-    ),
-    String,
-> {
+) -> Result<super::SignedPairDetails, String> {
     let fork_return = UnifiedPsbt::from_psbt(fork_signed)
         .map_err(|_| "The BTCB2 signer PSBT could not be decoded.".to_string())?;
     let combined = crate::services::claim_pair_signing::combine_ancestry_claim_pair(
@@ -263,10 +257,16 @@ pub(super) async fn record_exact_signed_pair(
     controller
         .record_signed_ancestry_claim_pair(&context, &verified)
         .map_err(|error| format!("The signed Claim pair could not be recorded: {error:?}"))?;
-    Ok((
-        verified.bitcoin().transaction().compute_txid(),
-        verified.fork().transaction().compute_txid(),
-    ))
+    Ok(super::SignedPairDetails {
+        bitcoin_txid: verified.bitcoin().transaction().compute_txid(),
+        fork_txid: verified.fork().transaction().compute_txid(),
+        bitcoin_output: super::super::paired_summary::PairedOutputSummary::from_signed(
+            verified.bitcoin().transaction(),
+        ),
+        fork_output: super::super::paired_summary::PairedOutputSummary::from_signed(
+            verified.fork().transaction(),
+        ),
+    })
 }
 
 /// One-use result of checking this exact unsigned construction and session.

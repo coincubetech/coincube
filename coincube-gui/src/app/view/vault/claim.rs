@@ -91,9 +91,21 @@ pub fn view<'a>(
                 .push(p1_regular("This device has a two-chain claim record. For each possible broadcast, Tenshu checks the exact saved transaction against its own chain. This screen does not sign or resend either transaction."))
                 .push(p1_bold("Bitcoin transaction"))
                 .push_maybe(recovery.bitcoin_txid.map(|id| p2_regular(id.to_string())))
+                .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
+                    p2_regular(format!("Recorded Bitcoin output: {} sats", output.amount_sats))
+                }))
+                .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
+                    p2_regular(output.destination.clone())
+                }))
                 .push(p1_regular(recovery.bitcoin_status.clone()))
                 .push(p1_bold("Bitcoin Blake2b transaction"))
                 .push_maybe(recovery.fork_txid.map(|id| p2_regular(id.to_string())))
+                .push_maybe(recovery.fork_output.as_ref().map(|output| {
+                    p2_regular(format!("Recorded BTCB2 output: {} sats", output.amount_sats))
+                }))
+                .push_maybe(recovery.fork_output.as_ref().map(|output| {
+                    p2_regular(output.destination.clone())
+                }))
                 .push(p1_regular(recovery.fork_status.clone()))
                 .push_maybe(error.map(|message| card::warning(message.to_string())))
                 .push(button::secondary(None, if checking { "Checking both chains…" } else { "Check again" }).on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::Refresh))))

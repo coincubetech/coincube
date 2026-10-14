@@ -656,6 +656,10 @@ marker spend cases remain.
    attempt. The wizard does not yet expose either review or broadcast action;
    the post-Bitcoin coordinator must still join fresh source and target checks
    to this review and both paths need GUI and end-to-end tests.
+   The Claim and Split signed-pair recovery screens now also display the exact
+   one-output destination and amount decoded from each retained signed
+   transaction, including immediately after Claim signs. These are read-only
+   transaction facts; they do not restore approval or requalification.
 The latter mines separate post-fork coinbases into the foreign source, tests
 both signed transactions against each node, confirms BTCB2 first, and checks
 that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin

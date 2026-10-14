@@ -928,6 +928,8 @@ fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
     panel.paired_recovery = Some(PairedSplitRecovery {
         bitcoin_txid: None,
         fork_txid: None,
+        bitcoin_output: None,
+        fork_output: None,
         bitcoin_status: "No broadcast attempt recorded.".into(),
         fork_status: "No broadcast attempt recorded.".into(),
     });

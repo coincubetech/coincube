@@ -583,9 +583,33 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                 body = body
                     .push(p1_bold("Bitcoin transaction"))
                     .push_maybe(recovery.bitcoin_txid.map(|id| caption(id.to_string())))
+                    .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
+                        caption(format!(
+                            "Recorded Bitcoin output: {} sats",
+                            output.amount_sats
+                        ))
+                    }))
+                    .push_maybe(
+                        recovery
+                            .bitcoin_output
+                            .as_ref()
+                            .map(|output| caption(output.destination.clone())),
+                    )
                     .push(p1_regular(recovery.bitcoin_status.clone()))
                     .push(p1_bold("Bitcoin Blake2b transaction"))
                     .push_maybe(recovery.fork_txid.map(|id| caption(id.to_string())))
+                    .push_maybe(recovery.fork_output.as_ref().map(|output| {
+                        caption(format!(
+                            "Recorded BTCB2 output: {} sats",
+                            output.amount_sats
+                        ))
+                    }))
+                    .push_maybe(
+                        recovery
+                            .fork_output
+                            .as_ref()
+                            .map(|output| caption(output.destination.clone())),
+                    )
                     .push(p1_regular(recovery.fork_status.clone()));
             }
             actions = actions.push(action("Check again", SplitMessage::CheckPaired));
