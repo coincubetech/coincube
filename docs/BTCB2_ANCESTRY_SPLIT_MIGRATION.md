@@ -322,8 +322,10 @@ a replayable spend.
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. The old one-sided Claim signer, Bitcoin handoff and
    completion path are now test-fixture-only or permanently denied in
-   production, independent of the paired ancestry gate. Enabling that gate
-   later cannot turn the old path back on. Next remove `split_poison` payload building,
+   production, independent of the paired ancestry gate. New OP_RETURN Claim
+   journal creation is also refused by the production workflow service, even
+   if a caller bypasses the desktop route. Enabling the paired gate later
+   cannot turn the old path back on. Next remove `split_poison` payload building,
    `Poison::OpReturn` production selection, the remaining RDTS expiry checks
    that exist only for the 90-byte output, OP_RETURN review details and the transport path for
    newly created claims. Migrate or explicitly refuse any persisted,

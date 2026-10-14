@@ -312,34 +312,46 @@ impl Controller {
         artifact: &coincube_core::claim_spend::PoisonSelfTransfer,
         context: Context,
     ) -> Result<Self, Error> {
-        let bitcoin_chain = artifact.chain();
-        let fork_chain = match bitcoin_chain {
-            ChainId::Bitcoin => ChainId::BitcoinBlake2b,
-            ChainId::Testnet4 => ChainId::BitcoinBlake2bTestnet4,
-            _ => return Err(Error::InvalidPlan),
-        };
-        let identity = WalletIdentity {
-            bitcoin_cube,
-            fork_cube,
-            descriptor_digest: sha256::Hash::hash(artifact.descriptor().to_string().as_bytes()),
-        };
-        let step1 = artifact.psbt().unsigned_tx.clone();
-        let claimed_prevouts = step1.input.iter().map(|i| i.previous_output).collect();
-        Self::create_intent(
-            directory,
-            identity,
-            ClaimPlan {
-                bitcoin_chain,
-                fork_chain,
-                step1,
-                claimed_prevouts,
-                poison: Poison::OpReturn,
-                previous_confirmation: None,
-                tracked_txid: None,
-            },
-            context,
-            Some(u32::from(artifact.change_index())),
-        )
+        // The OP_RETURN builder is retained for exact reconstruction of old
+        // records and test fixtures. A new production journal must use the
+        // paired ancestry constructor, even if an older caller reaches this
+        // service without passing through the desktop route gate.
+        #[cfg(not(test))]
+        {
+            let _ = (directory, bitcoin_cube, fork_cube, artifact, context);
+            return Err(Error::Unchecked);
+        }
+        #[cfg(test)]
+        {
+            let bitcoin_chain = artifact.chain();
+            let fork_chain = match bitcoin_chain {
+                ChainId::Bitcoin => ChainId::BitcoinBlake2b,
+                ChainId::Testnet4 => ChainId::BitcoinBlake2bTestnet4,
+                _ => return Err(Error::InvalidPlan),
+            };
+            let identity = WalletIdentity {
+                bitcoin_cube,
+                fork_cube,
+                descriptor_digest: sha256::Hash::hash(artifact.descriptor().to_string().as_bytes()),
+            };
+            let step1 = artifact.psbt().unsigned_tx.clone();
+            let claimed_prevouts = step1.input.iter().map(|i| i.previous_output).collect();
+            Self::create_intent(
+                directory,
+                identity,
+                ClaimPlan {
+                    bitcoin_chain,
+                    fork_chain,
+                    step1,
+                    claimed_prevouts,
+                    poison: Poison::OpReturn,
+                    previous_confirmation: None,
+                    tracked_txid: None,
+                },
+                context,
+                Some(u32::from(artifact.change_index())),
+            )
+        }
     }
     /// Restart never restores the builder artifact. A caller must reconstruct it
     /// through ownership/prevout checks before recording any new broadcast intent.
@@ -399,6 +411,7 @@ impl Controller {
         &self.intent.identity
     }
 
+    #[cfg(test)]
     fn create_intent(
         directory: &Path,
         identity: WalletIdentity,
