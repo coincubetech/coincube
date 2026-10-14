@@ -484,13 +484,88 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .fork_identity();
     drop(reopened);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
-    let recorded = reopened.recorded_signed_ancestry_pair().unwrap();
+    let recorded = reopened.recorded_signed_ancestry_pair().unwrap().clone();
     assert_eq!(recorded.bitcoin_identity(), bitcoin_id);
     assert_eq!(recorded.fork_identity(), fork_id);
     assert_eq!(recorded.bitcoin(), signed.bitcoin().transaction());
     assert_eq!(recorded.fork(), signed.fork().transaction());
     assert_eq!(reopened.status(), Status::Unchecked);
     assert!(!reopened.construction_verified);
+    let preflight = crate::services::claim_preflight::accepted_pair_for_test(
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        context().generation,
+        100,
+    );
+    let freshness = crate::services::claim_preflight::FreshnessPolicy {
+        max_age_seconds: 30,
+        max_future_skew_seconds: 5,
+    };
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            preflight.fork(),
+            freshness,
+            100,
+        ),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 200,),
+        Err(Error::LateObservation)
+    ));
+    let moved = temp.0.with_extension("moved");
+    fs::rename(&temp.0, &moved).unwrap();
+    assert!(reopened
+        .record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 100)
+        .is_err());
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::Bitcoin)
+        .is_none());
+    fs::rename(moved, &temp.0).unwrap();
+    drop(reopened);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    reopened
+        .record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 100)
+        .unwrap();
+    drop(reopened);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::Bitcoin)
+        .is_some());
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(&context(), &preflight, freshness, 100,),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            preflight.fork(),
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let refreshed_fork = crate::services::claim_preflight::accepted_pair_for_test(
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(8),
+        context().generation,
+        200,
+    );
+    reopened
+        .record_possible_ancestry_fork_attempt(&context(), refreshed_fork.fork(), freshness, 200)
+        .unwrap();
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::BitcoinBlake2b)
+        .is_some());
     let mut altered = serde_json::to_value(&reopened.intent).unwrap();
     let mut changed_fork = recorded.fork().clone();
     changed_fork.input[0].witness =
@@ -504,6 +579,15 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         "{:?}",
         validation
     );
+    assert_ne!(bitcoin_id.0, fork_id.0);
+    let mut changed_attempt = serde_json::to_value(&reopened.intent).unwrap();
+    changed_attempt["paired_submission"]["bitcoin_attempt"]["txid"] =
+        serde_json::to_value(fork_id.0).unwrap();
+    let changed_attempt: Intent = serde_json::from_value(changed_attempt).unwrap();
+    assert!(matches!(
+        super::super::validate(&changed_attempt),
+        Err(Error::InvalidPlan)
+    ));
     let mut wrong_marker = fork_marker.clone();
     wrong_marker.index += 1;
     assert!(matches!(

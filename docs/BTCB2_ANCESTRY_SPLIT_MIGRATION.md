@@ -377,9 +377,18 @@ marker spend cases remain.
    any network attempt. Journal validation requires their unsigned forms to
    match both saved templates exactly. Restart restores the bytes for
    reconciliation but leaves the controller unchecked and does not permit
-   signing or broadcast. The journal still needs a separate durable possible
-   submission record for each chain; acceptance on one chain must never imply
-   acceptance on the other.
+   signing or broadcast. Separate possible-submission records now bind each
+   chain's exact txid, wtxid and short-lived Connect preflight before any
+   transport call. The initial Bitcoin record requires both signed witnesses
+   to pass paired preflight. The later fork record requires a new preflight of
+   the exact BTCB2 witness; the Bitcoin transaction may be mined by then.
+   These records cannot be cleared or repeated through the journal; the fork
+   record is sequenced after the Bitcoin record. Neither record
+   establishes upstream acceptance or unlocks a send. The paired coordinator
+   must still require a fresh six-confirmation Bitcoin observation before
+   recording the BTCB2 attempt, and reconcile both records independently
+   after a restart. Acceptance on one chain never implies acceptance on the
+   other.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

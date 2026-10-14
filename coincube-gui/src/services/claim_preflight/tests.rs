@@ -65,6 +65,26 @@ fn pair_response(chain: ChainId, transaction: &Transaction, allowed: bool) -> Va
     body
 }
 
+#[test]
+fn paired_attempt_rechecks_both_exact_witnesses_and_observation_age() {
+    let bitcoin = paired_tx(3);
+    let fork = paired_tx(4);
+    let pair = accepted_pair_for_test(&bitcoin, &fork, tip(), 9, 100);
+    assert!(pair.accepted_for(&bitcoin, &fork, 9, policy(), 100));
+    assert!(!pair.accepted_for(&bitcoin, &fork, 10, policy(), 100));
+    assert!(!pair.accepted_for(&bitcoin, &fork, 9, policy(), 161));
+    let mut changed_witness = fork.clone();
+    changed_witness.input[0].witness = Witness::from_slice(&[vec![9]]);
+    assert_eq!(changed_witness.compute_txid(), fork.compute_txid());
+    assert_ne!(changed_witness.compute_wtxid(), fork.compute_wtxid());
+    assert!(!pair.accepted_for(&bitcoin, &changed_witness, 9, policy(), 100));
+    let mut rejected = pair;
+    rejected.fork.policy = NodePolicy::Rejected {
+        reason: "rejected".into(),
+    };
+    assert!(!rejected.accepted_for(&bitcoin, &fork, 9, policy(), 100));
+}
+
 #[tokio::test]
 async fn paired_preflight_requires_distinct_markers_and_both_policy_acceptances() {
     let bitcoin = paired_tx(3);

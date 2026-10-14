@@ -109,6 +109,24 @@ impl Evidence {
     pub fn node_policy(&self) -> &NodePolicy {
         &self.policy
     }
+
+    /// Recheck one exact signed witness against a fresh operator-node policy
+    /// read. A confirmation or wallet proof is a separate requirement.
+    pub(crate) fn accepted_for(
+        &self,
+        chain: ChainId,
+        transaction: &Transaction,
+        generation: u64,
+        policy: FreshnessPolicy,
+        now: i64,
+    ) -> bool {
+        self.chain == chain
+            && self.txid == transaction.compute_txid()
+            && self.wtxid == transaction.compute_wtxid()
+            && self.generation == generation
+            && matches!(self.policy, NodePolicy::Accepted)
+            && policy.fresh(self.observed_at, now)
+    }
 }
 /// Two independently accepted mempool-policy reads for one ordinary ancestry
 /// pair. This is still only short-lived review evidence: wallet ownership,
@@ -125,6 +143,48 @@ impl PairEvidence {
     }
     pub fn fork(&self) -> &Evidence {
         &self.fork
+    }
+
+    /// Recheck the short-lived policy observations at the point a possible
+    /// submission is journaled. This binds the exact two witnesses and the
+    /// current account generation; it does not establish live ancestry or
+    /// grant permission to broadcast.
+    pub(crate) fn accepted_for(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        generation: u64,
+        policy: FreshnessPolicy,
+        now: i64,
+    ) -> bool {
+        self.bitcoin
+            .accepted_for(ChainId::Bitcoin, bitcoin, generation, policy, now)
+            && self
+                .fork
+                .accepted_for(ChainId::BitcoinBlake2b, fork, generation, policy, now)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn accepted_pair_for_test(
+    bitcoin: &Transaction,
+    fork: &Transaction,
+    tip: BlockHash,
+    generation: u64,
+    observed_at: i64,
+) -> PairEvidence {
+    let evidence = |chain, transaction: &Transaction| Evidence {
+        chain,
+        txid: transaction.compute_txid(),
+        wtxid: transaction.compute_wtxid(),
+        tip,
+        observed_at,
+        generation,
+        policy: NodePolicy::Accepted,
+    };
+    PairEvidence {
+        bitcoin: evidence(ChainId::Bitcoin, bitcoin),
+        fork: evidence(ChainId::BitcoinBlake2b, fork),
     }
 }
 
