@@ -765,7 +765,7 @@ impl Controller {
             return Err(Error::WrongIdentity);
         }
         let rate = |fee: u64, maximum: u64| {
-            if maximum == 0 || fee % maximum != 0 {
+            if maximum == 0 || !fee.is_multiple_of(maximum) {
                 return Err(Error::InvalidPlan);
             }
             let rate = fee / maximum;

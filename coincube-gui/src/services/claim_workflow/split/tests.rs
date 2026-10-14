@@ -364,7 +364,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .unwrap()
         .step2_unsigned
         .output[0]
-        .script_pubkey = ScriptBuf::new_op_return(&[]);
+        .script_pubkey = ScriptBuf::new_op_return([]);
     assert!(matches!(
         validate(&wrong_destination),
         Err(Error::InvalidPlan)

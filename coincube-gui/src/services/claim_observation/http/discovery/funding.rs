@@ -273,6 +273,7 @@ impl CollectedFundingPair {
     /// constructions, retained paths and scan-derived wallet coins. This is a
     /// review check, not a signing capability: source ownership is established
     /// by the core builders, and reservations/fresh preflight remain required.
+    #[allow(clippy::too_many_arguments)]
     pub fn validate_for_split(
         &self,
         bitcoin_path: &RetainedPath,
