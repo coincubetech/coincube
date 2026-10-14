@@ -4,8 +4,12 @@
 //! Loading it does not grant signing or broadcasting authority.
 
 use super::{journal::Journal, Context, Error};
-use crate::services::foreign_split_inventory::{FreshFundingAddresses, SplitInventory};
+use crate::services::{
+    claim_observation::http::{DiscoveryError, HttpObservationSource, OwnedSplitFunding},
+    foreign_split_inventory::{FreshFundingAddresses, SplitInventory},
+};
 use coincube_core::{
+    claim::Policy,
     foreign_split::SplitSource,
     miniscript::{
         bitcoin::{hashes::sha256, Address, Network},
@@ -13,7 +17,17 @@ use coincube_core::{
     },
 };
 use serde::{Deserialize, Serialize};
-use std::{path::Path, str::FromStr};
+use std::{
+    path::{Path, PathBuf},
+    str::FromStr,
+};
+
+#[derive(Debug)]
+pub enum SplitFundingDiscoveryError {
+    InvalidReservation(Error),
+    Changed,
+    Discovery(DiscoveryError),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -148,6 +162,75 @@ impl SplitFundingReservation {
             && self.account == context.account
             && self.provider == context.provider
             && self.source().is_ok_and(|recorded| recorded == *source)
+    }
+
+    fn checked_reserved_inventory(
+        &self,
+        directory: &Path,
+        source: &SplitSource,
+        context: &Context,
+        inventory: &SplitInventory,
+    ) -> Result<SplitInventory, SplitFundingDiscoveryError> {
+        if !self.is_released() {
+            return Err(SplitFundingDiscoveryError::Changed);
+        }
+        let saved = load_split_funding(directory, source, &self.target_cube, context)
+            .map_err(SplitFundingDiscoveryError::InvalidReservation)?
+            .ok_or(SplitFundingDiscoveryError::Changed)?;
+        if saved != *self || !saved.matches(source, &self.target_cube, context) {
+            return Err(SplitFundingDiscoveryError::Changed);
+        }
+        Ok(inventory.funding_at_reserved_addresses(self.indices))
+    }
+
+    /// Reload the exact pre-deposit selection and search only its two receive
+    /// indices under one live observation context. This is read-only evidence,
+    /// not a source-wallet reconciliation or signer capability.
+    pub async fn discover_reserved_funding(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        context: &Context,
+        inventory: &SplitInventory,
+        observations: &HttpObservationSource,
+        policy: Policy,
+    ) -> Result<Option<OwnedSplitFunding>, SplitFundingDiscoveryError> {
+        observations
+            .validate_context(&context.provider, context.generation)
+            .map_err(|_| SplitFundingDiscoveryError::Changed)?;
+        // A foreign wallet scan has its own generation, independent of the
+        // Connect account generation used by the observation source.
+        let reservation = self.clone();
+        let source_for_load = source.clone();
+        let context_for_load = context.clone();
+        let inventory_for_load = inventory.clone();
+        let reserved = tokio::task::spawn_blocking(move || {
+            reservation.checked_reserved_inventory(
+                &directory,
+                &source_for_load,
+                &context_for_load,
+                &inventory_for_load,
+            )
+        })
+        .await
+        .map_err(|_| SplitFundingDiscoveryError::Changed)??;
+        if reserved
+            .funding_candidates(coincube_core::chain::ChainId::Bitcoin)
+            .is_empty()
+            || reserved
+                .funding_candidates(coincube_core::chain::ChainId::BitcoinBlake2b)
+                .is_empty()
+        {
+            return Ok(None);
+        }
+        let found = observations
+            .discover_owned_split_funding(&reserved, source, policy)
+            .await
+            .map_err(SplitFundingDiscoveryError::Discovery)?;
+        observations
+            .validate_context(&context.provider, context.generation)
+            .map_err(|_| SplitFundingDiscoveryError::Changed)?;
+        Ok(found)
     }
 }
 
@@ -365,5 +448,37 @@ mod tests {
             SplitFundingReservation::new(&fixed, "cube-a", &context(), indices()),
             Err(Error::InvalidPlan)
         ));
+    }
+
+    #[test]
+    fn reserved_discovery_requires_release_and_account_but_not_matching_scan_generation() {
+        let directory = std::env::temp_dir().join(format!(
+            "split-funding-discovery-{}-{}",
+            std::process::id(),
+            super::super::controller_id().unwrap()
+        ));
+        let source = source();
+        let saved = reserve_split_funding(&directory, &source, "cube-a", &context(), &inventory(3))
+            .unwrap();
+        assert!(matches!(
+            saved.checked_reserved_inventory(&directory, &source, &context(), &inventory(3)),
+            Err(SplitFundingDiscoveryError::Changed)
+        ));
+        let released = release_split_funding(&directory, &saved).unwrap();
+        let mut later_account = context();
+        later_account.generation = 19;
+        // The foreign scan generation stays at 1. It is separate from the
+        // authenticated Connect account generation.
+        assert!(released
+            .checked_reserved_inventory(&directory, &source, &later_account, &inventory(3))
+            .is_ok());
+        later_account.account = "another-account".into();
+        assert!(matches!(
+            released.checked_reserved_inventory(&directory, &source, &later_account, &inventory(3)),
+            Err(SplitFundingDiscoveryError::InvalidReservation(
+                Error::WrongIdentity
+            ))
+        ));
+        std::fs::remove_dir_all(directory).unwrap();
     }
 }

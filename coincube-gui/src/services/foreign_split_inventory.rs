@@ -232,6 +232,19 @@ impl SplitInventory {
         .cloned()
         .collect()
     }
+    /// Restrict a proof search to the two addresses durably reserved before
+    /// the user sent deposits. A later scan can discover unrelated post-fork
+    /// outputs, but none of them may silently become this split's marker.
+    pub fn funding_at_reserved_addresses(&self, indices: FreshFundingAddresses) -> Self {
+        let mut restricted = self.clone();
+        restricted.bitcoin_funding_candidates.retain(|_, coin| {
+            coin.branch == SplitBranch::External && coin.index == indices.bitcoin_deposit
+        });
+        restricted.btcb2_funding_candidates.retain(|_, coin| {
+            coin.branch == SplitBranch::External && coin.index == indices.btcb2_deposit
+        });
+        restricted
+    }
     /// Unconfirmed on either chain, or present on both after the fork.
     pub fn pending(&self) -> &[InventoryCoin] {
         &self.pending
@@ -757,6 +770,25 @@ mod tests {
             inventory.funding_candidates(ChainId::BitcoinBlake2b),
             vec![fork_funding]
         );
+        let reserved = inventory.funding_at_reserved_addresses(FreshFundingAddresses {
+            bitcoin_deposit: 3,
+            btcb2_deposit: 4,
+            bitcoin_return: 6,
+        });
+        assert_eq!(reserved.funding_candidates(ChainId::Bitcoin).len(), 1);
+        assert_eq!(
+            reserved.funding_candidates(ChainId::BitcoinBlake2b).len(),
+            1
+        );
+        let elsewhere = inventory.funding_at_reserved_addresses(FreshFundingAddresses {
+            bitcoin_deposit: 4,
+            btcb2_deposit: 3,
+            bitcoin_return: 6,
+        });
+        assert!(elsewhere.funding_candidates(ChainId::Bitcoin).is_empty());
+        assert!(elsewhere
+            .funding_candidates(ChainId::BitcoinBlake2b)
+            .is_empty());
         assert!(inventory
             .funding_candidate(ChainId::Bitcoin, btcb2_post.outpoint)
             .is_none());
