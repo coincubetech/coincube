@@ -287,6 +287,43 @@ pub struct ClaimDepositProgress {
     pub review: Option<view::vault::ancestry_coins::CoinPairReview>,
 }
 
+/// A borrowed fork daemon is valid only while the tab that supplied it stays
+/// open under the same session. The weak reference does not keep a closed
+/// Cube's daemon alive during the Bitcoin-side scan.
+#[derive(Clone)]
+pub(crate) struct ClaimForkBinding {
+    daemon: Weak<dyn Daemon + Sync + Send>,
+    generation: watch::Receiver<u64>,
+    expected: u64,
+}
+
+impl ClaimForkBinding {
+    pub(crate) fn new(
+        daemon: &Arc<dyn Daemon + Sync + Send>,
+        generation: watch::Receiver<u64>,
+    ) -> Self {
+        let expected = *generation.borrow();
+        Self {
+            daemon: Arc::downgrade(daemon),
+            generation,
+            expected,
+        }
+    }
+
+    pub(crate) fn current(&self) -> bool {
+        matches!(self.generation.has_changed(), Ok(false))
+            && *self.generation.borrow() == self.expected
+    }
+
+    fn upgrade(&self) -> Option<Arc<dyn Daemon + Sync + Send>> {
+        self.current().then(|| self.daemon.upgrade()).flatten()
+    }
+
+    fn generation_guard(&self) -> (&watch::Receiver<u64>, u64) {
+        (&self.generation, self.expected)
+    }
+}
+
 pub(crate) fn funding_proof_refusal(
     error: crate::services::claim_observation::http::DiscoveryError,
 ) -> &'static str {
@@ -510,7 +547,7 @@ pub struct ClaimStep1Panel {
     connect: Option<ConnectSession>,
     /// A paired, currently open BTCB2 wallet. Weak ownership ensures closing
     /// its tab cannot leave a stopped daemon held alive by the Bitcoin Cube.
-    fork_daemon: Option<Weak<dyn Daemon + Sync + Send>>,
+    fork_daemon: Option<ClaimForkBinding>,
     pre: Preconditions,
     funding_error: Option<String>,
     funding_status: Option<String>,
@@ -844,8 +881,8 @@ impl ClaimStep1Panel {
 
     /// Only the GUI's cross-tab pairing path sets this for the next deposit
     /// check. It validates Cube, descriptor and Connect identity first.
-    pub(crate) fn bind_fork_daemon(&mut self, daemon: Option<&Arc<dyn Daemon + Sync + Send>>) {
-        self.fork_daemon = daemon.map(Arc::downgrade);
+    pub(crate) fn bind_fork_daemon(&mut self, binding: Option<ClaimForkBinding>) {
+        self.fork_daemon = binding;
     }
 
     pub(crate) fn funding_pair_target(&self, session: &ConnectSession) -> Option<&str> {
@@ -1384,7 +1421,7 @@ impl ClaimStep1Panel {
         let descriptor = self.wallet.main_descriptor.clone();
         let bitcoin_cube = self.bitcoin_cube.clone();
         let fork_cube = self.pre.target.clone();
-        let fork_daemon = self.fork_daemon.as_ref().and_then(Weak::upgrade);
+        let fork_binding = self.fork_daemon.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_checking = true;
         self.funding_status = None;
@@ -1512,13 +1549,18 @@ impl ClaimStep1Panel {
                             "The saved deposit reservation no longer matches this Vault and Connect session.".to_string(),
                     })?;
                 let review = if let Some(proof) = proof {
-                    let fork_daemon = fork_daemon.ok_or_else(|| {
+                    let fork_binding = fork_binding.as_ref().ok_or_else(|| {
                         "Open the paired BTCB2 Cube under this Connect account, then check both deposits again."
+                            .to_string()
+                    })?;
+                    let fork_daemon = fork_binding.upgrade().ok_or_else(|| {
+                        "The paired BTCB2 Cube closed or its Connect session changed. Reopen it and check deposits again."
                             .to_string()
                     })?;
                     if generation.has_changed().is_err() || *generation.borrow() != expected {
                         return Err("The Connect session changed during the deposit check.".into());
                     }
+                    let (fork_generation, fork_expected) = fork_binding.generation_guard();
                     let change = claim_workflow::reserve_claim_change_indices(
                         directory,
                         &descriptor,
@@ -1527,6 +1569,8 @@ impl ClaimStep1Panel {
                         &*daemon,
                         &*fork_daemon,
                         &generation,
+                        fork_generation,
+                        fork_expected,
                     )
                     .await
                     .map_err(|error| match error {
@@ -1537,6 +1581,9 @@ impl ClaimStep1Panel {
                         claim_workflow::ClaimChangeError::Journal(_) =>
                             "The saved Claim reservation changed. Reopen the Claim and check deposits again.".to_string(),
                     })?;
+                    if !fork_binding.current() {
+                        return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
+                    }
                     let tips = claim::PreflightTips {
                         bitcoin: proof
                             .inputs
@@ -1584,6 +1631,13 @@ impl ClaimStep1Panel {
                 };
                 if generation.has_changed().is_err() || *generation.borrow() != expected {
                     return Err("The Connect session changed during the deposit check.".into());
+                }
+                if review.is_some()
+                    && fork_binding
+                        .as_ref()
+                        .is_some_and(|binding| !binding.current())
+                {
+                    return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
                 }
                 Ok(ClaimDepositProgress {
                     bitcoin_candidate,

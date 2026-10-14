@@ -584,6 +584,12 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                                 review.bitcoin.shared.len(),
                                 review.bitcoin.shared_total.to_sat()
                             )));
+                        if let Some(threshold) = panel.funding_signing_threshold() {
+                            body = body.push(caption(format!(
+                                "Signing threshold: {threshold} signature{} per input",
+                                if threshold == 1 { "" } else { "s" }
+                            )));
+                        }
                         for row in &review.bitcoin.shared {
                             body = body.push(caption(format!(
                                 "Before fork · present on both chains: {} · {} sats",
@@ -594,11 +600,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         body = body
                             .push(p1_bold("Bitcoin transaction"))
                             .push(caption(format!("Bitcoin-only · verified: {} · {} sats", review.bitcoin.funding.outpoint, review.bitcoin.funding.amount.to_sat())))
-                            .push(caption(format!("Return to this source wallet: {}", address(&review.bitcoin.destination))))
+                            .push(caption(format!("Return to this source wallet: {} · {} sats", address(&review.bitcoin.destination), review.bitcoin.destination.value.to_sat())))
                             .push(caption(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
                             .push(p1_bold("Bitcoin Blake2b transaction"))
                             .push(caption(format!("BTCB2-only · verified: {} · {} sats", review.fork.funding.outpoint, review.fork.funding.amount.to_sat())))
-                            .push(caption(format!("Send to your paired BTCB2 Cube: {}", address(&review.fork.destination))))
+                            .push(caption(format!("Send to your paired BTCB2 Cube: {} · {} sats", address(&review.fork.destination), review.fork.destination.value.to_sat())))
                             .push(caption(format!("Fee: {} sats", review.fork.fee.to_sat())))
                             .push(p1_regular("Each transaction spends every shared coin together with its own verified chain-specific funding coin. This preview is not a signing or broadcast request; both proofs, wallet state and fees must be checked again before either transaction can be signed."));
                     } else if progress.bitcoin_candidate && progress.btcb2_candidate {

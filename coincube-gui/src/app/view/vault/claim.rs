@@ -76,7 +76,10 @@ pub fn view<'a>(
                     (!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding))
                 ))
                 .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
-                .push_maybe(panel.funding_review().map(funding_review_view))
+                .push_maybe(panel.funding_review().map(|review| {
+                    let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
+                    funding_review_view(review, threshold)
+                }))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
         StageView::PairedRecovery(recovery, checking, error) => dashboard(
@@ -162,7 +165,7 @@ pub fn view<'a>(
     }
 }
 
-fn funding_review_view(review: &CoinPairReview) -> Element<'static, Message> {
+fn funding_review_view(review: &CoinPairReview, threshold: usize) -> Element<'static, Message> {
     let address = |output: &TxOut| {
         Address::from_script(&output.script_pubkey, Network::Bitcoin)
             .map(|address| address.to_string())
@@ -175,6 +178,10 @@ fn funding_review_view(review: &CoinPairReview) -> Element<'static, Message> {
             "{} shared pre-fork coins · {} sats on each chain",
             review.bitcoin.shared.len(),
             review.bitcoin.shared_total.to_sat()
+        )))
+        .push(p2_regular(format!(
+            "Signing threshold: {threshold} signature{} per input",
+            if threshold == 1 { "" } else { "s" }
         )));
     for coin in &review.bitcoin.shared {
         rows = rows.push(p2_regular(format!(
@@ -190,8 +197,9 @@ fn funding_review_view(review: &CoinPairReview) -> Element<'static, Message> {
             review.bitcoin.funding.amount.to_sat()
         )))
         .push(p2_regular(format!(
-            "Back to this Vault: {}",
-            address(&review.bitcoin.destination)
+            "Back to this Vault: {} · {} sats",
+            address(&review.bitcoin.destination),
+            review.bitcoin.destination.value.to_sat()
         )))
         .push(p2_regular(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
         .push(p1_bold("Bitcoin Blake2b transaction"))
@@ -201,8 +209,9 @@ fn funding_review_view(review: &CoinPairReview) -> Element<'static, Message> {
             review.fork.funding.amount.to_sat()
         )))
         .push(p2_regular(format!(
-            "Back to the paired BTCB2 Vault: {}",
-            address(&review.fork.destination)
+            "Back to the paired BTCB2 Vault: {} · {} sats",
+            address(&review.fork.destination),
+            review.fork.destination.value.to_sat()
         )))
         .push(p2_regular(format!("Fee: {} sats", review.fork.fee.to_sat())))
         .push(p1_regular("Each transaction spends all shared coins with one verified chain-specific funding coin. These exact PSBTs are a preview only; the app must recheck both proofs, wallets and fees before signing."))

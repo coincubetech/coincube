@@ -4415,7 +4415,7 @@ impl App {
     pub(crate) fn claim_fork_daemon(
         &self,
         request: &ClaimPairRequest,
-    ) -> Option<Arc<dyn Daemon + Sync + Send>> {
+    ) -> Option<state::vault::claim::ClaimForkBinding> {
         if self.datadir != request.root
             || self.cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
             || self.cube_settings.id != request.fork_cube
@@ -4451,15 +4451,20 @@ impl App {
         }
         (config.bitcoin_config.chain == crate::chain::ChainId::BitcoinBlake2b
             && config.main_descriptor == request.descriptor)
-            .then(|| daemon.clone())
+            .then(|| {
+                state::vault::claim::ClaimForkBinding::new(
+                    daemon,
+                    self.panels.claim_generation.subscribe(),
+                )
+            })
     }
 
     pub(crate) fn bind_claim_fork_daemon(
         &mut self,
-        daemon: Option<&Arc<dyn Daemon + Sync + Send>>,
+        binding: Option<state::vault::claim::ClaimForkBinding>,
     ) {
         if let Some(panel) = &mut self.panels.claim {
-            panel.bind_fork_daemon(daemon);
+            panel.bind_fork_daemon(binding);
         }
     }
 
@@ -10606,6 +10611,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("claim-fork-pair-{}", uuid::Uuid::new_v4()));
         let mut app = split_app(&root, false, true);
         let wallet = app.wallet.as_ref().unwrap();
+        let wallet_id = wallet.id();
         let mut request = ClaimPairRequest {
             root: app.datadir.clone(),
             fork_cube: app.cube_settings.id.clone(),
@@ -10615,8 +10621,9 @@ mod tests {
                 account: "7".into(),
             },
         };
-        app.cube_settings.vault_wallet_id = Some(wallet.id());
-        assert!(app.claim_fork_daemon(&request).is_some());
+        app.cube_settings.vault_wallet_id = Some(wallet_id.clone());
+        let binding = app.claim_fork_daemon(&request).unwrap();
+        assert!(binding.current());
 
         request.fork_cube = "other".into();
         assert!(app.claim_fork_daemon(&request).is_none());
@@ -10638,6 +10645,19 @@ mod tests {
         app.split_backend = state::vault::claim::BackendState::Ready;
         app.cube_settings.vault_wallet_id = None;
         assert!(app.claim_fork_daemon(&request).is_none());
+        app.revoke_claim();
+        assert!(
+            !binding.current(),
+            "an existing pairing must expire on revocation"
+        );
+        app.cube_settings.vault_wallet_id = Some(wallet_id);
+        let after_revocation = app.claim_fork_daemon(&request).unwrap();
+        assert!(after_revocation.current());
+        drop(app);
+        assert!(
+            !after_revocation.current(),
+            "closing the tab must expire its pairing"
+        );
         let _ = std::fs::remove_dir_all(root);
     }
 

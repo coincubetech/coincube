@@ -737,7 +737,7 @@ impl GUI {
                         .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == *tab_id))
                         .map(|tab| &mut tab.state)
                     {
-                        app.bind_claim_fork_daemon(fork_daemon.as_ref());
+                        app.bind_claim_fork_daemon(fork_daemon);
                     }
                 }
                 match msg {

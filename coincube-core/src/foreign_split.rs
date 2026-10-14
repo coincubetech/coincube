@@ -210,6 +210,24 @@ impl SplitSource {
         self.internal.as_ref()
     }
 
+    /// Required signatures per input for every supported source shape. This
+    /// is display information; PSBT finalization still verifies each input.
+    pub fn signing_threshold(&self) -> usize {
+        match &self.external {
+            Descriptor::Pkh(_) | Descriptor::Wpkh(_) | Descriptor::Sh(_) => 1,
+            Descriptor::Wsh(wsh) => match wsh.as_inner() {
+                WshInner::SortedMulti(multi) => multi.k(),
+                WshInner::Ms(ms) => match ms.as_inner() {
+                    Terminal::Multi(multi) => multi.k(),
+                    _ => unreachable!("SplitSource::new checks the descriptor shape"),
+                },
+            },
+            Descriptor::Bare(_) | Descriptor::Tr(_) => {
+                unreachable!("SplitSource::new checks the descriptor shape")
+            }
+        }
+    }
+
     /// The source identity (owner decision D9): SHA-256 over the domain tag
     /// [`SPLIT_SOURCE_DIGEST_TAG`], then each descriptor's canonical text
     /// with its checksum, tagged by branch and length-prefixed so the pair

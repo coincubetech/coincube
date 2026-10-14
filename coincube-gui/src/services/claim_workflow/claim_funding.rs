@@ -756,9 +756,13 @@ pub async fn reserve_claim_change_indices(
     bitcoin_daemon: &(dyn Daemon + Send + Sync),
     fork_daemon: &(dyn Daemon + Send + Sync),
     generation: &watch::Receiver<u64>,
+    fork_generation: &watch::Receiver<u64>,
+    fork_expected: u64,
 ) -> Result<ClaimChangeIndices, ClaimChangeError> {
     use coincube_core::chain::ChainId;
-    if !current(generation, context.generation) {
+    let sessions_current =
+        || current(generation, context.generation) && current(fork_generation, fork_expected);
+    if !sessions_current() {
         return Err(ClaimChangeError::Cancelled);
     }
     let descriptor = descriptor.clone();
@@ -792,47 +796,63 @@ pub async fn reserve_claim_change_indices(
     if !saved.is_released() {
         return Err(ClaimChangeError::Journal(Error::InvalidPlan));
     }
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
     let (bitcoin_info, fork_info) =
         tokio::try_join!(bitcoin_daemon.get_info(), fork_daemon.get_info(),)
             .map_err(|_| ClaimChangeError::WalletState)?;
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
     if !change_wallet_ready(&bitcoin_info, ChainId::Bitcoin, &descriptor, None)
         || !change_wallet_ready(&fork_info, ChainId::BitcoinBlake2b, &descriptor, None)
     {
         return Err(ClaimChangeError::WalletState);
     }
     if let Some(change) = saved.change_indices() {
-        return if current(generation, context.generation)
-            && change_wallet_ready(
-                &bitcoin_info,
-                ChainId::Bitcoin,
-                &descriptor,
-                Some(change.bitcoin),
-            )
-            && change_wallet_ready(
-                &fork_info,
-                ChainId::BitcoinBlake2b,
-                &descriptor,
-                Some(change.fork),
-            ) {
+        return if change_wallet_ready(
+            &bitcoin_info,
+            ChainId::Bitcoin,
+            &descriptor,
+            Some(change.bitcoin),
+        ) && change_wallet_ready(
+            &fork_info,
+            ChainId::BitcoinBlake2b,
+            &descriptor,
+            Some(change.fork),
+        ) {
             Ok(change)
         } else {
             Err(ClaimChangeError::WalletState)
         };
     }
 
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
     let bitcoin = bitcoin_daemon
         .reserve_claim_change(ChainId::Bitcoin, &descriptor)
         .await
         .map_err(|_| ClaimChangeError::WalletState)?;
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
     let mut fork = fork_daemon
         .reserve_claim_change(ChainId::BitcoinBlake2b, &descriptor)
         .await
         .map_err(|_| ClaimChangeError::WalletState)?;
+    if !sessions_current() {
+        return Err(ClaimChangeError::Cancelled);
+    }
     if bitcoin == fork {
         fork = fork_daemon
             .reserve_claim_change(ChainId::BitcoinBlake2b, &descriptor)
             .await
             .map_err(|_| ClaimChangeError::WalletState)?;
+        if !sessions_current() {
+            return Err(ClaimChangeError::Cancelled);
+        }
     }
     if bitcoin.is_hardened() || fork.is_hardened() || bitcoin == fork {
         return Err(ClaimChangeError::WalletState);
@@ -844,7 +864,7 @@ pub async fn reserve_claim_change_indices(
     let (bitcoin_info, fork_info) =
         tokio::try_join!(bitcoin_daemon.get_info(), fork_daemon.get_info(),)
             .map_err(|_| ClaimChangeError::WalletState)?;
-    if !current(generation, context.generation) {
+    if !sessions_current() {
         return Err(ClaimChangeError::Cancelled);
     }
     if !change_wallet_ready(
@@ -860,14 +880,21 @@ pub async fn reserve_claim_change_indices(
     ) {
         return Err(ClaimChangeError::WalletState);
     }
+    let generation = generation.clone();
+    let fork_generation = fork_generation.clone();
+    let expected = context.generation;
     tokio::task::spawn_blocking(move || {
-        let mut journal = Journal::open(&directory)?;
-        journal.record_claim_change_indices(&saved, change)?;
+        let mut journal = Journal::open(&directory).map_err(ClaimChangeError::Journal)?;
+        if !current(&generation, expected) || !current(&fork_generation, fork_expected) {
+            return Err(ClaimChangeError::Cancelled);
+        }
+        journal
+            .record_claim_change_indices(&saved, change)
+            .map_err(ClaimChangeError::Journal)?;
         Ok(change)
     })
     .await
     .map_err(|_| ClaimChangeError::Journal(Error::InvalidJournal))?
-    .map_err(ClaimChangeError::Journal)
 }
 
 /// Release saved deposit addresses for display only after authenticated

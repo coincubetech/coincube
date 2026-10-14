@@ -120,6 +120,18 @@ fn wallet(shape: Shape) -> Wallet {
     }
 }
 
+#[test]
+fn review_threshold_matches_supported_source_shapes() {
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        assert_eq!(
+            wallet.source.signing_threshold(),
+            wallet.threshold,
+            "{shape:?}"
+        );
+    }
+}
+
 fn block(height: u64) -> BlockRef {
     BlockRef {
         height,

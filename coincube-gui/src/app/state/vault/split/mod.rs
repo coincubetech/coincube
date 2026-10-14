@@ -850,6 +850,11 @@ impl SplitPanel {
     pub fn funding_progress(&self) -> Option<&step1::SplitDepositProgress> {
         self.funding_progress.as_ref()
     }
+    pub fn funding_signing_threshold(&self) -> Option<usize> {
+        self.funding_source
+            .as_ref()
+            .map(SplitSource::signing_threshold)
+    }
     pub fn paired_recovery(&self) -> Option<&PairedSplitRecovery> {
         self.paired_recovery.as_ref()
     }
