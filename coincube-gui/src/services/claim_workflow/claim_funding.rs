@@ -5,18 +5,24 @@
 use super::{journal::Journal, Context, Error, WalletIdentity};
 use crate::services::{
     claim_inventory::ClaimInventory,
-    claim_observation::{CollectionContext, FailureKind},
+    claim_observation::{
+        http::{DiscoveryError, HttpObservationSource, OwnedClaimFunding},
+        CollectionContext, FailureKind,
+    },
     coincube::CoincubeClient,
     foreign_split_inventory::FreshDepositAddresses,
     split_evidence::ConnectEsplora,
 };
 use async_trait::async_trait;
 use coincube_core::{
+    claim::Policy,
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
+        bip32::ChildNumber,
         hashes::{sha256, Hash},
         Address, Network,
     },
+    spend::CandidateCoin,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -28,6 +34,28 @@ use tokio::sync::watch;
 
 const ADDRESS_CHECK_BUDGET: Duration = Duration::from_secs(20);
 const MAX_ADDRESS_AGE_SECONDS: i64 = 60;
+
+fn at_reserved_receive_index(coin: &CandidateCoin, index: u32) -> bool {
+    !coin.is_change && coin.deriv_index == ChildNumber::Normal { index }
+}
+
+fn select_reserved_candidates(
+    bitcoin: &[CandidateCoin],
+    fork: &[CandidateCoin],
+    indices: FreshDepositAddresses,
+) -> (Vec<CandidateCoin>, Vec<CandidateCoin>) {
+    (
+        bitcoin
+            .iter()
+            .filter(|coin| at_reserved_receive_index(coin, indices.bitcoin_deposit))
+            .copied()
+            .collect(),
+        fork.iter()
+            .filter(|coin| at_reserved_receive_index(coin, indices.btcb2_deposit))
+            .copied()
+            .collect(),
+    )
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimAddressError {
@@ -45,6 +73,12 @@ pub enum ClaimAddressError {
 pub struct CheckedClaimFundingAddresses {
     pub bitcoin_deposit: String,
     pub btcb2_deposit: String,
+}
+
+#[derive(Debug)]
+pub enum ClaimFundingDiscoveryError {
+    InvalidReservation(Error),
+    Discovery(DiscoveryError),
 }
 
 #[async_trait]
@@ -215,6 +249,74 @@ impl ClaimFundingReservation {
             && self.descriptor().is_ok_and(|saved| saved == *descriptor)
     }
 
+    fn reserved_candidates(
+        &self,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+    ) -> Result<(Vec<CandidateCoin>, Vec<CandidateCoin>), Error> {
+        self.validate()?;
+        if !self.matches(inventory.descriptor(), identity, context)
+            || inventory.scan_report().bitcoin.generation() != context.generation
+            || inventory.scan_report().btcb2.generation() != context.generation
+        {
+            return Err(Error::WrongIdentity);
+        }
+        Ok(select_reserved_candidates(
+            inventory.bitcoin_funding(),
+            inventory.fork_funding(),
+            self.indices,
+        ))
+    }
+
+    /// Search only the exact two receive addresses reserved before deposits.
+    /// Other post-fork Vault outputs cannot silently replace the user's
+    /// funding plan. The returned pair is still read-only: source-wallet
+    /// reconciliation and a fresh signer preflight remain mandatory.
+    pub async fn discover_reserved_funding(
+        &self,
+        directory: PathBuf,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+        source: &HttpObservationSource,
+        policy: Policy,
+    ) -> Result<Option<OwnedClaimFunding>, ClaimFundingDiscoveryError> {
+        let descriptor = inventory.descriptor().clone();
+        let owner = identity.clone();
+        let account = context.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            load_claim_funding(&directory, &descriptor, &owner, &account)
+        })
+        .await
+        .map_err(|_| ClaimFundingDiscoveryError::InvalidReservation(Error::InvalidJournal))?
+        .map_err(ClaimFundingDiscoveryError::InvalidReservation)?
+        .ok_or(ClaimFundingDiscoveryError::InvalidReservation(
+            Error::InvalidPlan,
+        ))?;
+        if saved != *self {
+            return Err(ClaimFundingDiscoveryError::InvalidReservation(
+                Error::InvalidPlan,
+            ));
+        }
+        let (bitcoin, fork) = self
+            .reserved_candidates(inventory, identity, context)
+            .map_err(ClaimFundingDiscoveryError::InvalidReservation)?;
+        if bitcoin.is_empty() || fork.is_empty() || inventory.shared().is_empty() {
+            return Ok(None);
+        }
+        source
+            .discover_owned_claim_funding(
+                inventory.descriptor(),
+                &bitcoin,
+                &fork,
+                inventory.shared(),
+                policy,
+            )
+            .await
+            .map_err(ClaimFundingDiscoveryError::Discovery)
+    }
+
     pub(super) fn matches_pair(
         &self,
         identity: &WalletIdentity,
@@ -345,11 +447,44 @@ mod tests {
         chain::ChainId,
         descriptors::{CoincubePolicy, PathInfo},
         miniscript::{
-            bitcoin::{bip32::DerivationPath, secp256k1, Network},
+            bitcoin::{bip32::DerivationPath, secp256k1, Amount, Network, OutPoint},
             DescriptorPublicKey,
         },
         signer::MasterSigner,
     };
+
+    #[test]
+    fn reserved_funding_rejects_other_indices_and_change_outputs() {
+        let coin = CandidateCoin {
+            outpoint: OutPoint::null(),
+            amount: Amount::from_sat(10_000),
+            deriv_index: ChildNumber::Normal { index: 4 },
+            is_change: false,
+            must_select: true,
+            sequence: None,
+            ancestor_info: None,
+        };
+        let at_five = CandidateCoin {
+            deriv_index: ChildNumber::Normal { index: 5 },
+            ..coin
+        };
+        let change_at_four = CandidateCoin {
+            is_change: true,
+            ..coin
+        };
+        let (bitcoin, fork) = select_reserved_candidates(
+            &[coin, at_five, change_at_four],
+            &[coin, at_five],
+            FreshDepositAddresses {
+                bitcoin_deposit: 4,
+                btcb2_deposit: 5,
+            },
+        );
+        assert_eq!(bitcoin.len(), 1);
+        assert_eq!(bitcoin[0].deriv_index, ChildNumber::Normal { index: 4 });
+        assert_eq!(fork.len(), 1);
+        assert_eq!(fork[0].deriv_index, ChildNumber::Normal { index: 5 });
+    }
 
     struct FakeHistory {
         stamp: i64,

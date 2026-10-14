@@ -159,8 +159,10 @@ a replayable spend.
    address history on both chains for both addresses. Creation of a version-10
    paired Claim intent now requires that saved record and checks both funding
    derivations against its exact external indices under the journal lock. The
-   Claim wizard has not yet been wired to these checks or to the paired
-   transaction builder.
+   paired Claim discovery now searches only funding outputs at the two
+   reserved receive indices, so a different post-fork Vault coin cannot
+   silently replace a planned deposit. The Claim wizard has not yet been
+   wired to these checks or to the paired transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,
