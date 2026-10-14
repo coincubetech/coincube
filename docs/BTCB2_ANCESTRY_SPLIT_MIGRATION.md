@@ -76,8 +76,8 @@ a replayable spend.
    Split deposit reservation now restricts the search to the two exact
    external receive indices shown to the user. The search reloads and compares
    the released reservation under the current Connect identity before
-   returning a read-only result from a completed paired scan. It is not yet invoked by
-   the production Split panel's deposit check and cannot authorize signing.
+   returning a read-only result from a completed paired scan. The production
+   Split panel calls it for a read-only deposit check; it cannot authorize signing.
    Claim now has an equivalent read-only paired search that binds the selected
    Bitcoin and BTCB2 funding outputs and every shared output to its Vault
    descriptor. A Cube-specific entry point to the bounded two-chain scanner
@@ -89,8 +89,9 @@ a replayable spend.
    Claim pair constructor builds the exact ordinary Bitcoin and BTCB2 PSBTs
    from that paired result, current shared wallet coins, previous transactions
    and separately reserved change indices. It refuses a changed shared set or
-   output before returning the pair. No production route invokes either new
-   Claim stage yet, and signer admission is not wired.
+   output before returning the pair. The production Claim deposit check invokes
+   paired discovery for read-only status, but does not construct the pair or
+   admit it to signers.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
    one-output Bitcoin self-transfer with `B`.
    `create_ancestry_fork_sweep_with_marker` now constructs and exactly
@@ -197,10 +198,12 @@ a replayable spend.
    displays the exact addresses after fresh authenticated history reads even
    if deposits have since made their
    history nonempty; it never chooses replacements on retry.
-   Coincubed `getinfo` now reports an explicit chain ID; older daemon
-   responses and the remote Connect wallet API still report none, so address
-   preparation refuses those backends. Connect must return an authenticated
-   wallet chain ID before Connect-backed Claim deposits are usable. Creation of a version-10
+   Coincubed `getinfo` now reports an explicit chain ID. The desktop accepts
+   an authenticated `chain_id` on a Connect wallet record, checks its address
+   network, and keeps an omitted field unknown. The current remote Connect
+   wallet API does not yet supply this field, so Connect-backed Claim address
+   preparation still refuses it. Connect must return the positive identity
+   before those deposits are usable. Creation of a version-10
    paired Claim intent now requires that saved record and checks both funding
    derivations against its exact external indices under the journal lock. The
    paired Claim discovery now searches only funding outputs at the two
@@ -219,8 +222,8 @@ a replayable spend.
    digest, target Cube and account, then repeats both-chain address checks
    before showing the same deposit addresses. A resumed deposit screen can
    run the same read-only "Check deposits" scan.
-   The Claim
-   wizard does not yet call paired funding discovery or the transaction builder.
+   The Claim wizard calls paired funding discovery only for read-only deposit
+   status; it does not yet call the transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,
