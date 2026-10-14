@@ -382,6 +382,9 @@ marker spend cases remain.
    transport call. The initial Bitcoin record requires both signed witnesses
    to pass paired preflight. The later fork record requires a new preflight of
    the exact BTCB2 witness; the Bitcoin transaction may be mined by then.
+   Typed Claim and Split preflight readers now make only that BTCB2 request
+   after the Bitcoin step and refuse a rejected policy result. They do not
+   themselves establish Bitcoin confirmation, live ancestry or spend authority.
    These records cannot be cleared or repeated through the journal; the fork
    record is sequenced after the Bitcoin record. Neither record
    establishes upstream acceptance or unlocks a send. The paired coordinator
@@ -396,6 +399,12 @@ marker spend cases remain.
    witness and session; the coordinator must still recollect live two-chain
    ancestry and obtain explicit approval before either send. Acceptance on
    one chain never implies acceptance on the other.
+   The initial collector requires the shared and Bitcoin-only inputs to be
+   unspent on Bitcoin. That condition becomes false once the exact Bitcoin
+   transaction confirms, so the fork stage needs a distinct collector that
+   verifies the canonical Bitcoin spend and requires the shared and BTCB2-only
+   inputs to remain unspent on BTCB2. Reusing the initial collector would make
+   a successful second step impossible.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

@@ -421,6 +421,31 @@ impl PreflightClient {
         Ok(PairEvidence { bitcoin, fork })
     }
 
+    /// A mined Bitcoin half cannot be preflighted as a mempool transaction.
+    /// Refresh only the exact fork witness and require positive node policy;
+    /// Bitcoin confirmation and current ancestry are separate checks.
+    async fn observe_ancestry_fork(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<Evidence, Error> {
+        if !paired_input_shape(bitcoin, fork) {
+            return Err(Error::InvalidRequest);
+        }
+        let evidence = self
+            .observe(ChainId::BitcoinBlake2b, fork, fork_tip, policy)
+            .await?;
+        if let NodePolicy::Rejected { reason } = evidence.node_policy() {
+            return Err(Error::PairedPolicyRejected {
+                chain: ChainId::BitcoinBlake2b,
+                reason: reason.clone(),
+            });
+        }
+        Ok(evidence)
+    }
+
     /// Preflight the exact signed Claim pair after the journal and fresh
     /// ancestry checks have admitted it. A typed pair prevents callers from
     /// supplying two unrelated raw transactions. This remains observation
@@ -465,6 +490,52 @@ impl PreflightClient {
             pair.bitcoin().transaction(),
             pair.fork().transaction(),
             bitcoin_tip,
+            fork_tip,
+            policy,
+        )
+        .await
+    }
+
+    /// After the Bitcoin half is mined, recheck only the exact finalized
+    /// BTCB2 Claim witness against the current BTCB2 operator node. The
+    /// coordinator must independently recheck Bitcoin confirmations and
+    /// current two-chain ancestry before using this policy observation.
+    pub async fn observe_verified_claim_fork(
+        &self,
+        pair: &coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<Evidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_fork(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            fork_tip,
+            policy,
+        )
+        .await
+    }
+
+    /// Same single-chain refresh for a verified foreign Split pair. This is
+    /// node policy evidence only, never a replay-safety or send token.
+    pub async fn observe_verified_split_fork(
+        &self,
+        pair: &coincube_core::foreign_split::VerifiedAncestrySplitPair,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<Evidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_fork(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
             fork_tip,
             policy,
         )

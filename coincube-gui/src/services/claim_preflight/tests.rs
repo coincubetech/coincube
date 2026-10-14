@@ -135,6 +135,59 @@ async fn paired_preflight_requires_distinct_markers_and_both_policy_acceptances(
         fork_mock.assert_hits(1);
     }
 }
+
+#[tokio::test]
+async fn post_bitcoin_preflight_reads_only_the_exact_fork_witness() {
+    let bitcoin = paired_tx(3);
+    let fork = paired_tx(4);
+    for allowed in [true, false] {
+        let server = MockServer::start();
+        let (client, _sender) = client(&server);
+        let bitcoin_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+            then.status(500);
+        });
+        let fork_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight")
+                .json_body(json!({
+                    "transaction": consensus::encode::serialize_hex(&fork),
+                    "tip_hash": tip(),
+                }));
+            then.status(200)
+                .header("Cache-Control", "no-store")
+                .json_body(pair_response(ChainId::BitcoinBlake2b, &fork, allowed));
+        });
+        let observed = client
+            .observe_ancestry_fork(&bitcoin, &fork, tip(), policy())
+            .await;
+        if allowed {
+            let evidence = observed.unwrap();
+            assert_eq!(evidence.wtxid(), fork.compute_wtxid());
+            assert_eq!(evidence.chain(), ChainId::BitcoinBlake2b);
+        } else {
+            assert_eq!(
+                observed,
+                Err(Error::PairedPolicyRejected {
+                    chain: ChainId::BitcoinBlake2b,
+                    reason: "policy_rejected".into(),
+                })
+            );
+        }
+        fork_mock.assert_hits(1);
+        bitcoin_mock.assert_hits(0);
+    }
+
+    let server = MockServer::start();
+    let (client, _sender) = client(&server);
+    assert_eq!(
+        client
+            .observe_ancestry_fork(&bitcoin, &bitcoin, tip(), policy())
+            .await,
+        Err(Error::InvalidRequest)
+    );
+}
 fn parse_value(status: StatusCode, body: Value) -> Result<Evidence, Error> {
     parse(
         status,
