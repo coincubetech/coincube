@@ -99,6 +99,14 @@ pub fn view<'a>(
                 .push(button::secondary(None, if checking { "Checking both chains…" } else { "Check again" }).on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::Refresh))))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
+        StageView::PairedSign {
+            bitcoin,
+            fork,
+            session,
+            active,
+            recording,
+            error,
+        } => paired_sign_view(menu, cache, bitcoin, fork, session, active, recording, error),
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),
         StageView::CheckingSign => dashboard(
             menu,
@@ -617,6 +625,69 @@ fn sign_view<'a>(
         }
         None => content,
     }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paired_sign_view<'a>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    bitcoin: &'a PsbtState,
+    fork: &'a PsbtState,
+    session: u64,
+    active: coincube_core::chain::ChainId,
+    recording: bool,
+    error: Option<&'a str>,
+) -> Element<'a, Message> {
+    let state = if active == coincube_core::chain::ChainId::Bitcoin {
+        bitcoin
+    } else {
+        fork
+    };
+    let currently_signing = matches!(&state.modal, Some(PsbtModal::Sign(m)) if m.is_signing());
+    let content = dashboard(
+        menu,
+        cache,
+        Column::new()
+            .spacing(20)
+            .push(header("Sign both ordinary Claim transactions"))
+            .push_maybe(recording.then(|| p1_regular("Checking both chains and recording the signed pair…")))
+            .push(p1_regular("Each transaction spends the same shared coins with its own verified chain-specific deposit. Both PSBTs need this Vault's normal signing threshold. A fresh two-chain check runs before every signer request."))
+            .push(Row::new().spacing(10)
+                .push(button::secondary(None, "Bitcoin transaction").on_press(Message::Claim(ClaimMessage::ShowPairBitcoin)))
+                .push(button::secondary(None, "Bitcoin Blake2b transaction").on_press(Message::Claim(ClaimMessage::ShowPairBtcb2))))
+            .push(p1_bold(if active == coincube_core::chain::ChainId::Bitcoin {
+                "Bitcoin — return to this Vault"
+            } else {
+                "Bitcoin Blake2b — return to the paired Vault"
+            }))
+            .push_maybe(error.map(|reason| card::warning(reason.to_string())))
+            .push(psbt::spend_overview_with_cancel(
+                &state.tx,
+                &state.desc_policy,
+                &state.wallet.keys_aliases,
+                currently_signing,
+                state.saved,
+                None,
+                false,
+                Some(Message::Claim(ClaimMessage::Cancel)),
+            )),
+    );
+    let rendered = match &state.modal {
+        Some(modal) => {
+            let modal: &dyn crate::app::state::vault::psbt::Modal = modal.as_ref();
+            modal.view(content)
+        }
+        None => content,
+    };
+    rendered.map(move |message| match message {
+        Message::Claim(_)
+        | Message::ShowError(_)
+        | Message::ShowToast(_, _)
+        | Message::Clipboard(_)
+        | Message::CopyWithToast(_, _)
+        | Message::OpenUrl(_) => message,
+        other => Message::ClaimPairedSigner(session, active, Box::new(other)),
+    })
 }
 
 /// Step 1 has exactly one spendable return output (with an optional zero-value

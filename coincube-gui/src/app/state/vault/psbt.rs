@@ -126,7 +126,9 @@ pub struct RecipientIdentities {
 pub(crate) fn claim_signing_dispatch(message: &Message) -> bool {
     matches!(
         message,
-        Message::View(view::Message::SelectHardwareWallet(_))
+        Message::View(view::Message::ExportPsbt | view::Message::ImportPsbt)
+            | Message::Export(ImportExportMessage::Progress(Progress::Psbt(_)))
+            | Message::View(view::Message::SelectHardwareWallet(_))
             | Message::View(view::Message::SelectPsbtHardwareWallet(_))
             | Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectMasterSigner
@@ -474,6 +476,21 @@ impl PsbtState {
     /// coordinator check every signing dispatch is refused, including retries.
     pub fn require_claim_signing_checks(&mut self) -> bool {
         if !self.wallet.chain.is_blake2b() {
+            return false;
+        }
+        self.claim_signing = true;
+        self.claim_dispatch = None;
+        self.paired_dispatch = None;
+        true
+    }
+
+    /// A paired ordinary Claim has a Bitcoin and a BTCB2 signer. Neither side
+    /// may dispatch without a one-use permit issued after a fresh pair check.
+    pub(crate) fn require_paired_signing_checks(&mut self) -> bool {
+        if !matches!(
+            self.wallet.chain,
+            coincube_core::chain::ChainId::Bitcoin | coincube_core::chain::ChainId::BitcoinBlake2b
+        ) {
             return false;
         }
         self.claim_signing = true;
@@ -5682,6 +5699,11 @@ mod tests {
             );
             let fingerprint = wallet.signer.as_ref().unwrap().fingerprint();
             let requests = vec![
+                Message::View(view::Message::ExportPsbt),
+                Message::View(view::Message::ImportPsbt),
+                Message::Export(ImportExportMessage::Progress(Progress::Psbt(
+                    f.psbt.clone(),
+                ))),
                 Message::View(view::Message::SelectHardwareWallet(0)),
                 Message::View(view::Message::Spend(
                     view::SpendTxMessage::SelectMasterSigner,

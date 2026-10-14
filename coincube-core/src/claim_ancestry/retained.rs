@@ -18,7 +18,7 @@ pub enum DecodeError {
 
 /// Contains raw evidence only. Even a successfully restored path requires new
 /// canonical root qualification and all wallet/spend checks before use.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RetainedPath {
     selected: OutPoint,
     links: Vec<OwnedLink>,

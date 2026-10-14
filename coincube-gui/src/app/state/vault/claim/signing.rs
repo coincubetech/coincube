@@ -20,7 +20,7 @@ pub(super) async fn prepare_exact_pair_intent(
     connect: ConnectSession,
     expected: u64,
     generation: watch::Receiver<u64>,
-) -> Result<(), String> {
+) -> Result<claim_workflow::RequalifiedInitialClaim, String> {
     let current = || {
         if generation.has_changed().is_err() || *generation.borrow() != expected {
             Err("The Connect session changed during Claim preparation.".to_string())
@@ -142,21 +142,24 @@ pub(super) async fn prepare_exact_pair_intent(
     if !fork_binding.current() {
         return Err("The paired BTCB2 Vault changed during Claim verification.".into());
     }
-    let bitcoin = pair.bitcoin;
-    let fork = pair.fork;
+    let bitcoin = pair.bitcoin.clone();
+    let fork = pair.fork.clone();
+    let bitcoin_path = funding.funding().bitcoin_path.clone();
+    let fork_path = funding.funding().fork_path.clone();
+    let fork_derivation = (
+        funding.funding().fork.deriv_index,
+        funding.funding().fork.is_change,
+    );
     let result = tokio::task::spawn_blocking(move || {
         let controller = claim_workflow::Controller::create_or_reopen_ancestry_pair(
             &directory,
             bitcoin_cube,
             fork_cube,
             &bitcoin,
-            &funding.funding().bitcoin_path,
+            &bitcoin_path,
             &fork,
-            &funding.funding().fork_path,
-            (
-                funding.funding().fork.deriv_index,
-                funding.funding().fork.is_change,
-            ),
+            &fork_path,
+            fork_derivation,
             rates.0,
             rates.1,
             context,
@@ -171,7 +174,99 @@ pub(super) async fn prepare_exact_pair_intent(
     if !fork_binding.current() {
         return Err("The paired BTCB2 Vault changed while recording the Claim intent.".into());
     }
-    result
+    result.map(|()| funding)
+}
+
+/// Finish both ordinary PSBTs under a new exact-pair requalification, then
+/// atomically save their finalized witnesses. A partial signer result never
+/// enters the journal, and this function performs no broadcast or preflight.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn record_exact_signed_pair(
+    pair: PreparedClaimPair,
+    bitcoin_signed: Psbt,
+    fork_signed: Psbt,
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<
+    (
+        coincube_core::miniscript::bitcoin::Txid,
+        coincube_core::miniscript::bitcoin::Txid,
+    ),
+    String,
+> {
+    let fork_return = UnifiedPsbt::from_psbt(fork_signed)
+        .map_err(|_| "The BTCB2 signer PSBT could not be decoded.".to_string())?;
+    let combined = crate::services::claim_pair_signing::combine_ancestry_claim_pair(
+        &pair.bitcoin,
+        &[bitcoin_signed],
+        &pair.fork,
+        &[fork_return],
+    )
+    .map_err(|error| format!("The exact Claim signatures could not be verified: {error:?}"))?;
+    if !combined.complete {
+        return Err("Both Claim transactions need all required signatures.".into());
+    }
+    let requalified = prepare_exact_pair_intent(
+        pair.clone(),
+        directory.clone(),
+        bitcoin_cube.clone(),
+        fork_cube.clone(),
+        wallet.clone(),
+        daemon,
+        fork_binding.clone(),
+        connect,
+        expected,
+        generation.clone(),
+    )
+    .await?;
+    let context = requalified.context().clone();
+    let tips = requalified.tips();
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube,
+        fork_cube,
+        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+    };
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The exact Claim intent could not be reopened: {error:?}"))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The system clock is unavailable.".to_string())?
+        .as_secs() as i64;
+    let (verified, _) = controller
+        .finalize_ancestry_pair_for_review(
+            &context,
+            &requalified,
+            &pair.bitcoin,
+            &pair.fork,
+            &combined.bitcoin,
+            &combined.fork,
+            CHECK_POLICY.observations,
+            now,
+            tips,
+        )
+        .map_err(|error| format!("The signed Claim pair is no longer verified: {error:?}"))?;
+    if generation.has_changed().is_err()
+        || *generation.borrow() != expected
+        || !fork_binding.current()
+    {
+        return Err("The Claim session changed before saving the signed pair.".into());
+    }
+    controller
+        .record_signed_ancestry_claim_pair(&context, &verified)
+        .map_err(|error| format!("The signed Claim pair could not be recorded: {error:?}"))?;
+    Ok((
+        verified.bitcoin().transaction().compute_txid(),
+        verified.fork().transaction().compute_txid(),
+    ))
 }
 
 /// One-use result of checking this exact unsigned construction and session.

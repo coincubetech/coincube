@@ -64,12 +64,21 @@ pub(crate) struct RequalifiedInitialClaim {
     bitcoin_psbt: Psbt,
     fork_psbt: Psbt,
     context: Context,
+    tips: coincube_core::claim::PreflightTips,
     checked_at: std::time::Instant,
 }
 
 impl RequalifiedInitialClaim {
     pub(crate) fn funding(&self) -> &OwnedClaimFunding {
         &self.funding
+    }
+
+    pub(crate) fn context(&self) -> &Context {
+        &self.context
+    }
+
+    pub(crate) fn tips(&self) -> coincube_core::claim::PreflightTips {
+        self.tips
     }
 
     pub(super) fn matches_pair(
@@ -910,6 +919,7 @@ impl ClaimFundingReservation {
             bitcoin_psbt: bitcoin.psbt().clone(),
             fork_psbt: fork.psbt().clone(),
             context: context.clone(),
+            tips,
             checked_at: std::time::Instant::now(),
         })
     }

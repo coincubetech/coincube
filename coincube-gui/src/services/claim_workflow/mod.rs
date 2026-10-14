@@ -2,6 +2,7 @@
 mod ancestry;
 pub(crate) use ancestry::RecoveryObservation;
 mod claim_funding;
+pub(crate) use claim_funding::RequalifiedInitialClaim;
 mod journal;
 mod paired_recovery;
 pub(crate) mod paired_signing_permit;

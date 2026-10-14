@@ -7961,7 +7961,7 @@ impl App {
                 }
                 return Task::none();
             }
-            Message::Claim(_) => {
+            Message::Claim(_) | Message::View(view::Message::ClaimPairedSigner(_, _, _)) => {
                 if let Some(panel) = &mut self.panels.claim {
                     return panel.update(self.daemon.clone(), &self.cache, message);
                 }

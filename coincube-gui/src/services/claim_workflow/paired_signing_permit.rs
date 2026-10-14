@@ -19,7 +19,7 @@ use tokio::sync::watch;
 const DISPATCH_LIFETIME: Duration = Duration::from_secs(10);
 
 #[derive(Debug)]
-pub(crate) struct PairedSigningPermit {
+pub struct PairedSigningPermit {
     chain: ChainId,
     psbt: sha256::Hash,
     generation: watch::Receiver<u64>,

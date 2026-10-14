@@ -207,6 +207,8 @@ pub enum Message {
     /// Claim step 1 — the poison self-transfer on Bitcoin (Lane B1.5),
     /// handled by `state::vault::claim::ClaimStep1Panel`.
     Claim(ClaimMessage),
+    /// Route a paired Claim signer view message to its Bitcoin or BTCB2 PSBT.
+    ClaimPairedSigner(u64, coincube_core::chain::ChainId, Box<Message>),
     /// Collapse the firmware-advisory detail panel on one device row. Carries
     /// the device fingerprint and the advisory id; the badge itself stays.
     DismissHwAdvisory(Fingerprint, &'static str),
@@ -2757,6 +2759,10 @@ pub enum ClaimMessage {
     /// Reserve distinct source-Vault addresses for chain-specific deposits.
     StartFunding,
     CheckFunding,
+    /// Open the two ordinary Claim PSBTs after a fresh pair requalification.
+    SignPair,
+    ShowPairBitcoin,
+    ShowPairBtcb2,
     /// Review the original transaction being re-mined after a reorg.
     ReviewReconfirmation,
     ReviewResubmission,

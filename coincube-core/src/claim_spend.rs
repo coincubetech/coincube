@@ -48,7 +48,7 @@ impl From<SpendCreationError> for Error {
 
 /// Construction result with no public-field or deserialization bypass. This
 /// certifies only the unsigned construction checks, not live spend permission.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct PoisonSelfTransfer {
     psbt: bitcoin::psbt::Psbt,
     descriptor: CoincubeDescriptor,
@@ -235,7 +235,7 @@ fn create_self_transfer(
 /// Unsigned owned construction using one structurally verified ancestry input.
 /// This type certifies neither exclusivity nor live eligibility. It deliberately
 /// cannot be passed to the OP_RETURN signing workflow as PoisonSelfTransfer.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AncestrySelfTransfer {
     transfer: PoisonSelfTransfer,
     poison_input: bitcoin::OutPoint,
@@ -375,7 +375,7 @@ pub fn create_ancestry_self_transfer(
 
 /// An unsigned BTCB2 self-sweep bound to the original Bitcoin poison inputs.
 /// Construction is not proof of confirmation, exclusivity or broadcast authority.
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ClaimForkSweep {
     psbt: bitcoin::psbt::Psbt,
     chain: ChainId,
