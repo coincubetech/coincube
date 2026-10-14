@@ -3,6 +3,8 @@ pub(crate) mod claim_ancestry_gate;
 pub mod claim_coordinator;
 pub mod claim_inventory;
 pub mod claim_observation;
+#[allow(dead_code)] // Kept behind the paired ancestry gate until GUI admission is wired.
+pub(crate) mod claim_pair_signing;
 pub mod connect;
 pub mod feeestimation;
 pub mod fiat;

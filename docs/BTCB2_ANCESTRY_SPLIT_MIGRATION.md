@@ -451,6 +451,13 @@ marker spend cases remain.
    partial signature against its exact side, combines multisig returns, and
    marks the pair complete only when both sides finalize. It still needs the
    production signer UI and fresh admission at every export or device call.
+   Claim now has the equivalent typed paired signing-result combiner. It
+   authenticates every Bitcoin and BTCB2 signature against the exact owned
+   construction, refuses changed metadata or finalized signer returns, merges
+   partial signatures and reports completion only when both ordinary
+   transactions finalize. The production Claim signer UI still needs to call
+   it after fresh two-chain admission; the combiner does not grant spend
+   authority or make either side available for broadcast.
    The version-10 Claim and version-11 Split journals now expose a review-only
    path that first validates a fresh paired funding collection against the
    exact saved intent and then invokes the corresponding pair finalizer.
