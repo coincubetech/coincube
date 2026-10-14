@@ -65,6 +65,7 @@ use crate::{
     },
     dir::CoincubeDirectory,
     services::{
+        claim_ancestry_gate,
         claim_coordinator::{
             self, split::SplitProduction, Coordinator, Outcome, ReconfirmationReview,
             ResubmissionReview, Review, SubmissionRoute,
@@ -73,6 +74,7 @@ use crate::{
             http::{HttpObservationSource, OwnedSplitFunding},
             CollectionContext, FailureKind, ObservationSource, TransactionObservation,
         },
+        claim_preflight::PreflightClient,
         claim_workflow::{self, Context, Controller, Phase, Status},
         foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanPlan, MAX_ADDRESSES},
         foreign_split_inventory::{self, FreshIndex},
@@ -407,6 +409,29 @@ pub trait SplitConnect: Send + Sync {
         false
     }
     fn evidence(&self) -> &dyn SplitEvidenceSource;
+    /// Recheck the signed ordinary pair against a new two-chain scan and
+    /// return the exact finalized bytes and fees for explicit user review.
+    async fn review_recorded_first_broadcast(
+        &self,
+        _directory: PathBuf,
+        _source_digest: sha256::Hash,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+    ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
+        Err("The two-chain broadcast review is unavailable for this session.".into())
+    }
+    /// Repeat all live checks and compare the complete reviewed transactions
+    /// and fees before a possible Bitcoin send is durably recorded.
+    async fn confirm_recorded_first_broadcast(
+        &self,
+        _directory: PathBuf,
+        _source_digest: sha256::Hash,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _displayed: &claim_workflow::InitialPairReviewSnapshot,
+    ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
+        Err("The two-chain broadcast action is unavailable for this session.".into())
+    }
     /// The fork's window from the authenticated anchor, with the fork marker.
     async fn window(&self) -> Result<ForkWindow, String>;
     async fn bitcoin_feerate(&self) -> Option<u64>;
@@ -768,6 +793,33 @@ pub struct ProductionConnect {
 }
 
 impl ProductionConnect {
+    async fn recorded_paired_source(
+        &self,
+        directory: PathBuf,
+        source_digest: sha256::Hash,
+        target_cube: &str,
+    ) -> Result<SplitSource, String> {
+        let context = self.context();
+        let identity = claim_workflow::split_identity(target_cube.to_owned(), source_digest);
+        let controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The recorded Split journal is unavailable: {error:?}"))?;
+        let saved = controller
+            .recorded_split()
+            .map_err(|error| format!("The recorded Split source is invalid: {error:?}"))?
+            .ok_or_else(|| "The recorded Split source is missing.".to_string())?;
+        if saved.source_digest != source_digest || saved.target_cube != target_cube {
+            return Err("The recorded Split belongs to another source or Cube.".into());
+        }
+        let source = saved
+            .source
+            .ok_or_else(|| "The recorded Split has no source descriptors.".to_string())?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed while reading the Split source.".into());
+        }
+        Ok(source)
+    }
+
     /// Refused without an account, for an unusable origin, or after the
     /// generation moved.
     pub fn new(
@@ -1027,6 +1079,77 @@ impl SplitConnect for ProductionConnect {
     }
     fn evidence(&self) -> &dyn SplitEvidenceSource {
         &self.evidence
+    }
+    async fn review_recorded_first_broadcast(
+        &self,
+        directory: PathBuf,
+        source_digest: sha256::Hash,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+    ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
+        if claim_ancestry_gate::authorization().is_none() {
+            return Err("The paired split is not ready for broadcast.".into());
+        }
+        let target_vault = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let source = self
+            .recorded_paired_source(directory.clone(), source_digest, target_cube)
+            .await?;
+        let (_, review) = self
+            .prepare_recorded_initial_review(directory, &source, target_cube, target_vault)
+            .await?;
+        let snapshot = review.snapshot().clone();
+        if crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(
+            &snapshot.bitcoin,
+        )
+        .is_none()
+            || crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(
+                &snapshot.fork,
+            )
+            .is_none()
+        {
+            return Err("The signed Split destinations cannot be displayed for review.".into());
+        }
+        Ok(snapshot)
+    }
+    async fn confirm_recorded_first_broadcast(
+        &self,
+        directory: PathBuf,
+        source_digest: sha256::Hash,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        displayed: &claim_workflow::InitialPairReviewSnapshot,
+    ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
+        if claim_ancestry_gate::authorization().is_none() {
+            return Err("The paired split is not ready for broadcast.".into());
+        }
+        let target_vault = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let source = self
+            .recorded_paired_source(directory.clone(), source_digest, target_cube)
+            .await?;
+        let (mut controller, review) = self
+            .prepare_recorded_initial_review(directory, &source, target_cube, target_vault)
+            .await?;
+        let context = self.context();
+        let preflight = PreflightClient::new(
+            &self.session.client.base_url,
+            CollectionContext {
+                expected_generation: self.expected,
+                generation: self.generation.clone(),
+            },
+        )
+        .map_err(|error| format!("The Connect broadcast check is unavailable: {error:?}"))?;
+        review
+            .confirm_exact_snapshot_and_submit(
+                displayed,
+                &mut controller,
+                &context,
+                &preflight,
+                CHECK_POLICY.preflight,
+            )
+            .await
+            .map_err(|error| format!("The Bitcoin broadcast was refused: {error:?}"))
     }
     async fn window(&self) -> Result<ForkWindow, String> {
         let status = self

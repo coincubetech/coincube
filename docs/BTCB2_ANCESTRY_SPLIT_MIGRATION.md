@@ -524,16 +524,22 @@ marker spend cases remain.
    Restart of an unsigned version-10 intent now reloads its fixed deposit
    addresses and current fee quote, then requires a new deposit check before
    reopening the exact pair for signing. A signed intent still opens the
-   read-only per-chain recovery view.
+   per-chain recovery view.
    The version-10 Claim and version-11 Split journals now expose a review-only
    path that first validates a fresh paired funding collection against the
    exact saved intent and then invokes the corresponding pair finalizer.
    Connect now has separate exact-byte, one-attempt Bitcoin and BTCB2 mainnet
    broadcast transports for either typed pair. Each side has its own
-   transaction-bound, expiring gate and uncertain outcome. These transports
-   are not called from the wizard: the paired coordinator still has to bind
-   fresh two-chain proof, reservations, preflight and explicit approval to
-   separate durable submission intents before either gate can be entered.
+   transaction-bound, expiring gate and uncertain outcome. The Claim and Split
+   wizards now have a gated first-Bitcoin broadcast review. It reconstructs
+   the exact recorded signed pair from a new scan, repeats live two-chain
+   requalification, shows both finalized transactions and fees, and requires
+   an explicit confirmation. Confirmation repeats the entire check and
+   compares the displayed bytes and fees before paired Connect preflight,
+   durable possible-attempt recording and the one-use Bitcoin send. The
+   production gate remains closed; this route is not yet available to users.
+   The separate BTCB2 broadcast review after six Bitcoin confirmations is
+   still to be wired.
    Gate constructors now accept the finalized Claim or Split pair directly
    and bind separately to its Bitcoin or BTCB2 witness; the coordinator must
    still issue them only after the corresponding durable possible-attempt
@@ -566,13 +572,15 @@ marker spend cases remain.
    exact signed witness bytes, canonical block mapping and stable chain tip.
    Absent, stale, mismatched or unavailable observations never permit an
    automatic retry. The Bitcoin Claim wizard now reopens a version-10 journal
-   through a separate read-only recovery screen, checks each recorded possible
+   through a separate recovery screen, checks each recorded possible
    send against its own chain, and shows exact transaction IDs and independent
    statuses. It does not re-enable signing or retry an absent transaction.
    The foreign Split wizard now also diverts version-11 journals away from
-   the legacy step-one/step-two restart routes. Its read-only recovery screen
+   the legacy step-one/step-two restart routes. Its recovery screen
    checks the exact saved possible sends independently under the current
-   Connect identity and offers no signer, resend or broadcast action. The
+   Connect identity. Both screens can offer the separate gated first-send
+   review only while the journal records no Bitcoin attempt; an attempted
+   transaction remains status-only. The
    fork-attempt journal now also requires an opaque,
    short-lived Bitcoin six-confirmation result bound to the exact signed
    witness and session; the coordinator must still recollect live two-chain
@@ -683,14 +691,15 @@ marker spend cases remain.
    it rereads BTCB2 policy, journals the possible BTCB2 send and enters a
    separate one-use exact-byte gate. Either review refuses a Connect origin
    that differs from the authenticated proof provider before recording an
-   attempt. The wizard does not yet expose either review or broadcast action;
-   the post-Bitcoin coordinator must still join fresh source and target checks
-   to this review and both paths need GUI and end-to-end tests.
+   attempt. The first-Bitcoin review and confirmation are now wired in both
+   wizards behind the closed acceptance gate. The post-Bitcoin coordinator
+   must still join fresh source and target checks to its BTCB2 review, and
+   both paths need GUI and end-to-end tests.
    Initial Claim and Split requalification now each have a typed handoff that
    rechecks the exact saved signatures and prepares a first-send review under
-   the same live controller. The desktop still needs to invoke that handoff
-   after a new paired scan and show an explicit broadcast review; loading
-   signed bytes from disk remains read-only.
+   the same live controller. The desktop invokes that handoff only after a
+   new paired scan and shows an explicit broadcast review; loading signed
+   bytes from disk alone remains read-only.
    An unattempted signed journal now exposes only its two saved funding
    outpoints and fee rates for that fresh scan. The hint is unavailable after
    either possible-send record; it does not restore proof or send authority.
@@ -701,7 +710,7 @@ marker spend cases remain.
    The production Split adapter now wraps that reconstruction with journal
    identity and Connect-generation checks, releasing its journal lock during
    the network scan and rechecking the saved plan when it reopens. It is not
-   yet a signer or broadcast entry.
+   alone broadcast authority.
    Claim has the matching structural restore from a new paired Vault scan:
    it selects the exact saved Bitcoin and BTCB2 funding outpoints, joins each
    with the freshly scanned shared set, and requires both saved unsigned
@@ -712,8 +721,10 @@ marker spend cases remain.
    then returns only the structurally rebuilt pair for a later live review.
    Both production adapters can now take that rebuilt pair through a fresh
    exact-pair requalification and saved-witness re-verification under one live
-   controller, producing a short-lived first-send review. Neither wizard
-   calls the review yet, and neither method performs preflight or broadcast.
+   controller, producing a short-lived first-send review. Both wizards call
+   the review on request and repeat it on confirmation; only the latter may
+   run paired preflight and a one-use Bitcoin broadcast. The production gate
+   is still closed.
    The corresponding stage-two Claim and Split handoffs now also join their
    recovered exact signed pair, new post-Bitcoin source check and canonical
    six-confirmation token to a one-use BTCB2 review in the same controller.

@@ -705,13 +705,16 @@ impl GUI {
             }
             Message::Pane(i, msg) => {
                 // Bind the Claim's Bitcoin tab to its exact, currently open
-                // BTCB2 wallet immediately before a deposit check. Fork Cubes
+                // BTCB2 wallet immediately before a deposit or signed-pair
+                // broadcast check. Fork Cubes
                 // intentionally have no generic JSON-RPC socket; borrowing
                 // their in-process daemon keeps that restriction intact.
                 if let pane::Message::Tab(
                     tab_id,
                     tab::Message::Run(AppMessage::View(crate::app::view::Message::Claim(
-                        crate::app::view::ClaimMessage::CheckFunding,
+                        crate::app::view::ClaimMessage::CheckFunding
+                        | crate::app::view::ClaimMessage::ReviewPairedBitcoin
+                        | crate::app::view::ClaimMessage::ConfirmPairedBitcoin,
                     ))),
                 ) = &msg
                 {

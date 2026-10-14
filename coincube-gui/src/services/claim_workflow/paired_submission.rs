@@ -176,8 +176,7 @@ impl InitialSignedPair {
 /// PSBT or a fee quote. The BTCB2 transaction is displayed now but receives
 /// its own later approval after six Bitcoin confirmations.
 #[derive(Debug, Clone, PartialEq, Eq)]
-#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
-pub(crate) struct InitialPairReviewSnapshot {
+pub struct InitialPairReviewSnapshot {
     pub bitcoin: Transaction,
     pub fork: Transaction,
     pub bitcoin_fee_sats: u64,
@@ -201,12 +200,13 @@ pub(crate) struct InitialPairReview {
 pub(crate) enum InitialPairSubmissionError {
     Workflow(Error),
     Preflight(claim_preflight::Error),
+    SnapshotChanged,
     InvalidReview,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
-pub(crate) enum InitialPairSubmissionOutcome {
+pub enum InitialPairSubmissionOutcome {
     UpstreamAccepted {
         txid: Txid,
         wtxid: Wtxid,
@@ -331,10 +331,27 @@ impl Controller {
     }
 }
 
-#[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
 impl InitialPairReview {
     pub(crate) fn snapshot(&self) -> &InitialPairReviewSnapshot {
         &self.snapshot
+    }
+
+    /// The user approves exact finalized bytes and fees, not merely a txid
+    /// or an address copied from a previous screen. A later live scan may
+    /// reconstruct the review, but it cannot change what this approval sends.
+    pub(crate) async fn confirm_exact_snapshot_and_submit(
+        self,
+        expected: &InitialPairReviewSnapshot,
+        controller: &mut Controller,
+        current: &Context,
+        preflight: &PreflightClient,
+        policy: FreshnessPolicy,
+    ) -> Result<InitialPairSubmissionOutcome, InitialPairSubmissionError> {
+        if &self.snapshot != expected {
+            return Err(InitialPairSubmissionError::SnapshotChanged);
+        }
+        self.confirm_and_submit(controller, current, preflight, policy)
+            .await
     }
 
     /// Consume explicit approval. Policy is reread for *both* exact signed
@@ -523,6 +540,24 @@ impl Controller {
 impl PostBitcoinPairReview {
     pub(crate) fn snapshot(&self) -> &InitialPairReviewSnapshot {
         &self.snapshot
+    }
+
+    /// A second-chain approval must still name the same finalized pair the
+    /// user saw, including its BTCB2 destination and fee. A fresh canonical
+    /// Bitcoin confirmation never permits changed BTCB2 bytes implicitly.
+    pub(crate) async fn confirm_exact_snapshot_and_submit(
+        self,
+        expected: &InitialPairReviewSnapshot,
+        controller: &mut Controller,
+        current: &Context,
+        preflight: &PreflightClient,
+        policy: FreshnessPolicy,
+    ) -> Result<InitialPairSubmissionOutcome, InitialPairSubmissionError> {
+        if &self.snapshot != expected {
+            return Err(InitialPairSubmissionError::SnapshotChanged);
+        }
+        self.confirm_and_submit(controller, current, preflight, policy)
+            .await
     }
 
     /// BTCB2 receives its own live policy read, explicit approval and durable

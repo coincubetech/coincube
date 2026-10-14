@@ -199,6 +199,58 @@ pub(super) async fn prepare_recorded_initial_review(
     Ok((controller, review))
 }
 
+/// An explicit Bitcoin broadcast always reconstructs the saved Claim pair
+/// and repeats the live two-chain proof. The displayed bytes and fees must
+/// still match exactly before preflight or a possible-send journal write.
+#[allow(clippy::too_many_arguments)]
+pub(super) async fn confirm_recorded_first_broadcast(
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+    displayed: claim_workflow::InitialPairReviewSnapshot,
+) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
+    if crate::services::claim_ancestry_gate::authorization().is_none() {
+        return Err("The paired claim is not ready for broadcast.".into());
+    }
+    let (mut controller, review) = prepare_recorded_initial_review(
+        directory,
+        bitcoin_cube,
+        fork_cube,
+        wallet,
+        daemon,
+        fork_binding,
+        connect.clone(),
+        expected,
+        generation.clone(),
+    )
+    .await?;
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let preflight = crate::services::claim_preflight::PreflightClient::new(
+        &connect.client.base_url,
+        CollectionContext {
+            expected_generation: expected,
+            generation,
+        },
+    )
+    .map_err(|error| format!("The Connect broadcast check is unavailable: {error:?}"))?;
+    review
+        .confirm_exact_snapshot_and_submit(
+            &displayed,
+            &mut controller,
+            &context,
+            &preflight,
+            CHECK_POLICY.preflight,
+        )
+        .await
+        .map_err(|error| format!("The Bitcoin broadcast was refused: {error:?}"))
+}
+
 /// Recollect the exact ordinary pair from a new two-chain scan and both
 /// complete Vault coin sets before recording its version-10 intent. A caller
 /// must repeat this at each signer dispatch: the journal is structural state,

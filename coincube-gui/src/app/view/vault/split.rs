@@ -91,6 +91,8 @@ fn working(work: Work) -> &'static str {
         Work::PreparingPairedSign => "Rechecking both chains and saving the exact signing intent…",
         Work::CheckingPairedSignatures => "Checking both chains and the returned signatures…",
         Work::RecordingPairedSignatures => "Recording both signed transactions on this device…",
+        Work::ReviewingPairedBitcoin => "Rechecking both chains for Bitcoin broadcast review…",
+        Work::SubmittingPairedBitcoin => "Rechecking both chains before Bitcoin broadcast…",
         Work::Checking => "Checking the fork, fees and the fresh address…",
         Work::Building => "Building step 1…",
         Work::Exporting => "Saving the PSBT file…",
@@ -555,7 +557,10 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
         || panel.unified().record().is_some();
     let mut body = Column::new().spacing(10).max_width(640);
-    body = if matches!(panel.stage(), Stage::PairedRecovery) {
+    body = if matches!(
+        panel.stage(),
+        Stage::PairedRecovery | Stage::PairedBitcoinReview
+    ) {
         body.push(h3("Recorded two-chain split"))
     } else if matches!(panel.stage(), Stage::PairedSign) {
         body.push(h3("Split: sign both transactions"))
@@ -578,7 +583,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
 
     match panel.stage() {
         Stage::PairedRecovery => {
-            body = body.push(p1_regular("This device has a two-chain split record. Each possible broadcast is checked against its own chain. This screen does not sign or resend either transaction."));
+            body = body.push(p1_regular("This device has a two-chain split record. Each possible broadcast is checked against its own chain. Checking status does not send either transaction."));
             if let Some(recovery) = panel.paired_recovery() {
                 body = body
                     .push(p1_bold("Bitcoin transaction"))
@@ -613,6 +618,39 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     .push(p1_regular(recovery.fork_status.clone()));
             }
             actions = actions.push(action("Check again", SplitMessage::CheckPaired));
+            if crate::services::claim_ancestry_gate::authorization().is_some()
+                && panel
+                    .paired_recovery()
+                    .is_some_and(|recovery| recovery.bitcoin_unattempted)
+            {
+                actions = actions.push(action(
+                    "Review Bitcoin broadcast",
+                    SplitMessage::ReviewPairedBitcoin,
+                ));
+            }
+        }
+        Stage::PairedBitcoinReview => {
+            if let Some(review) = panel.paired_bitcoin_review() {
+                body = body
+                    .push(p1_regular("Review these exact signed transactions. Only the Bitcoin transaction will be broadcast now; BTCB2 requires a separate review after Bitcoin confirmation."))
+                    .push(p1_bold("Bitcoin — broadcast now"))
+                    .push(caption(format!("Txid: {}", review.bitcoin.compute_txid())))
+                    .push(caption(format!("Fee: {} sats", review.bitcoin_fee_sats)))
+                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }))
+                    .push(p1_bold("Bitcoin Blake2b — recorded, not sent now"))
+                    .push(caption(format!("Txid: {}", review.fork.compute_txid())))
+                    .push(caption(format!("Fee: {} sats", review.fork_fee_sats)))
+                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }));
+                actions = actions.push(action("Back", SplitMessage::CheckPaired));
+                actions = actions.push(action(
+                    "Broadcast Transaction",
+                    SplitMessage::ConfirmPairedBitcoin,
+                ));
+            }
         }
         Stage::FundingDeposits => {
             if let Some(addresses) = panel.funding_addresses() {

@@ -96,7 +96,7 @@ pub fn view<'a>(
             Column::new()
                 .spacing(20)
                 .push(header("Recorded two-chain claim"))
-                .push(p1_regular("This device has a two-chain claim record. For each possible broadcast, Tenshu checks the exact saved transaction against its own chain. This screen does not sign or resend either transaction."))
+                .push(p1_regular("This device has a two-chain claim record. For each possible broadcast, Tenshu checks the exact saved transaction against its own chain. Checking status does not send either transaction."))
                 .push(p1_bold("Bitcoin transaction"))
                 .push_maybe(recovery.bitcoin_txid.map(|id| p2_regular(id.to_string())))
                 .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
@@ -117,7 +117,41 @@ pub fn view<'a>(
                 .push(p1_regular(recovery.fork_status.clone()))
                 .push_maybe(error.map(|message| card::warning(message.to_string())))
                 .push(button::secondary(None, if checking { "Checking both chains…" } else { "Check again" }).on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::Refresh))))
+                .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some()
+                    && recovery.bitcoin_unattempted)
+                    .then(|| button::primary(None, "Review Bitcoin broadcast")
+                        .on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::ReviewPairedBitcoin)))))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
+        ),
+        StageView::PairedBitcoinReview(review) => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Review Bitcoin broadcast"))
+                .push(p1_regular("Review these exact signed transactions. Only Bitcoin will be broadcast now; BTCB2 requires a separate review after Bitcoin confirmation."))
+                .push(p1_bold("Bitcoin — broadcast now"))
+                .push(p2_regular(format!("Txid: {}", review.bitcoin.compute_txid())))
+                .push(p2_regular(format!("Fee: {} sats", review.bitcoin_fee_sats)))
+                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                    p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
+                }))
+                .push(p1_bold("Bitcoin Blake2b — recorded, not sent now"))
+                .push(p2_regular(format!("Txid: {}", review.fork.compute_txid())))
+                .push(p2_regular(format!("Fee: {} sats", review.fork_fee_sats)))
+                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                    p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
+                }))
+                .push(button::secondary(None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedBitcoin)))
+                .push(button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedBitcoin))),
+        ),
+        StageView::PairedBitcoinSubmitting => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Checking Bitcoin broadcast"))
+                .push(p1_regular("Tenshu is rechecking both chains, the signed transactions and Connect policy before attempting the Bitcoin send.")),
         ),
         StageView::PairedSign {
             bitcoin,

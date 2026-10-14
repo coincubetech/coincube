@@ -926,6 +926,7 @@ fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
     panel.journal = Some((sha256::Hash::all_zeros(), PathBuf::from("recorded-split")));
     panel.stage = Stage::PairedRecovery;
     panel.paired_recovery = Some(PairedSplitRecovery {
+        bitcoin_unattempted: false,
         bitcoin_txid: None,
         fork_txid: None,
         bitcoin_output: None,
@@ -938,6 +939,8 @@ fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
         SplitMessage::ImportSigned,
         SplitMessage::Confirm,
         SplitMessage::ConfirmResend,
+        SplitMessage::ReviewPairedBitcoin,
+        SplitMessage::ConfirmPairedBitcoin,
     ] {
         let _ = panel.update(message);
         assert_eq!(panel.stage(), &Stage::PairedRecovery);
@@ -2325,20 +2328,29 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     let build = open.find("build_listing(").unwrap();
     assert!(open[..build]
         .ends_with("tokio::task::spawn_blocking(move || {\n                            "));
-    // #653 F1: scoped to the signing arm, the run is the spawned task's own
-    // future (nothing between the spawn and the run), and nothing in the
-    // device module blocks on a future.
+    // Both the paired and ordinary routes run the device inside a spawned
+    // task. The paired route first repeats live two-chain admission there.
     let sign = &open[open
         .find("            DeviceMessage::Sign(id) => {")
         .unwrap()..];
     let sign = &sign[..sign.find("            DeviceMessage::Cancel").unwrap()];
-    assert_eq!(sign.matches(".run()").count(), 1);
-    let run = sign.find(".run()").unwrap();
-    let spawned = sign[..run]
+    let runs: Vec<_> = sign
+        .match_indices(".run()")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(runs.len(), 2);
+    let paired_spawned = sign[..runs[0]]
         .rfind("self.spawn(")
-        .expect("the signing run is spawned");
+        .expect("the paired signing run is spawned");
+    assert!(sign[paired_spawned..runs[0]].contains("prepare_exact_pair_intent("));
+    assert!(sign[paired_spawned..runs[0]].contains("permit.consume(chain, &psbt)"));
+    let spawned = sign[..runs[1]]
+        .rfind("self.spawn(")
+        .expect("the ordinary signing run is spawned");
     assert_eq!(
-        sign[spawned..run].split_whitespace().collect::<String>(),
+        sign[spawned..runs[1]]
+            .split_whitespace()
+            .collect::<String>(),
         "self.spawn(asyncmove{signing"
     );
     let production = &device[..device.find("\n#[cfg(all(test, unix))]\n").unwrap()];

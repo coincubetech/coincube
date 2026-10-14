@@ -89,7 +89,7 @@ use crate::{
     services::{
         claim_coordinator::{fork::split::step2::Step1AfterStep2, Outcome},
         claim_observation::TransactionObservation,
-        claim_workflow::{Phase, Status},
+        claim_workflow::{InitialPairReviewSnapshot, InitialPairSubmissionOutcome, Phase, Status},
         split_psbt_file::{self, Encoding},
     },
 };
@@ -119,6 +119,8 @@ pub enum Stage {
     PairedSign,
     /// A version-11 ordinary two-chain record, reopened for status only.
     PairedRecovery,
+    /// Exact signed bytes and fees approved before a fresh Bitcoin send.
+    PairedBitcoinReview,
     /// #568 B4b-3c: the single-step (fork-only) route.
     Unified(unified::UnifiedStage),
     /// A task is running.
@@ -178,6 +180,8 @@ pub enum Work {
     PreparingPairedSign,
     CheckingPairedSignatures,
     RecordingPairedSignatures,
+    ReviewingPairedBitcoin,
+    SubmittingPairedBitcoin,
     Checking,
     Building,
     Exporting,
@@ -303,6 +307,7 @@ pub enum Restarted {
 /// displayed status is never spend authority or permission to retry a send.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PairedSplitRecovery {
+    pub bitcoin_unattempted: bool,
     pub bitcoin_txid: Option<Txid>,
     pub fork_txid: Option<Txid>,
     pub bitcoin_output: Option<super::paired_summary::PairedOutputSummary>,
@@ -333,6 +338,7 @@ async fn paired_recovery(
             return Err("The Connect session changed while checking this split.".into());
         }
         return Ok(PairedSplitRecovery {
+            bitcoin_unattempted: false,
             bitcoin_txid: None,
             fork_txid: None,
             bitcoin_output: None,
@@ -342,6 +348,7 @@ async fn paired_recovery(
         });
     };
     let bitcoin_txid = record.bitcoin_identity().0;
+    let bitcoin_unattempted = record.possible_attempt(ChainId::Bitcoin).is_none();
     let fork_txid = record.fork_identity().0;
     let bitcoin_output = super::paired_summary::PairedOutputSummary::from_signed(record.bitcoin());
     let fork_output = super::paired_summary::PairedOutputSummary::from_signed(record.fork());
@@ -365,6 +372,7 @@ async fn paired_recovery(
         return Err("The Connect session changed while checking this split.".into());
     }
     Ok(PairedSplitRecovery {
+        bitcoin_unattempted,
         bitcoin_txid: Some(bitcoin_txid),
         fork_txid: Some(fork_txid),
         bitcoin_output,
@@ -413,6 +421,8 @@ pub enum SplitEvent {
         Result<(Vec<Psbt>, Vec<Psbt>, split_psbt_file::CombinedAncestrySplit), String>,
     ),
     PairedSignaturesRecorded(u64, Result<(Txid, Txid), String>),
+    PairedBitcoinReviewed(u64, Result<InitialPairReviewSnapshot, String>),
+    PairedBitcoinSubmitted(u64, Result<InitialPairSubmissionOutcome, String>),
     PairedExportChosen(u64, ChainId, Encoding, Option<PathBuf>),
     PairedImportChosen(u64, ChainId, Option<Vec<PathBuf>>),
     PairedExported(u64, Result<PathBuf, String>),
@@ -545,6 +555,8 @@ pub enum Recovered {
 pub enum SplitMessage {
     Retry,
     CheckPaired,
+    ReviewPairedBitcoin,
+    ConfirmPairedBitcoin,
     CheckDeposits,
     BeginPairedSigning,
     ExportPairedUnsigned(ChainId, Encoding),
@@ -620,6 +632,7 @@ pub struct SplitPanel {
     funding_progress: Option<step1::SplitDepositProgress>,
     paired_signing: Option<PairedSplitSigning>,
     paired_recovery: Option<PairedSplitRecovery>,
+    paired_bitcoin_review: Option<InitialPairReviewSnapshot>,
     prepared: Option<Box<Prepared>>,
     construction: Option<Box<SplitStep1>>,
     files: Vec<Psbt>,
@@ -765,6 +778,7 @@ impl SplitPanel {
             funding_progress: None,
             paired_signing: None,
             paired_recovery: None,
+            paired_bitcoin_review: None,
             prepared: None,
             construction: None,
             files: Vec::new(),
@@ -915,6 +929,10 @@ impl SplitPanel {
     }
     pub fn paired_recovery(&self) -> Option<&PairedSplitRecovery> {
         self.paired_recovery.as_ref()
+    }
+
+    pub fn paired_bitcoin_review(&self) -> Option<&InitialPairReviewSnapshot> {
+        self.paired_bitcoin_review.as_ref()
     }
     pub fn is_hidden(&self) -> bool {
         self.hidden
@@ -1071,6 +1089,7 @@ impl SplitPanel {
         self.funding_progress = None;
         self.paired_signing = None;
         self.paired_recovery = None;
+        self.paired_bitcoin_review = None;
         self.funding_source = None;
         self.funding_target_binding = None;
         self.driver = None;
@@ -1597,9 +1616,79 @@ impl SplitPanel {
         }
         let seq = self.seq;
         match message {
-            SplitMessage::CheckPaired if self.stage == Stage::PairedRecovery => {
+            SplitMessage::CheckPaired
+                if matches!(
+                    self.stage,
+                    Stage::PairedRecovery | Stage::PairedBitcoinReview
+                ) =>
+            {
+                self.paired_bitcoin_review = None;
                 self.stage = Stage::NeedsSession;
                 self.begin()
+            }
+            SplitMessage::ReviewPairedBitcoin if self.stage == Stage::PairedRecovery => {
+                if crate::services::claim_ancestry_gate::authorization().is_none() {
+                    return Task::none();
+                }
+                if !self
+                    .paired_recovery
+                    .as_ref()
+                    .is_some_and(|recovery| recovery.bitcoin_unattempted)
+                {
+                    return Task::none();
+                }
+                let (Some(connect), Some((digest, directory))) =
+                    (self.connect.clone(), self.journal.clone())
+                else {
+                    return Task::none();
+                };
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                self.stage = Stage::Working(Work::ReviewingPairedBitcoin);
+                self.spawn(
+                    async move {
+                        connect
+                            .review_recorded_first_broadcast(
+                                directory,
+                                digest,
+                                &target,
+                                target_vault.as_ref(),
+                            )
+                            .await
+                    },
+                    SplitEvent::PairedBitcoinReviewed,
+                )
+            }
+            SplitMessage::ConfirmPairedBitcoin if self.stage == Stage::PairedBitcoinReview => {
+                if crate::services::claim_ancestry_gate::authorization().is_none() {
+                    self.paired_bitcoin_review = None;
+                    self.stage = Stage::PairedRecovery;
+                    return Task::none();
+                }
+                let (Some(connect), Some((digest, directory)), Some(displayed)) = (
+                    self.connect.clone(),
+                    self.journal.clone(),
+                    self.paired_bitcoin_review.take(),
+                ) else {
+                    return Task::none();
+                };
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                self.stage = Stage::Working(Work::SubmittingPairedBitcoin);
+                self.spawn(
+                    async move {
+                        connect
+                            .confirm_recorded_first_broadcast(
+                                directory,
+                                digest,
+                                &target,
+                                target_vault.as_ref(),
+                                &displayed,
+                            )
+                            .await
+                    },
+                    SplitEvent::PairedBitcoinSubmitted,
+                )
             }
             SplitMessage::BeginPairedSigning if self.stage == Stage::FundingDeposits => {
                 // A verified deposit preview is evidence, not permission to
@@ -1983,6 +2072,41 @@ impl SplitPanel {
             return Task::none();
         }
         match event {
+            SplitEvent::PairedBitcoinReviewed(_, result) => {
+                if self.stage != Stage::Working(Work::ReviewingPairedBitcoin) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(snapshot) => {
+                        self.paired_bitcoin_review = Some(snapshot);
+                        self.notice = None;
+                        self.stage = Stage::PairedBitcoinReview;
+                    }
+                    Err(reason) => {
+                        self.paired_bitcoin_review = None;
+                        self.notice = Some(reason);
+                        self.stage = Stage::PairedRecovery;
+                    }
+                }
+                Task::none()
+            }
+            SplitEvent::PairedBitcoinSubmitted(_, result) => {
+                if self.stage != Stage::Working(Work::SubmittingPairedBitcoin) {
+                    return Task::none();
+                }
+                self.paired_bitcoin_review = None;
+                match result {
+                    Ok(_) => {
+                        self.stage = Stage::NeedsSession;
+                        self.begin()
+                    }
+                    Err(reason) => {
+                        self.notice = Some(reason);
+                        self.stage = Stage::PairedRecovery;
+                        Task::none()
+                    }
+                }
+            }
             SplitEvent::FundingPrepared(_, Ok(addresses)) => {
                 let Some(intent) = self.intent.as_ref() else {
                     self.stage =
@@ -2620,6 +2744,8 @@ impl SplitEvent {
             | Self::PairedSigningPrepared(seq, _)
             | Self::PairedSignaturesChecked(seq, _)
             | Self::PairedSignaturesRecorded(seq, _)
+            | Self::PairedBitcoinReviewed(seq, _)
+            | Self::PairedBitcoinSubmitted(seq, _)
             | Self::PairedExportChosen(seq, ..)
             | Self::PairedImportChosen(seq, ..)
             | Self::PairedExported(seq, _)

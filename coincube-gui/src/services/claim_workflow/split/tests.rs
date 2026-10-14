@@ -732,9 +732,11 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert!(review.snapshot().bitcoin_fee_sats > 0);
     assert!(review.snapshot().fork_fee_sats > 0);
     assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
+    let mut changed_snapshot = review.snapshot().clone();
+    changed_snapshot.bitcoin_fee_sats += 1;
     let (_generation, receiver) = tokio::sync::watch::channel(context().generation);
-    // Even a matching Connect origin cannot reach the network while the
-    // paired migration's production acceptance gate is closed.
+    // A changed displayed fee is refused before preflight or any durable
+    // possible-send record, even when the Connect origin matches.
     let matching_provider = crate::services::claim_preflight::PreflightClient::new(
         "https://synthetic.invalid",
         crate::services::claim_observation::CollectionContext {
@@ -747,7 +749,8 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .enable_all()
         .build()
         .unwrap()
-        .block_on(review.confirm_and_submit(
+        .block_on(review.confirm_exact_snapshot_and_submit(
+            &changed_snapshot,
             &mut reopened,
             &context(),
             &matching_provider,
@@ -758,7 +761,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         ));
     assert!(matches!(
         refusal,
-        Err(super::super::paired_submission::InitialPairSubmissionError::InvalidReview)
+        Err(super::super::paired_submission::InitialPairSubmissionError::SnapshotChanged)
     ));
     assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
     let preflight = crate::services::claim_preflight::accepted_pair_for_test(

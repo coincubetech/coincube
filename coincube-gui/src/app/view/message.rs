@@ -2756,6 +2756,9 @@ mod duress_message_debug_tests {
 /// panel against its current stage; none is a permission on its own.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimMessage {
+    ReviewPairedBitcoin,
+    ConfirmPairedBitcoin,
+    BackPairedBitcoin,
     /// Reserve distinct source-Vault addresses for chain-specific deposits.
     StartFunding,
     CheckFunding,

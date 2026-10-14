@@ -64,6 +64,7 @@ fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
     let mut panel = panel(SINGLE_WSH);
     let state = || {
         Stage::PairedRecovery(PairedClaimRecovery {
+            bitcoin_unattempted: false,
             bitcoin_txid: None,
             fork_txid: None,
             bitcoin_output: None,
@@ -75,6 +76,11 @@ fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
     panel.stage = state();
     assert!(!panel.can_sign_or_submit());
     assert!(!panel.can_broadcast_review());
+    if let Stage::PairedRecovery(recovery) = &mut panel.stage {
+        recovery.bitcoin_unattempted = true;
+    }
+    let _ = panel.review_paired_bitcoin(Arc::new(Recording::default()));
+    assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
     panel.restart_error = Some("The two-chain status source is unavailable.".into());
     assert!(matches!(
         panel.stage(),
