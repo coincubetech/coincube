@@ -773,6 +773,7 @@ fn old_split_proof_expiry_cannot_clear_a_newer_deposit_check() {
         btcb2_candidate: true,
         both_verified: false,
         review: None,
+        prepared: None,
     });
 
     drop(panel.apply(SplitEvent::FundingReviewExpired(7)));

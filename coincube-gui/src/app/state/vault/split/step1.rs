@@ -45,8 +45,8 @@ use coincube_core::{
     claim::{Assessment, BlockRef, DeploymentState},
     foreign_split::{
         finalize_split_step1, reconstruct_split_step1, verify_split_step1_transaction,
-        FinalizeError, SplitBranch, SplitCoin, SplitInputs, SplitSource, SplitStep1,
-        VerifiedSplitStep1,
+        AncestrySplitStep1, AncestrySplitStep2, FinalizeError, SplitBranch, SplitCoin, SplitInputs,
+        SplitSource, SplitStep1, VerifiedSplitStep1,
     },
     miniscript::bitcoin::{
         hashes::sha256, psbt::Psbt, secp256k1, Address, Network, OutPoint, Txid,
@@ -69,8 +69,8 @@ use crate::{
             ResubmissionReview, Review, SubmissionRoute,
         },
         claim_observation::{
-            http::HttpObservationSource, CollectionContext, FailureKind, ObservationSource,
-            TransactionObservation,
+            http::{HttpObservationSource, OwnedSplitFunding},
+            CollectionContext, FailureKind, ObservationSource, TransactionObservation,
         },
         claim_workflow::{self, Context, Controller, Phase, Status},
         foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanPlan, MAX_ADDRESSES},
@@ -456,7 +456,7 @@ pub struct SplitFundingQuote {
 
 /// Display-only observation. Candidate flags never enable signing; only the
 /// paired proof can set `both_verified`, and it is discarded after this read.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug)]
 pub struct SplitDepositProgress {
     pub bitcoin_candidate: bool,
     pub btcb2_candidate: bool,
@@ -464,6 +464,47 @@ pub struct SplitDepositProgress {
     /// Derived from the exact paired unsigned transactions, never retained
     /// as spend authority or offered to a signer.
     pub review: Option<crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview>,
+    pub(super) prepared: Option<Box<PreparedSplitPair>>,
+}
+
+/// A transient exact pair retained with the proof that produced its preview.
+/// It must be requalified against current chains, wallet inputs and the saved
+/// reservation before any hardware or software signer sees either PSBT.
+#[derive(Debug)]
+pub(super) struct PreparedSplitPair {
+    bitcoin: AncestrySplitStep1,
+    fork: AncestrySplitStep2,
+    funding: OwnedSplitFunding,
+    bitcoin_rate_vb: u64,
+    fork_rate_vb: u64,
+}
+
+impl PreparedSplitPair {
+    fn matches_review(
+        &self,
+        review: &crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview,
+    ) -> bool {
+        self.bitcoin_rate_vb > 0
+            && self.fork_rate_vb > 0
+            && crate::app::view::vault::ancestry_coins::CoinPairReview::from_psbts(
+                self.bitcoin.psbt(),
+                self.fork.psbt(),
+                self.bitcoin.claimed_prevouts(),
+                self.funding.bitcoin.outpoint,
+                self.funding.fork.outpoint,
+            )
+            .is_ok_and(|coins| coins == review.coins)
+    }
+}
+
+impl SplitDepositProgress {
+    pub(super) fn exact_review_retained(&self) -> bool {
+        self.review.as_ref().is_none_or(|review| {
+            self.prepared
+                .as_ref()
+                .is_some_and(|pair| pair.matches_review(review))
+        })
+    }
 }
 
 pub async fn check_reserved_funding_addresses(
@@ -864,7 +905,7 @@ impl SplitConnect for ProductionConnect {
         let btcb2_candidate = !reserved
             .funding_candidates(ChainId::BitcoinBlake2b)
             .is_empty();
-        let review = if bitcoin_candidate && btcb2_candidate {
+        let (review, prepared) = if bitcoin_candidate && btcb2_candidate {
             let target_script = reservation
                 .target_binding
                 .as_ref()
@@ -1001,21 +1042,29 @@ impl SplitConnect for ProductionConnect {
                 {
                     return Err("The two-chain split proof changed or expired while preparing the preview. Check deposits again.".into());
                 }
-                Some(
-                    crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview::new(
-                        coins,
-                        found.inputs.funding().bitcoin().block(),
-                        tips.bitcoin,
-                        found.inputs.funding().fork().block(),
-                        tips.fork,
-                    )
-                    .map_err(str::to_owned)?,
+                let review = crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview::new(
+                    coins,
+                    found.inputs.funding().bitcoin().block(),
+                    tips.bitcoin,
+                    found.inputs.funding().fork().block(),
+                    tips.fork,
+                )
+                .map_err(str::to_owned)?;
+                (
+                    Some(review),
+                    Some(Box::new(PreparedSplitPair {
+                        bitcoin,
+                        fork,
+                        funding: found,
+                        bitcoin_rate_vb: bitcoin_rate,
+                        fork_rate_vb: fork_rate,
+                    })),
                 )
             } else {
-                None
+                (None, None)
             }
         } else {
-            None
+            (None, None)
         };
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during the deposit proof.".into());
@@ -1025,6 +1074,7 @@ impl SplitConnect for ProductionConnect {
             btcb2_candidate,
             both_verified: review.is_some(),
             review,
+            prepared,
         })
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {

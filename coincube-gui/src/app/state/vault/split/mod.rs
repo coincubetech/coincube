@@ -848,7 +848,9 @@ impl SplitPanel {
         self.funding_addresses.as_ref()
     }
     pub fn funding_progress(&self) -> Option<&step1::SplitDepositProgress> {
-        self.funding_progress.as_ref()
+        self.funding_progress
+            .as_ref()
+            .filter(|progress| progress.exact_review_retained())
     }
     pub fn funding_signing_threshold(&self) -> Option<usize> {
         self.funding_source
@@ -1745,6 +1747,15 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::FundingChecked(_, Ok(progress)) => {
+                if !progress.exact_review_retained() {
+                    self.funding_progress = None;
+                    self.notice = Some(
+                        "The verified split preview changed before it could be displayed. Check both deposits again."
+                            .into(),
+                    );
+                    self.stage = Stage::FundingDeposits;
+                    return Task::none();
+                }
                 let has_review = progress.review.is_some();
                 self.funding_progress = Some(progress);
                 self.stage = Stage::FundingDeposits;

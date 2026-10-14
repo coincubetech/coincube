@@ -243,6 +243,11 @@ a replayable spend.
    in the desktop, with older timers unable to clear newer checks. The user
    must check both deposits again for a current display. This display limit
    does not replace live preflight at signing and broadcast.
+   Both panels now retain the exact ordinary PSBT pair with the selected
+   funding proof for that short review window, and suppress a verified coin
+   review if it no longer matches the retained pair. Expiry, cancellation or
+   session revocation discards the pair. This is transient handoff state only;
+   the signer must recollect proof and wallet state before each dispatch.
    Exact per-chain proof failure states, proof refresh and ordinary
    signer admission remain to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal

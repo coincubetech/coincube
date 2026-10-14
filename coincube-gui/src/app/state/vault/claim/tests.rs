@@ -336,8 +336,20 @@ fn claim_funding_results_require_the_current_panel_and_session() {
         btcb2_candidate: true,
         both_verified: true,
         review: None,
+        prepared: None,
     };
-    drop(p.apply(ClaimEvent::FundingChecked(11, 7, 0, Ok(progress.clone()))));
+    drop(p.apply(ClaimEvent::FundingChecked(
+        11,
+        7,
+        0,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: true,
+            both_verified: true,
+            review: None,
+            prepared: None,
+        }),
+    )));
     assert!(p.funding_checking);
     assert!(p.funding_status.is_none());
     drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Ok(progress))));
@@ -359,6 +371,7 @@ fn claim_funding_results_require_the_current_panel_and_session() {
             btcb2_candidate: false,
             both_verified: false,
             review: None,
+            prepared: None,
         }),
     )));
     let status = p.funding_status.as_deref().unwrap();
@@ -377,6 +390,7 @@ fn claim_funding_results_require_the_current_panel_and_session() {
             btcb2_candidate: true,
             both_verified: true,
             review: None,
+            prepared: None,
         }),
     )));
     assert!(p
