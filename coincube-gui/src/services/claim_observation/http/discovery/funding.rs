@@ -9,7 +9,7 @@ use coincube_core::{
     claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
     foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitCoin},
-    miniscript::bitcoin::{consensus::deserialize, Transaction},
+    miniscript::bitcoin::{consensus::deserialize, psbt::Psbt, Transaction, TxOut},
     spend::CandidateCoin,
 };
 use std::collections::BTreeSet;
@@ -176,6 +176,7 @@ pub struct CollectedFundingPair {
 pub struct CollectedSpendInputs {
     funding: CollectedFundingPair,
     shared: Vec<(OutPoint, BlockRef)>,
+    shared_outputs: Vec<(OutPoint, TxOut)>,
     observed_at: i64,
 }
 
@@ -219,7 +220,9 @@ impl CollectedSpendInputs {
             &fork.psbt().unsigned_tx,
             bitcoin.claimed_prevouts(),
             context,
-        )
+        )?;
+        validate_shared_psbt(bitcoin.psbt(), &self.shared_outputs)?;
+        validate_shared_psbt(fork.psbt(), &self.shared_outputs)
     }
 
     /// Review a foreign Split's exact ordinary constructions under the same
@@ -249,7 +252,9 @@ impl CollectedSpendInputs {
             &fork.psbt().unsigned_tx,
             bitcoin.claimed_prevouts(),
             context,
-        )
+        )?;
+        validate_shared_psbt(bitcoin.psbt(), &self.shared_outputs)?;
+        validate_shared_psbt(fork.psbt(), &self.shared_outputs)
     }
 
     /// Bind the collected shared set to both exact unsigned transactions and
@@ -293,6 +298,42 @@ impl CollectedSpendInputs {
         }
         Ok(())
     }
+}
+
+fn validate_shared_psbt(
+    psbt: &Psbt,
+    shared_outputs: &[(OutPoint, TxOut)],
+) -> Result<(), FailureKind> {
+    if psbt.unsigned_tx.input.len() != psbt.inputs.len() {
+        return Err(FailureKind::Changed);
+    }
+    for (outpoint, output) in shared_outputs {
+        let Some((_, metadata)) = psbt
+            .unsigned_tx
+            .input
+            .iter()
+            .zip(&psbt.inputs)
+            .find(|(input, _)| input.previous_output == *outpoint)
+        else {
+            return Err(FailureKind::Changed);
+        };
+        let non_witness = metadata.non_witness_utxo.as_ref().and_then(|tx| {
+            (tx.compute_txid() == outpoint.txid)
+                .then(|| tx.output.get(outpoint.vout as usize))
+                .flatten()
+        });
+        if metadata
+            .witness_utxo
+            .as_ref()
+            .is_some_and(|utxo| utxo != output)
+            || (metadata.non_witness_utxo.is_some() && non_witness.is_none())
+            || non_witness.is_some_and(|utxo| utxo != output)
+            || (metadata.witness_utxo.is_none() && non_witness.is_none())
+        {
+            return Err(FailureKind::Changed);
+        }
+    }
+    Ok(())
 }
 
 impl CollectedFundingPair {
@@ -660,7 +701,18 @@ impl HttpObservationSource {
             let fork_tip = roots.fork().tip;
             let mut observed_at = funding.observed_at;
             let mut confirmed = Vec::with_capacity(unique.len());
+            let mut shared_outputs = Vec::with_capacity(unique.len());
             for outpoint in unique {
+                let raw = snapshot
+                    .ancestry_transaction(ChainId::Bitcoin, outpoint.txid)
+                    .await?;
+                let transaction: Transaction =
+                    deserialize(&raw).map_err(|_| FailureKind::Malformed)?;
+                let output = transaction
+                    .output
+                    .get(outpoint.vout as usize)
+                    .ok_or(FailureKind::Changed)?
+                    .clone();
                 let mut blocks = Vec::with_capacity(2);
                 for (chain, tip) in [
                     (ChainId::Bitcoin, bitcoin_tip),
@@ -709,6 +761,7 @@ impl HttpObservationSource {
                     return Err(FailureKind::Changed);
                 }
                 confirmed.push((outpoint, blocks[0]));
+                shared_outputs.push((outpoint, output));
             }
             let last_bitcoin = snapshot.tip(ChainId::Bitcoin).await?;
             let last_fork = snapshot.tip(ChainId::BitcoinBlake2b).await?;
@@ -729,6 +782,7 @@ impl HttpObservationSource {
             Ok(CollectedSpendInputs {
                 funding,
                 shared: confirmed,
+                shared_outputs,
                 observed_at,
             })
         })
@@ -741,6 +795,59 @@ impl HttpObservationSource {
 mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::hashes::Hash;
+
+    #[test]
+    fn shared_psbt_metadata_must_match_the_txid_authenticated_output() {
+        use coincube_core::miniscript::bitcoin::{
+            absolute::LockTime, psbt::Psbt, transaction::Version, Amount, ScriptBuf, TxIn,
+        };
+        let previous = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn::default()],
+            output: vec![TxOut {
+                value: Amount::from_sat(50_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0, 20, 1]),
+            }],
+        };
+        let outpoint = OutPoint::new(previous.compute_txid(), 0);
+        let spend = Transaction {
+            version: Version::TWO,
+            lock_time: LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output: outpoint,
+                ..Default::default()
+            }],
+            output: vec![TxOut {
+                value: Amount::from_sat(49_000),
+                script_pubkey: ScriptBuf::from_bytes(vec![0, 20, 2]),
+            }],
+        };
+        let outputs = [(outpoint, previous.output[0].clone())];
+        let mut psbt = Psbt::from_unsigned_tx(spend).unwrap();
+        psbt.inputs[0].witness_utxo = Some(previous.output[0].clone());
+        assert_eq!(validate_shared_psbt(&psbt, &outputs), Ok(()));
+        psbt.inputs[0].non_witness_utxo = Some(previous.clone());
+        assert_eq!(validate_shared_psbt(&psbt, &outputs), Ok(()));
+        psbt.inputs[0].witness_utxo.as_mut().unwrap().value = Amount::from_sat(50_001);
+        assert_eq!(
+            validate_shared_psbt(&psbt, &outputs),
+            Err(FailureKind::Changed)
+        );
+        psbt.inputs[0].witness_utxo = None;
+        assert_eq!(validate_shared_psbt(&psbt, &outputs), Ok(()));
+        psbt.inputs[0].non_witness_utxo.as_mut().unwrap().output[0].value =
+            Amount::from_sat(50_001);
+        assert_eq!(
+            validate_shared_psbt(&psbt, &outputs),
+            Err(FailureKind::Changed)
+        );
+        psbt.inputs[0].non_witness_utxo = None;
+        assert_eq!(
+            validate_shared_psbt(&psbt, &outputs),
+            Err(FailureKind::Changed)
+        );
+    }
 
     fn at(height: u64, byte: u8) -> BlockRef {
         BlockRef {

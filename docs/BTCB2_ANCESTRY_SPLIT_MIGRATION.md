@@ -61,7 +61,9 @@ a replayable spend.
    A further read-only collection now checks every shared input's confirmed
    transaction against the same canonical pre-fork block on both chains and
    requires an explicit current unspent response on each, under the paired
-   funding session and stable tips. Claim and Split review validators bind
+   funding session and stable tips. It also authenticates the shared output
+   bytes by txid and checks their scripts and amounts against both PSBTs' UTXO
+   metadata. Claim and Split review validators bind
    that exact shared set to both unsigned transactions and their version-10
    Claim or version-11 Split journal. Signer admission still needs to consume
    this fresh evidence with wallet ownership, reservations and a new preflight;

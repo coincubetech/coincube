@@ -636,6 +636,13 @@ mod tests {
                         let mut shared_tx = bitcoin.clone();
                         shared_tx.output[0].value = Amount::from_sat(3411);
                         let shared = OutPoint::new(shared_tx.compute_txid(), 0);
+                        server.mock(|when, then| {
+                            when.method(GET).path(format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+                                shared.txid
+                            ));
+                            then.status(200).body(hex::encode(serialize(&shared_tx)));
+                        });
                         let mut shared_outspends = Vec::new();
                         for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
                             let prefix = format!(
