@@ -174,6 +174,10 @@ survive a rebuilt transaction.
   transactions with ordinary ECDSA, accepts each on its intended chain and
   rejects the exact signed bytes on the other chain. Repeat after restart,
   stale observations, marker spend, shallow/deep reorg and step-order changes.
+
+The paired Claim consensus vector is now implemented in the test bridge and
+two-chain harness, including BTCB2-first broadcast. It still needs execution
+against the pinned Knots and electrs binaries, and restart/reorg cases remain.
 - Exercise Claim and Split through their actual GUI intents and signed-PSBT
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device

@@ -8,8 +8,8 @@ use coincube_core::{
         finalize_ancestry_transfer, finalize_claim_fork_sweep, finalize_poison_transfer,
     },
     claim_spend::{
-        create_ancestry_fork_sweep, create_ancestry_self_transfer, create_claim_fork_sweep,
-        create_poison_self_transfer,
+        create_ancestry_fork_sweep, create_ancestry_fork_sweep_with_marker,
+        create_ancestry_self_transfer, create_claim_fork_sweep, create_poison_self_transfer,
     },
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
@@ -44,6 +44,9 @@ struct Request {
     coins: Vec<Coin>,
     /// Direct coinbase dependency for isolated consensus tests only.
     coinbase_input: Option<OutPoint>,
+    /// Independent direct coinbase on the fork chain, for the ordinary S+F
+    /// consensus vector. Both nodes must separately prove its chain status.
+    fork_coinbase_input: Option<OutPoint>,
     signed_step1: Option<String>,
     signed_fork: Option<String>,
 }
@@ -94,27 +97,86 @@ fn main() -> Result<(), Box<dyn Error>> {
         .map_err(|error| format!("invalid coinbase dependency: {:?}", error))?;
         // Structural dependency only. No regtest height is admitted by the
         // mainnet canonical-pair verifier and no eligibility is manufactured.
+        let shared: Vec<_> = coins
+            .iter()
+            .filter(|coin| {
+                coin.outpoint != selected && Some(coin.outpoint) != request.fork_coinbase_input
+            })
+            .copied()
+            .collect();
+        let bitcoin_coins: Vec<_> = coins
+            .iter()
+            .filter(|coin| Some(coin.outpoint) != request.fork_coinbase_input)
+            .copied()
+            .collect();
         let source = create_ancestry_self_transfer(
             ChainId::Bitcoin,
             &descriptor,
             &secp,
             &mut previous,
-            &coins,
+            &bitcoin_coins,
             ChildNumber::from_normal_idx(100)?,
             5,
             absolute::LockTime::ZERO,
             &dependency,
         )?;
         let mut result = json!({"step1_psbt": source.psbt().to_string()});
-        if let Some(signed) = &request.signed_step1 {
-            let verified = finalize_ancestry_transfer(&source, &Psbt::from_str(signed)?, &secp)?;
-            result["step1_raw"] = json!(serialize_hex(verified.transaction()));
-            result["step1_txid"] = json!(verified.transaction().compute_txid());
-            let shared: Vec<_> = coins
+        if let Some(fork_selected) = request.fork_coinbase_input {
+            let fork_raw = serialize(
+                previous
+                    .0
+                    .get(&fork_selected.txid)
+                    .ok_or("missing fork coinbase")?,
+            );
+            let fork_dependency = claim_ancestry::verify(
+                fork_selected,
+                &[Link {
+                    transaction: &fork_raw,
+                    parent_input: None,
+                }],
+            )
+            .map_err(|error| format!("invalid fork coinbase dependency: {:?}", error))?;
+            let fork_coins: Vec<_> = coins
                 .iter()
                 .filter(|coin| coin.outpoint != selected)
                 .copied()
                 .collect();
+            previous.0.remove(&selected.txid);
+            let fork = create_ancestry_fork_sweep_with_marker(
+                &source,
+                ChainId::BitcoinBlake2b,
+                &secp,
+                &mut previous,
+                &fork_coins,
+                ChildNumber::from_normal_idx(101)?,
+                5,
+                absolute::LockTime::ZERO,
+                &fork_dependency,
+            )?;
+            result["fork_psbt"] = json!(fork.psbt().to_string());
+            result["shared_prevouts"] = json!(shared
+                .iter()
+                .map(|coin| coin.outpoint.to_string())
+                .collect::<Vec<_>>());
+            if let Some(signed) = &request.signed_step1 {
+                let verified =
+                    finalize_ancestry_transfer(&source, &Psbt::from_str(signed)?, &secp)?;
+                result["step1_raw"] = json!(serialize_hex(verified.transaction()));
+                result["step1_txid"] = json!(verified.transaction().compute_txid());
+            }
+            if let Some(signed) = &request.signed_fork {
+                let signed = UnifiedPsbt::from_psbt(Psbt::from_str(signed)?)?;
+                let verified = finalize_claim_fork_sweep(&fork, &signed, &secp)?;
+                result["fork_raw"] = json!(serialize_hex(verified.transaction()));
+                result["fork_txid"] = json!(verified.transaction().compute_txid());
+            }
+            println!("{}", serde_json::to_string(&result)?);
+            return Ok(());
+        }
+        if let Some(signed) = &request.signed_step1 {
+            let verified = finalize_ancestry_transfer(&source, &Psbt::from_str(signed)?, &secp)?;
+            result["step1_raw"] = json!(serialize_hex(verified.transaction()));
+            result["step1_txid"] = json!(verified.transaction().compute_txid());
             // A fork builder must not look up the Bitcoin-only transaction.
             previous.0.remove(&selected.txid);
             let fork = create_ancestry_fork_sweep(
