@@ -221,8 +221,18 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
     assert!(!p.can_sign_or_submit());
+    p.funding_checking = true;
+    p.check_seq = 12;
+    drop(p.apply(ClaimEvent::FundingChecked(11, 7, 0, Ok(true))));
+    assert!(p.funding_checking);
+    assert!(p.funding_status.is_none());
+    drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Ok(true))));
+    assert!(!p.funding_checking);
+    assert!(p.funding_status.as_deref().unwrap().contains("proofs"));
+    assert!(!p.can_sign_or_submit());
     p.revoke();
     assert!(matches!(p.stage, Stage::Preconditions));
+    assert!(p.funding_status.is_none());
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
     assert!(matches!(p.stage, Stage::Preconditions));
 }

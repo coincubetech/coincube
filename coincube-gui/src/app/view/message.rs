@@ -2756,6 +2756,7 @@ mod duress_message_debug_tests {
 pub enum ClaimMessage {
     /// Reserve distinct source-Vault addresses for chain-specific deposits.
     StartFunding,
+    CheckFunding,
     /// Review the original transaction being re-mined after a reorg.
     ReviewReconfirmation,
     ReviewResubmission,

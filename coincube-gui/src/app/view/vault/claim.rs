@@ -69,6 +69,10 @@ pub fn view<'a>(
                 .push(p1_bold("Bitcoin Blake2b deposit address"))
                 .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
                 .push(p1_regular("Send only Bitcoin to the Bitcoin address and only BTCB2 to the BTCB2 address. Both deposits must later pass independent ancestry, confirmation, ownership and unspent checks; neither deposit by itself splits the coins."))
+                .push(button::secondary(None, if panel.funding_checking() { "Checking deposits…" } else { "Check deposits" }).on_press_maybe(
+                    (!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding))
+                ))
+                .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),

@@ -191,6 +191,7 @@ impl ClaimInventory {
         let stale = || ClaimInventoryError::WalletState;
         let reports = [&self.scan.bitcoin, &self.scan.btcb2];
         if info.network != Network::Bitcoin
+            || info.chain_id != Some(ChainId::Bitcoin)
             || info.descriptors.main != self.descriptor
             || !info.sync.is_finite()
             || info.sync < 0.9999
@@ -307,12 +308,6 @@ impl ClaimInventory {
         daemon: &(dyn Daemon + Send + Sync),
         bitcoin_funding_index: u32,
     ) -> Result<(), ClaimInventoryError> {
-        if !daemon.config().is_some_and(|config| {
-            config.bitcoin_config.chain == ChainId::Bitcoin
-                && config.main_descriptor == self.descriptor
-        }) {
-            return Err(ClaimInventoryError::WalletState);
-        }
         let info = daemon
             .get_info()
             .await
@@ -611,6 +606,17 @@ mod tests {
             ),
             Err(ClaimInventoryError::WalletState)
         );
+        info.chain_id = None;
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[coin.clone(), funding_coin.clone()], 4),
+            Err(ClaimInventoryError::WalletState)
+        );
+        info.chain_id = Some(ChainId::BitcoinBlake2b);
+        assert_eq!(
+            scan.reconcile_wallet_snapshot(&info, &[coin.clone(), funding_coin.clone()], 4),
+            Err(ClaimInventoryError::WalletState)
+        );
+        info.chain_id = Some(ChainId::Bitcoin);
         info.receive_index = 10;
         assert_eq!(
             scan.reconcile_wallet_snapshot(&info, &[coin, funding_coin], 4),

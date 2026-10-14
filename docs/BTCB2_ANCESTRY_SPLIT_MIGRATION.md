@@ -169,8 +169,12 @@ a replayable spend.
    offer a bounded two-chain Vault scan, persist that reservation and prepare
    the Bitcoin daemon's receive range before displaying the two copyable
    deposit addresses. Stale results and session revocations withdraw them;
-   this stage cannot sign. Deposit progress, exact funding minimums,
-   funding-only restart recovery and ordinary transaction admission remain.
+   this stage cannot sign. A separate "Check deposits" action now reloads the
+   same reservation, reconciles a new paired scan with the full Bitcoin Vault
+   UTXO set, and runs the bounded two-chain ancestry collector; it displays
+   only a transient status and does not retain spend authority. Per-chain
+   deposit progress, exact funding minimums, funding-only restart recovery
+   and ordinary transaction admission remain.
    Coincubed `getinfo` now reports an explicit chain ID; older daemon
    responses and the remote Connect wallet API still report none, so address
    preparation refuses those backends. Connect must return an authenticated
@@ -185,6 +189,10 @@ a replayable spend.
    paired scan. It also requires the reserved Bitcoin funding output to be
    present and unspent in that wallet. A missing coin, incomplete address
    coverage, unsynced wallet or changed spend state refuses review. The Claim
+   daemon comparison now uses the explicit `getinfo` chain identity, so an
+   external Coincubed daemon can pass the same positive check as an embedded
+   one; an older or unbound remote response cannot.
+   The Claim
    wizard does not yet call paired funding discovery or the transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the

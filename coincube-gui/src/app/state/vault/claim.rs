@@ -285,6 +285,7 @@ pub enum ClaimEvent {
         u64,
         Result<claim_workflow::CheckedClaimFundingAddresses, String>,
     ),
+    FundingChecked(u64, u64, u64, Result<bool, String>),
     Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
@@ -435,6 +436,8 @@ pub struct ClaimStep1Panel {
     connect: Option<ConnectSession>,
     pre: Preconditions,
     funding_error: Option<String>,
+    funding_status: Option<String>,
+    funding_checking: bool,
     stage: Stage,
     /// The live coordinator's revoker, kept outside the session so a
     /// revocation lands synchronously even while a task holds the session.
@@ -481,6 +484,8 @@ impl ClaimStep1Panel {
             connect,
             pre: Preconditions::default(),
             funding_error: None,
+            funding_status: None,
+            funding_checking: false,
             stage: Stage::Preconditions,
             revoker: None,
             revoked: false,
@@ -540,6 +545,14 @@ impl ClaimStep1Panel {
         self.funding_error.as_deref()
     }
 
+    pub fn funding_status(&self) -> Option<&str> {
+        self.funding_status.as_deref()
+    }
+
+    pub fn funding_checking(&self) -> bool {
+        self.funding_checking
+    }
+
     /// The App's hook for a Connect session change. Returns whether a
     /// session the panel was working under was removed or replaced — a
     /// sign-out, or a different account or client identity — in which case
@@ -577,6 +590,8 @@ impl ClaimStep1Panel {
         ) {
             self.stage = Stage::Preconditions;
             self.funding_error = None;
+            self.funding_status = None;
+            self.funding_checking = false;
         }
         if self.building.take().is_some() {
             self.pre.checking = false;
@@ -1207,6 +1222,131 @@ impl ClaimStep1Panel {
         )
     }
 
+    /// Reload the exact saved address reservation, then search both chains
+    /// for independently proved funding. This is status only: the result is
+    /// discarded after rendering and never becomes signer admission.
+    fn check_funding(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
+        if !matches!(self.stage, Stage::FundingDeposits(_))
+            || self.funding_checking
+            || !self.backend_ready()
+        {
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        self.check_seq = self.check_seq.wrapping_add(1);
+        let seq = self.check_seq;
+        let expected = *self.generation.borrow();
+        let revocations = self.revocations;
+        let generation = self.generation.clone();
+        let descriptor = self.wallet.main_descriptor.clone();
+        let bitcoin_cube = self.bitcoin_cube.clone();
+        let fork_cube = self.pre.target.clone();
+        let directory = journal_directory(&self.datadir, &self.wallet);
+        self.funding_checking = true;
+        self.funding_status = None;
+        Task::perform(
+            async move {
+                use coincube_core::miniscript::bitcoin::hashes::sha256;
+                let fork_cube =
+                    fork_cube.ok_or_else(|| "The paired BTCB2 Cube is missing.".to_string())?;
+                let production = Production::new(
+                    connect.client.clone(),
+                    daemon.clone(),
+                    connect.account,
+                    expected,
+                    generation.clone(),
+                )
+                .map_err(|_| "The Connect claim session is unavailable.".to_string())?;
+                let context = production.context().clone();
+                let identity = claim_workflow::WalletIdentity {
+                    bitcoin_cube,
+                    fork_cube,
+                    descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+                };
+                let info = daemon
+                    .get_info()
+                    .await
+                    .map_err(|_| "The Bitcoin Vault is unavailable.".to_string())?;
+                if info.chain_id != Some(ChainId::Bitcoin)
+                    || info.descriptors.main != descriptor
+                    || info.rescan_progress.is_some()
+                    || info.chain_divergence
+                    || info.refused_reorg_depth.is_some()
+                {
+                    return Err(
+                        "The Bitcoin Vault is not ready for a two-chain deposit check.".into(),
+                    );
+                }
+                let highest = info.receive_index.max(info.change_index);
+                let end_exclusive = highest.saturating_add(128).max(256);
+                if end_exclusive > 20_000 {
+                    return Err(
+                        "The Vault's address range is too large for this bounded scan.".into(),
+                    );
+                }
+                let inventory = crate::services::claim_inventory::ClaimInventory::scan(
+                    connect.client.clone(),
+                    &descriptor,
+                    end_exclusive,
+                    64,
+                    expected,
+                    generation.clone(),
+                )
+                .await
+                .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+                let for_load = (
+                    directory.clone(),
+                    descriptor.clone(),
+                    identity.clone(),
+                    context.clone(),
+                );
+                let saved = tokio::task::spawn_blocking(move || {
+                    let (directory, descriptor, identity, context) = for_load;
+                    claim_workflow::load_claim_funding(&directory, &descriptor, &identity, &context)
+                })
+                .await
+                .map_err(|_| "Loading the saved deposit addresses was interrupted.".to_string())?
+                .map_err(|_| {
+                    "The saved deposit addresses no longer match this Cube and account.".to_string()
+                })?
+                .ok_or_else(|| "The saved deposit addresses are missing.".to_string())?;
+                let source = HttpObservationSource::new(
+                    connect.client,
+                    ChainId::Bitcoin,
+                    ChainId::BitcoinBlake2b,
+                    CollectionContext {
+                        expected_generation: expected,
+                        generation,
+                    },
+                )
+                .map_err(|_| "The two-chain observation source is unavailable.".to_string())?;
+                saved
+                    .discover_reserved_funding(
+                        directory,
+                        &inventory,
+                        &identity,
+                        &context,
+                        &*daemon,
+                        &source,
+                        CHECK_POLICY.observations,
+                    )
+                    .await
+                    .map(|proof| proof.is_some())
+                    .map_err(|_| "The deposits could not both be verified against the current chains and Vault.".to_string())
+            },
+            move |result| {
+                Message::Claim(ClaimEvent::FundingChecked(
+                    seq,
+                    expected,
+                    revocations,
+                    result,
+                ))
+            },
+        )
+    }
+
     fn build(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
         if !self.can_build() {
             return Task::none();
@@ -1794,6 +1934,8 @@ impl ClaimStep1Panel {
             }
             Stage::FundingChecking | Stage::FundingDeposits(_) => {
                 self.check_seq = self.check_seq.wrapping_add(1);
+                self.funding_checking = false;
+                self.funding_status = None;
                 self.stage = Stage::Preconditions;
             }
             Stage::Preconditions | Stage::Review { .. } | Stage::Track { .. } => {}
@@ -1804,6 +1946,27 @@ impl ClaimStep1Panel {
     /// session travelling inside one is never dropped for want of it.
     fn apply(&mut self, event: ClaimEvent) -> Task<Message> {
         match event {
+            ClaimEvent::FundingChecked(seq, generation, revocations, result) => {
+                if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
+                    return Task::none();
+                }
+                self.funding_checking = false;
+                if !self.authorized(generation, revocations) || !self.backend_ready() {
+                    self.stage = Stage::Preconditions;
+                    self.funding_status = None;
+                    self.funding_error =
+                        Some("The Claim session changed during the deposit check.".into());
+                    return Task::none();
+                }
+                self.funding_status = Some(match result {
+                    Ok(true) => "Both deposits have current two-chain ancestry proofs.".into(),
+                    Ok(false) => {
+                        "Waiting for confirmed, unspent deposits at both reserved addresses.".into()
+                    }
+                    Err(reason) => reason,
+                });
+                Task::none()
+            }
             ClaimEvent::FundingPrepared(seq, generation, revocations, result) => {
                 if seq != self.check_seq || !matches!(self.stage, Stage::FundingChecking) {
                     return Task::none();
@@ -2328,6 +2491,10 @@ impl State for ClaimStep1Panel {
                 match intent {
                     view::ClaimMessage::StartFunding => match daemon {
                         Some(daemon) => self.prepare_funding(daemon),
+                        None => node_unavailable(),
+                    },
+                    view::ClaimMessage::CheckFunding => match daemon {
+                        Some(daemon) => self.check_funding(daemon),
                         None => node_unavailable(),
                     },
                     view::ClaimMessage::Recheck => match daemon {
