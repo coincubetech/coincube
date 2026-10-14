@@ -398,6 +398,13 @@ a replayable spend.
    account, both-chain address histories and fee quotes. A recorded signed
    pair still opens read-only recovery; reopening never restores signer
    authority from the journal.
+   After Bitcoin confirms, Claim now reconstructs the spent Bitcoin-only
+   input from its retained path and the shared inputs from the current BTCB2
+   scan. The collector's canonical Bitcoin blocks must match the BTCB2
+   confirming blocks and all recovered scripts must belong to the Claim Vault.
+   Its stage-two proof entry rebuilds both exact version-10 PSBTs and verifies
+   both saved signed witnesses before using the post-Bitcoin observation.
+   This remains a gated evidence path, not a signer or broadcast action.
    The target daemon must positively identify as BTCB2 when reserving its
    destination; mainnet address encoding alone cannot distinguish the two
    chains. An older Connect wallet response without an authenticated chain

@@ -14,7 +14,8 @@ use super::{
 use crate::daemon::{model, Daemon};
 use coincube_core::{
     chain::ChainId,
-    claim::Policy,
+    claim::{BlockRef, Policy},
+    claim_ancestry::retained::RetainedPath,
     claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
     foreign_split::{SplitBranch, SplitCoin},
@@ -57,6 +58,21 @@ pub struct ClaimInventory {
 }
 
 struct ScannedTransactions(BTreeMap<Txid, Transaction>);
+
+/// Source-owned reconstruction inputs after Bitcoin has spent its side of a
+/// Claim. These are structural records only; they carry no live UTXO proof.
+#[derive(Debug, Clone)]
+pub(crate) struct PostBitcoinClaimCoins {
+    pub bitcoin: Vec<CandidateCoin>,
+    pub fork: Vec<CandidateCoin>,
+    previous: BTreeMap<Txid, Transaction>,
+}
+
+impl TxGetter for PostBitcoinClaimCoins {
+    fn get_tx(&mut self, txid: &Txid) -> Option<Transaction> {
+        self.previous.get(txid).cloned()
+    }
+}
 
 impl TxGetter for ScannedTransactions {
     fn get_tx(&mut self, txid: &Txid) -> Option<Transaction> {
@@ -197,6 +213,132 @@ impl ClaimInventory {
     }
     pub fn fork_funding(&self) -> &[CandidateCoin] {
         &self.fork_funding
+    }
+
+    /// Recover the exact spent Bitcoin inputs and still-live BTCB2 inputs for
+    /// a saved Claim pair. The caller must first validate the post-Bitcoin
+    /// collector and reconcile the complete BTCB2 Vault at these same tips.
+    /// No recovered coin is considered currently unspent on Bitcoin.
+    pub(crate) fn post_bitcoin_restore_coins(
+        &self,
+        shared_blocks: &[(OutPoint, BlockRef)],
+        bitcoin_path: &RetainedPath,
+        bitcoin_index: u32,
+        fork_funding: OutPoint,
+        fork_index: u32,
+    ) -> Result<PostBitcoinClaimCoins, ClaimInventoryError> {
+        let stale = || ClaimInventoryError::WalletState;
+        let shared: BTreeSet<_> = shared_blocks
+            .iter()
+            .map(|(outpoint, _)| *outpoint)
+            .collect();
+        let spent: BTreeSet<_> = self
+            .scan
+            .inventory
+            .spent_on_bitcoin()
+            .iter()
+            .map(|coin| coin.outpoint)
+            .collect();
+        if shared.is_empty()
+            || shared.len() != shared_blocks.len()
+            || shared != spent
+            || shared.contains(&bitcoin_path.selected())
+            || shared.contains(&fork_funding)
+            || bitcoin_path.selected() == fork_funding
+        {
+            return Err(stale());
+        }
+        let raw = bitcoin_path.links().first().ok_or_else(stale)?;
+        let bitcoin_previous: Transaction =
+            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw.transaction)
+                .map_err(|_| stale())?;
+        let bitcoin_marker = SplitCoin {
+            outpoint: bitcoin_path.selected(),
+            branch: SplitBranch::External,
+            index: bitcoin_index,
+            previous: bitcoin_previous,
+            bitcoin_block: None,
+            btcb2_block: None,
+        };
+        let bitcoin_funding = owned_candidate(&self.descriptor, &bitcoin_marker)?;
+        let mut previous = BTreeMap::new();
+        let mut insert = |coin: &SplitCoin| -> Result<(), ClaimInventoryError> {
+            match previous.insert(coin.outpoint.txid, coin.previous.clone()) {
+                Some(existing) if existing != coin.previous => Err(stale()),
+                _ => Ok(()),
+            }
+        };
+        insert(&bitcoin_marker)?;
+        let mut bitcoin = Vec::with_capacity(shared.len() + 1);
+        let mut fork = Vec::with_capacity(shared.len() + 1);
+        for (outpoint, block) in shared_blocks {
+            let scanned = self
+                .scan
+                .btcb2
+                .coins()
+                .iter()
+                .find(|coin| coin.outpoint == *outpoint)
+                .ok_or_else(stale)?;
+            if self.scan.btcb2.fork_side(scanned) != super::foreign_scan::ForkSide::PreFork
+                || scanned.block_height != u32::try_from(block.height).ok()
+                || scanned.block_hash != Some(block.hash)
+                || scanned.previous.compute_txid() != outpoint.txid
+                || scanned.previous.output.get(outpoint.vout as usize) != Some(&scanned.output)
+            {
+                return Err(stale());
+            }
+            let coin = SplitCoin {
+                outpoint: *outpoint,
+                branch: if scanned.branch == Branch::Internal {
+                    SplitBranch::Internal
+                } else {
+                    SplitBranch::External
+                },
+                index: scanned.index,
+                previous: scanned.previous.clone(),
+                bitcoin_block: Some(*block),
+                btcb2_block: Some(*block),
+            };
+            let candidate = owned_candidate(&self.descriptor, &coin)?;
+            insert(&coin)?;
+            bitcoin.push(candidate);
+            fork.push(candidate);
+        }
+        let scanned = self
+            .scan
+            .btcb2
+            .coins()
+            .iter()
+            .find(|coin| coin.outpoint == fork_funding)
+            .ok_or_else(stale)?;
+        if self.scan.btcb2.fork_side(scanned) != super::foreign_scan::ForkSide::PostFork
+            || scanned.branch != Branch::External
+            || scanned.index != fork_index
+            || scanned.previous.compute_txid() != fork_funding.txid
+            || scanned.previous.output.get(fork_funding.vout as usize) != Some(&scanned.output)
+        {
+            return Err(stale());
+        }
+        let fork_marker = SplitCoin {
+            outpoint: fork_funding,
+            branch: SplitBranch::External,
+            index: fork_index,
+            previous: scanned.previous.clone(),
+            bitcoin_block: None,
+            btcb2_block: None,
+        };
+        let fork_candidate = owned_candidate(&self.descriptor, &fork_marker)?;
+        if !self.fork_funding.contains(&fork_candidate) {
+            return Err(stale());
+        }
+        insert(&fork_marker)?;
+        bitcoin.push(bitcoin_funding);
+        fork.push(fork_candidate);
+        Ok(PostBitcoinClaimCoins {
+            bitcoin,
+            fork,
+            previous,
+        })
     }
 
     fn scanned_transactions(&self) -> Result<ScannedTransactions, ClaimPairError> {
@@ -719,6 +861,7 @@ impl ClaimInventory {
 mod tests {
     use super::*;
     use crate::services::foreign_scan::{BranchCoverage, DiscoveredCoin, ScanReport};
+    use coincube_core::claim_ancestry::search::OwnedLink;
     use coincube_core::{
         bip39::Mnemonic,
         descriptors::{CoincubePolicy, PathInfo},
@@ -942,6 +1085,64 @@ mod tests {
         assert_eq!(
             previous.get_tx(&funding_outpoint.txid).unwrap().output[0].value,
             Amount::from_sat(10_000)
+        );
+        let bitcoin_path = RetainedPath::new(
+            funding_outpoint,
+            vec![OwnedLink {
+                transaction: coincube_core::miniscript::bitcoin::consensus::serialize(
+                    &previous.get_tx(&funding_outpoint.txid).unwrap(),
+                ),
+                parent_input: None,
+            }],
+        )
+        .unwrap();
+        let shared_blocks = [(
+            outpoint,
+            BlockRef {
+                height: 90,
+                hash: tip,
+            },
+        )];
+        let mut recovered = post_bitcoin
+            .post_bitcoin_restore_coins(&shared_blocks, &bitcoin_path, 4, fork_outpoint, 5)
+            .unwrap();
+        assert_eq!(recovered.bitcoin.len(), 2);
+        assert_eq!(recovered.fork.len(), 2);
+        assert_eq!(recovered.bitcoin[1].outpoint, funding_outpoint);
+        assert_eq!(recovered.fork[1].outpoint, fork_outpoint);
+        assert_eq!(
+            recovered.get_tx(&outpoint.txid).unwrap().output[0].value,
+            Amount::from_sat(50_000)
+        );
+        assert_eq!(
+            post_bitcoin
+                .post_bitcoin_restore_coins(
+                    &[(
+                        outpoint,
+                        BlockRef {
+                            height: 91,
+                            hash: tip
+                        }
+                    )],
+                    &bitcoin_path,
+                    4,
+                    fork_outpoint,
+                    5,
+                )
+                .err(),
+            Some(ClaimInventoryError::WalletState)
+        );
+        assert_eq!(
+            post_bitcoin
+                .post_bitcoin_restore_coins(&shared_blocks, &bitcoin_path, 6, fork_outpoint, 5)
+                .err(),
+            Some(ClaimInventoryError::Ownership)
+        );
+        assert_eq!(
+            post_bitcoin
+                .post_bitcoin_restore_coins(&shared_blocks, &bitcoin_path, 4, fork_outpoint, 6)
+                .err(),
+            Some(ClaimInventoryError::WalletState)
         );
         let mut info = model::GetInfoResult {
             version: "test".into(),

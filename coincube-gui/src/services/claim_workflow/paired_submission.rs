@@ -962,24 +962,24 @@ impl Controller {
         &mut self,
         current: &Context,
         requalified: &RequalifiedPostBitcoinClaim,
-        fork_psbt: &Psbt,
         confirmation: &BitcoinConfirmation,
         policy: Policy,
         now: i64,
-        tips: PreflightTips,
-    ) -> Result<PostBitcoinAncestryProof, Error> {
+    ) -> Result<(VerifiedAncestryClaimPair, PostBitcoinAncestryProof), Error> {
         if self.intent.version != 10 || self.intent.split.is_some() {
             return Err(Error::WrongIdentity);
         }
-        self.post_bitcoin_ancestry_proof(
+        let (pair, fork_psbt) = requalified.reverify_recorded_pair(self, current)?;
+        let proof = self.post_bitcoin_ancestry_proof(
             current,
             &requalified.observed,
-            fork_psbt,
+            &fork_psbt,
             confirmation,
             policy,
             now,
-            tips,
-        )
+            requalified.tips(),
+        )?;
+        Ok((pair, proof))
     }
 
     /// Only a Split requalification that checked the saved source and target

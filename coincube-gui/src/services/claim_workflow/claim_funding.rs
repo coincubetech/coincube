@@ -8,7 +8,9 @@ use super::{
 };
 use crate::daemon::{model, Daemon};
 use crate::services::{
-    claim_inventory::{ClaimInventory, ClaimInventoryError, ClaimPairSnapshotError},
+    claim_inventory::{
+        ClaimInventory, ClaimInventoryError, ClaimPairSnapshotError, PostBitcoinClaimCoins,
+    },
     claim_observation::{
         http::{
             ClaimPairError, CollectedPostBitcoinInputs, DiscoveryError, FundingContext,
@@ -568,6 +570,47 @@ pub enum ClaimPostBitcoinError {
 #[allow(dead_code)] // The paired stage-two coordinator is not wired yet.
 pub struct RequalifiedPostBitcoinClaim {
     pub(super) observed: CollectedPostBitcoinInputs,
+    coins: PostBitcoinClaimCoins,
+    descriptor: CoincubeDescriptor,
+    context: Context,
+    tips: PreflightTips,
+    checked_at: std::time::Instant,
+}
+
+#[allow(dead_code)] // The paired Claim stage-two coordinator is still gated.
+impl RequalifiedPostBitcoinClaim {
+    pub(super) fn tips(&self) -> PreflightTips {
+        self.tips
+    }
+
+    /// Reconstruct both journal templates from the spent Bitcoin input and
+    /// live BTCB2 inputs, then reverify both saved finalized witnesses. This
+    /// is signature evidence only; it cannot renew Bitcoin UTXO status.
+    pub(super) fn reverify_recorded_pair(
+        &self,
+        controller: &mut Controller,
+        current: &Context,
+    ) -> Result<
+        (
+            coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+            Psbt,
+        ),
+        Error,
+    > {
+        if self.context != *current || self.checked_at.elapsed() >= Duration::from_secs(10) {
+            return Err(Error::LateObservation);
+        }
+        let (bitcoin, fork) = controller.restore_ancestry_pair(
+            current,
+            &self.descriptor,
+            &mut self.coins.clone(),
+            &self.coins.bitcoin,
+            &mut self.coins.clone(),
+            &self.coins.fork,
+        )?;
+        let verified = controller.verify_recorded_ancestry_claim_pair(current, &bitcoin, &fork)?;
+        Ok((verified, fork.psbt().clone()))
+    }
 }
 
 fn change_wallet_ready(
@@ -1139,8 +1182,22 @@ impl ClaimFundingReservation {
                 },
             )
             .map_err(ClaimPostBitcoinError::Observation)?;
+        let coins = inventory
+            .post_bitcoin_restore_coins(
+                collected.shared_blocks(),
+                bitcoin_path,
+                self.indices.bitcoin_deposit,
+                funding,
+                self.indices.btcb2_deposit,
+            )
+            .map_err(ClaimPostBitcoinError::Wallet)?;
         Ok(RequalifiedPostBitcoinClaim {
             observed: collected,
+            coins,
+            descriptor: inventory.descriptor().clone(),
+            context: context.clone(),
+            tips,
+            checked_at: std::time::Instant::now(),
         })
     }
 
