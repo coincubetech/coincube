@@ -3,6 +3,7 @@ mod ancestry;
 pub(crate) use ancestry::RecoveryObservation;
 mod claim_funding;
 mod journal;
+mod paired_recovery;
 mod paired_submission;
 mod recovery;
 mod reorg;

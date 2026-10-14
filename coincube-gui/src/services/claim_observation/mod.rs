@@ -81,6 +81,9 @@ pub struct FreshRead<T> {
     observed_at: i64,
 }
 impl<T> FreshRead<T> {
+    pub fn chain(&self) -> ChainId {
+        self.chain
+    }
     /// The value read, once the fresh-read contract has been acknowledged.
     pub fn value(&self) -> &T {
         &self.value

@@ -386,8 +386,12 @@ marker spend cases remain.
    record is sequenced after the Bitcoin record. Neither record
    establishes upstream acceptance or unlocks a send. The paired coordinator
    must still require a fresh six-confirmation Bitcoin observation before
-   recording the BTCB2 attempt, and reconcile both records independently
-   after a restart. Acceptance on one chain never implies acceptance on the
+   recording the BTCB2 attempt. A read-only recovery collector now checks
+   each possible attempt independently against fresh transaction status,
+   exact signed witness bytes, canonical block mapping and stable chain tip.
+   Absent, stale, mismatched or unavailable observations never permit an
+   automatic retry. This collector is not yet connected to the wizard's
+   recovery screen. Acceptance on one chain never implies acceptance on the
    other.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
