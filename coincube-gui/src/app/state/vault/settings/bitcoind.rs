@@ -1761,13 +1761,6 @@ fn write_internal_bitcoind_config(
             // choice has to be kept — and kept before the write, so a write that
             // then fails still leaves the choice on record.
             crate::node::revalidate::ManagedNodeState::record_configured(coincube_datadir, flavor);
-            // The Bitcoin family's node relays claim step 1's 90-byte OP_RETURN
-            // marker; the Bitcoin Blake2b family's node must reject it, so its
-            // file never gets the line.
-            if flavor.chain_family() == crate::node::bitcoind::NodeChainFamily::Bitcoin {
-                conf.data_carrier_size = Some(crate::node::bitcoind::DATA_CARRIER_SIZE);
-            }
-
             let mut network_conf = existing.unwrap_or(InternalBitcoindNetworkConfig {
                 rpc_port,
                 p2p_port,
@@ -3697,12 +3690,8 @@ mod tests {
                 p
             );
         }
-        // The Bitcoin family's file carries the OP_RETURN relay cap claim
-        // step 1 needs; the other family's file does not gain it.
-        assert_eq!(
-            after.data_carrier_size,
-            Some(crate::node::bitcoind::DATA_CARRIER_SIZE)
-        );
+        // A new managed node uses its normal relay policy on either chain.
+        assert_eq!(after.data_carrier_size, None);
         assert!(!fs::read_to_string(&blake2b_conf)
             .unwrap()
             .contains("datacarriersize"));

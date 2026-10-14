@@ -344,7 +344,10 @@ a replayable spend.
    production, independent of the paired ancestry gate. New OP_RETURN Claim
    and Split journal creation are also refused by the production workflow
    service, even if a caller bypasses the desktop route. Enabling the paired gate later
-   cannot turn the old path back on. Next remove `split_poison` payload building,
+   cannot turn the old path back on. Managed Bitcoin node setup and startup no
+   longer add the old claim's 100-byte `datacarriersize` relay override;
+   operator-specified values in existing configurations still round-trip.
+   Next remove `split_poison` payload building,
    `Poison::OpReturn` production selection, the remaining RDTS expiry checks
    that exist only for the 90-byte output, OP_RETURN review details and the transport path for
    newly created claims. Migrate or explicitly refuse any persisted,
