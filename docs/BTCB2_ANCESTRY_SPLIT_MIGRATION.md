@@ -68,6 +68,9 @@ a replayable spend.
    Claim or version-11 Split journal. Signer admission still needs to consume
    this fresh evidence with wallet ownership, reservations and a new preflight;
    no candidate or validator result is cached spend authority.
+   The version-10 Claim journal now requires its recorded fee rates to match
+   the exact unsigned PSBT fees, and the version-11 Split observation check
+   compares the funding coins' branch and index to the saved derivations.
    A bounded paired search now uses one session, deadline and request budget
    for Bitcoin and BTCB2 candidate ancestry plus the shared-input refresh;
    it returns no one-sided result. For foreign Split, scan-derived funding and

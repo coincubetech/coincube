@@ -213,6 +213,13 @@ impl StoredSplitPath {
         let bytes = hex::decode(&self.raw).map_err(|_| Error::InvalidJournal)?;
         RetainedPath::decode(self.selected, &bytes).map_err(|_| Error::InvalidJournal)
     }
+
+    fn matches_coin(&self, coin: &SplitCoin) -> bool {
+        self.selected == coin.outpoint
+            && self.index == coin.index
+            && self.is_change
+                == (coin.branch == coincube_core::foreign_split::SplitBranch::Internal)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -897,14 +904,7 @@ impl Controller {
         let fork_path = funding.fork.decode()?;
         let bitcoin_dependency = bitcoin_path.reverify().map_err(|_| Error::InvalidJournal)?;
         let fork_dependency = fork_path.reverify().map_err(|_| Error::InvalidJournal)?;
-        let matches_marker = |stored: &StoredSplitPath, coin: &SplitCoin| {
-            stored.selected == coin.outpoint
-                && stored.index == coin.index
-                && stored.is_change
-                    == (coin.branch == coincube_core::foreign_split::SplitBranch::Internal)
-        };
-        if !matches_marker(&funding.bitcoin, bitcoin_marker)
-            || !matches_marker(&funding.fork, fork_marker)
+        if !funding.bitcoin.matches_coin(bitcoin_marker) || !funding.fork.matches_coin(fork_marker)
         {
             return Err(Error::InvalidPlan);
         }
@@ -982,6 +982,8 @@ impl Controller {
             || bitcoin.destination() != record.destination
             || bitcoin.claimed_prevouts() != self.intent.plan.claimed_prevouts
             || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
+            || !funding.bitcoin.matches_coin(bitcoin_coin)
+            || !funding.fork.matches_coin(fork_coin)
             || funding
                 .bitcoin_feerate_vb
                 .checked_mul(bitcoin.maximum_signed_vbytes())

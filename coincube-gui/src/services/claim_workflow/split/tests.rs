@@ -399,10 +399,16 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert_eq!(reopened.status(), Status::Unchecked);
     assert!(!reopened.construction_verified);
     let record = reopened.intent.split.as_ref().unwrap();
-    assert_eq!(
-        record.funding.as_ref().unwrap().step2_unsigned,
-        fork.psbt().unsigned_tx
-    );
+    let stored_funding = record.funding.as_ref().unwrap();
+    assert!(stored_funding.bitcoin.matches_coin(&bitcoin_marker));
+    assert!(stored_funding.fork.matches_coin(&fork_marker));
+    let mut wrong_derivation = bitcoin_marker.clone();
+    wrong_derivation.index += 1;
+    assert!(!stored_funding.bitcoin.matches_coin(&wrong_derivation));
+    wrong_derivation = fork_marker.clone();
+    wrong_derivation.branch = SplitBranch::Internal;
+    assert!(!stored_funding.fork.matches_coin(&wrong_derivation));
+    assert_eq!(stored_funding.step2_unsigned, fork.psbt().unsigned_tx);
     assert_eq!(reopened.intent.plan.step1, bitcoin.psbt().unsigned_tx);
     let (restored_bitcoin, restored_fork) = reopened
         .restore_ancestry_split_pair(

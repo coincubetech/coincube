@@ -314,6 +314,24 @@ fn version_ten_pair_creation_reopens_without_live_spend_authority() {
             .store_claim_funding_reservation(&reservation)
             .unwrap();
     }
+    for (bitcoin_rate, fork_rate) in [(6, 5), (5, 6)] {
+        assert!(matches!(
+            Controller::create_ancestry_pair(
+                &temp.0,
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                &bitcoin,
+                &bitcoin_path,
+                &fork,
+                &fork_path,
+                (index, false),
+                bitcoin_rate,
+                fork_rate,
+                context(),
+            ),
+            Err(Error::WrongIdentity)
+        ));
+    }
     let controller = Controller::create_ancestry_pair(
         &temp.0,
         "bitcoin-cube".into(),

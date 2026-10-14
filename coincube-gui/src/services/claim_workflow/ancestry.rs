@@ -100,6 +100,38 @@ impl StoredFundingPlan {
         Ok(())
     }
 }
+
+/// The journal's fee rate must describe the exact unsigned transaction, not
+/// merely fall within the policy range. A different rate after restart is a
+/// different construction even when a caller supplies the same PSBT bytes.
+fn exact_claim_fee_rate(
+    psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+    descriptor: &CoincubeDescriptor,
+    rate: u64,
+) -> bool {
+    let Some(inputs) = psbt.inputs.iter().try_fold(0u64, |sum, input| {
+        sum.checked_add(input.witness_utxo.as_ref()?.value.to_sat())
+    }) else {
+        return false;
+    };
+    let Some(outputs) = psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+    else {
+        return false;
+    };
+    matches!(
+        (
+            inputs.checked_sub(outputs),
+            descriptor
+                .unsigned_tx_max_vbytes(&psbt.unsigned_tx, true)
+                .checked_mul(rate),
+        ),
+        (Some(actual), Some(expected)) if actual == expected
+    )
+}
 impl StoredAncestry {
     fn decode(&self) -> Result<RetainedPath, Error> {
         if self.raw.len() > 2 * MAX_ENCODED_BYTES
@@ -406,6 +438,8 @@ impl Controller {
             || fork.bitcoin_step1() != bitcoin.psbt().unsigned_tx.compute_txid()
             || fork.descriptor() != bitcoin.descriptor()
             || fork_marker_derivation.0.is_hardened()
+            || !exact_claim_fee_rate(bitcoin.psbt(), bitcoin.descriptor(), bitcoin_feerate_vb)
+            || !exact_claim_fee_rate(fork.psbt(), fork.descriptor(), fork_feerate_vb)
         {
             return Err(Error::WrongIdentity);
         }
@@ -563,6 +597,12 @@ impl Controller {
             || u32::from(fork.change_index()) != funding.fork_change_index
             || sha256::Hash::hash(bitcoin.descriptor().to_string().as_bytes())
                 != self.intent.identity.descriptor_digest
+            || !exact_claim_fee_rate(
+                bitcoin.psbt(),
+                bitcoin.descriptor(),
+                funding.bitcoin_feerate_vb,
+            )
+            || !exact_claim_fee_rate(fork.psbt(), fork.descriptor(), funding.fork_feerate_vb)
         {
             return Err(Error::WrongIdentity);
         }
