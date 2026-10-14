@@ -363,6 +363,12 @@ marker spend cases remain.
    The version-10 Claim and version-11 Split journals now expose a review-only
    path that first validates a fresh paired funding collection against the
    exact saved intent and then invokes the corresponding pair finalizer.
+   Connect now has separate exact-byte, one-attempt Bitcoin and BTCB2 mainnet
+   broadcast transports for either typed pair. Each side has its own
+   transaction-bound, expiring gate and uncertain outcome. These transports
+   are not called from the wizard: the paired coordinator still has to bind
+   fresh two-chain proof, reservations, preflight and explicit approval to
+   separate durable submission intents before either gate can be entered.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

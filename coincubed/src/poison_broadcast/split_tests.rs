@@ -324,6 +324,112 @@ fn split_step1_gate_binds_the_signed_witness_identity() {
     assert_eq!(gate.enter(), Err(SubmissionError::Revoked));
 }
 
+/// The pair-side transport has an explicit BTCB2 Connect route and preserves
+/// exact bytes, one attempt and uncertain-outcome behavior on that route.
+#[test]
+fn ancestry_pair_side_connect_transport_routes_by_chain_once() {
+    let verified = split_step1(ChainId::Bitcoin, 9);
+    let transaction = verified.transaction();
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let expected_route = match chain {
+            ChainId::Bitcoin => "/api/v1/esplora/bitcoin/mainnet/tx",
+            ChainId::BitcoinBlake2b => "/api/v1/esplora/bitcoin-blake2b/mainnet/tx",
+            _ => unreachable!(),
+        };
+        let tx = transaction.clone();
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .unwrap();
+            let mut headers = Vec::new();
+            let mut byte = [0];
+            while !headers.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                headers.push(byte[0]);
+                assert!(headers.len() < 8192);
+            }
+            let headers = String::from_utf8(headers).unwrap();
+            assert!(headers.starts_with(&format!("POST {expected_route} HTTP/1.1\r\n")));
+            assert!(!headers.to_ascii_lowercase().contains("authorization:"));
+            let length: usize = headers
+                .lines()
+                .find_map(|line| {
+                    let (key, value) = line.split_once(':')?;
+                    key.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse().unwrap())
+                })
+                .unwrap();
+            let mut body = vec![0; length];
+            stream.read_exact(&mut body).unwrap();
+            assert_eq!(
+                body,
+                bitcoin::consensus::encode::serialize_hex(&tx).as_bytes()
+            );
+            let answer = tx.compute_txid().to_string();
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                answer.len(),
+                answer
+            )
+            .unwrap();
+        });
+        let (gate, revoker) = SubmissionGate::for_transaction(
+            chain,
+            transaction,
+            Instant::now() + Duration::from_secs(5),
+        );
+        let origin = format!("http://{address}/");
+        assert_eq!(
+            submit_exact_ancestry_pair_side_to_connect(chain, transaction, &gate, &origin),
+            Ok(SubmissionOutcome::UpstreamAccepted {
+                txid: transaction.compute_txid(),
+                wtxid: transaction.compute_wtxid(),
+            })
+        );
+        assert_eq!(revoker.state(), SubmissionState::Started);
+        assert_eq!(
+            submit_exact_ancestry_pair_side_to_connect(chain, transaction, &gate, &origin),
+            Err(SubmissionError::AlreadyStarted)
+        );
+        worker.join().unwrap();
+    }
+}
+
+#[test]
+fn ancestry_pair_side_refuses_wrong_chain_gate_and_unsupported_testnet() {
+    let verified = split_step1(ChainId::Bitcoin, 10);
+    let transaction = verified.transaction();
+    let (gate, _) = SubmissionGate::for_transaction(
+        ChainId::Bitcoin,
+        transaction,
+        Instant::now() + Duration::from_secs(5),
+    );
+    assert_eq!(
+        submit_exact_ancestry_pair_side_to_connect(
+            ChainId::BitcoinBlake2b,
+            transaction,
+            &gate,
+            "http://127.0.0.1:1/",
+        ),
+        Err(SubmissionError::GateMismatch)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    assert_eq!(
+        submit_exact_ancestry_pair_side_to_connect(
+            ChainId::BitcoinBlake2bTestnet4,
+            transaction,
+            &gate,
+            "http://127.0.0.1:1/",
+        ),
+        Err(SubmissionError::UnsupportedChain)
+    );
+    assert_eq!(gate.state(), SubmissionState::Pending);
+}
+
 /// Not exposed over daemon RPC: neither the JSON-RPC dispatch nor any
 /// `DaemonControl` command names the Split transport or its gate.
 #[test]
