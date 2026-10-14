@@ -809,6 +809,126 @@ impl ProductionConnect {
             evidence,
         })
     }
+
+    /// Recover only the exact unsigned templates of an unattempted signed
+    /// pair. Drop the journal lock before the network scan; then reopen it
+    /// and require the scan's shared and funding coins to reconstruct both
+    /// saved transactions. A later review still needs full live paired
+    /// requalification and verification of the saved signed witnesses.
+    #[allow(dead_code)] // The resumed paired broadcast review will use this.
+    async fn restore_recorded_initial_pair(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target: &coincube_core::descriptors::CoincubeDescriptor,
+    ) -> Result<(AncestrySplitStep1, AncestrySplitStep2, (u64, u64)), String> {
+        if !self.session_current() {
+            return Err("The Connect session changed before reopening this split.".into());
+        }
+        let context = self.context();
+        let identity = claim_workflow::split_identity(target_cube.to_owned(), source.digest());
+        let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| {
+                format!("The signed Split journal could not be reopened: {error:?}")
+            })?;
+        let record = controller
+            .recorded_split()
+            .map_err(|error| format!("The recorded source is invalid: {error:?}"))?
+            .ok_or_else(|| "The recorded Split source is missing.".to_string())?;
+        if record.source.as_ref() != Some(source)
+            || record.source_digest != source.digest()
+            || record.target_cube != target_cube
+        {
+            return Err("The recorded Split belongs to another source or target.".into());
+        }
+        let plan = controller
+            .recorded_initial_pair_plan(&context)
+            .map_err(|error| {
+                format!("This signed pair cannot be prepared for a first send: {error:?}")
+            })?;
+        drop(controller);
+        let scan = foreign_split_inventory::scan(
+            self.session.client.clone(),
+            split_funding_scan_plan(source)?,
+            self.expected,
+            self.generation.clone(),
+        )
+        .await
+        .map_err(|error| format!("The two-chain source scan did not complete: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during the split scan.".into());
+        }
+        let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Split journal changed: {error:?}"))?;
+        if controller
+            .recorded_initial_pair_plan(&context)
+            .map_err(|error| format!("The signed pair changed: {error:?}"))?
+            != plan
+        {
+            return Err("The signed Split pair changed during the scan.".into());
+        }
+        let pair = controller
+            .restore_unattempted_split_pair_from_scan(&context, source, target, &scan.inventory)
+            .map_err(|error| {
+                format!("The saved Split pair no longer matches the source scan: {error:?}")
+            })?;
+        drop(controller);
+        Ok((pair.0, pair.1, (plan.bitcoin_rate_vb, plan.fork_rate_vb)))
+    }
+
+    /// Re-run the complete initial Split check and bind its fresh proof and
+    /// the saved finalized witnesses to a single live journal controller.
+    /// The caller must display the snapshot and obtain a separate explicit
+    /// confirmation before consuming this short-lived review.
+    #[allow(dead_code)] // The paired recovery screen will consume this boundary.
+    async fn prepare_recorded_initial_review(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target_vault: &(WalletId, coincube_core::descriptors::CoincubeDescriptor),
+    ) -> Result<(Controller, claim_workflow::InitialPairReview), String> {
+        let context = self.context();
+        let (bitcoin, fork, rates) = self
+            .restore_recorded_initial_pair(directory.clone(), source, target_cube, &target_vault.1)
+            .await?;
+        let check = self
+            .prepare_exact_pair_intent(
+                directory.clone(),
+                source,
+                target_cube,
+                Some(target_vault),
+                &bitcoin,
+                &fork,
+                rates,
+            )
+            .await?;
+        if !self.session_current() || self.context() != context || check.context() != &context {
+            return Err("The Connect session changed before Split broadcast review.".into());
+        }
+        let identity = claim_workflow::split_identity(target_cube.to_owned(), source.digest());
+        let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Split journal changed: {error:?}"))?;
+        let review = check
+            .requalified
+            .prepare_recorded_pair_review(
+                &mut controller,
+                &target_vault.1,
+                &bitcoin,
+                &fork,
+                CHECK_POLICY.observations,
+                self.observation.now(),
+            )
+            .map_err(|error| format!("The signed Split pair is no longer verified: {error:?}"))?;
+        if !self.session_current() || self.context() != context {
+            return Err("The Connect session changed during Split broadcast review.".into());
+        }
+        Ok((controller, review))
+    }
 }
 
 fn split_funding_scan_plan(source: &SplitSource) -> Result<ScanPlan, String> {

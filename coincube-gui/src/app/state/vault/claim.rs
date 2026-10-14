@@ -1947,7 +1947,8 @@ impl ClaimStep1Panel {
     /// ancestry, reserved inputs, exact PSBTs and fee quotes before it opens
     /// either ordinary signer. A later device request repeats that check.
     fn request_paired_signing(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
-        if !matches!(self.stage, Stage::FundingDeposits(_))
+        if crate::services::claim_ancestry_gate::authorization().is_none()
+            || !matches!(self.stage, Stage::FundingDeposits(_))
             || self.paired_signing_pending
             || self.funding_checking
             || self.funding_review().is_none()

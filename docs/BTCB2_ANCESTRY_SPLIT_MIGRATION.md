@@ -349,8 +349,8 @@ a replayable spend.
    ten-second, one-use signer permit bound to the exact current PSBT, chain and
    Connect generation; the ordinary picker can consume it while keeping its
    own broadcast actions closed. The paired Claim panel consumes this permit
-   for its signer requests, but its entry action is still hidden while the
-   submission coordinator and Split signer path are incomplete.
+   for its signer requests. Its entry action is behind the production
+   acceptance gate while submission remains incomplete.
    Split's requalification now also retains the exact source coin set, session,
    tips and PSBTs long enough to issue the same one-use permit after checking
    both constructions and the current partial signatures. A new core combiner
@@ -382,6 +382,10 @@ a replayable spend.
    reopens read-only recovery. This route does not yet have paired preflight,
    a submission coordinator or broadcast, and device support still needs
    independent hardware smoke tests.
+   The production Split and Claim signer entries and their buttons are now
+   closed by the shared ancestry acceptance gate; a verified deposit preview
+   alone cannot expose spendable PSBTs. Both staged paired submission methods
+   also check that gate before a preflight read or possible-send journal write.
    The signing review repeats the source threshold and the exact output
    amount beside each full destination, so a signer can compare both sides
    without relying on the earlier deposit preview.
@@ -687,6 +691,29 @@ marker spend cases remain.
    the same live controller. The desktop still needs to invoke that handoff
    after a new paired scan and show an explicit broadcast review; loading
    signed bytes from disk remains read-only.
+   An unattempted signed journal now exposes only its two saved funding
+   outpoints and fee rates for that fresh scan. The hint is unavailable after
+   either possible-send record; it does not restore proof or send authority.
+   Split can use those exact outpoints to reconstruct its saved ordinary pair
+   from a new two-chain source scan. Reconstruction remains unchecked; the
+   wizard must repeat live ancestry, reservation and policy checks before a
+   broadcast review.
+   The production Split adapter now wraps that reconstruction with journal
+   identity and Connect-generation checks, releasing its journal lock during
+   the network scan and rechecking the saved plan when it reopens. It is not
+   yet a signer or broadcast entry.
+   Claim has the matching structural restore from a new paired Vault scan:
+   it selects the exact saved Bitcoin and BTCB2 funding outpoints, joins each
+   with the freshly scanned shared set, and requires both saved unsigned
+   templates to reconstruct. Full wallet reconciliation and live proof still
+   have to follow.
+   Its production adapter also reopens the exact journal before and after the
+   network scan, checks the current paired BTCB2 Vault and Connect session,
+   then returns only the structurally rebuilt pair for a later live review.
+   Both production adapters can now take that rebuilt pair through a fresh
+   exact-pair requalification and saved-witness re-verification under one live
+   controller, producing a short-lived first-send review. Neither wizard
+   calls the review yet, and neither method performs preflight or broadcast.
    The corresponding stage-two Claim and Split handoffs now also join their
    recovered exact signed pair, new post-Bitcoin source check and canonical
    six-confirmation token to a one-use BTCB2 review in the same controller.

@@ -7,6 +7,7 @@ use super::{
         ClaimPairError, DiscoveryError, FundingContext, HttpObservationSource, OwnedClaimFunding,
     },
     claim_observation::{FailureKind, ObservationSource},
+    claim_workflow::{Context, Controller, Error as WorkflowError},
     coincube::CoincubeClient,
     foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanError, ScanPlan},
     foreign_split_inventory::{self, FreshDepositAddresses, InventoryError, TwoChainScan},
@@ -116,6 +117,51 @@ fn owned_candidate(
 }
 
 impl ClaimInventory {
+    /// Reconstruct an unattempted signed Claim's saved ordinary pair from a
+    /// new two-chain Vault scan. The saved funding outpoints select coins;
+    /// neither the journal nor the scan restores live proof, wallet-state
+    /// reconciliation, signer admission or permission to broadcast.
+    #[allow(dead_code)] // The resumed Claim broadcast review will consume this boundary.
+    pub(crate) fn restore_unattempted_claim_pair_from_scan(
+        &self,
+        controller: &mut Controller,
+        current: &Context,
+        descriptor: &CoincubeDescriptor,
+    ) -> Result<(AncestrySelfTransfer, ClaimForkSweep), WorkflowError> {
+        if self.descriptor != *descriptor {
+            return Err(WorkflowError::WrongIdentity);
+        }
+        let plan = controller.recorded_initial_pair_plan(current)?;
+        let bitcoin_marker = self
+            .bitcoin_funding
+            .iter()
+            .find(|coin| coin.outpoint == plan.bitcoin_funding)
+            .ok_or(WorkflowError::Unchecked)?;
+        let fork_marker = self
+            .fork_funding
+            .iter()
+            .find(|coin| coin.outpoint == plan.fork_funding)
+            .ok_or(WorkflowError::Unchecked)?;
+        let mut bitcoin_coins = self.shared.clone();
+        bitcoin_coins.push(*bitcoin_marker);
+        let mut fork_coins = self.shared.clone();
+        fork_coins.push(*fork_marker);
+        let mut bitcoin_previous = self
+            .scanned_transactions()
+            .map_err(|_| WorkflowError::Unchecked)?;
+        let mut fork_previous = self
+            .scanned_transactions()
+            .map_err(|_| WorkflowError::Unchecked)?;
+        controller.restore_ancestry_pair(
+            current,
+            descriptor,
+            &mut bitcoin_previous,
+            &bitcoin_coins,
+            &mut fork_previous,
+            &fork_coins,
+        )
+    }
+
     /// Read both chains using the same validated Vault descriptor. Bounds are
     /// caller-supplied so the wallet's known derivation range can be covered.
     /// The scanner stops after its configured history gap; its result must be

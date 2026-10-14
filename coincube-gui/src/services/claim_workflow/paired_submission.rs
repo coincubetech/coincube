@@ -22,7 +22,7 @@ use coincube_core::{
         AncestrySplitInputs, AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs,
         VerifiedAncestrySplitPair,
     },
-    miniscript::bitcoin::{psbt::Psbt, BlockHash, ScriptBuf, Transaction, Txid, Wtxid},
+    miniscript::bitcoin::{psbt::Psbt, BlockHash, OutPoint, ScriptBuf, Transaction, Txid, Wtxid},
 };
 use coincubed::poison_broadcast::{self, SubmissionGate, SubmissionOutcome, SubmissionRevoker};
 use serde::{Deserialize, Serialize};
@@ -136,6 +136,17 @@ pub(crate) enum InitialSignedPair {
     Split(VerifiedAncestrySplitPair),
 }
 
+/// Saved construction hints for restoring the exact initial pair from a new
+/// complete source scan. The presence of a signed journal is not fresh chain
+/// proof and this value cannot enter a broadcast gate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct RecordedInitialPairPlan {
+    pub bitcoin_funding: OutPoint,
+    pub fork_funding: OutPoint,
+    pub bitcoin_rate_vb: u64,
+    pub fork_rate_vb: u64,
+}
+
 #[allow(dead_code)] // The first-send production review is not exposed in the wizard yet.
 impl InitialSignedPair {
     fn bitcoin(&self) -> &Transaction {
@@ -218,6 +229,53 @@ fn current_time() -> Result<i64, InitialPairSubmissionError> {
 }
 
 impl Controller {
+    /// Expose only the saved chain-specific inputs and fee rates needed to
+    /// reconstruct an unattempted signed pair. The caller must rescan both
+    /// chains, restore the exact PSBTs and obtain new live requalification.
+    #[allow(dead_code)] // The resumed paired wizard will consume this hint.
+    pub(crate) fn recorded_initial_pair_plan(
+        &mut self,
+        current: &Context,
+    ) -> Result<RecordedInitialPairPlan, Error> {
+        self.ensure_context(current)?;
+        let signed = self
+            .intent
+            .paired_submission
+            .as_ref()
+            .ok_or(Error::Unchecked)?;
+        if signed.bitcoin_attempt.is_some() || signed.fork_attempt.is_some() {
+            return Err(Error::Unchecked);
+        }
+        let (bitcoin_funding, fork_funding, bitcoin_rate_vb, fork_rate_vb) =
+            match self.intent.version {
+                10 => {
+                    let bitcoin = self.intent.ancestry.as_ref().ok_or(Error::InvalidJournal)?;
+                    let fork = self
+                        .intent
+                        .funding_plan
+                        .as_ref()
+                        .ok_or(Error::InvalidJournal)?;
+                    (
+                        bitcoin.selected,
+                        fork.fork.selected,
+                        fork.bitcoin_feerate_vb,
+                        fork.fork_feerate_vb,
+                    )
+                }
+                11 => split::ancestry_funding_plan(&self.intent).ok_or(Error::InvalidJournal)?,
+                _ => return Err(Error::WrongIdentity),
+            };
+        if bitcoin_funding == fork_funding {
+            return Err(Error::InvalidPlan);
+        }
+        Ok(RecordedInitialPairPlan {
+            bitcoin_funding,
+            fork_funding,
+            bitcoin_rate_vb,
+            fork_rate_vb,
+        })
+    }
+
     /// Prepare a first-send review after a new complete wallet/source scan,
     /// saved-witness re-verification and live two-chain proof. It makes no
     /// network request and does not record a possible attempt.
@@ -290,7 +348,8 @@ impl InitialPairReview {
         preflight: &PreflightClient,
         policy: FreshnessPolicy,
     ) -> Result<InitialPairSubmissionOutcome, InitialPairSubmissionError> {
-        if self.context != *current
+        if crate::services::claim_ancestry_gate::authorization().is_none()
+            || self.context != *current
             || self.prepared_at.elapsed() >= Duration::from_secs(30)
             || !preflight.matches_provider(&current.provider)
         {
@@ -476,7 +535,8 @@ impl PostBitcoinPairReview {
         preflight: &PreflightClient,
         policy: FreshnessPolicy,
     ) -> Result<InitialPairSubmissionOutcome, InitialPairSubmissionError> {
-        if self.context != *current
+        if crate::services::claim_ancestry_gate::authorization().is_none()
+            || self.context != *current
             || self.prepared_at.elapsed() >= Duration::from_secs(30)
             || !preflight.matches_provider(&current.provider)
         {

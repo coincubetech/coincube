@@ -700,9 +700,10 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         body = body.push(p1_regular("Both deposits are visible, but their paired chain-specific ancestry has not been established. No transaction can be signed."));
                     }
                 }
-                if panel
-                    .funding_progress()
-                    .is_some_and(|progress| progress.both_verified && progress.review.is_some())
+                if crate::services::claim_ancestry_gate::authorization().is_some()
+                    && panel
+                        .funding_progress()
+                        .is_some_and(|progress| progress.both_verified && progress.review.is_some())
                 {
                     actions = actions.push(primary(
                         "Review and sign both transactions",

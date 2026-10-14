@@ -1602,6 +1602,11 @@ impl SplitPanel {
                 self.begin()
             }
             SplitMessage::BeginPairedSigning if self.stage == Stage::FundingDeposits => {
+                // A verified deposit preview is evidence, not permission to
+                // expose spendable PSBTs before the migration acceptance gate.
+                if crate::services::claim_ancestry_gate::authorization().is_none() {
+                    return Task::none();
+                }
                 let (Some(connect), Some(source), Some((_, directory)), Some(progress)) = (
                     self.connect.clone(),
                     self.funding_source.clone(),

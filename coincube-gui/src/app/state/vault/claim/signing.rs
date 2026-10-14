@@ -3,6 +3,202 @@ use super::*;
 use coincube_core::miniscript::bitcoin::hashes::sha256;
 use std::collections::BTreeSet;
 
+/// Recover only the saved unsigned Claim pair from a new two-chain Vault
+/// scan. The signed journal supplies exact funding outpoints and fee rates;
+/// it does not restore ancestry proof, complete-wallet reconciliation or
+/// permission to sign or send. A later review must run
+/// `prepare_exact_pair_intent` and reverify both saved witnesses.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // The resumed paired broadcast review will use this.
+pub(super) async fn restore_recorded_initial_pair(
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<PreparedClaimPair, String> {
+    let current = || {
+        if generation.has_changed().is_err() || *generation.borrow() != expected {
+            Err("The Connect session changed during Claim recovery.".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    current()?;
+    let descriptor = wallet.main_descriptor.clone();
+    let fork_wallet = fork_binding
+        .wallet()
+        .ok_or_else(|| "The paired BTCB2 Vault closed during Claim recovery.".to_string())?;
+    if wallet.chain != ChainId::Bitcoin
+        || !fork_binding.current()
+        || fork_wallet.chain != ChainId::BitcoinBlake2b
+        || fork_wallet.main_descriptor != descriptor
+    {
+        return Err("The paired Bitcoin and BTCB2 Vaults changed. Reopen both Cubes.".into());
+    }
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube,
+        fork_cube,
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| {
+                format!("The signed Claim journal could not be reopened: {error:?}")
+            })?;
+    let plan = controller
+        .recorded_initial_pair_plan(&context)
+        .map_err(|error| {
+            format!("This signed Claim cannot be prepared for a first send: {error:?}")
+        })?;
+    drop(controller);
+    let info = daemon
+        .get_info()
+        .await
+        .map_err(|_| "The Bitcoin Vault is unavailable for Claim recovery.".to_string())?;
+    if !bitcoin_funding_wallet_ready(&info, &descriptor) {
+        return Err("The Bitcoin Vault is not ready for Claim recovery.".into());
+    }
+    let end_exclusive = info
+        .receive_index
+        .max(info.change_index)
+        .saturating_add(128)
+        .max(256);
+    if end_exclusive > 20_000 {
+        return Err("The Vault's address range is too large for this bounded scan.".into());
+    }
+    let inventory = crate::services::claim_inventory::ClaimInventory::scan(
+        connect.client,
+        &descriptor,
+        end_exclusive,
+        64,
+        expected,
+        generation.clone(),
+    )
+    .await
+    .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+    current()?;
+    if !fork_binding.current() {
+        return Err("The paired BTCB2 Vault changed during Claim recovery.".into());
+    }
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Claim journal changed: {error:?}"))?;
+    if controller
+        .recorded_initial_pair_plan(&context)
+        .map_err(|error| format!("The signed Claim pair changed: {error:?}"))?
+        != plan
+    {
+        return Err("The signed Claim pair changed during the scan.".into());
+    }
+    let (bitcoin, fork) = inventory
+        .restore_unattempted_claim_pair_from_scan(&mut controller, &context, &descriptor)
+        .map_err(|error| format!("The saved Claim pair no longer matches this Vault: {error:?}"))?;
+    drop(controller);
+    Ok(PreparedClaimPair {
+        bitcoin,
+        fork,
+        bitcoin_funding: plan.bitcoin_funding,
+        fork_funding: plan.fork_funding,
+        bitcoin_rate_vb: plan.bitcoin_rate_vb,
+        fork_rate_vb: plan.fork_rate_vb,
+    })
+}
+
+/// Reconstruct, requalify and reverify a saved unattempted Claim pair under
+/// one live journal controller. This returns a short-lived review; it does
+/// not perform Connect preflight, record an attempt or send a transaction.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code)] // The paired recovery screen will consume this boundary.
+pub(super) async fn prepare_recorded_initial_review(
+    directory: PathBuf,
+    bitcoin_cube: String,
+    fork_cube: String,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+    fork_binding: ClaimForkBinding,
+    connect: ConnectSession,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<
+    (
+        claim_workflow::Controller,
+        claim_workflow::InitialPairReview,
+    ),
+    String,
+> {
+    let pair = restore_recorded_initial_pair(
+        directory.clone(),
+        bitcoin_cube.clone(),
+        fork_cube.clone(),
+        wallet.clone(),
+        daemon.clone(),
+        fork_binding.clone(),
+        connect.clone(),
+        expected,
+        generation.clone(),
+    )
+    .await?;
+    let requalified = prepare_exact_pair_intent(
+        pair.clone(),
+        directory.clone(),
+        bitcoin_cube.clone(),
+        fork_cube.clone(),
+        wallet.clone(),
+        daemon,
+        fork_binding.clone(),
+        connect.clone(),
+        expected,
+        generation.clone(),
+    )
+    .await?;
+    if !fork_binding.current()
+        || generation.has_changed().is_err()
+        || *generation.borrow() != expected
+    {
+        return Err("The paired BTCB2 Vault or Connect session changed before review.".into());
+    }
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube,
+        fork_cube,
+        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+    };
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| format!("The signed Claim journal changed: {error:?}"))?;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|_| "The current time is unavailable for Claim review.".to_string())?
+        .as_secs() as i64;
+    let review = requalified
+        .prepare_recorded_pair_review(
+            &mut controller,
+            &pair.bitcoin,
+            &pair.fork,
+            CHECK_POLICY.observations,
+            now,
+        )
+        .map_err(|error| format!("The signed Claim pair is no longer verified: {error:?}"))?;
+    if !fork_binding.current()
+        || generation.has_changed().is_err()
+        || *generation.borrow() != expected
+    {
+        return Err(
+            "The paired BTCB2 Vault or Connect session changed during Claim review.".into(),
+        );
+    }
+    Ok((controller, review))
+}
+
 /// Recollect the exact ordinary pair from a new two-chain scan and both
 /// complete Vault coin sets before recording its version-10 intent. A caller
 /// must repeat this at each signer dispatch: the journal is structural state,

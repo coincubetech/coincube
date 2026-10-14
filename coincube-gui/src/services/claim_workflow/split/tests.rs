@@ -48,7 +48,7 @@ fn context() -> Context {
     Context {
         generation: 1,
         account: "synthetic-account".into(),
-        provider: "https://synthetic.invalid".into(),
+        provider: "bitcoin|https://synthetic.invalid/api/v1/esplora/bitcoin/mainnet".into(),
     }
 }
 fn policy() -> Policy {
@@ -198,7 +198,7 @@ fn construction_at(wallet: &Wallet, feerate: u64) -> SplitStep1 {
 #[test]
 fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path() {
     use crate::services::{
-        foreign_scan::{Branch, BranchCoverage, ScanReport},
+        foreign_scan::{Branch, BranchCoverage, DiscoveredCoin, ScanReport},
         foreign_split_inventory::SplitInventory,
     };
     use coincube_core::{
@@ -630,6 +630,73 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert_eq!(recorded.fork_identity(), fork_id);
     assert_eq!(recorded.bitcoin(), signed.bitcoin().transaction());
     assert_eq!(recorded.fork(), signed.fork().transaction());
+    let saved_plan = reopened.recorded_initial_pair_plan(&context()).unwrap();
+    assert_eq!(saved_plan.bitcoin_funding, bitcoin_marker.outpoint);
+    assert_eq!(saved_plan.fork_funding, fork_marker.outpoint);
+    assert_eq!(saved_plan.bitcoin_rate_vb, 2);
+    assert_eq!(saved_plan.fork_rate_vb, 2);
+    let discovered = |coin: &SplitCoin, block: BlockRef| DiscoveredCoin {
+        branch: match coin.branch {
+            SplitBranch::External => Branch::External,
+            SplitBranch::Internal => Branch::Internal,
+        },
+        index: coin.index,
+        outpoint: coin.outpoint,
+        output: coin.previous.output[coin.outpoint.vout as usize].clone(),
+        previous: coin.previous.clone(),
+        confirmed: true,
+        block_height: Some(block.height as u32),
+        block_hash: Some(block.hash),
+    };
+    let scan_report = |chain, marker: &SplitCoin, block: BlockRef| {
+        let coins = shared
+            .iter()
+            .map(|coin| discovered(coin, coin.bitcoin_block.unwrap()))
+            .chain(std::iter::once(discovered(marker, block)))
+            .collect();
+        ScanReport::for_test(chain, 1, hash(7), coins)
+            .with_tip_height(TIP)
+            .with_coverage(vec![
+                BranchCoverage {
+                    branch: Branch::External,
+                    start: 0,
+                    end_exclusive: 10,
+                    last_used: Some(3),
+                },
+                BranchCoverage {
+                    branch: Branch::Internal,
+                    start: 0,
+                    end_exclusive: 10,
+                    last_used: Some(1),
+                },
+            ])
+    };
+    let fresh_inventory = SplitInventory::join(
+        &scan_report(
+            ChainId::BitcoinBlake2b,
+            &fork_marker,
+            fork_marker.btcb2_block.unwrap(),
+        )
+        .with_fork_height(Some(FORK)),
+        &scan_report(
+            ChainId::Bitcoin,
+            &bitcoin_marker,
+            bitcoin_marker.bitcoin_block.unwrap(),
+        ),
+        1,
+        true,
+    )
+    .unwrap();
+    let (rebuilt_bitcoin, rebuilt_fork) = reopened
+        .restore_unattempted_split_pair_from_scan(
+            &context(),
+            &wallet.source,
+            &target,
+            &fresh_inventory,
+        )
+        .unwrap();
+    assert_eq!(rebuilt_bitcoin.psbt(), bitcoin.psbt());
+    assert_eq!(rebuilt_fork.psbt(), fork.psbt());
     assert_eq!(reopened.status(), Status::Unchecked);
     assert!(!reopened.construction_verified);
     let reverified = reopened
@@ -666,8 +733,10 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert!(review.snapshot().fork_fee_sats > 0);
     assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
     let (_generation, receiver) = tokio::sync::watch::channel(context().generation);
-    let anonymous = crate::services::claim_preflight::PreflightClient::new(
-        "http://127.0.0.1:9",
+    // Even a matching Connect origin cannot reach the network while the
+    // paired migration's production acceptance gate is closed.
+    let matching_provider = crate::services::claim_preflight::PreflightClient::new(
+        "https://synthetic.invalid",
         crate::services::claim_observation::CollectionContext {
             expected_generation: context().generation,
             generation: receiver,
@@ -681,7 +750,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .block_on(review.confirm_and_submit(
             &mut reopened,
             &context(),
-            &anonymous,
+            &matching_provider,
             crate::services::claim_preflight::FreshnessPolicy {
                 max_age_seconds: 30,
                 max_future_skew_seconds: 5,
@@ -828,6 +897,10 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             100,
         )
         .unwrap();
+    assert!(matches!(
+        reopened.recorded_initial_pair_plan(&context()),
+        Err(Error::Unchecked)
+    ));
     let (bitcoin_gate, bitcoin_revoker) = bitcoin_attempt
         .into_split_gate(
             &signed,
@@ -1001,7 +1074,12 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .enable_all()
         .build()
         .unwrap()
-        .block_on(post_review.confirm_and_submit(&mut reopened, &context(), &anonymous, freshness));
+        .block_on(post_review.confirm_and_submit(
+            &mut reopened,
+            &context(),
+            &matching_provider,
+            freshness,
+        ));
     assert!(matches!(
         refusal,
         Err(super::super::paired_submission::InitialPairSubmissionError::InvalidReview)

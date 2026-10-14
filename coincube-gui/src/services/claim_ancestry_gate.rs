@@ -15,8 +15,9 @@ pub(crate) const CLOSED_MESSAGE: &str = "Bitcoin-only input signing is not avail
 /// needs independently verified Bitcoin-only and BTCB2-only funding coins.
 pub(crate) const NEW_CLAIM_MESSAGE: &str = "Claim will require confirmed Bitcoin-only and Bitcoin Blake2b-only funding coins in this Vault. This transaction cannot be signed until both funding coins can be verified.";
 
-// No production path consumes this token yet. Changing it requires the
-// acceptance evidence documented above and a separate paired coordinator.
+// Paired signer entry and both paired submission reviews consume this token.
+// Changing it requires the acceptance evidence documented above and a
+// complete paired coordinator.
 const ENABLED: bool = false;
 
 /// An unforgeable authorization token for production ancestry side effects.

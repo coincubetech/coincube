@@ -242,6 +242,18 @@ pub(super) fn ancestry_step2_unsigned(intent: &Intent) -> Option<&Transaction> {
         .map(|funding| &funding.step2_unsigned)
 }
 
+/// Structural inputs needed to rebuild an unsigned, still-unbroadcast
+/// ancestry pair after restart. These fields are journal hints only.
+pub(super) fn ancestry_funding_plan(intent: &Intent) -> Option<(OutPoint, OutPoint, u64, u64)> {
+    let funding = intent.split.as_ref()?.funding.as_ref()?;
+    Some((
+        funding.bitcoin.selected,
+        funding.fork.selected,
+        funding.bitcoin_feerate_vb,
+        funding.fork_feerate_vb,
+    ))
+}
+
 /// #568 S4, O4: the claimed coin fresh Bitcoin reads found missing from
 /// its address's unspent outputs while step 1 was absent, the Bitcoin tip
 /// of the reconcile that first found it, and (S4-D5) the tip at which it

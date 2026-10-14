@@ -456,6 +456,42 @@ impl RequalifiedInitialSplit {
     }
 }
 
+impl Controller {
+    /// Rebuild an unattempted signed Split's exact unsigned pair from a new
+    /// two-chain source scan. The saved marker outpoints are selectors only:
+    /// this leaves the controller unchecked and requires the caller to run
+    /// `requalify_exact_pair` against live ancestry, reservation and policy
+    /// before preparing any review or submission.
+    #[allow(dead_code)] // The resumed Split broadcast review will consume this boundary.
+    pub(crate) fn restore_unattempted_split_pair_from_scan(
+        &mut self,
+        current: &Context,
+        source: &SplitSource,
+        target: &CoincubeDescriptor,
+        inventory: &SplitInventory,
+    ) -> Result<(AncestrySplitStep1, AncestrySplitStep2), Error> {
+        let plan = self.recorded_initial_pair_plan(current)?;
+        let bitcoin_marker = inventory
+            .funding_candidate(ChainId::Bitcoin, plan.bitcoin_funding)
+            .ok_or(Error::Unchecked)?;
+        let fork_marker = inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, plan.fork_funding)
+            .ok_or(Error::Unchecked)?;
+        let shared = inventory.splittable_coins();
+        self.restore_ancestry_split_pair(
+            current,
+            source,
+            target,
+            &shared,
+            &bitcoin_marker,
+            inventory.bitcoin_tip_height(),
+            &shared,
+            &fork_marker,
+            inventory.btcb2_tip_height(),
+        )
+    }
+}
+
 /// Only the saved foreign source/target reservation and fresh stage-two
 /// requalification below can create this value. It remains read-only.
 #[allow(dead_code)] // The paired stage-two coordinator is not wired yet.

@@ -80,6 +80,14 @@ pub fn view<'a>(
                     let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
                     funding_review_view(review, threshold)
                 }))
+                .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some()
+                    && panel.funding_review().is_some())
+                    .then(|| button::primary(None, if panel.paired_signing_pending() {
+                        "Checking both transactions…"
+                    } else {
+                        "Review and sign both transactions"
+                    }).on_press_maybe((!panel.paired_signing_pending() && !panel.funding_checking())
+                        .then_some(Message::Claim(ClaimMessage::SignPair)))))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
         StageView::PairedRecovery(recovery, checking, error) => dashboard(

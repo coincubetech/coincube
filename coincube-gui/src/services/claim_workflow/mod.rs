@@ -8,6 +8,7 @@ mod paired_recovery;
 pub(crate) mod paired_signing_permit;
 pub(crate) use paired_recovery::{ChainState as PairedChainState, SideReport as PairedSideReport};
 mod paired_submission;
+pub(crate) use paired_submission::InitialPairReview;
 mod recovery;
 mod reorg;
 mod split;
