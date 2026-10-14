@@ -466,6 +466,23 @@ pub trait SplitConnect: Send + Sync {
     ) -> Result<(Txid, Txid), String> {
         Err("Two-chain Split signing is unavailable for this session.".into())
     }
+    /// Check all signer returns against a newly requalified pair. An
+    /// aggregate is not live ancestry evidence or permission to submit.
+    #[allow(clippy::too_many_arguments)]
+    async fn check_exact_signer_returns(
+        &self,
+        _directory: PathBuf,
+        _source: &SplitSource,
+        _target_cube: &str,
+        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _bitcoin: &AncestrySplitStep1,
+        _bitcoin_returns: &[Psbt],
+        _fork: &AncestrySplitStep2,
+        _fork_returns: &[Psbt],
+        _rates: (u64, u64),
+    ) -> Result<split_psbt_file::CombinedAncestrySplit, String> {
+        Err("Two-chain Split signing is unavailable for this session.".into())
+    }
     /// Opens or creates the journal. Blocking: callers use `spawn_blocking`.
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error>;
 }
@@ -548,6 +565,14 @@ pub(super) struct PreparedSplitPair {
 }
 
 impl PreparedSplitPair {
+    pub(super) fn signing_plan(&self) -> (AncestrySplitStep1, AncestrySplitStep2, (u64, u64)) {
+        (
+            self.bitcoin.clone(),
+            self.fork.clone(),
+            (self.bitcoin_rate_vb, self.fork_rate_vb),
+        )
+    }
+
     fn matches_review(
         &self,
         review: &crate::app::view::vault::ancestry_coins::VerifiedCoinPairReview,
@@ -1386,6 +1411,48 @@ impl SplitConnect for ProductionConnect {
             return Err("The Connect session changed while recording this split.".into());
         }
         Ok(result)
+    }
+    async fn check_exact_signer_returns(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_returns: &[Psbt],
+        fork: &AncestrySplitStep2,
+        fork_returns: &[Psbt],
+        rates: (u64, u64),
+    ) -> Result<split_psbt_file::CombinedAncestrySplit, String> {
+        let (_, target_descriptor) = target_vault
+            .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
+        let check = self
+            .prepare_exact_pair_intent(
+                directory,
+                source,
+                target_cube,
+                target_vault,
+                bitcoin,
+                fork,
+                rates,
+            )
+            .await?;
+        let combined = check
+            .requalified
+            .combine_signer_returns(
+                target_descriptor,
+                bitcoin,
+                bitcoin_returns,
+                fork,
+                fork_returns,
+            )
+            .map_err(|error| {
+                format!("The signed Split files do not match the verified pair: {error:?}")
+            })?;
+        if !self.session_current() || self.context() != *check.context() {
+            return Err("The Connect session changed while checking the signed files.".into());
+        }
+        Ok(combined)
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
         let production = SplitProduction::new(

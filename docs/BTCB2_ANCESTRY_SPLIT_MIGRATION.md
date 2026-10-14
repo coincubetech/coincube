@@ -370,8 +370,18 @@ a replayable spend.
    signed ordinary PSBTs: it rescans and requalifies the exact pair, checks
    each signer return, reopens the version-11 journal, verifies both complete
    signed transactions against the live proof and atomically records both
-   witnesses. The UI does not call this boundary yet; it does not preflight
-   or send either transaction.
+   witnesses. The Split panel now opens a paired file-signing stage only after
+   a fresh requalification creates or reopens the exact intent. Each unsigned
+   file export repeats that check and consumes a short-lived, one-use permit;
+   each imported signer file is combined under another fresh paired scan.
+   Connected-device signing now has distinct Bitcoin and BTCB2 actions: the
+   panel builds its listing from the source policy, repeats the same live
+   requalification, consumes a one-use permit before opening the device, and
+   sends returned PSBTs through the same strict combiner as files. Once both
+   sides are complete, the panel invokes the finalization boundary and
+   reopens read-only recovery. This route does not yet have paired preflight,
+   a submission coordinator or broadcast, and device support still needs
+   independent hardware smoke tests.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks

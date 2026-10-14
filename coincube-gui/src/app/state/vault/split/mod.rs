@@ -75,9 +75,10 @@ use std::{
 use iced::Task;
 
 use coincube_core::{
+    chain::ChainId,
     claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
     descriptors::CoincubeDescriptor,
-    foreign_split::{SplitCoin, SplitSource, SplitStep1},
+    foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitCoin, SplitSource, SplitStep1},
     miniscript::bitcoin::{
         consensus::encode::serialize_hex, hashes::sha256, psbt::Psbt, OutPoint, Transaction, Txid,
     },
@@ -113,6 +114,9 @@ pub enum Stage {
     /// Fresh two-chain address checks passed; deposits are still candidates,
     /// never signing authority until both ancestry proofs are collected.
     FundingDeposits,
+    /// Both ordinary PSBTs were requalified against one live source scan.
+    /// Each later signer dispatch repeats that check; no send is available.
+    PairedSign,
     /// A version-11 ordinary two-chain record, reopened for status only.
     PairedRecovery,
     /// #568 B4b-3c: the single-step (fork-only) route.
@@ -171,6 +175,9 @@ pub enum Step2Stage {
 pub enum Work {
     ReservingFunding,
     CheckingFunding,
+    PreparingPairedSign,
+    CheckingPairedSignatures,
+    RecordingPairedSignatures,
     Checking,
     Building,
     Exporting,
@@ -392,6 +399,15 @@ pub enum SplitEvent {
         Result<(SplitSource, step1::CheckedFundingAddresses), String>,
     ),
     FundingChecked(u64, Result<step1::SplitDepositProgress, String>),
+    PairedSigningPrepared(u64, Result<(), String>),
+    PairedSignaturesChecked(
+        u64,
+        Result<(Vec<Psbt>, Vec<Psbt>, split_psbt_file::CombinedAncestrySplit), String>,
+    ),
+    PairedSignaturesRecorded(u64, Result<(Txid, Txid), String>),
+    PairedExportChosen(u64, ChainId, Encoding, Option<PathBuf>),
+    PairedImportChosen(u64, ChainId, Option<Vec<PathBuf>>),
+    PairedExported(u64, Result<PathBuf, String>),
     /// Read-only proof and fee preview must not remain displayed as current.
     FundingReviewExpired(u64),
     Checked(u64, Result<Box<Prepared>, Refusal>),
@@ -522,6 +538,9 @@ pub enum SplitMessage {
     Retry,
     CheckPaired,
     CheckDeposits,
+    BeginPairedSigning,
+    ExportPairedUnsigned(ChainId, Encoding),
+    ImportPairedSigned(ChainId),
     ExportUnsigned(Encoding),
     ImportSigned,
     Review,
@@ -591,6 +610,7 @@ pub struct SplitPanel {
     funding_source: Option<SplitSource>,
     funding_addresses: Option<step1::CheckedFundingAddresses>,
     funding_progress: Option<step1::SplitDepositProgress>,
+    paired_signing: Option<PairedSplitSigning>,
     paired_recovery: Option<PairedSplitRecovery>,
     prepared: Option<Box<Prepared>>,
     construction: Option<Box<SplitStep1>>,
@@ -695,6 +715,20 @@ pub struct SplitPanel {
     legacy_flow_fixture: bool,
 }
 
+/// Retained exact constructions and signer returns. This holds no ancestry
+/// authority; `SplitConnect` rechecks the source and reservation for each
+/// file dispatch and again before recording final signed witnesses.
+#[derive(Debug)]
+struct PairedSplitSigning {
+    bitcoin: AncestrySplitStep1,
+    fork: AncestrySplitStep2,
+    rates: (u64, u64),
+    bitcoin_current: Psbt,
+    fork_current: Psbt,
+    bitcoin_returns: Vec<Psbt>,
+    fork_returns: Vec<Psbt>,
+}
+
 impl fmt::Debug for SplitPanel {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("SplitPanel")
@@ -721,6 +755,7 @@ impl SplitPanel {
             funding_source: None,
             funding_addresses: None,
             funding_progress: None,
+            paired_signing: None,
             paired_recovery: None,
             prepared: None,
             construction: None,
@@ -852,6 +887,18 @@ impl SplitPanel {
         self.funding_progress
             .as_ref()
             .filter(|progress| progress.exact_review_retained())
+    }
+    pub fn paired_signing_view(
+        &self,
+    ) -> Option<(&AncestrySplitStep1, &AncestrySplitStep2, usize, usize)> {
+        self.paired_signing.as_ref().map(|signing| {
+            (
+                &signing.bitcoin,
+                &signing.fork,
+                signing.bitcoin_returns.len(),
+                signing.fork_returns.len(),
+            )
+        })
     }
     pub fn funding_signing_threshold(&self) -> Option<usize> {
         self.funding_source
@@ -1014,6 +1061,7 @@ impl SplitPanel {
         self.device.close();
         self.funding_addresses = None;
         self.funding_progress = None;
+        self.paired_signing = None;
         self.paired_recovery = None;
         self.funding_source = None;
         self.funding_target_binding = None;
@@ -1287,6 +1335,87 @@ impl SplitPanel {
         })
     }
 
+    fn record_paired_signatures(
+        &mut self,
+        combined: split_psbt_file::CombinedAncestrySplit,
+    ) -> Task<Message> {
+        let (Some(connect), Some(source), Some((_, directory)), Some(signing)) = (
+            self.connect.clone(),
+            self.funding_source.clone(),
+            self.funding_journal.clone(),
+            self.paired_signing.as_ref(),
+        ) else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        let bitcoin = signing.bitcoin.clone();
+        let fork = signing.fork.clone();
+        let rates = signing.rates;
+        self.stage = Stage::Working(Work::RecordingPairedSignatures);
+        self.spawn(
+            async move {
+                connect
+                    .record_exact_signed_pair(
+                        directory,
+                        &source,
+                        &target,
+                        target_vault.as_ref(),
+                        &bitcoin,
+                        &combined.bitcoin,
+                        &fork,
+                        &combined.fork,
+                        rates,
+                    )
+                    .await
+            },
+            SplitEvent::PairedSignaturesRecorded,
+        )
+    }
+
+    fn import_paired_device_psbt(&mut self, chain: ChainId, returned: Psbt) -> Task<Message> {
+        let (Some(connect), Some(source), Some((_, directory)), Some(signing)) = (
+            self.connect.clone(),
+            self.funding_source.clone(),
+            self.funding_journal.clone(),
+            self.paired_signing.as_ref(),
+        ) else {
+            return Task::none();
+        };
+        let target = self.target_cube.clone();
+        let target_vault = self.target_vault.clone();
+        let bitcoin = signing.bitcoin.clone();
+        let fork = signing.fork.clone();
+        let rates = signing.rates;
+        let mut bitcoin_returns = signing.bitcoin_returns.clone();
+        let mut fork_returns = signing.fork_returns.clone();
+        match chain {
+            ChainId::Bitcoin => bitcoin_returns.push(returned),
+            ChainId::BitcoinBlake2b => fork_returns.push(returned),
+            _ => return Task::none(),
+        }
+        self.stage = Stage::Working(Work::CheckingPairedSignatures);
+        self.spawn(
+            async move {
+                let combined = connect
+                    .check_exact_signer_returns(
+                        directory,
+                        &source,
+                        &target,
+                        target_vault.as_ref(),
+                        &bitcoin,
+                        &bitcoin_returns,
+                        &fork,
+                        &fork_returns,
+                        rates,
+                    )
+                    .await?;
+                Ok((bitcoin_returns, fork_returns, combined))
+            },
+            SplitEvent::PairedSignaturesChecked,
+        )
+    }
+
     fn take_driver(&mut self, work: Work) -> Option<(Box<dyn Step1Driver>, Arc<dyn SplitConnect>)> {
         let connect = self.connect.clone()?;
         let driver = self.driver.take()?;
@@ -1463,6 +1592,101 @@ impl SplitPanel {
             SplitMessage::CheckPaired if self.stage == Stage::PairedRecovery => {
                 self.stage = Stage::NeedsSession;
                 self.begin()
+            }
+            SplitMessage::BeginPairedSigning if self.stage == Stage::FundingDeposits => {
+                let (Some(connect), Some(source), Some((_, directory)), Some(progress)) = (
+                    self.connect.clone(),
+                    self.funding_source.clone(),
+                    self.funding_journal.clone(),
+                    self.funding_progress.as_ref(),
+                ) else {
+                    return Task::none();
+                };
+                if !progress.both_verified || !progress.exact_review_retained() {
+                    return Task::none();
+                }
+                let Some(prepared) = progress.prepared.as_ref() else {
+                    return Task::none();
+                };
+                let (bitcoin, fork, rates) = prepared.signing_plan();
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                self.paired_signing = Some(PairedSplitSigning {
+                    bitcoin_current: bitcoin.psbt().clone(),
+                    fork_current: fork.psbt().clone(),
+                    bitcoin: bitcoin.clone(),
+                    fork: fork.clone(),
+                    rates,
+                    bitcoin_returns: Vec::new(),
+                    fork_returns: Vec::new(),
+                });
+                self.funding_progress = None;
+                self.notice = None;
+                self.stage = Stage::Working(Work::PreparingPairedSign);
+                self.spawn(
+                    async move {
+                        connect
+                            .prepare_exact_pair_intent(
+                                directory,
+                                &source,
+                                &target,
+                                target_vault.as_ref(),
+                                &bitcoin,
+                                &fork,
+                                rates,
+                            )
+                            .await
+                            .map(|_| ())
+                    },
+                    SplitEvent::PairedSigningPrepared,
+                )
+            }
+            SplitMessage::ExportPairedUnsigned(chain, encoding)
+                if self.stage == Stage::PairedSign && self.paired_signing.is_some() =>
+            {
+                let name = match (chain, encoding) {
+                    (ChainId::Bitcoin, Encoding::Binary) => "split-bitcoin.psbt",
+                    (ChainId::Bitcoin, Encoding::Base64) => "split-bitcoin.txt",
+                    (ChainId::BitcoinBlake2b, Encoding::Binary) => "split-btcb2.psbt",
+                    (ChainId::BitcoinBlake2b, Encoding::Base64) => "split-btcb2.txt",
+                    _ => return Task::none(),
+                };
+                Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .set_file_name(name)
+                            .save_file()
+                            .await
+                            .map(|handle| handle.path().to_path_buf())
+                    },
+                    move |path| {
+                        Message::Split(Box::new(SplitEvent::PairedExportChosen(
+                            seq, chain, encoding, path,
+                        )))
+                    },
+                )
+            }
+            SplitMessage::ImportPairedSigned(chain)
+                if self.stage == Stage::PairedSign
+                    && self.paired_signing.is_some()
+                    && matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) =>
+            {
+                Task::perform(
+                    async move {
+                        rfd::AsyncFileDialog::new()
+                            .pick_files()
+                            .await
+                            .map(|handles| {
+                                handles
+                                    .iter()
+                                    .map(|handle| handle.path().to_path_buf())
+                                    .collect::<Vec<_>>()
+                            })
+                    },
+                    move |paths| {
+                        Message::Split(Box::new(SplitEvent::PairedImportChosen(seq, chain, paths)))
+                    },
+                )
             }
             SplitMessage::CheckDeposits if self.stage == Stage::FundingDeposits => {
                 let (Some(connect), Some(source), Some((_, directory))) = (
@@ -1811,6 +2035,205 @@ impl SplitPanel {
             SplitEvent::FundingChecked(_, Err(reason)) => {
                 self.notice = Some(reason);
                 self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::PairedSigningPrepared(_, result) => {
+                if self.stage != Stage::Working(Work::PreparingPairedSign) {
+                    return Task::none();
+                }
+                match result {
+                    Ok(()) if self.paired_signing.is_some() => {
+                        self.stage = Stage::PairedSign;
+                    }
+                    Ok(()) => {
+                        self.stage = Stage::FundingDeposits;
+                        self.notice = Some(
+                            "The paired Split signing state was lost. Check both deposits again."
+                                .into(),
+                        );
+                    }
+                    Err(reason) => {
+                        self.paired_signing = None;
+                        self.stage = Stage::FundingDeposits;
+                        self.notice = Some(reason);
+                    }
+                }
+                Task::none()
+            }
+            SplitEvent::PairedExportChosen(_, chain, encoding, Some(path))
+                if self.stage == Stage::PairedSign =>
+            {
+                let (Some(connect), Some(source), Some((_, directory)), Some(signing)) = (
+                    self.connect.clone(),
+                    self.funding_source.clone(),
+                    self.funding_journal.clone(),
+                    self.paired_signing.as_ref(),
+                ) else {
+                    return Task::none();
+                };
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                let bitcoin = signing.bitcoin.clone();
+                let fork = signing.fork.clone();
+                let rates = signing.rates;
+                let psbt = match chain {
+                    ChainId::Bitcoin => bitcoin.psbt().clone(),
+                    ChainId::BitcoinBlake2b => fork.psbt().clone(),
+                    _ => return Task::none(),
+                };
+                self.stage = Stage::Working(Work::Exporting);
+                self.spawn(
+                    async move {
+                        let check = connect
+                            .prepare_exact_pair_intent(
+                                directory,
+                                &source,
+                                &target,
+                                target_vault.as_ref(),
+                                &bitcoin,
+                                &fork,
+                                rates,
+                            )
+                            .await?;
+                        let permit = check
+                            .signer_permit(chain, &bitcoin, &fork, &psbt)
+                            .ok_or_else(|| {
+                                "The paired signing check expired. Check both deposits again."
+                                    .to_string()
+                            })?;
+                        if !connect.session_current() || !permit.consume(chain, &psbt) {
+                            return Err(
+                                "The paired signing check expired. Check both deposits again."
+                                    .into(),
+                            );
+                        }
+                        let encoded = split_psbt_file::encode(&psbt, encoding);
+                        let saved = path.clone();
+                        tokio::task::spawn_blocking(move || std::fs::write(&saved, encoded))
+                            .await
+                            .map_err(|_| "Saving the Split PSBT was interrupted.".to_string())?
+                            .map_err(|error| {
+                                format!("The Split PSBT could not be saved: {error}")
+                            })?;
+                        Ok(path)
+                    },
+                    SplitEvent::PairedExported,
+                )
+            }
+            SplitEvent::PairedExportChosen(..) => Task::none(),
+            SplitEvent::PairedImportChosen(_, chain, Some(paths))
+                if self.stage == Stage::PairedSign && !paths.is_empty() =>
+            {
+                let (Some(connect), Some(source), Some((_, directory)), Some(signing)) = (
+                    self.connect.clone(),
+                    self.funding_source.clone(),
+                    self.funding_journal.clone(),
+                    self.paired_signing.as_ref(),
+                ) else {
+                    return Task::none();
+                };
+                let target = self.target_cube.clone();
+                let target_vault = self.target_vault.clone();
+                let bitcoin = signing.bitcoin.clone();
+                let fork = signing.fork.clone();
+                let rates = signing.rates;
+                let mut bitcoin_returns = signing.bitcoin_returns.clone();
+                let mut fork_returns = signing.fork_returns.clone();
+                self.stage = Stage::Working(Work::CheckingPairedSignatures);
+                self.spawn(
+                    async move {
+                        let loaded = tokio::task::spawn_blocking(move || {
+                            paths
+                                .iter()
+                                .map(|path| split_psbt_file::load(path))
+                                .collect::<Result<Vec<_>, _>>()
+                        })
+                        .await
+                        .map_err(|_| "Reading the signed Split files was interrupted.".to_string())?
+                        .map_err(|error| error.to_string())?;
+                        match chain {
+                            ChainId::Bitcoin => bitcoin_returns.extend(loaded),
+                            ChainId::BitcoinBlake2b => fork_returns.extend(loaded),
+                            _ => return Err("The signing chain is unsupported.".into()),
+                        }
+                        let combined = connect
+                            .check_exact_signer_returns(
+                                directory,
+                                &source,
+                                &target,
+                                target_vault.as_ref(),
+                                &bitcoin,
+                                &bitcoin_returns,
+                                &fork,
+                                &fork_returns,
+                                rates,
+                            )
+                            .await?;
+                        Ok((bitcoin_returns, fork_returns, combined))
+                    },
+                    SplitEvent::PairedSignaturesChecked,
+                )
+            }
+            SplitEvent::PairedImportChosen(..) => Task::none(),
+            SplitEvent::PairedExported(_, result) => {
+                if self.stage != Stage::Working(Work::Exporting) {
+                    return Task::none();
+                }
+                self.stage = Stage::PairedSign;
+                self.notice = Some(match result {
+                    Ok(path) => format!("Unsigned Split PSBT saved to {}.", path.display()),
+                    Err(reason) => reason,
+                });
+                Task::none()
+            }
+            SplitEvent::PairedSignaturesChecked(_, result) => {
+                if self.stage != Stage::Working(Work::CheckingPairedSignatures) {
+                    return Task::none();
+                }
+                self.stage = Stage::PairedSign;
+                match result {
+                    Ok((bitcoin_returns, fork_returns, combined)) => {
+                        let Some(signing) = self.paired_signing.as_mut() else {
+                            return Task::none();
+                        };
+                        signing.bitcoin_returns = bitcoin_returns;
+                        signing.fork_returns = fork_returns;
+                        signing.bitcoin_current = combined.bitcoin.clone();
+                        signing.fork_current = combined.fork.clone();
+                        self.notice = Some(if combined.complete {
+                            "Both transactions have complete signatures. Rechecking both chains before saving the signed pair.".into()
+                        } else {
+                            "Signatures verified. More signatures are needed on one or both chains."
+                                .into()
+                        });
+                        if combined.complete {
+                            return self.record_paired_signatures(combined);
+                        }
+                    }
+                    Err(reason) => self.notice = Some(reason),
+                }
+                Task::none()
+            }
+            SplitEvent::PairedSignaturesRecorded(_, result) => {
+                if self.stage != Stage::Working(Work::RecordingPairedSignatures)
+                    || self.paired_signing.is_none()
+                    || self.funding_journal.is_none()
+                {
+                    return Task::none();
+                }
+                match result {
+                    Ok(_) => {
+                        self.paired_signing = None;
+                        self.journal = self.funding_journal.take();
+                        self.stage = Stage::NeedsSession;
+                        self.notice = Some("Both signed transactions are recorded on this device. Nothing has been broadcast.".into());
+                        return self.begin();
+                    }
+                    Err(reason) => {
+                        self.stage = Stage::PairedSign;
+                        self.notice = Some(reason);
+                    }
+                }
                 Task::none()
             }
             SplitEvent::FundingReviewExpired(_) => {
@@ -2181,6 +2604,12 @@ impl SplitEvent {
             Self::FundingPrepared(seq, _)
             | Self::FundingRecovered(seq, _)
             | Self::FundingChecked(seq, _)
+            | Self::PairedSigningPrepared(seq, _)
+            | Self::PairedSignaturesChecked(seq, _)
+            | Self::PairedSignaturesRecorded(seq, _)
+            | Self::PairedExportChosen(seq, ..)
+            | Self::PairedImportChosen(seq, ..)
+            | Self::PairedExported(seq, _)
             | Self::FundingReviewExpired(seq)
             | Self::Checked(seq, _)
             | Self::Built(seq, _)

@@ -212,6 +212,16 @@ impl RequalifiedInitialSplit {
         {
             return Err(Error::WrongIdentity);
         }
+        let combined = self.combine_signer_returns(
+            target,
+            bitcoin,
+            std::slice::from_ref(bitcoin_signed),
+            fork,
+            std::slice::from_ref(fork_signed),
+        )?;
+        if !combined.complete {
+            return Err(Error::Unchecked);
+        }
         let bitcoin_dependency = self
             .funding
             .bitcoin_path
@@ -248,18 +258,6 @@ impl RequalifiedInitialSplit {
                 .script_pubkey
                 .as_script(),
         };
-        let combined = crate::services::split_psbt_file::combine_ancestry_split_pair(
-            bitcoin,
-            &bitcoin_inputs,
-            std::slice::from_ref(bitcoin_signed),
-            fork,
-            &fork_inputs,
-            std::slice::from_ref(fork_signed),
-        )
-        .map_err(|_| Error::InvalidPlan)?;
-        if !combined.complete {
-            return Err(Error::Unchecked);
-        }
         let (verified, _) = controller.finalize_ancestry_split_pair_for_review(
             &self.context,
             self,
@@ -275,6 +273,69 @@ impl RequalifiedInitialSplit {
             self.tips,
         )?;
         Ok(verified)
+    }
+
+    /// Authenticate independent file or device returns under the current
+    /// two-chain source scan. This result is only a signature aggregate;
+    /// final recording repeats the live scan and journal check.
+    pub(crate) fn combine_signer_returns(
+        &self,
+        target: &CoincubeDescriptor,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_returns: &[Psbt],
+        fork: &AncestrySplitStep2,
+        fork_returns: &[Psbt],
+    ) -> Result<crate::services::split_psbt_file::CombinedAncestrySplit, Error> {
+        if !self.matches_pair(target, bitcoin, fork)
+            || self.checked_at.elapsed() >= Duration::from_secs(10)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let bitcoin_dependency = self
+            .funding
+            .bitcoin_path
+            .reverify()
+            .map_err(|_| Error::Unchecked)?;
+        let fork_dependency = self
+            .funding
+            .fork_path
+            .reverify()
+            .map_err(|_| Error::Unchecked)?;
+        let bitcoin_inputs = AncestrySplitInputs {
+            chain: bitcoin.chain(),
+            source: bitcoin.source(),
+            shared: &self.shared,
+            funding: &self.funding.bitcoin,
+            dependency: &bitcoin_dependency,
+            fork_height: bitcoin.fork_height(),
+            destination: bitcoin.destination(),
+        };
+        let fork_inputs = AncestrySplitStep2Inputs {
+            chain: fork.chain(),
+            source: fork.source(),
+            shared: &self.shared,
+            funding: &self.funding.fork,
+            dependency: &fork_dependency,
+            fork_height: fork.fork_height(),
+            claimed: bitcoin.claimed_prevouts(),
+            target: fork
+                .psbt()
+                .unsigned_tx
+                .output
+                .first()
+                .ok_or(Error::InvalidPlan)?
+                .script_pubkey
+                .as_script(),
+        };
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            bitcoin,
+            &bitcoin_inputs,
+            bitcoin_returns,
+            fork,
+            &fork_inputs,
+            fork_returns,
+        )
+        .map_err(|_| Error::InvalidPlan)
     }
 }
 

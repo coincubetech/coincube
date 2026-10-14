@@ -757,6 +757,12 @@ async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() 
         assert!(panel.funding_progress().is_none());
         assert!(panel.notice().is_some());
         assert!(panel.construction().is_none());
+        // A deposit address or an unproven candidate cannot open either
+        // ordinary PSBT for signing, even when Connect is authenticated.
+        let task = panel.update(SplitMessage::BeginPairedSigning);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        assert!(panel.paired_signing.is_none());
         assert!(temp.root().exists());
     }
 }

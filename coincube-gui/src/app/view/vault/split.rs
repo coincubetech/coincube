@@ -5,6 +5,7 @@
 //! step 1 has six confirmations.
 
 use coincube_core::{
+    chain::ChainId,
     claim::MIN_CONFIRMATIONS,
     miniscript::bitcoin::{Address, Network},
 };
@@ -66,10 +67,22 @@ fn funding_address_row(address: String, notice: &'static str) -> Element<'static
         .into()
 }
 
+fn signed_pair_destination(psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt) -> String {
+    psbt.unsigned_tx
+        .output
+        .first()
+        .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
+        .map(|address| address.to_string())
+        .unwrap_or_else(|| "Unavailable; inspect the PSBT output on your signer".into())
+}
+
 fn working(work: Work) -> &'static str {
     match work {
         Work::ReservingFunding => "Saving fresh deposit addresses and checking both chains for prior use…",
         Work::CheckingFunding => "Scanning both chains and checking deposit ancestry…",
+        Work::PreparingPairedSign => "Rechecking both chains and saving the exact signing intent…",
+        Work::CheckingPairedSignatures => "Checking both chains and the returned signatures…",
+        Work::RecordingPairedSignatures => "Recording both signed transactions on this device…",
         Work::Checking => "Checking the fork, fees and the fresh address…",
         Work::Building => "Building step 1…",
         Work::Exporting => "Saving the PSBT file…",
@@ -287,6 +300,20 @@ fn device_section<'a>(
         actions = actions.push(action(
             "Close device list",
             SplitMessage::Device(DeviceMessage::Cancel),
+        ));
+    } else if panel.can_open_paired_device(step) {
+        let chain = if step == DeviceStep::PairedBitcoin {
+            ChainId::Bitcoin
+        } else {
+            ChainId::BitcoinBlake2b
+        };
+        actions = actions.push(action(
+            if chain == ChainId::Bitcoin {
+                "Sign Bitcoin on device"
+            } else {
+                "Sign BTCB2 on device"
+            },
+            SplitMessage::Device(DeviceMessage::OpenPaired(chain)),
         ));
     } else if panel.can_open_device() {
         actions = actions.push(action(
@@ -522,6 +549,8 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let mut body = Column::new().spacing(10).max_width(640);
     body = if matches!(panel.stage(), Stage::PairedRecovery) {
         body.push(h3("Recorded two-chain split"))
+    } else if matches!(panel.stage(), Stage::PairedSign) {
+        body.push(h3("Split: sign both transactions"))
     } else if single {
         body.push(h3("Split")).push(
             p1_regular(
@@ -639,8 +668,84 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         body = body.push(p1_regular("Both deposits are visible, but their paired chain-specific ancestry has not been established. No transaction can be signed."));
                     }
                 }
+                if panel
+                    .funding_progress()
+                    .is_some_and(|progress| progress.both_verified && progress.review.is_some())
+                {
+                    actions = actions.push(primary(
+                        "Review and sign both transactions",
+                        SplitMessage::BeginPairedSigning,
+                    ));
+                }
                 actions = actions.push(action("Check deposits", SplitMessage::CheckDeposits));
             }
+        }
+        Stage::PairedSign => {
+            body = body.push(p1_regular("Both ordinary transactions are bound to the same source coins and separately verified chain-specific deposits. Recheck the full destination and fee on each signing device. Nothing has been sent."));
+            if let Some((bitcoin, fork, bitcoin_files, fork_files)) = panel.paired_signing_view() {
+                body = body
+                    .push(p1_regular(format!(
+                        "Both transactions spend the same {} shared pre-fork coin(s).",
+                        bitcoin.claimed_prevouts().len()
+                    )))
+                    .push(p1_bold("Bitcoin transaction"))
+                    .push(caption(format!(
+                        "Unsigned txid {} · Bitcoin-only input {} · fee {} sats · {} signer return(s)",
+                        bitcoin.psbt().unsigned_tx.compute_txid(),
+                        bitcoin.funding_prevout(),
+                        bitcoin.fee().to_sat(),
+                        bitcoin_files,
+                    )))
+                    .push(caption(format!(
+                        "Return address: {}",
+                        signed_pair_destination(bitcoin.psbt())
+                    )))
+                    .push(p1_bold("Bitcoin Blake2b transaction"))
+                    .push(caption(format!(
+                        "Unsigned txid {} · BTCB2-only input {} · fee {} sats · {} signer return(s)",
+                        fork.psbt().unsigned_tx.compute_txid(),
+                        fork.funding_prevout(),
+                        fork.fee().to_sat(),
+                        fork_files,
+                    )))
+                    .push(caption(format!(
+                        "Target address: {}",
+                        signed_pair_destination(fork.psbt())
+                    )));
+                for coin in bitcoin.claimed_prevouts() {
+                    body = body.push(caption(format!("Shared input: {coin}")));
+                }
+            }
+            body = body
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(action(
+                            "Save Bitcoin PSBT",
+                            SplitMessage::ExportPairedUnsigned(ChainId::Bitcoin, Encoding::Binary),
+                        ))
+                        .push(action(
+                            "Import Bitcoin signatures",
+                            SplitMessage::ImportPairedSigned(ChainId::Bitcoin),
+                        )),
+                )
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(action(
+                            "Save BTCB2 PSBT",
+                            SplitMessage::ExportPairedUnsigned(
+                                ChainId::BitcoinBlake2b,
+                                Encoding::Binary,
+                            ),
+                        ))
+                        .push(action(
+                            "Import BTCB2 signatures",
+                            SplitMessage::ImportPairedSigned(ChainId::BitcoinBlake2b),
+                        )),
+                );
+            (body, actions) = device_section(panel, DeviceStep::PairedBitcoin, body, actions);
+            (body, actions) = device_section(panel, DeviceStep::PairedFork, body, actions);
         }
         Stage::ChooseRoute => {
             body = body.push(p1_regular(step1::RETIRED_MARKER).style(theme::text::warning));

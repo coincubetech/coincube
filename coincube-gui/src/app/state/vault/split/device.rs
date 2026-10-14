@@ -25,7 +25,7 @@
 
 use std::sync::Arc;
 
-use coincube_core::{foreign_split::SplitSource, miniscript::bitcoin::Network};
+use coincube_core::{chain::ChainId, foreign_split::SplitSource, miniscript::bitcoin::Network};
 use iced::{Subscription, Task};
 
 use super::{SplitEvent, SplitMessage, SplitPanel, Stage, Step2Stage, Work};
@@ -50,6 +50,8 @@ use crate::{
 pub enum DeviceStep {
     Step1,
     Step2,
+    PairedBitcoin,
+    PairedFork,
 }
 
 /// Device intents, inside [`SplitMessage::Device`].
@@ -57,6 +59,7 @@ pub enum DeviceStep {
 pub enum DeviceMessage {
     /// Open the device listing for this step's policy.
     Open,
+    OpenPaired(ChainId),
     /// The listing's refresh subscription.
     Devices(HardwareWalletMessage),
     /// Sign with the listed device of this id.
@@ -73,6 +76,8 @@ pub fn step_copy(step: DeviceStep) -> &'static [&'static str] {
             DEVICE_SHOWS_BITCOIN_WARNING,
             STEP2_DEVICE_SHOWS_BITCOIN_WARNING,
         ],
+        DeviceStep::PairedBitcoin => &["Verify the Bitcoin return address and fee on the device. This PSBT spends the Bitcoin-only funding coin with every shared coin."],
+        DeviceStep::PairedFork => &["Verify the BTCB2 target address and fee on the device. This PSBT spends the BTCB2-only funding coin with the same shared coins."],
     }
 }
 
@@ -259,6 +264,10 @@ impl SplitPanel {
     /// step 2's build is waiting for signatures.
     pub fn device_step(&self) -> Option<DeviceStep> {
         match self.stage {
+            Stage::PairedSign => self
+                .device
+                .step
+                .filter(|step| matches!(step, DeviceStep::PairedBitcoin | DeviceStep::PairedFork)),
             Stage::Sign if self.construction.is_some() => Some(DeviceStep::Step1),
             Stage::Step2(Step2Stage::Sign)
                 if self.step2_psbt.is_some() && self.construction.is_some() =>
@@ -282,6 +291,18 @@ impl SplitPanel {
                 .is_some_and(|construction| signing_routes(construction.source()).in_app_hardware)
     }
 
+    pub fn can_open_paired_device(&self, step: DeviceStep) -> bool {
+        matches!(step, DeviceStep::PairedBitcoin | DeviceStep::PairedFork)
+            && self.stage == Stage::PairedSign
+            && self.paired_signing.is_some()
+            && self.device.datadir.is_some()
+            && !self.device.is_open()
+            && self
+                .funding_source
+                .as_ref()
+                .is_some_and(|source| signing_routes(source).in_app_hardware)
+    }
+
     /// The listing's refresh, while it is open for the step on screen or a
     /// device is working on it.
     pub fn subscription(&self) -> Subscription<SplitMessage> {
@@ -299,14 +320,49 @@ impl SplitPanel {
         self.stage = match step {
             DeviceStep::Step1 => Stage::Sign,
             DeviceStep::Step2 => Stage::Step2(Step2Stage::Sign),
+            DeviceStep::PairedBitcoin | DeviceStep::PairedFork => Stage::PairedSign,
         };
     }
 
     pub(super) fn update_device(&mut self, message: DeviceMessage) -> Task<Message> {
-        if !self.can_sign_or_submit() {
+        if !self.can_sign_or_submit()
+            && !matches!(
+                self.stage,
+                Stage::PairedSign
+                    | Stage::Working(Work::ListingDevices)
+                    | Stage::Working(Work::SigningOnDevice)
+            )
+        {
             return Task::none();
         }
         match message {
+            DeviceMessage::OpenPaired(chain) => {
+                let step = match chain {
+                    ChainId::Bitcoin => DeviceStep::PairedBitcoin,
+                    ChainId::BitcoinBlake2b => DeviceStep::PairedFork,
+                    _ => return Task::none(),
+                };
+                if !self.can_open_paired_device(step) {
+                    return Task::none();
+                }
+                let (Some(datadir), Some(source)) =
+                    (self.device.datadir.clone(), self.funding_source.clone())
+                else {
+                    return Task::none();
+                };
+                self.device.step = Some(step);
+                self.stage = Stage::Working(Work::ListingDevices);
+                self.spawn(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            build_listing(datadir, &source).map(Box::new)
+                        })
+                        .await
+                        .map_err(|_| "Listing the devices was interrupted.".to_string())?
+                    },
+                    SplitEvent::DeviceListed,
+                )
+            }
             DeviceMessage::Open if self.can_open_device() => {
                 let (Some(step), Some(datadir), Some(construction)) = (
                     self.device_step(),
@@ -351,6 +407,14 @@ impl SplitPanel {
                 let psbt = match step {
                     DeviceStep::Step1 => self.construction.as_deref().map(|c| c.psbt().clone()),
                     DeviceStep::Step2 => self.step2_psbt.clone(),
+                    DeviceStep::PairedBitcoin => self
+                        .paired_signing
+                        .as_ref()
+                        .map(|signing| signing.bitcoin_current.clone()),
+                    DeviceStep::PairedFork => self
+                        .paired_signing
+                        .as_ref()
+                        .map(|signing| signing.fork_current.clone()),
                 };
                 let Some(psbt) = psbt else {
                     return Task::none();
@@ -370,6 +434,60 @@ impl SplitPanel {
                 };
                 self.notice = None;
                 self.stage = Stage::Working(Work::SigningOnDevice);
+                if let DeviceStep::PairedBitcoin | DeviceStep::PairedFork = step {
+                    let (Some(connect), Some(source), Some((_, directory)), Some(pair)) = (
+                        self.connect.clone(),
+                        self.funding_source.clone(),
+                        self.funding_journal.clone(),
+                        self.paired_signing.as_ref(),
+                    ) else {
+                        self.back_to(step);
+                        return Task::none();
+                    };
+                    let chain = if step == DeviceStep::PairedBitcoin {
+                        ChainId::Bitcoin
+                    } else {
+                        ChainId::BitcoinBlake2b
+                    };
+                    let bitcoin = pair.bitcoin.clone();
+                    let fork = pair.fork.clone();
+                    let rates = pair.rates;
+                    let target = self.target_cube.clone();
+                    let target_vault = self.target_vault.clone();
+                    return self.spawn(
+                        async move {
+                            let check = connect
+                                .prepare_exact_pair_intent(
+                                    directory,
+                                    &source,
+                                    &target,
+                                    target_vault.as_ref(),
+                                    &bitcoin,
+                                    &fork,
+                                    rates,
+                                )
+                                .await?;
+                            let permit = check
+                                .signer_permit(chain, &bitcoin, &fork, &psbt)
+                                .ok_or_else(|| {
+                                    "The paired signing check expired. Check both deposits again."
+                                        .to_string()
+                                })?;
+                            if !connect.session_current() || !permit.consume(chain, &psbt) {
+                                return Err(
+                                    "The paired signing check expired. Check both deposits again."
+                                        .into(),
+                                );
+                            }
+                            signing
+                                .run()
+                                .await
+                                .map(|signed| Box::new(signed.into_psbt()))
+                                .map_err(|error| error.to_string())
+                        },
+                        SplitEvent::DeviceSigned,
+                    );
+                }
                 self.spawn(
                     async move {
                         signing
@@ -413,6 +531,12 @@ impl SplitPanel {
                     Ok(signed) => match step {
                         DeviceStep::Step1 => self.import_psbts(vec![*signed]),
                         DeviceStep::Step2 => self.step2_import_psbts(vec![*signed]),
+                        DeviceStep::PairedBitcoin => {
+                            self.import_paired_device_psbt(ChainId::Bitcoin, *signed)
+                        }
+                        DeviceStep::PairedFork => {
+                            self.import_paired_device_psbt(ChainId::BitcoinBlake2b, *signed)
+                        }
                     },
                     Err(reason) => {
                         self.notice = Some(reason);

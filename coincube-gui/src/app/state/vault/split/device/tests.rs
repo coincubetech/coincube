@@ -405,6 +405,7 @@ async fn device_signing_copy_per_step_and_registration_notice() {
             let mut panel = match step {
                 DeviceStep::Step1 => step1_panel(shape, &root, opener.clone()),
                 DeviceStep::Step2 => step2_panel(shape, &root, opener.clone()).panel,
+                DeviceStep::PairedBitcoin | DeviceStep::PairedFork => unreachable!(),
             };
             assert_eq!(panel.device_step(), Some(step));
             open(&mut panel, &devices).await;
@@ -470,6 +471,7 @@ async fn device_signing_copy_per_step_and_registration_notice() {
             let other = match step {
                 DeviceStep::Step1 => STEP2_DEVICE_SHOWS_BITCOIN_WARNING,
                 DeviceStep::Step2 => STEP1_DATA_OUTPUT_NOTE,
+                DeviceStep::PairedBitcoin | DeviceStep::PairedFork => unreachable!(),
             };
             assert!(!labels.iter().any(|l| l == other), "{:?}", step);
             for (notice, rows) in [
