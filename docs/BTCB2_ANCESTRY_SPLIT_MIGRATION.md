@@ -319,6 +319,13 @@ a replayable spend.
    preview is labeled verified. Signer admission must recollect the live proof
    and rerun this operation under the saved reservation; a preview result is
    never signing authority.
+   A separate signer-prerequisite operation now reloads that reservation,
+   selects the exact funding outpoints from the retained pair, recollects
+   both-chain ancestry and shared-input evidence, rebuilds both PSBTs with
+   the saved change indices and rates, compares all PSBT fields, rereads both
+   wallets and tips, then checks the journal and Connect generation again.
+   It is not yet called by the GUI signer transition and does not authorize a
+   send; the signed-pair coordinator and each signer dispatch still need it.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks

@@ -5,10 +5,13 @@
 use super::{journal::Journal, Context, Error, WalletIdentity};
 use crate::daemon::{model, Daemon};
 use crate::services::{
-    claim_inventory::{ClaimInventory, ClaimInventoryError},
+    claim_inventory::{ClaimInventory, ClaimInventoryError, ClaimPairSnapshotError},
     claim_observation::{
-        http::{DiscoveryError, HttpObservationSource, OwnedClaimFunding},
-        CollectionContext, FailureKind,
+        http::{
+            ClaimPairError, DiscoveryError, FundingContext, HttpObservationSource,
+            OwnedClaimFunding,
+        },
+        CollectionContext, FailureKind, ObservationSource,
     },
     coincube::CoincubeClient,
     foreign_psbt::btcb2_sweep_feerate,
@@ -18,12 +21,13 @@ use crate::services::{
 };
 use async_trait::async_trait;
 use coincube_core::{
-    claim::Policy,
+    claim::{Policy, PreflightTips},
+    claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
         bip32::ChildNumber,
         hashes::{sha256, Hash},
-        Address, Network,
+        Address, Network, OutPoint,
     },
     spend::CandidateCoin,
 };
@@ -71,6 +75,17 @@ fn fee_eligible_candidates(
     candidates
         .into_iter()
         .filter(|coin| coin.amount.to_sat() >= minimum_sats)
+        .collect()
+}
+
+fn eligible_selected_candidates(
+    candidates: Vec<CandidateCoin>,
+    minimum_sats: u64,
+    selected: Option<OutPoint>,
+) -> Vec<CandidateCoin> {
+    fee_eligible_candidates(candidates, minimum_sats)
+        .into_iter()
+        .filter(|coin| selected.is_none_or(|outpoint| coin.outpoint == outpoint))
         .collect()
 }
 
@@ -407,6 +422,19 @@ pub enum ClaimChangeError {
     Cancelled,
 }
 
+/// A fresh exact-pair recheck is a prerequisite for signer dispatch, not a
+/// durable authorization. The signer and submission coordinators must repeat
+/// it at their respective boundaries and apply their own policy checks.
+#[derive(Debug)]
+#[allow(dead_code)] // The paired signer dispatch is not wired yet.
+pub enum ClaimPairRequalificationError {
+    Discovery(ClaimFundingDiscoveryError),
+    Construction(ClaimPairError),
+    Snapshot(ClaimPairSnapshotError),
+    Observation(FailureKind),
+    Changed,
+}
+
 fn change_wallet_ready(
     info: &model::GetInfoResult,
     chain: coincube_core::chain::ChainId,
@@ -615,6 +643,25 @@ impl ClaimFundingReservation {
         policy: Policy,
         minimums: (u64, u64),
     ) -> Result<Option<OwnedClaimFunding>, ClaimFundingDiscoveryError> {
+        self.discover_reserved_funding_at_outpoints(
+            directory, inventory, identity, context, daemon, source, policy, minimums, None,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn discover_reserved_funding_at_outpoints(
+        &self,
+        directory: PathBuf,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+        daemon: &(dyn Daemon + Send + Sync),
+        source: &HttpObservationSource,
+        policy: Policy,
+        minimums: (u64, u64),
+        selected: Option<(OutPoint, OutPoint)>,
+    ) -> Result<Option<OwnedClaimFunding>, ClaimFundingDiscoveryError> {
         let descriptor = inventory.descriptor().clone();
         let owner = identity.clone();
         let account = context.clone();
@@ -635,8 +682,9 @@ impl ClaimFundingReservation {
         let (bitcoin, fork) = self
             .reserved_candidates(inventory, identity, context)
             .map_err(ClaimFundingDiscoveryError::InvalidReservation)?;
-        let bitcoin = fee_eligible_candidates(bitcoin, minimums.0);
-        let fork = fee_eligible_candidates(fork, minimums.1);
+        let bitcoin =
+            eligible_selected_candidates(bitcoin, minimums.0, selected.map(|pair| pair.0));
+        let fork = eligible_selected_candidates(fork, minimums.1, selected.map(|pair| pair.1));
         tokio::time::timeout(
             ADDRESS_CHECK_BUDGET,
             inventory.reconcile_daemon(daemon, self.indices.bitcoin_deposit),
@@ -657,6 +705,129 @@ impl ClaimFundingReservation {
             )
             .await
             .map_err(ClaimFundingDiscoveryError::Discovery)
+    }
+
+    /// Recollect the two exact funding outpoints, rebuild the saved ordinary
+    /// pair using the already reserved change indices, and compare every PSBT
+    /// field before rereading both complete wallet coin sets and both tips.
+    /// A prior preview or a different deposit at either address cannot stand
+    /// in for this check. The result remains read-only evidence: every signer
+    /// dispatch must rerun it, and no network send is permitted by it.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The paired signer dispatch is not wired yet.
+    pub async fn requalify_exact_pair(
+        &self,
+        directory: PathBuf,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+        bitcoin_daemon: &(dyn Daemon + Send + Sync),
+        fork_daemon: &(dyn Daemon + Send + Sync),
+        source: &HttpObservationSource,
+        policy: Policy,
+        minimums: (u64, u64),
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        rates: (u64, u64),
+    ) -> Result<OwnedClaimFunding, ClaimPairRequalificationError> {
+        source
+            .validate_context(&context.provider, context.generation)
+            .map_err(ClaimPairRequalificationError::Observation)?;
+        let change = self.change.ok_or(ClaimPairRequalificationError::Changed)?;
+        if !self.released
+            || u32::from(bitcoin.change_index()) != change.bitcoin
+            || u32::from(fork.change_index()) != change.fork
+        {
+            return Err(ClaimPairRequalificationError::Changed);
+        }
+        let selected = (
+            bitcoin.poison_input(),
+            fork.fork_marker()
+                .ok_or(ClaimPairRequalificationError::Changed)?,
+        );
+        let funding = self
+            .discover_reserved_funding_at_outpoints(
+                directory.clone(),
+                inventory,
+                identity,
+                context,
+                bitcoin_daemon,
+                source,
+                policy,
+                minimums,
+                Some(selected),
+            )
+            .await
+            .map_err(ClaimPairRequalificationError::Discovery)?
+            .ok_or(ClaimPairRequalificationError::Changed)?;
+        let tips = PreflightTips {
+            bitcoin: funding
+                .inputs
+                .funding()
+                .bitcoin()
+                .ancestry()
+                .pair()
+                .bitcoin()
+                .tip,
+            fork: funding.inputs.funding().fork().ancestry().pair().fork().tip,
+        };
+        let review = FundingContext {
+            provider: &context.provider,
+            generation: context.generation,
+            now: source.now(),
+            max_age_seconds: policy.max_observation_age_seconds,
+            tips,
+        };
+        let (rebuilt_bitcoin, rebuilt_fork) = inventory
+            .construct_pair_for_review(
+                &funding,
+                ChildNumber::Normal {
+                    index: change.bitcoin,
+                },
+                ChildNumber::Normal { index: change.fork },
+                rates.0,
+                rates.1,
+                review,
+            )
+            .map_err(ClaimPairRequalificationError::Construction)?;
+        if rebuilt_bitcoin.psbt() != bitcoin.psbt() || rebuilt_fork.psbt() != fork.psbt() {
+            return Err(ClaimPairRequalificationError::Changed);
+        }
+        inventory
+            .reconcile_pair_snapshot(
+                bitcoin_daemon,
+                fork_daemon,
+                self.indices.bitcoin_deposit,
+                self.indices.btcb2_deposit,
+                &funding,
+                bitcoin,
+                fork,
+                source,
+                review,
+            )
+            .await
+            .map_err(ClaimPairRequalificationError::Snapshot)?;
+        let saved_descriptor = inventory.descriptor().clone();
+        let saved_identity = identity.clone();
+        let saved_context = context.clone();
+        let current = tokio::task::spawn_blocking(move || {
+            load_claim_funding(
+                &directory,
+                &saved_descriptor,
+                &saved_identity,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| ClaimPairRequalificationError::Changed)?
+        .map_err(|_| ClaimPairRequalificationError::Changed)?;
+        if current.as_ref() != Some(self) {
+            return Err(ClaimPairRequalificationError::Changed);
+        }
+        source
+            .validate_context(&context.provider, context.generation)
+            .map_err(ClaimPairRequalificationError::Observation)?;
+        Ok(funding)
     }
 
     pub(super) fn matches_pair(
@@ -1135,6 +1306,16 @@ mod tests {
             fee_eligible_candidates(vec![small, coin], 1_000),
             vec![coin]
         );
+        let second_deposit = CandidateCoin {
+            outpoint: OutPoint::new(Txid::all_zeros(), 1),
+            ..coin
+        };
+        assert_eq!(
+            eligible_selected_candidates(vec![coin, second_deposit], 1_000, Some(coin.outpoint)),
+            vec![coin],
+            "a second coin at the same reserved address cannot replace the signed pair's funding input"
+        );
+        assert!(eligible_selected_candidates(vec![coin], 20_000, Some(coin.outpoint)).is_empty());
     }
 
     struct FakeHistory {

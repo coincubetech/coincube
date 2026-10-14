@@ -15,7 +15,7 @@ pub use claim_funding::{
     load_claim_funding, prepare_claim_deposit_instructions, quote_claim_deposit_minimums,
     quote_claim_deposit_terms, reserve_claim_change_indices, reserve_claim_funding,
     CheckedClaimFundingAddresses, ClaimAddressError, ClaimChangeError, ClaimChangeIndices,
-    ClaimFundingDiscoveryError, ClaimFundingReservation,
+    ClaimFundingDiscoveryError, ClaimFundingReservation, ClaimPairRequalificationError,
 };
 use coincube_core::{
     chain::ChainId,
