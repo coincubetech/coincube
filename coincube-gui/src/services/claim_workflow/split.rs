@@ -1028,6 +1028,51 @@ impl Controller {
             .map_err(|_| Error::Unchecked)
     }
 
+    /// Verify the two signed ordinary Split PSBTs only after the saved
+    /// version-11 intent and fresh two-chain funding collection agree. The
+    /// returned signatures are review evidence, never a submission permit.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_ancestry_split_pair_for_review(
+        &mut self,
+        current: &Context,
+        observed: &crate::services::claim_observation::http::CollectedSpendInputs,
+        target: &CoincubeDescriptor,
+        bitcoin_coin: &SplitCoin,
+        fork_coin: &SplitCoin,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_inputs: &AncestrySplitInputs<'_>,
+        bitcoin_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+        fork: &AncestrySplitStep2,
+        fork_inputs: &AncestrySplitStep2Inputs<'_>,
+        fork_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<coincube_core::foreign_split::VerifiedAncestrySplitPair, Error> {
+        self.validate_ancestry_split_observation(
+            current,
+            observed,
+            target,
+            bitcoin_coin,
+            fork_coin,
+            bitcoin,
+            fork,
+            policy,
+            now,
+            tips,
+        )?;
+        coincube_core::foreign_split::finalize_ancestry_split_pair(
+            bitcoin,
+            bitcoin_inputs,
+            bitcoin_signed,
+            fork,
+            fork_inputs,
+            fork_signed,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        )
+        .map_err(|_| Error::InvalidPlan)
+    }
+
     /// Record a Split step 1 before any submission. `construction` is the
     /// opaque core builder output and `signed` its verified finalization;
     /// neither can come from a journal. `fork_height` is the authenticated

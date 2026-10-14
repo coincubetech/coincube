@@ -624,6 +624,47 @@ impl Controller {
         .map_err(|_| Error::Unchecked)
     }
 
+    /// Authenticate both signed ordinary Claim PSBTs against this exact saved
+    /// pair and a fresh two-chain funding collection. The collection is
+    /// consumed only for this check and never persisted as spend authority.
+    /// A coordinator still needs paired mempool preflight, revocable review,
+    /// submission-intent journaling and reorg handling before broadcast.
+    #[allow(clippy::too_many_arguments)]
+    pub fn finalize_ancestry_pair_for_review(
+        &mut self,
+        current: &Context,
+        pair: &crate::services::claim_observation::http::CollectedSpendInputs,
+        bitcoin_coin: &CandidateCoin,
+        fork_coin: &CandidateCoin,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        bitcoin_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+        fork_signed: &coincube_core::psbt_unified::UnifiedPsbt,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<coincube_core::claim_finalize::VerifiedAncestryClaimPair, Error> {
+        self.validate_ancestry_pair_observation(
+            current,
+            pair,
+            bitcoin_coin,
+            fork_coin,
+            bitcoin,
+            fork,
+            policy,
+            now,
+            tips,
+        )?;
+        coincube_core::claim_finalize::finalize_ancestry_claim_pair(
+            bitcoin,
+            fork,
+            bitcoin_signed,
+            fork_signed,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        )
+        .map_err(|_| Error::InvalidPlan)
+    }
+
     /// Bind a new positive ancestry collection to the saved intent. This clears
     /// prior checks and never makes the controller eligible by itself.
     pub fn validate_ancestry_observation(

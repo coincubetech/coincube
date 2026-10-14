@@ -636,11 +636,11 @@ mod tests {
             Ok(())
         );
         assert_eq!(
-            scan.reconcile_wallet_snapshot(&info, &[funding_coin.clone()], 4),
+            scan.reconcile_wallet_snapshot(&info, std::slice::from_ref(&funding_coin), 4),
             Err(ClaimInventoryError::WalletState)
         );
         assert_eq!(
-            scan.reconcile_wallet_snapshot(&info, &[coin.clone()], 4),
+            scan.reconcile_wallet_snapshot(&info, std::slice::from_ref(&coin), 4),
             Err(ClaimInventoryError::WalletState)
         );
         let extra = model::Coin {

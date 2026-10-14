@@ -136,9 +136,11 @@ pub fn finalize_ancestry_claim_pair<C: secp256k1::Verification>(
     let marker = fork
         .fork_marker()
         .ok_or(ClaimPairFinalizeError::ConstructionChanged)?;
-    if bitcoin.chain() != ChainId::Bitcoin
-        || fork.chain() != ChainId::BitcoinBlake2b
-        || bitcoin.descriptor() != fork.descriptor()
+    if !matches!(
+        (bitcoin.chain(), fork.chain()),
+        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+    ) || bitcoin.descriptor() != fork.descriptor()
         || fork.bitcoin_step1() != bitcoin.psbt().unsigned_tx.compute_txid()
         || marker == bitcoin.poison_input()
         || shared.is_empty()

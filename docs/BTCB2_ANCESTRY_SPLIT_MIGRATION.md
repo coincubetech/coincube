@@ -360,6 +360,9 @@ marker spend cases remain.
    Core also has typed pair finalizers for both Claim and Split. They require
    the same shared input set, distinct chain-specific funding inputs, ordinary
    outputs and valid signatures on both exact PSBTs before returning a pair.
+   The version-10 Claim and version-11 Split journals now expose a review-only
+   path that first validates a fresh paired funding collection against the
+   exact saved intent and then invokes the corresponding pair finalizer.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.

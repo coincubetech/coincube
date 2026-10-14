@@ -433,9 +433,11 @@ pub fn finalize_ancestry_split_pair<C: secp256k1::Verification>(
 ) -> Result<VerifiedAncestrySplitPair, FinalizeError> {
     let shared: BTreeSet<_> = bitcoin.claimed_prevouts().iter().copied().collect();
     let fork_shared: BTreeSet<_> = fork.claimed_prevouts().iter().copied().collect();
-    if bitcoin.chain() != ChainId::Bitcoin
-        || fork.chain() != ChainId::BitcoinBlake2b
-        || bitcoin.source() != fork.source()
+    if !matches!(
+        (bitcoin.chain(), fork.chain()),
+        (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+            | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+    ) || bitcoin.source() != fork.source()
         || bitcoin.fork_height() != fork.fork_height()
         || shared.is_empty()
         || shared.len() != bitcoin.claimed_prevouts().len()
