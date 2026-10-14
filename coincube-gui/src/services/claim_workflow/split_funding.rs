@@ -8,24 +8,27 @@ use crate::app::settings::WalletId;
 use crate::services::{
     claim_observation::{
         http::{
-            DiscoveryError, FundingContext, HttpObservationSource, OwnedSplitFunding,
-            SplitPairError,
+            CollectedPostBitcoinInputs, DiscoveryError, FundingContext, HttpObservationSource,
+            OwnedSplitFunding, SplitPairError,
         },
-        ObservationSource,
+        FailureKind, ObservationSource,
     },
     foreign_psbt::TargetAddressEvidence,
-    foreign_split_inventory::{FreshFundingAddresses, SplitInventory},
+    foreign_split_inventory::{
+        FreshFundingAddresses, InventoryError, SplitInventory, TwoChainScan,
+    },
 };
 use coincube_core::{
     chain::ChainId,
     claim::{Policy, PreflightTips},
+    claim_ancestry::retained::RetainedPath,
     descriptors::CoincubeDescriptor,
     foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitSource},
     miniscript::{
         bitcoin::{
             bip32::ChildNumber,
             hashes::{sha256, Hash},
-            Address, Network, OutPoint, ScriptBuf,
+            Address, Network, OutPoint, ScriptBuf, Transaction,
         },
         Descriptor, DescriptorPublicKey,
     },
@@ -51,6 +54,13 @@ pub enum SplitPairRequalificationError {
     Discovery(SplitFundingDiscoveryError),
     Construction(SplitPairError),
     Changed,
+}
+
+#[derive(Debug)]
+pub enum SplitPostBitcoinError {
+    Changed,
+    Inventory(InventoryError),
+    Observation(FailureKind),
 }
 
 /// The destination Vault address already authenticated and reserved when
@@ -545,6 +555,168 @@ impl SplitFundingReservation {
             .validate_context(&context.provider, context.generation)
             .map_err(|_| SplitPairRequalificationError::Changed)?;
         Ok(funding)
+    }
+
+    /// Recheck the saved foreign source and target after Bitcoin has spent
+    /// the shared coins. The initial all-unspent collection cannot be reused:
+    /// only the BTCB2 funding coin and shared coins remain unspent there.
+    /// This returns fresh read-only observations, not signer or send authority.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The stage-two Split coordinator is not wired yet.
+    pub async fn requalify_post_bitcoin_fork(
+        &self,
+        directory: PathBuf,
+        source: &SplitSource,
+        target_cube: &str,
+        target_vault: (&WalletId, &CoincubeDescriptor),
+        context: &Context,
+        scan: &TwoChainScan,
+        observations: &HttpObservationSource,
+        policy: Policy,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        signed_bitcoin: &Transaction,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+    ) -> Result<CollectedPostBitcoinInputs, SplitPostBitcoinError> {
+        observations
+            .validate_context(&context.provider, context.generation)
+            .map_err(|_| SplitPostBitcoinError::Changed)?;
+        let target = self
+            .target_binding
+            .as_ref()
+            .filter(|binding| binding.matches_vault(target_vault.0, target_vault.1))
+            .ok_or(SplitPostBitcoinError::Changed)?
+            .script_pubkey()
+            .map_err(|_| SplitPostBitcoinError::Changed)?;
+        let mut unsigned_bitcoin = signed_bitcoin.clone();
+        for input in &mut unsigned_bitcoin.input {
+            input.script_sig = ScriptBuf::new();
+            input.witness.clear();
+        }
+        if !self.released
+            || !self.matches(source, target_cube, context)
+            || bitcoin.chain() != ChainId::Bitcoin
+            || fork.chain() != ChainId::BitcoinBlake2b
+            || bitcoin.source() != source
+            || fork.source() != source
+            || bitcoin.destination() != self.indices.bitcoin_return
+            || bitcoin.funding_prevout() != bitcoin_path.selected()
+            || fork.funding_prevout() != fork_path.selected()
+            || bitcoin.funding_derivation()
+                != Some((
+                    coincube_core::foreign_split::SplitBranch::External,
+                    self.indices.bitcoin_deposit,
+                ))
+            || fork.funding_derivation()
+                != Some((
+                    coincube_core::foreign_split::SplitBranch::External,
+                    self.indices.btcb2_deposit,
+                ))
+            || bitcoin.claimed_prevouts() != fork.claimed_prevouts()
+            || fork.target() != target.as_script()
+            || unsigned_bitcoin != bitcoin.psbt().unsigned_tx
+        {
+            return Err(SplitPostBitcoinError::Changed);
+        }
+        let saved_source = source.clone();
+        let saved_target = target_cube.to_owned();
+        let saved_context = context.clone();
+        let saved_directory = directory.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            load_split_funding(
+                &saved_directory,
+                &saved_source,
+                &saved_target,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| SplitPostBitcoinError::Changed)?
+        .map_err(|_| SplitPostBitcoinError::Changed)?;
+        if saved.as_ref() != Some(self) {
+            return Err(SplitPostBitcoinError::Changed);
+        }
+        let collected = observations
+            .collect_post_bitcoin_inputs(
+                bitcoin_path,
+                fork_path,
+                bitcoin.claimed_prevouts(),
+                signed_bitcoin,
+                policy,
+            )
+            .await
+            .map_err(SplitPostBitcoinError::Observation)?;
+        let (bitcoin_tip, fork_tip) = tokio::try_join!(
+            observations.tip(ChainId::Bitcoin),
+            observations.tip(ChainId::BitcoinBlake2b),
+        )
+        .map_err(SplitPostBitcoinError::Observation)?;
+        let tips = PreflightTips {
+            bitcoin: *bitcoin_tip.value(),
+            fork: *fork_tip.value(),
+        };
+        scan.reconcile_post_bitcoin_split(
+            source,
+            bitcoin.claimed_prevouts(),
+            fork.funding_prevout(),
+            self.indices.btcb2_deposit,
+            context.generation,
+            tips,
+        )
+        .map_err(SplitPostBitcoinError::Inventory)?;
+        collected
+            .validate_for_fork_psbt(
+                signed_bitcoin,
+                fork.psbt(),
+                bitcoin.claimed_prevouts(),
+                FundingContext {
+                    provider: &context.provider,
+                    generation: context.generation,
+                    now: observations.now(),
+                    max_age_seconds: policy.max_observation_age_seconds,
+                    tips,
+                },
+            )
+            .map_err(SplitPostBitcoinError::Observation)?;
+        let saved_source = source.clone();
+        let saved_target = target_cube.to_owned();
+        let saved_context = context.clone();
+        let current = tokio::task::spawn_blocking(move || {
+            load_split_funding(&directory, &saved_source, &saved_target, &saved_context)
+        })
+        .await
+        .map_err(|_| SplitPostBitcoinError::Changed)?
+        .map_err(|_| SplitPostBitcoinError::Changed)?;
+        if current.as_ref() != Some(self) {
+            return Err(SplitPostBitcoinError::Changed);
+        }
+        observations
+            .validate_context(&context.provider, context.generation)
+            .map_err(|_| SplitPostBitcoinError::Changed)?;
+        let (last_bitcoin, last_fork) = tokio::try_join!(
+            observations.tip(ChainId::Bitcoin),
+            observations.tip(ChainId::BitcoinBlake2b),
+        )
+        .map_err(SplitPostBitcoinError::Observation)?;
+        if last_bitcoin.value() != &tips.bitcoin || last_fork.value() != &tips.fork {
+            return Err(SplitPostBitcoinError::Changed);
+        }
+        collected
+            .validate_for_fork_psbt(
+                signed_bitcoin,
+                fork.psbt(),
+                bitcoin.claimed_prevouts(),
+                FundingContext {
+                    provider: &context.provider,
+                    generation: context.generation,
+                    now: observations.now(),
+                    max_age_seconds: policy.max_observation_age_seconds,
+                    tips,
+                },
+            )
+            .map_err(SplitPostBitcoinError::Observation)?;
+        Ok(collected)
     }
 }
 

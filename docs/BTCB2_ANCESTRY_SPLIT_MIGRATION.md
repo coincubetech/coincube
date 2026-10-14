@@ -532,8 +532,17 @@ marker spend cases remain.
    recheck: the exact shared set must have left Bitcoin while remaining
    confirmed and unspent on BTCB2, and the exact reserved BTCB2 funding coin
    must remain there with its source descriptor derivation. It also binds the
-   scan generation and both current tips. This is not yet joined to the
-   stage-two collector, target reservation or signed BTCB2 transaction.
+   scan generation and both current tips. It remains a separate read-only
+   check rather than spend authority.
+   A separate Split stage-two requalification now joins those read-only
+   checks: it reloads the exact released source and target reservation,
+   compares the confirmed Bitcoin witness to the supplied exact Bitcoin construction,
+   recollects the canonical post-Bitcoin input evidence, checks the BTCB2
+   PSBT prevouts, and compares the refreshed tips with the new source scan.
+   It returns expiring observations only. The coordinator still needs to
+   bind the pair to the signed journal, validate the finalized BTCB2 witness
+   and live target Vault, obtain fresh
+   BTCB2 policy, journal the attempt, and enforce explicit broadcast review.
    The Claim and Split pair finalizers now issue an opaque, controller-bound
    initial proof only after validating the exact signed pair against the saved
    intent and fresh two-chain collection. Recording a possible Bitcoin send
