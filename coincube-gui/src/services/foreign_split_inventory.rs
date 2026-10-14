@@ -593,7 +593,76 @@ pub struct TwoChainScan {
     pub inventory: SplitInventory,
 }
 
+/// Source-owned BTCB2 inputs recovered from a post-Bitcoin scan. The Bitcoin
+/// block references must come from a fresh canonical post-Bitcoin collector;
+/// these coins are construction data, never signing or send authority.
+#[derive(Debug)]
+pub struct PostBitcoinSplitCoins {
+    pub shared: Vec<SplitCoin>,
+    pub funding: SplitCoin,
+}
+
 impl TwoChainScan {
+    /// Rebuild the fork-side input data after the Bitcoin spend has removed
+    /// the shared outputs from that chain's UTXO scan. Require the collector's
+    /// canonical Bitcoin blocks to agree exactly with the BTCB2 scan.
+    #[allow(dead_code)] // Used when the stage-two coordinator opens the pair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_bitcoin_fork_coins(
+        &self,
+        source: &SplitSource,
+        shared_blocks: &[(OutPoint, BlockRef)],
+        fork_funding: OutPoint,
+        fork_funding_index: u32,
+        expected_generation: u64,
+        tips: PreflightTips,
+    ) -> Result<PostBitcoinSplitCoins, InventoryError> {
+        let shared_outpoints: Vec<_> = shared_blocks
+            .iter()
+            .map(|(outpoint, _)| *outpoint)
+            .collect();
+        self.reconcile_post_bitcoin_split(
+            source,
+            &shared_outpoints,
+            fork_funding,
+            fork_funding_index,
+            expected_generation,
+            tips,
+        )?;
+        let mut shared = Vec::with_capacity(shared_blocks.len());
+        for (outpoint, bitcoin_block) in shared_blocks {
+            let coin = self
+                .btcb2
+                .coins()
+                .iter()
+                .find(|coin| coin.outpoint == *outpoint)
+                .ok_or(InventoryError::Stale)?;
+            let mut reconstructed = funding_coin(coin, ChainId::BitcoinBlake2b)?;
+            if reconstructed.btcb2_block != Some(*bitcoin_block)
+                || bitcoin_block.height >= self.inventory.fork_height()
+            {
+                return Err(InventoryError::Inconsistent(*outpoint));
+            }
+            reconstructed.bitcoin_block = Some(*bitcoin_block);
+            shared.push(reconstructed);
+        }
+        let saved_funding = self
+            .inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, fork_funding)
+            .ok_or(InventoryError::Stale)?;
+        let current_funding = self
+            .btcb2
+            .coins()
+            .iter()
+            .find(|coin| coin.outpoint == fork_funding)
+            .ok_or(InventoryError::Stale)?;
+        let funding = funding_coin(current_funding, ChainId::BitcoinBlake2b)?;
+        if funding != saved_funding {
+            return Err(InventoryError::Stale);
+        }
+        Ok(PostBitcoinSplitCoins { shared, funding })
+    }
+
     /// Reconcile a fresh foreign-source scan after the Bitcoin side of an
     /// ordinary Split confirms. The exact shared inputs must now be absent
     /// from Bitcoin's scanned UTXO set but remain confirmed and unspent in
@@ -1058,6 +1127,44 @@ mod tests {
             ),
             Ok(())
         );
+        let shared_block = BlockRef {
+            height: 90,
+            hash: hash(90),
+        };
+        let recovered = scan
+            .post_bitcoin_fork_coins(
+                &source(42),
+                &[(shared.outpoint, shared_block)],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            )
+            .unwrap();
+        assert_eq!(recovered.shared.len(), 1);
+        assert_eq!(recovered.shared[0].previous, shared.previous);
+        assert_eq!(recovered.shared[0].bitcoin_block, Some(shared_block));
+        assert_eq!(recovered.shared[0].btcb2_block, Some(shared_block));
+        assert_eq!(recovered.funding.previous, funding.previous);
+        assert!(recovered.funding.bitcoin_block.is_none());
+        assert_eq!(
+            scan.post_bitcoin_fork_coins(
+                &source(42),
+                &[(
+                    shared.outpoint,
+                    BlockRef {
+                        height: 90,
+                        hash: hash(89),
+                    },
+                )],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            )
+            .err(),
+            Some(InventoryError::Inconsistent(shared.outpoint))
+        );
         for (source, shared, index) in [
             (source(43), vec![shared.outpoint], 1),
             (source(42), vec![], 1),
@@ -1113,6 +1220,29 @@ mod tests {
             ),
             Err(InventoryError::Stale)
         );
+        let mut changed_funding = funding.clone();
+        changed_funding.previous.output[0].value = Amount::from_sat(9_999);
+        changed_funding.output.value = Amount::from_sat(9_999);
+        let changed_funding_scan = TwoChainScan {
+            bitcoin: scan.bitcoin.clone(),
+            btcb2: report(
+                ChainId::BitcoinBlake2b,
+                vec![shared.clone(), changed_funding],
+                walk(10, Some(1)),
+            )
+            .with_tip_height(200),
+            inventory: scan.inventory.clone(),
+        };
+        assert!(changed_funding_scan
+            .post_bitcoin_fork_coins(
+                &source(42),
+                &[(shared.outpoint, shared_block)],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            )
+            .is_err());
     }
 
     #[test]

@@ -271,6 +271,13 @@ pub struct CollectedPostBitcoinInputs {
 }
 
 impl CollectedPostBitcoinInputs {
+    /// Canonical pre-fork Bitcoin blocks for the shared outputs checked by
+    /// this collection. The caller must first validate this observation for
+    /// the exact signed pair and live session before using the block mapping.
+    pub(crate) fn shared_blocks(&self) -> &[(OutPoint, BlockRef)] {
+        &self.shared
+    }
+
     pub fn observed_at(&self) -> i64 {
         self.observed_at
     }

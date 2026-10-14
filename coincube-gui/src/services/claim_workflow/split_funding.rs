@@ -16,7 +16,7 @@ use crate::services::{
     },
     foreign_psbt::TargetAddressEvidence,
     foreign_split_inventory::{
-        FreshFundingAddresses, InventoryError, SplitInventory, TwoChainScan,
+        FreshFundingAddresses, InventoryError, PostBitcoinSplitCoins, SplitInventory, TwoChainScan,
     },
 };
 use coincube_core::{
@@ -438,6 +438,9 @@ impl RequalifiedInitialSplit {
 #[allow(dead_code)] // The paired stage-two coordinator is not wired yet.
 pub struct RequalifiedPostBitcoinSplit {
     pub(super) observed: CollectedPostBitcoinInputs,
+    /// Exact source-owned inputs for rebuilding the recorded BTCB2 PSBT.
+    /// The stage-two coordinator must still reverify the saved signed pair.
+    pub(super) fork_coins: PostBitcoinSplitCoins,
 }
 
 /// The destination Vault address already authenticated and reserved when
@@ -1102,8 +1105,19 @@ impl SplitFundingReservation {
                 },
             )
             .map_err(SplitPostBitcoinError::Observation)?;
+        let fork_coins = scan
+            .post_bitcoin_fork_coins(
+                source,
+                collected.shared_blocks(),
+                fork.funding_prevout(),
+                self.indices.btcb2_deposit,
+                context.generation,
+                tips,
+            )
+            .map_err(SplitPostBitcoinError::Inventory)?;
         Ok(RequalifiedPostBitcoinSplit {
             observed: collected,
+            fork_coins,
         })
     }
 }

@@ -614,6 +614,11 @@ marker spend cases remain.
    bind the pair to the signed journal, validate the finalized BTCB2 witness
    and live target Vault, obtain fresh BTCB2 policy, journal the attempt, and
    enforce explicit broadcast review.
+   This requalification now also recovers the exact source-owned BTCB2 input
+   transactions from the fresh post-Bitcoin scan. Each shared input's block
+   must equal the collector's canonical pre-fork Bitcoin block, and the BTCB2
+   funding input must match the scan's joined candidate. The recovered coins
+   remain construction data; no signer or send path consumes them yet.
    The version-10 Claim and version-11 Split journal proof entries now accept
    those distinct requalification result types rather than a raw
    post-Bitcoin observation. Their shared private check binds the saved exact
