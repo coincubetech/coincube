@@ -357,11 +357,13 @@ fn version_ten_pair_creation_reopens_without_live_spend_authority() {
     )
     .unwrap();
     assert_eq!(controller.intent.version, 10);
+    assert!(controller.is_paired_ancestry_claim());
     assert_eq!(controller.status(), Status::Unchecked);
     assert!(!controller.construction_verified);
     let identity = controller.identity().clone();
     drop(controller);
     let mut restored = reopen_settled(&temp.0, &identity, context()).unwrap();
+    assert!(restored.is_paired_ancestry_claim());
     assert_eq!(restored.status(), Status::Unchecked);
     assert!(!restored.construction_verified);
     assert_eq!(restored.intent.version, 10);

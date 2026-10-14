@@ -587,6 +587,7 @@ impl ClaimFundingReservation {
     /// Other post-fork Vault outputs cannot silently replace the user's
     /// funding plan. The returned pair is still read-only: source-wallet
     /// reconciliation and a fresh signer preflight remain mandatory.
+    #[allow(clippy::too_many_arguments)] // Identity, daemon, and observations remain explicit admission inputs.
     pub async fn discover_reserved_funding(
         &self,
         directory: PathBuf,

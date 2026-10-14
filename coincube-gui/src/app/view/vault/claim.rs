@@ -75,6 +75,23 @@ pub fn view<'a>(
                 .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
                 .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
+        StageView::PairedRecovery(recovery, checking, error) => dashboard(
+            menu,
+            cache,
+            Column::new()
+                .spacing(20)
+                .push(header("Recorded two-chain claim"))
+                .push(p1_regular("This device has a two-chain claim record. For each possible broadcast, Tenshu checks the exact saved transaction against its own chain. This screen does not sign or resend either transaction."))
+                .push(p1_bold("Bitcoin transaction"))
+                .push_maybe(recovery.bitcoin_txid.map(|id| p2_regular(id.to_string())))
+                .push(p1_regular(recovery.bitcoin_status.clone()))
+                .push(p1_bold("Bitcoin Blake2b transaction"))
+                .push_maybe(recovery.fork_txid.map(|id| p2_regular(id.to_string())))
+                .push(p1_regular(recovery.fork_status.clone()))
+                .push_maybe(error.map(|message| card::warning(message.to_string())))
+                .push(button::secondary(None, if checking { "Checking both chains…" } else { "Check again" }).on_press_maybe((!checking).then_some(Message::Claim(ClaimMessage::Refresh))))
+                .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
+        ),
         StageView::Plan(built) => dashboard(menu, cache, plan_view(cache, panel, built)),
         StageView::CheckingSign => dashboard(
             menu,

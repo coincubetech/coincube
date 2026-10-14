@@ -4,6 +4,7 @@ pub(crate) use ancestry::RecoveryObservation;
 mod claim_funding;
 mod journal;
 mod paired_recovery;
+pub(crate) use paired_recovery::{ChainState as PairedChainState, SideReport as PairedSideReport};
 mod paired_submission;
 mod recovery;
 mod reorg;
@@ -650,6 +651,11 @@ impl Controller {
     }
     pub fn phase(&self) -> Phase {
         self.intent.phase
+    }
+    /// A paired Claim must be reopened through the read-only two-chain path.
+    /// Legacy construction and submission admission cannot represent it.
+    pub(crate) fn is_paired_ancestry_claim(&self) -> bool {
+        self.intent.version == 10 && self.intent.split.is_none()
     }
     pub fn plan(&self) -> ClaimPlan {
         self.intent.plan.clone()

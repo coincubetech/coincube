@@ -59,6 +59,40 @@ fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backe
     assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
 }
 
+#[test]
+fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
+    let mut panel = panel(SINGLE_WSH);
+    let state = || {
+        Stage::PairedRecovery(PairedClaimRecovery {
+            bitcoin_txid: None,
+            fork_txid: None,
+            bitcoin_status: "No broadcast attempt recorded.".into(),
+            fork_status: "No broadcast attempt recorded.".into(),
+        })
+    };
+    panel.stage = state();
+    assert!(!panel.can_sign_or_submit());
+    assert!(!panel.can_broadcast_review());
+    panel.restart_error = Some("The two-chain status source is unavailable.".into());
+    assert!(matches!(
+        panel.stage(),
+        StageView::PairedRecovery(
+            _,
+            false,
+            Some("The two-chain status source is unavailable.")
+        )
+    ));
+    panel.cancel();
+    assert!(panel.restart_pending);
+    assert!(matches!(panel.stage, Stage::Preconditions));
+
+    panel.stage = state();
+    panel.restart_pending = false;
+    panel.revoke();
+    assert!(panel.restart_pending);
+    assert!(matches!(panel.stage, Stage::Preconditions));
+}
+
 fn coin(height: Option<i32>, spent: bool, immature: bool, n: u32) -> Coin {
     Coin {
         amount: Amount::from_sat(10_000 + u64::from(n)),

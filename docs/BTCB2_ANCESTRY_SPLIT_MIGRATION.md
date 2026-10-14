@@ -403,8 +403,12 @@ marker spend cases remain.
    each possible attempt independently against fresh transaction status,
    exact signed witness bytes, canonical block mapping and stable chain tip.
    Absent, stale, mismatched or unavailable observations never permit an
-   automatic retry. This collector is not yet connected to the wizard's
-   recovery screen. The fork-attempt journal now also requires an opaque,
+   automatic retry. The Bitcoin Claim wizard now reopens a version-10 journal
+   through a separate read-only recovery screen, checks each recorded possible
+   send against its own chain, and shows exact transaction IDs and independent
+   statuses. It does not re-enable signing or retry an absent transaction.
+   The foreign Split recovery screen still needs the same integration. The
+   fork-attempt journal now also requires an opaque,
    short-lived Bitcoin six-confirmation result bound to the exact signed
    witness and session; the coordinator must still recollect live two-chain
    ancestry and obtain explicit approval before either send. Acceptance on

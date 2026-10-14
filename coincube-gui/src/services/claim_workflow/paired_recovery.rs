@@ -230,7 +230,6 @@ impl Controller {
     /// Read both possible sends independently. The journal remains unchanged
     /// and unchecked even if both providers report confirmations. A future
     /// coordinator must separately refresh ancestry, wallet state and policy.
-    #[allow(dead_code)] // The paired recovery UI is not yet opened.
     pub(crate) async fn reconcile_possible_ancestry_attempts(
         &mut self,
         current: &Context,

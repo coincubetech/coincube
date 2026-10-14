@@ -372,12 +372,38 @@ enum RestartedState {
     Intent(Box<Construction>),
     Bound(Box<ClaimSession>),
     Unavailable(Txid, String),
+    PairedRecovery(PairedClaimRecovery),
+}
+
+/// Read-only restart state for the two ordinary transactions. A status read
+/// cannot authorize signing, retrying or moving to the next chain.
+#[derive(Debug)]
+pub struct PairedClaimRecovery {
+    pub bitcoin_txid: Option<Txid>,
+    pub fork_txid: Option<Txid>,
+    pub bitcoin_status: String,
+    pub fork_status: String,
+}
+
+fn paired_side_status(report: claim_workflow::PairedSideReport) -> String {
+    use claim_workflow::{PairedChainState as State, PairedSideReport as Side};
+    match report {
+        Side::NotAttempted => "No broadcast attempt recorded.".into(),
+        Side::Observed(State::Absent) =>
+            "A possible broadcast was recorded, but this chain does not currently show the transaction. It will not be retried automatically.".into(),
+        Side::Observed(State::Unconfirmed) => "Transaction seen; awaiting confirmation.".into(),
+        Side::Observed(State::Confirmed { confirmations, .. }) =>
+            format!("Confirmed in the current chain view ({confirmations} confirmations)."),
+        Side::Indeterminate(_) =>
+            "The recorded transaction could not be verified against this chain. Check again when its node and indexer are available; no retry was sent.".into(),
+    }
 }
 
 enum Stage {
     Preconditions,
     FundingChecking,
     FundingDeposits(claim_workflow::CheckedClaimFundingAddresses),
+    PairedRecovery(PairedClaimRecovery),
     /// Built and shown; nothing signed yet.
     Plan {
         built: Box<Construction>,
@@ -452,6 +478,7 @@ pub enum StageView<'a> {
     Preconditions(&'a Preconditions, Option<Refusal>),
     FundingChecking,
     FundingDeposits(&'a claim_workflow::CheckedClaimFundingAddresses),
+    PairedRecovery(&'a PairedClaimRecovery, bool, Option<&'a str>),
     Plan(&'a Construction),
     CheckingSign,
     Sign {
@@ -667,6 +694,11 @@ impl ClaimStep1Panel {
     pub fn revoke(&mut self) {
         self.revoked = true;
         self.revocations = self.revocations.wrapping_add(1);
+        if matches!(self.stage, Stage::PairedRecovery(_)) {
+            self.restart_pending = true;
+            self.stage = Stage::Preconditions;
+            self.restart_error = Some(SESSION_ENDED.into());
+        }
         if matches!(
             self.stage,
             Stage::FundingChecking | Stage::FundingDeposits(_)
@@ -887,6 +919,11 @@ impl ClaimStep1Panel {
             Stage::Preconditions => StageView::Preconditions(&self.pre, self.refusal()),
             Stage::FundingChecking => StageView::FundingChecking,
             Stage::FundingDeposits(addresses) => StageView::FundingDeposits(addresses),
+            Stage::PairedRecovery(recovery) => StageView::PairedRecovery(
+                recovery,
+                self.restarting.is_some(),
+                self.restart_error.as_deref(),
+            ),
             Stage::Plan { built } => StageView::Plan(built),
             Stage::CheckingSign(_) => StageView::CheckingSign,
             Stage::Sign {
@@ -2049,6 +2086,10 @@ impl ClaimStep1Panel {
                 self.funding_status = None;
                 self.stage = Stage::Preconditions;
             }
+            Stage::PairedRecovery(_) => {
+                self.restart_pending = true;
+                self.stage = Stage::Preconditions;
+            }
             Stage::Preconditions | Stage::Review { .. } | Stage::Track { .. } => {}
         }
     }
@@ -2196,6 +2237,10 @@ impl ClaimStep1Panel {
                             busy: false,
                             error: Some(error),
                         };
+                    }
+                    RestartedState::PairedRecovery(recovery) => {
+                        self.restart_pending = false;
+                        self.stage = Stage::PairedRecovery(recovery);
                     }
                 }
                 Task::none()
@@ -2669,6 +2714,14 @@ impl State for ClaimStep1Panel {
                         Some(daemon) => self.recover(Some(daemon)),
                         None => node_unavailable(),
                     },
+                    view::ClaimMessage::Refresh
+                        if matches!(self.stage, Stage::PairedRecovery(_)) =>
+                    {
+                        match daemon {
+                            Some(daemon) => self.restart(daemon),
+                            None => node_unavailable(),
+                        }
+                    }
                     view::ClaimMessage::Refresh => match &self.stage {
                         Stage::Review { .. } | Stage::Track { .. } if self.revoked => {
                             match (self.backend.copy(), daemon) {
@@ -2743,6 +2796,7 @@ impl State for ClaimStep1Panel {
                 self.recover(Some(daemon))
             }
             Stage::Track { .. } => self.reconcile(),
+            Stage::PairedRecovery(_) => self.restart(daemon),
             Stage::FundingChecking
             | Stage::FundingDeposits(_)
             | Stage::Plan { .. }
@@ -3073,10 +3127,79 @@ async fn restore_recorded_claim(
     generation: watch::Receiver<u64>,
 ) -> Result<RestartedClaim, String> {
     use coincube_core::miniscript::bitcoin::hashes::sha256;
-    if wallet.chain != ChainId::Bitcoin
-        || daemon
-            .config()
-            .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
+    if wallet.chain != ChainId::Bitcoin {
+        return Err("The recorded claim does not match this Bitcoin Vault.".into());
+    }
+    // A version-10 pair has no legacy Coincubed construction or submission
+    // path. Reopen its journal under the authenticated two-chain identity and
+    // reconcile exact saved witnesses before consulting the old coordinator.
+    let context = ClaimStep1Panel::funding_context(&connect, expected, generation.clone())?;
+    let identity = claim_workflow::WalletIdentity {
+        bitcoin_cube: bitcoin_cube.clone(),
+        fork_cube: fork_cube.clone(),
+        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+    };
+    let mut controller =
+        claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
+            .await
+            .map_err(|error| describe(claim_coordinator::Error::Journal(error)))?;
+    if controller.is_paired_ancestry_claim() {
+        let source = HttpObservationSource::new(
+            connect.client.clone(),
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: expected,
+                generation: generation.clone(),
+            },
+        )
+        .map_err(|_| "The two-chain status source is unavailable.".to_string())?;
+        let (bitcoin_txid, fork_txid, bitcoin_status, fork_status) =
+            if let Some(record) = controller.recorded_signed_ancestry_pair() {
+                let bitcoin_txid = record.bitcoin_identity().0;
+                let fork_txid = record.fork_identity().0;
+                let report = controller
+                .reconcile_possible_ancestry_attempts(
+                    &context,
+                    &source,
+                    CHECK_POLICY.observations.max_observation_age_seconds,
+                )
+                .await
+                .map_err(|_| {
+                    "The paired transaction status could not be read. No transaction was retried."
+                        .to_string()
+                })?;
+                (
+                    Some(bitcoin_txid),
+                    Some(fork_txid),
+                    paired_side_status(report.bitcoin),
+                    paired_side_status(report.fork),
+                )
+            } else {
+                (
+                    None,
+                    None,
+                    "No signed Bitcoin transaction is recorded.".into(),
+                    "No signed BTCB2 transaction is recorded.".into(),
+                )
+            };
+        if generation.has_changed().is_err() || *generation.borrow() != expected {
+            return Err(SESSION_ENDED.into());
+        }
+        return Ok(RestartedClaim {
+            context,
+            state: RestartedState::PairedRecovery(PairedClaimRecovery {
+                bitcoin_txid,
+                fork_txid,
+                bitcoin_status,
+                fork_status,
+            }),
+        });
+    }
+    drop(controller);
+    if daemon
+        .config()
+        .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
     {
         return Err("The recorded claim does not match this Bitcoin Vault.".into());
     }

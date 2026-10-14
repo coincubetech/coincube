@@ -372,7 +372,6 @@ impl Controller {
         )
     }
 
-    #[allow(dead_code)] // Restart reconciliation reader; no current UI caller.
     pub(crate) fn recorded_signed_ancestry_pair(&self) -> Option<&PairedSubmissionRecord> {
         self.intent.paired_submission.as_ref()
     }

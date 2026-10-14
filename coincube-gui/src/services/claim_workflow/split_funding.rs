@@ -201,7 +201,7 @@ impl SplitFundingReservation {
     }
 
     pub(super) fn validate(&self) -> Result<(), Error> {
-        if !matches!(self.version, 1 | 2 | 3)
+        if !matches!(self.version, 1..=3)
             || (self.version == 1 && self.released)
             || (self.version < 3 && self.target_binding.is_some())
             || (self.version == 3 && self.target_binding.is_none())
@@ -325,6 +325,7 @@ impl SplitFundingReservation {
     /// Reload the exact pre-deposit selection and search only its two receive
     /// indices under one live observation context. This is read-only evidence,
     /// not a source-wallet reconciliation or signer capability.
+    #[allow(clippy::too_many_arguments)] // Keep the saved selection and live evidence explicit.
     pub async fn discover_reserved_funding(
         &self,
         directory: PathBuf,
