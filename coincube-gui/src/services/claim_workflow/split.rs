@@ -65,8 +65,12 @@
 use super::*;
 use crate::services::claim_observation::TransactionObservation;
 use coincube_core::{
+    claim_ancestry::retained::{RetainedPath, MAX_ENCODED_BYTES},
+    descriptors::CoincubeDescriptor,
     foreign_split::{
-        SplitSource, SplitStep1, SplitStep2, UnifiedSweep, VerifiedSplitStep1, VerifiedSplitStep2,
+        reconstruct_ancestry_split_step1, reconstruct_ancestry_split_step2, AncestrySplitInputs,
+        AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs, SplitCoin, SplitSource,
+        SplitStep1, SplitStep2, UnifiedSweep, VerifiedSplitStep1, VerifiedSplitStep2,
         VerifiedUnifiedSweep,
     },
     miniscript::{
@@ -81,12 +85,13 @@ use std::str::FromStr;
 /// record stays at 8, byte-identical to before, so a binary that predates
 /// the fork-only record keeps reading it; a fork-only record is 9, which
 /// that binary refuses by version (and by the `kind` field it does not
-/// know). Binaries that predate Split refuse both: `split` is an unknown
-/// field to them, and 8 and 9 are outside every version they validate.
+/// know). The unchecked paired ancestry record is version 11. Binaries that
+/// predate Split refuse all three: `split` is an unknown field to them.
 pub(super) const VERSION: u32 = 9;
+pub(super) const ANCESTRY_VERSION: u32 = 11;
 /// Every version a Split intent may carry; `claim_workflow`'s reader sends
 /// an intent at any of them to [`validate`].
-pub(super) const VERSIONS: std::ops::RangeInclusive<u32> = 8..=VERSION;
+pub(super) const VERSIONS: [u32; 3] = [8, VERSION, ANCESTRY_VERSION];
 /// Far above any supported descriptor (a 3-key `wsh(sortedmulti)` is under
 /// 400 bytes); a bound on untrusted journal text, not a policy.
 const MAX_DESCRIPTOR_BYTES: usize = 4096;
@@ -113,6 +118,9 @@ pub enum SplitKind {
     /// `bitcoin_transaction`, it is Tracking from creation and carries its
     /// target from creation; the sweep reuses the step-2 fields. Version 9.
     Unified,
+    /// Unchecked paired ancestry plan. Neither ordinary transaction is signed
+    /// or submitted at creation; both must be rebuilt and reproven together.
+    Ancestry,
 }
 impl SplitKind {
     fn is_split(&self) -> bool {
@@ -124,6 +132,7 @@ impl SplitKind {
         match self {
             Self::Split => 8,
             Self::Unified => VERSION,
+            Self::Ancestry => ANCESTRY_VERSION,
         }
     }
 }
@@ -135,6 +144,9 @@ pub(super) struct SplitRecord {
     /// fork-only record, so a binary without it refuses one.
     #[serde(default, skip_serializing_if = "SplitKind::is_split")]
     kind: SplitKind,
+    /// Version-11 structural funding paths and ordinary BTCB2 template.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    funding: Option<SplitFundingPlan>,
     source_digest: sha256::Hash,
     /// Public descriptors only (P2). Absent once deleted at completion.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -183,6 +195,35 @@ pub(super) struct SplitRecord {
     /// (`deny_unknown_fields`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     step1_conflict: Option<Step1Conflict>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredSplitPath {
+    selected: OutPoint,
+    raw: String,
+    index: u32,
+    is_change: bool,
+}
+impl StoredSplitPath {
+    fn decode(&self) -> Result<RetainedPath, Error> {
+        if self.raw.len() > 2 * MAX_ENCODED_BYTES || self.index >= 1 << 31 {
+            return Err(Error::InvalidJournal);
+        }
+        let bytes = hex::decode(&self.raw).map_err(|_| Error::InvalidJournal)?;
+        RetainedPath::decode(self.selected, &bytes).map_err(|_| Error::InvalidJournal)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SplitFundingPlan {
+    bitcoin: StoredSplitPath,
+    fork: StoredSplitPath,
+    step2_unsigned: Transaction,
+    bitcoin_feerate_vb: u64,
+    fork_feerate_vb: u64,
+    target_descriptor_digest: sha256::Hash,
 }
 
 /// #568 S4, O4: the claimed coin fresh Bitcoin reads found missing from
@@ -433,6 +474,71 @@ fn signs(signed: &Transaction, unsigned_digest: sha256::Hash) -> bool {
             .all(|input| !input.script_sig.is_empty() || !input.witness.is_empty())
 }
 
+fn validate_ancestry_plan(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
+    let p = &intent.plan;
+    let funding = record.funding.as_ref().ok_or(Error::InvalidPlan)?;
+    let bitcoin_path = funding.bitcoin.decode()?;
+    let fork_path = funding.fork.decode()?;
+    bitcoin_path.reverify().map_err(|_| Error::InvalidJournal)?;
+    fork_path.reverify().map_err(|_| Error::InvalidJournal)?;
+    let shared: std::collections::BTreeSet<_> = p.claimed_prevouts.iter().copied().collect();
+    let mut first: std::collections::BTreeSet<_> =
+        p.step1.input.iter().map(|i| i.previous_output).collect();
+    let mut second: std::collections::BTreeSet<_> = funding
+        .step2_unsigned
+        .input
+        .iter()
+        .map(|i| i.previous_output)
+        .collect();
+    if p.poison != Poison::InputAncestry
+        || p.tracked_txid.is_some()
+        || p.previous_confirmation.is_some()
+        || !matches!(
+            (p.bitcoin_chain, p.fork_chain),
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+                | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+        )
+        || shared.is_empty()
+        || shared.len() != p.claimed_prevouts.len()
+        || first.len() != p.step1.input.len()
+        || second.len() != funding.step2_unsigned.input.len()
+        || !first.remove(&bitcoin_path.selected())
+        || !second.remove(&fork_path.selected())
+        || bitcoin_path.selected() == fork_path.selected()
+        || first != shared
+        || second != shared
+        || p.step1.output.len() != 1
+        || p.step1.output[0].value == coincube_core::miniscript::bitcoin::Amount::ZERO
+        || funding.step2_unsigned.output.len() != 1
+        || funding.step2_unsigned.output[0].value
+            == coincube_core::miniscript::bitcoin::Amount::ZERO
+        || record.target_script.as_ref() != Some(&funding.step2_unsigned.output[0].script_pubkey)
+        || record.target_index.is_none()
+        || !(1..=coincube_core::spend::MAX_FEERATE).contains(&funding.bitcoin_feerate_vb)
+        || !(1..=coincube_core::spend::MAX_FEERATE).contains(&funding.fork_feerate_vb)
+        || funding.step2_unsigned.input.iter().any(|input| {
+            input.previous_output.is_null()
+                || !input.script_sig.is_empty()
+                || !input.witness.is_empty()
+        })
+        || intent.phase != Phase::Intent
+        || intent.signed_txid.is_some()
+        || intent.bitcoin_transaction.is_some()
+        || !intent.bitcoin_attempts.is_empty()
+        || intent.fork_sweep.is_some()
+        || intent.fork_submission.is_some()
+        || !intent.inclusion_history.is_empty()
+        || record.step2_transaction.is_some()
+        || !record.step2_resubmissions.is_empty()
+        || record.step2_observed
+        || record.step2_returned
+        || record.step1_conflict.is_some()
+    {
+        return Err(Error::InvalidPlan);
+    }
+    Ok(())
+}
+
 pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     let record = intent.split.as_ref().ok_or(Error::InvalidPlan)?;
     let p = &intent.plan;
@@ -443,7 +549,13 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     if intent.version != record.kind.version()
         || intent.ancestry.is_some()
         || intent.funding_plan.is_some()
-        || p.poison != Poison::OpReturn
+        || (record.kind == SplitKind::Ancestry) != record.funding.is_some()
+        || p.poison
+            != if record.kind == SplitKind::Ancestry {
+                Poison::InputAncestry
+            } else {
+                Poison::OpReturn
+            }
         || !intent.identity.bitcoin_cube.is_empty()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.fork_cube.len() > 256
@@ -509,6 +621,7 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
                 return Err(Error::InvalidPlan);
             }
         }
+        SplitKind::Ancestry => validate_ancestry_plan(intent, record)?,
     }
     if let Some(descriptors) = &record.descriptors {
         if descriptors.source()?.digest() != record.source_digest {
@@ -558,7 +671,7 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         }
     }
     // A reservation is only made once step 1 is tracked.
-    if record.target_index.is_some() && !tracked {
+    if record.target_index.is_some() && !tracked && record.kind != SplitKind::Ancestry {
         return Err(Error::InvalidPlan);
     }
     // The signed step 2 and its submission are recorded together; the
@@ -612,6 +725,223 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
 }
 
 impl Controller {
+    /// Atomically record the ordinary `S+B` and `S+F` Split constructions
+    /// before any signing. This is structural data only, with no spend right.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_ancestry_split(
+        directory: &Path,
+        target_cube: String,
+        target_descriptor: &CoincubeDescriptor,
+        target_index: u32,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_path: &RetainedPath,
+        fork: &AncestrySplitStep2,
+        fork_path: &RetainedPath,
+        context: Context,
+    ) -> Result<Self, Error> {
+        bitcoin_path.reverify().map_err(|_| Error::InvalidPlan)?;
+        fork_path.reverify().map_err(|_| Error::InvalidPlan)?;
+        if target_index >= 1 << 31
+            || fork_chain(bitcoin.chain()) != Some(fork.chain())
+            || bitcoin.source() != fork.source()
+            || bitcoin.fork_height() != fork.fork_height()
+            || bitcoin.claimed_prevouts() != fork.claimed_prevouts()
+            || bitcoin.funding_prevout() != bitcoin_path.selected()
+            || fork.funding_prevout() != fork_path.selected()
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let target_index =
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(target_index)
+                .map_err(|_| Error::InvalidPlan)?;
+        let target_script = target_descriptor
+            .receive_descriptor()
+            .derive(
+                target_index,
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        if fork.target() != target_script.as_script() {
+            return Err(Error::WrongIdentity);
+        }
+        let rate = |fee: u64, maximum: u64| {
+            if maximum == 0 || fee % maximum != 0 {
+                return Err(Error::InvalidPlan);
+            }
+            let rate = fee / maximum;
+            if !(1..=coincube_core::spend::MAX_FEERATE).contains(&rate) {
+                return Err(Error::InvalidPlan);
+            }
+            Ok(rate)
+        };
+        let bitcoin_rate = rate(bitcoin.fee().to_sat(), bitcoin.maximum_signed_vbytes())?;
+        let fork_rate = rate(fork.fee().to_sat(), fork.maximum_signed_vbytes())?;
+        let (bitcoin_branch, bitcoin_index) =
+            bitcoin.funding_derivation().ok_or(Error::InvalidPlan)?;
+        let (fork_branch, fork_index) = fork.funding_derivation().ok_or(Error::InvalidPlan)?;
+        let source_digest = bitcoin.source().digest();
+        let step1 = bitcoin.psbt().unsigned_tx.clone();
+        let intent = Intent {
+            version: ANCESTRY_VERSION,
+            ancestry: None,
+            funding_plan: None,
+            identity: split_identity(target_cube.clone(), source_digest),
+            plan: ClaimPlan {
+                bitcoin_chain: bitcoin.chain(),
+                fork_chain: fork.chain(),
+                claimed_prevouts: bitcoin.claimed_prevouts().to_vec(),
+                step1: step1.clone(),
+                poison: Poison::InputAncestry,
+                previous_confirmation: None,
+                tracked_txid: None,
+            },
+            unsigned_digest: digest(&step1),
+            context_digest: context_digest(&context),
+            signed_txid: None,
+            phase: Phase::Intent,
+            fork_sweep: None,
+            fork_change_index: None,
+            bitcoin_change_index: None,
+            fork_submission: None,
+            inclusion_history: Vec::new(),
+            bitcoin_transaction: None,
+            bitcoin_attempts: Vec::new(),
+            split: Some(SplitRecord {
+                kind: SplitKind::Ancestry,
+                funding: Some(SplitFundingPlan {
+                    bitcoin: StoredSplitPath {
+                        selected: bitcoin_path.selected(),
+                        raw: hex::encode(bitcoin_path.encode()),
+                        index: bitcoin_index,
+                        is_change: bitcoin_branch
+                            == coincube_core::foreign_split::SplitBranch::Internal,
+                    },
+                    fork: StoredSplitPath {
+                        selected: fork_path.selected(),
+                        raw: hex::encode(fork_path.encode()),
+                        index: fork_index,
+                        is_change: fork_branch
+                            == coincube_core::foreign_split::SplitBranch::Internal,
+                    },
+                    step2_unsigned: fork.psbt().unsigned_tx.clone(),
+                    bitcoin_feerate_vb: bitcoin_rate,
+                    fork_feerate_vb: fork_rate,
+                    target_descriptor_digest: sha256::Hash::hash(
+                        target_descriptor.to_string().as_bytes(),
+                    ),
+                }),
+                source_digest,
+                descriptors: Some(StoredDescriptors::new(bitcoin.source())),
+                fork_height: bitcoin.fork_height(),
+                destination: bitcoin.destination(),
+                target_cube,
+                target_index: Some(u32::from(target_index)),
+                target_script: Some(target_script),
+                step2_transaction: None,
+                step2_resubmissions: Vec::new(),
+                step2_observed: false,
+                step2_returned: false,
+                step1_conflict: None,
+            }),
+        };
+        Self::admit_split(directory, intent, context)
+    }
+
+    /// Rebuild both saved ordinary transactions from current source-wallet
+    /// coins. The retained paths provide structural ancestry only; this does
+    /// not restore live two-chain proof, a reservation, or signing authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_ancestry_split_pair(
+        &mut self,
+        current: &Context,
+        source: &SplitSource,
+        target: &CoincubeDescriptor,
+        bitcoin_shared: &[SplitCoin],
+        bitcoin_marker: &SplitCoin,
+        bitcoin_tip: u32,
+        fork_shared: &[SplitCoin],
+        fork_marker: &SplitCoin,
+        fork_tip: u32,
+    ) -> Result<(AncestrySplitStep1, AncestrySplitStep2), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        let record = self.record_of(SplitKind::Ancestry)?;
+        let funding = record.funding.as_ref().ok_or(Error::InvalidJournal)?;
+        if record.source_digest != source.digest()
+            || record
+                .descriptors
+                .as_ref()
+                .map(StoredDescriptors::source)
+                .transpose()?
+                != Some(source.clone())
+            || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let target_index = coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(
+            record.target_index.ok_or(Error::InvalidJournal)?,
+        )
+        .map_err(|_| Error::InvalidJournal)?;
+        let target_script = target
+            .receive_descriptor()
+            .derive(
+                target_index,
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey();
+        if record.target_script.as_ref() != Some(&target_script) {
+            return Err(Error::WrongIdentity);
+        }
+        let bitcoin_path = funding.bitcoin.decode()?;
+        let fork_path = funding.fork.decode()?;
+        let bitcoin_dependency = bitcoin_path.reverify().map_err(|_| Error::InvalidJournal)?;
+        let fork_dependency = fork_path.reverify().map_err(|_| Error::InvalidJournal)?;
+        let matches_marker = |stored: &StoredSplitPath, coin: &SplitCoin| {
+            stored.selected == coin.outpoint
+                && stored.index == coin.index
+                && stored.is_change
+                    == (coin.branch == coincube_core::foreign_split::SplitBranch::Internal)
+        };
+        if !matches_marker(&funding.bitcoin, bitcoin_marker)
+            || !matches_marker(&funding.fork, fork_marker)
+        {
+            return Err(Error::InvalidPlan);
+        }
+        let bitcoin = reconstruct_ancestry_split_step1(
+            &AncestrySplitInputs {
+                chain: self.intent.plan.bitcoin_chain,
+                source,
+                shared: bitcoin_shared,
+                funding: bitcoin_marker,
+                dependency: &bitcoin_dependency,
+                fork_height: record.fork_height,
+                destination: record.destination,
+            },
+            &self.intent.plan.step1,
+            funding.bitcoin_feerate_vb,
+            bitcoin_tip,
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        let fork = reconstruct_ancestry_split_step2(
+            &AncestrySplitStep2Inputs {
+                chain: self.intent.plan.fork_chain,
+                source,
+                shared: fork_shared,
+                funding: fork_marker,
+                dependency: &fork_dependency,
+                fork_height: record.fork_height,
+                claimed: bitcoin.claimed_prevouts(),
+                target: &target_script,
+            },
+            &funding.step2_unsigned,
+            funding.fork_feerate_vb,
+            fork_tip,
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        Ok((bitcoin, fork))
+    }
+
     /// Record a Split step 1 before any submission. `construction` is the
     /// opaque core builder output and `signed` its verified finalization;
     /// neither can come from a journal. `fork_height` is the authenticated
@@ -668,6 +998,7 @@ impl Controller {
             bitcoin_attempts: Vec::new(),
             split: Some(SplitRecord {
                 kind: SplitKind::Split,
+                funding: None,
                 source_digest,
                 descriptors: Some(StoredDescriptors::new(source)),
                 fork_height,
@@ -749,6 +1080,7 @@ impl Controller {
             bitcoin_attempts: Vec::new(),
             split: Some(SplitRecord {
                 kind: SplitKind::Unified,
+                funding: None,
                 source_digest,
                 descriptors: Some(StoredDescriptors::new(sweep.source())),
                 fork_height: sweep.fork_height(),
@@ -782,7 +1114,7 @@ impl Controller {
         Ok(Self {
             id: controller_id()?,
             revoked: false,
-            construction_verified: true,
+            construction_verified: intent.version != ANCESTRY_VERSION,
             journal,
             intent,
             context,

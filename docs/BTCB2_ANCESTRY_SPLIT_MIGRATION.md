@@ -86,9 +86,13 @@ a replayable spend.
    Both rebuild exact PSBTs from fresh coins and the persisted fee rate,
    rejecting changed scripts, amounts, input sets, destinations and fees.
    These are structural builders only; the old OP_RETURN types remain for
-   recorded legacy transactions. Next update coordinator transport,
-   preflight and journal identity to carry both typed proofs. Keep the unified
-   signature fallback separate and labeled with its actual replay properties.
+   recorded legacy transactions. A version-11 Split journal now retains both
+   unsigned constructions, funding paths, fee rates and target identity, and
+   restart can rebuild both from current source coins. It remains unchecked;
+   reconstruction does not restore chain proof, reservations or signer access.
+   Next update coordinator transport and preflight to carry both typed live
+   proofs. Keep the unified signature fallback separate and labeled with its
+   actual replay properties.
 4. **Both desktop wizards.** Lead with the two deposits and show separate
    Bitcoin and BTCB2 receive addresses, exact chain labels, expected minimum
    funding for each fee and independent confirmation/proof progress. Clearly

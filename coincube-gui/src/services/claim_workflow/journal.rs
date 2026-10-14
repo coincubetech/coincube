@@ -20,7 +20,7 @@ const ANCESTRY_PAIR_MAX_BYTES: u64 = LEGACY_MAX_BYTES
     + 4 * coincube_core::claim_ancestry::retained::MAX_ENCODED_BYTES as u64
     + 1024 * 1024;
 fn intent_limit(intent: &Intent) -> u64 {
-    if intent.version == 10 && intent.funding_plan.is_some() {
+    if (intent.version == 10 && intent.funding_plan.is_some()) || intent.version == 11 {
         ANCESTRY_PAIR_MAX_BYTES
     } else if intent.version == 7 && intent.ancestry.is_some() {
         MAX_BYTES

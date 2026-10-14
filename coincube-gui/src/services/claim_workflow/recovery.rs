@@ -17,7 +17,9 @@ impl BitcoinSubmissionAttempt {
 }
 
 pub(super) fn validate_record(intent: &Intent) -> Result<(), Error> {
-    if intent.version < 6 || (matches!(intent.version, 7 | 10) && intent.phase == Phase::Intent) {
+    if intent.version < 6
+        || (matches!(intent.version, 7 | 10 | 11) && intent.phase == Phase::Intent)
+    {
         return if intent.bitcoin_transaction.is_none() && intent.bitcoin_attempts.is_empty() {
             Ok(())
         } else {
@@ -109,7 +111,7 @@ impl Controller {
         use crate::services::claim_observation::TransactionObservation;
         let collected = collected.into();
         let data = collected.data();
-        if self.intent.version == 10
+        if matches!(self.intent.version, 10 | split::ANCESTRY_VERSION)
             || !self.construction_verified
             || data.generation != self.context.generation
             || self.intent.phase == Phase::Intent

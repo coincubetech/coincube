@@ -195,6 +195,185 @@ fn construction_at(wallet: &Wallet, feerate: u64) -> SplitStep1 {
     .unwrap()
 }
 
+#[test]
+fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path() {
+    use coincube_core::{
+        claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+        descriptors::CoincubeDescriptor,
+        foreign_split::{
+            create_ancestry_split_step1, create_ancestry_split_step2, AncestrySplitInputs,
+            AncestrySplitStep2Inputs,
+        },
+        miniscript::bitcoin::{bip32::ChildNumber, consensus::serialize},
+    };
+
+    let wallet = make_wallet(Shape::WshMulti, 70);
+    let target = CoincubeDescriptor::from_str(super::super::tests::WSH_DESC).unwrap();
+    let shared = vec![
+        coin(&wallet.source, SplitBranch::External, 0, 250_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 200_000),
+    ];
+    let mut bitcoin_marker = coin(&wallet.source, SplitBranch::External, 2, 150_000);
+    bitcoin_marker.previous.input[0].previous_output = OutPoint::null();
+    bitcoin_marker.outpoint = OutPoint::new(bitcoin_marker.previous.compute_txid(), 0);
+    bitcoin_marker.bitcoin_block = Some(BlockRef {
+        height: FORK + 1,
+        hash: hash(0x44),
+    });
+    bitcoin_marker.btcb2_block = None;
+    let mut fork_marker = coin(&wallet.source, SplitBranch::Internal, 3, 150_000);
+    fork_marker.previous.input[0].previous_output = OutPoint::null();
+    fork_marker.outpoint = OutPoint::new(fork_marker.previous.compute_txid(), 0);
+    fork_marker.bitcoin_block = None;
+    fork_marker.btcb2_block = Some(BlockRef {
+        height: FORK + 1,
+        hash: hash(0x55),
+    });
+    let path = |marker: &SplitCoin| {
+        RetainedPath::new(
+            marker.outpoint,
+            vec![OwnedLink {
+                transaction: serialize(&marker.previous),
+                parent_input: None,
+            }],
+        )
+        .unwrap()
+    };
+    let bitcoin_path = path(&bitcoin_marker);
+    let fork_path = path(&fork_marker);
+    let bitcoin = create_ancestry_split_step1(
+        &AncestrySplitInputs {
+            chain: ChainId::Bitcoin,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &bitcoin_marker,
+            dependency: &bitcoin_path.reverify().unwrap(),
+            fork_height: FORK,
+            destination: 5,
+        },
+        2,
+        LockTime::from_height(TIP).unwrap(),
+        TIP,
+    )
+    .unwrap();
+    let target_script = target
+        .receive_descriptor()
+        .derive(
+            ChildNumber::from_normal_idx(4).unwrap(),
+            &Secp256k1::verification_only(),
+        )
+        .script_pubkey();
+    let fork = create_ancestry_split_step2(
+        &AncestrySplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &fork_marker,
+            dependency: &fork_path.reverify().unwrap(),
+            fork_height: FORK,
+            claimed: bitcoin.claimed_prevouts(),
+            target: &target_script,
+        },
+        2,
+        LockTime::from_height(TIP).unwrap(),
+        TIP,
+    )
+    .unwrap();
+    let temp = Temp::new();
+    let controller = Controller::create_ancestry_split(
+        &temp.0,
+        TARGET.into(),
+        &target,
+        4,
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(controller.intent.version, ANCESTRY_VERSION);
+    assert_eq!(controller.status(), Status::Unchecked);
+    assert!(!controller.construction_verified);
+    let identity = controller.identity().clone();
+    drop(controller);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert_eq!(reopened.status(), Status::Unchecked);
+    assert!(!reopened.construction_verified);
+    let record = reopened.intent.split.as_ref().unwrap();
+    assert_eq!(
+        record.funding.as_ref().unwrap().step2_unsigned,
+        fork.psbt().unsigned_tx
+    );
+    assert_eq!(reopened.intent.plan.step1, bitcoin.psbt().unsigned_tx);
+    let (restored_bitcoin, restored_fork) = reopened
+        .restore_ancestry_split_pair(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &bitcoin_marker,
+            TIP,
+            &shared,
+            &fork_marker,
+            TIP,
+        )
+        .unwrap();
+    assert_eq!(restored_bitcoin.psbt(), bitcoin.psbt());
+    assert_eq!(restored_fork.psbt(), fork.psbt());
+    assert!(!reopened.construction_verified);
+    let mut wrong_marker = fork_marker.clone();
+    wrong_marker.index += 1;
+    assert!(matches!(
+        reopened.restore_ancestry_split_pair(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &bitcoin_marker,
+            TIP,
+            &shared,
+            &wrong_marker,
+            TIP,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(!reopened.construction_verified);
+    let mut missing_funding = reopened.intent.clone();
+    missing_funding
+        .split
+        .as_mut()
+        .unwrap()
+        .funding
+        .as_mut()
+        .unwrap()
+        .step2_unsigned
+        .input
+        .retain(|input| input.previous_output != fork_marker.outpoint);
+    assert!(matches!(
+        validate(&missing_funding),
+        Err(Error::InvalidPlan)
+    ));
+    let mut wrong_destination = reopened.intent.clone();
+    wrong_destination
+        .split
+        .as_mut()
+        .unwrap()
+        .funding
+        .as_mut()
+        .unwrap()
+        .step2_unsigned
+        .output[0]
+        .script_pubkey = ScriptBuf::new_op_return(&[]);
+    assert!(matches!(
+        validate(&wrong_destination),
+        Err(Error::InvalidPlan)
+    ));
+    let mut downgraded = reopened.intent.clone();
+    downgraded.version = 8;
+    assert!(matches!(validate(&downgraded), Err(Error::InvalidPlan)));
+}
+
 /// Two signers for multisig (the first two keys), one otherwise.
 fn sign(step1: &SplitStep1, signers: &[Xpriv]) -> VerifiedSplitStep1 {
     let secp = Secp256k1::new();

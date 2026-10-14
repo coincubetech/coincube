@@ -438,7 +438,7 @@ impl Controller {
             return Err(Error::Conflict);
         }
         journal.store(&intent)?;
-        let construction_verified = intent.version != 10;
+        let construction_verified = !matches!(intent.version, 10 | split::ANCESTRY_VERSION);
         Ok(Self {
             id: controller_id()?,
             revoked: false,
