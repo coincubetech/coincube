@@ -1661,6 +1661,24 @@ impl ClaimStep1Panel {
                             "The paired BTCB2 Vault changed while preparing the Claim preview. Check deposits again."
                                 .to_string()
                         })?;
+                    let (bitcoin_tip, fork_tip) = tokio::try_join!(
+                        source.tip(ChainId::Bitcoin),
+                        source.tip(ChainId::BitcoinBlake2b),
+                    )
+                    .map_err(|_| {
+                        "The chain tips could not be refreshed for the Claim preview. Check deposits again."
+                            .to_string()
+                    })?;
+                    let proof_age = source.now().checked_sub(proof.inputs.observed_at());
+                    if bitcoin_tip.value() != &tips.bitcoin
+                        || fork_tip.value() != &tips.fork
+                        || !proof_age.is_some_and(|age| {
+                            (0..=CHECK_POLICY.observations.max_observation_age_seconds)
+                                .contains(&age)
+                        })
+                    {
+                        return Err("The two-chain Claim proof changed or expired while preparing the preview. Check deposits again.".into());
+                    }
                     Some(
                         view::vault::ancestry_coins::VerifiedCoinPairReview::new(
                             coins,

@@ -297,7 +297,9 @@ a replayable spend.
    funding coin must match the fork scan. After reserving both change
    branches and constructing the preview PSBTs, Claim rereads both complete
    wallet coin sets; a spend or new shared coin during construction withdraws
-   the preview. Signer admission must repeat both wallet reads.
+   the preview. It also refreshes both chain tips and checks the original
+   paired proof's age before labeling the preview verified. Signer admission
+   must repeat these reads.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks
