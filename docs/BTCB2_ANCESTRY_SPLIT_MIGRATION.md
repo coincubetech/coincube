@@ -526,8 +526,15 @@ marker spend cases remain.
    set with a fresh paired scan after Bitcoin spends: every claimed pre-fork
    output must be absent from Bitcoin's scanned UTXOs, present and unspent in
    the BTCB2 Vault, and the exact reserved BTCB2 funding output must still be
-   confirmed and unspent. The stage-two coordinator must join that check with
-   the collector, saved reservation, final signature and new policy evidence.
+   confirmed and unspent. That snapshot alone is not spend authority.
+   A Claim stage-two requalification now joins the read-only parts: it reloads
+   the saved funding and change reservation, compares the confirmed Bitcoin
+   witness to the supplied construction, recollects both ancestry roots and
+   current input states, validates the BTCB2 PSBT prevouts, reads the complete
+   BTCB2 Vault, and brackets the check with current two-chain tips. It returns
+   expiring observations only. The coordinator still must bind the exact
+   signed journal, currently open paired Vault, finalized BTCB2 signature,
+   fresh policy result and explicit review before sending.
    Foreign Split now has an equivalent read-only post-Bitcoin source-scan
    recheck: the exact shared set must have left Bitcoin while remaining
    confirmed and unspent on BTCB2, and the exact reserved BTCB2 funding coin

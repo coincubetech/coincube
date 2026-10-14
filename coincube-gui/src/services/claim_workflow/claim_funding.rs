@@ -8,8 +8,8 @@ use crate::services::{
     claim_inventory::{ClaimInventory, ClaimInventoryError, ClaimPairSnapshotError},
     claim_observation::{
         http::{
-            ClaimPairError, DiscoveryError, FundingContext, HttpObservationSource,
-            OwnedClaimFunding,
+            ClaimPairError, CollectedPostBitcoinInputs, DiscoveryError, FundingContext,
+            HttpObservationSource, OwnedClaimFunding,
         },
         CollectionContext, FailureKind, ObservationSource,
     },
@@ -22,12 +22,13 @@ use crate::services::{
 use async_trait::async_trait;
 use coincube_core::{
     claim::{Policy, PreflightTips},
+    claim_ancestry::retained::RetainedPath,
     claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
         bip32::ChildNumber,
         hashes::{sha256, Hash},
-        Address, Network, OutPoint,
+        Address, Network, OutPoint, ScriptBuf, Transaction,
     },
     spend::CandidateCoin,
 };
@@ -435,6 +436,13 @@ pub enum ClaimPairRequalificationError {
     Changed,
 }
 
+#[derive(Debug)]
+pub enum ClaimPostBitcoinError {
+    Changed,
+    Observation(FailureKind),
+    Wallet(ClaimInventoryError),
+}
+
 fn change_wallet_ready(
     info: &model::GetInfoResult,
     chain: coincube_core::chain::ChainId,
@@ -828,6 +836,176 @@ impl ClaimFundingReservation {
             .validate_context(&context.provider, context.generation)
             .map_err(ClaimPairRequalificationError::Observation)?;
         Ok(funding)
+    }
+
+    /// After the exact Bitcoin spend confirms, check that the paired BTCB2
+    /// Vault still owns every shared input and the reserved BTCB2-only input.
+    /// This cannot reuse the initial all-unspent collection. The result is
+    /// fresh read-only evidence; it is not a signer or broadcast capability.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // The paired Claim stage-two coordinator is not wired yet.
+    pub async fn requalify_post_bitcoin_fork(
+        &self,
+        directory: PathBuf,
+        inventory: &ClaimInventory,
+        identity: &WalletIdentity,
+        context: &Context,
+        fork_daemon: &(dyn Daemon + Send + Sync),
+        source: &HttpObservationSource,
+        policy: Policy,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        signed_bitcoin: &Transaction,
+        bitcoin_path: &RetainedPath,
+        fork_path: &RetainedPath,
+    ) -> Result<CollectedPostBitcoinInputs, ClaimPostBitcoinError> {
+        source
+            .validate_context(&context.provider, context.generation)
+            .map_err(ClaimPostBitcoinError::Observation)?;
+        let change = self.change.ok_or(ClaimPostBitcoinError::Changed)?;
+        let funding = fork.fork_marker().ok_or(ClaimPostBitcoinError::Changed)?;
+        let mut unsigned_bitcoin = signed_bitcoin.clone();
+        for input in &mut unsigned_bitcoin.input {
+            input.script_sig = ScriptBuf::new();
+            input.witness.clear();
+        }
+        if !self.released
+            || !self.matches(inventory.descriptor(), identity, context)
+            || bitcoin.chain() != coincube_core::chain::ChainId::Bitcoin
+            || fork.chain() != coincube_core::chain::ChainId::BitcoinBlake2b
+            || bitcoin.descriptor() != inventory.descriptor()
+            || fork.descriptor() != inventory.descriptor()
+            || bitcoin.change_index()
+                != (ChildNumber::Normal {
+                    index: change.bitcoin,
+                })
+            || fork.change_index() != (ChildNumber::Normal { index: change.fork })
+            || bitcoin.poison_input() != bitcoin_path.selected()
+            || funding != fork_path.selected()
+            || bitcoin.poison_derivation()
+                != (
+                    ChildNumber::Normal {
+                        index: self.indices.bitcoin_deposit,
+                    },
+                    false,
+                )
+            || unsigned_bitcoin != bitcoin.psbt().unsigned_tx
+        {
+            return Err(ClaimPostBitcoinError::Changed);
+        }
+        let saved_descriptor = inventory.descriptor().clone();
+        let saved_identity = identity.clone();
+        let saved_context = context.clone();
+        let saved_directory = directory.clone();
+        let saved = tokio::task::spawn_blocking(move || {
+            load_claim_funding(
+                &saved_directory,
+                &saved_descriptor,
+                &saved_identity,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| ClaimPostBitcoinError::Changed)?
+        .map_err(|_| ClaimPostBitcoinError::Changed)?;
+        if saved.as_ref() != Some(self) {
+            return Err(ClaimPostBitcoinError::Changed);
+        }
+        let collected = source
+            .collect_post_bitcoin_inputs(
+                bitcoin_path,
+                fork_path,
+                bitcoin.claimed_prevouts(),
+                signed_bitcoin,
+                policy,
+            )
+            .await
+            .map_err(ClaimPostBitcoinError::Observation)?;
+        let (bitcoin_tip, fork_tip) = tokio::try_join!(
+            source.tip(coincube_core::chain::ChainId::Bitcoin),
+            source.tip(coincube_core::chain::ChainId::BitcoinBlake2b),
+        )
+        .map_err(ClaimPostBitcoinError::Observation)?;
+        let tips = PreflightTips {
+            bitcoin: *bitcoin_tip.value(),
+            fork: *fork_tip.value(),
+        };
+        let scan = inventory.scan_report();
+        if scan.bitcoin.tip() != tips.bitcoin.hash
+            || u64::from(scan.bitcoin.tip_height()) != tips.bitcoin.height
+            || scan.btcb2.tip() != tips.fork.hash
+            || u64::from(scan.btcb2.tip_height()) != tips.fork.height
+            || scan.bitcoin.generation() != context.generation
+            || scan.btcb2.generation() != context.generation
+        {
+            return Err(ClaimPostBitcoinError::Changed);
+        }
+        collected
+            .validate_for_fork_psbt(
+                signed_bitcoin,
+                fork.psbt(),
+                bitcoin.claimed_prevouts(),
+                FundingContext {
+                    provider: &context.provider,
+                    generation: context.generation,
+                    now: source.now(),
+                    max_age_seconds: policy.max_observation_age_seconds,
+                    tips,
+                },
+            )
+            .map_err(ClaimPostBitcoinError::Observation)?;
+        inventory
+            .reconcile_post_bitcoin_fork_daemon(
+                fork_daemon,
+                bitcoin.claimed_prevouts(),
+                funding,
+                self.indices.btcb2_deposit,
+            )
+            .await
+            .map_err(ClaimPostBitcoinError::Wallet)?;
+        let saved_descriptor = inventory.descriptor().clone();
+        let saved_identity = identity.clone();
+        let saved_context = context.clone();
+        let current = tokio::task::spawn_blocking(move || {
+            load_claim_funding(
+                &directory,
+                &saved_descriptor,
+                &saved_identity,
+                &saved_context,
+            )
+        })
+        .await
+        .map_err(|_| ClaimPostBitcoinError::Changed)?
+        .map_err(|_| ClaimPostBitcoinError::Changed)?;
+        if current.as_ref() != Some(self) {
+            return Err(ClaimPostBitcoinError::Changed);
+        }
+        let (last_bitcoin, last_fork) = tokio::try_join!(
+            source.tip(coincube_core::chain::ChainId::Bitcoin),
+            source.tip(coincube_core::chain::ChainId::BitcoinBlake2b),
+        )
+        .map_err(ClaimPostBitcoinError::Observation)?;
+        if last_bitcoin.value() != &tips.bitcoin || last_fork.value() != &tips.fork {
+            return Err(ClaimPostBitcoinError::Changed);
+        }
+        source
+            .validate_context(&context.provider, context.generation)
+            .map_err(ClaimPostBitcoinError::Observation)?;
+        collected
+            .validate_for_fork_psbt(
+                signed_bitcoin,
+                fork.psbt(),
+                bitcoin.claimed_prevouts(),
+                FundingContext {
+                    provider: &context.provider,
+                    generation: context.generation,
+                    now: source.now(),
+                    max_age_seconds: policy.max_observation_age_seconds,
+                    tips,
+                },
+            )
+            .map_err(ClaimPostBitcoinError::Observation)?;
+        Ok(collected)
     }
 
     pub(super) fn matches_pair(
