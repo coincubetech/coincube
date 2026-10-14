@@ -278,6 +278,34 @@ impl CollectedPostBitcoinInputs {
         &self.shared
     }
 
+    /// Recover the spent Bitcoin-only input from the retained path after the
+    /// canonical Bitcoin spend has been observed. The caller must first bind
+    /// this collection to the exact signed pair and current session. This
+    /// returns structural input data, never current UTXO or signing authority.
+    pub(crate) fn bitcoin_funding_coin(
+        &self,
+        path: &RetainedPath,
+        source: &SplitSource,
+        index: u32,
+    ) -> Result<SplitCoin, FailureKind> {
+        let raw = path.links().first().ok_or(FailureKind::Malformed)?;
+        let previous: Transaction =
+            deserialize(&raw.transaction).map_err(|_| FailureKind::Malformed)?;
+        let coin = SplitCoin {
+            outpoint: path.selected(),
+            branch: SplitBranch::External,
+            index,
+            previous,
+            bitcoin_block: Some(self.bitcoin.block()),
+            btcb2_block: None,
+        };
+        self.bitcoin.validate_candidate(path, &coin)?;
+        if !source_owns_coin(source, &coin) {
+            return Err(FailureKind::Changed);
+        }
+        Ok(coin)
+    }
+
     pub fn observed_at(&self) -> i64 {
         self.observed_at
     }

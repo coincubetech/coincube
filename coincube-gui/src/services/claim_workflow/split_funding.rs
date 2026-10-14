@@ -438,6 +438,9 @@ impl RequalifiedInitialSplit {
 #[allow(dead_code)] // The paired stage-two coordinator is not wired yet.
 pub struct RequalifiedPostBitcoinSplit {
     pub(super) observed: CollectedPostBitcoinInputs,
+    /// The Bitcoin-only input is already spent; its canonical previous
+    /// transaction and block are retained solely to reverify the saved pair.
+    pub(super) bitcoin_funding: SplitCoin,
     /// Exact source-owned inputs for rebuilding the recorded BTCB2 PSBT.
     /// The stage-two coordinator must still reverify the saved signed pair.
     pub(super) fork_coins: PostBitcoinSplitCoins,
@@ -1115,8 +1118,12 @@ impl SplitFundingReservation {
                 tips,
             )
             .map_err(SplitPostBitcoinError::Inventory)?;
+        let bitcoin_funding = collected
+            .bitcoin_funding_coin(bitcoin_path, source, self.indices.bitcoin_deposit)
+            .map_err(SplitPostBitcoinError::Observation)?;
         Ok(RequalifiedPostBitcoinSplit {
             observed: collected,
+            bitcoin_funding,
             fork_coins,
         })
     }

@@ -621,8 +621,12 @@ marker spend cases remain.
    remain construction data; no signer or send path consumes them yet. A
    separate version-11 journal reader can now reconstruct only the recorded
    BTCB2 PSBT from such coins, since the Bitcoin inputs have left the current
-   UTXO scan. It grants no spend permission and still needs the saved signed
-   Bitcoin witness and full stage-two requalification at the coordinator.
+   UTXO scan. The stage-two collector also retains the spent Bitcoin-only
+   deposit's exact previous transaction and canonical confirming block; after
+   validating the signed pair, it binds that transaction to the saved path and
+   source derivation for whole-pair reconstruction. Neither path grants spend
+   permission; the coordinator must still join the signed journal, current
+   reservations, finalized BTCB2 witness and policy before review.
    The version-10 Claim and version-11 Split journal proof entries now accept
    those distinct requalification result types rather than a raw
    post-Bitcoin observation. Their shared private check binds the saved exact
