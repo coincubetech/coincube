@@ -622,6 +622,72 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
             &secp,
         )
         .is_ok());
+        if shape == Shape::Wpkh {
+            // ECDSA permits more than one valid nonce for the same key and
+            // message. Both files authenticate, but their disagreement must
+            // not be resolved by whichever file happened to load first.
+            let first = bitcoin_returns[0].clone();
+            let mut alternate = first.clone();
+            let funding_index = alternate
+                .unsigned_tx
+                .input
+                .iter()
+                .position(|input| input.previous_output == bitcoin_funding.outpoint)
+                .unwrap();
+            let (public_key, original) = alternate.inputs[funding_index]
+                .partial_sigs
+                .iter()
+                .next()
+                .map(|(key, signature)| (*key, *signature))
+                .unwrap();
+            let derivation = &alternate.inputs[funding_index]
+                .bip32_derivation
+                .get(&public_key.inner)
+                .unwrap()
+                .1;
+            let signing = secp256k1::Secp256k1::new();
+            let secret = wallet.signers[0].derive_priv(&signing, derivation).unwrap();
+            let output = &bitcoin_funding.previous.output[bitcoin_funding.outpoint.vout as usize];
+            let definite = wallet
+                .source
+                .derive(bitcoin_funding.branch, bitcoin_funding.index)
+                .unwrap();
+            let digest = sighash_all(
+                &mut SighashCache::new(&alternate.unsigned_tx),
+                funding_index,
+                &definite,
+                &alternate.inputs[funding_index],
+                output,
+            )
+            .unwrap();
+            let message = secp256k1::Message::from_digest(digest);
+            let different_signature =
+                signing.sign_ecdsa_with_noncedata(&message, &secret.private_key, &[7; 32]);
+            assert_ne!(different_signature, original.signature);
+            let mut replacement = original;
+            replacement.signature = different_signature;
+            alternate.inputs[funding_index]
+                .partial_sigs
+                .insert(public_key, replacement);
+            assert!(
+                finalize_ancestry_split_step1(&bitcoin, &bitcoin_inputs, &alternate, &secp).is_ok()
+            );
+            assert!(matches!(
+                combine_ancestry_split_pair(
+                    &bitcoin,
+                    &bitcoin_inputs,
+                    &[first, alternate],
+                    &fork,
+                    &fork_inputs,
+                    &[],
+                    &secp,
+                ),
+                Err(CombineAncestrySplitError::ConflictingSignature {
+                    chain: ChainId::Bitcoin,
+                    input,
+                }) if input == funding_index
+            ));
+        }
         let mut altered_return = fork_returns[0].clone();
         altered_return.unsigned_tx.output[0].value = Amount::from_sat(1);
         assert!(matches!(
