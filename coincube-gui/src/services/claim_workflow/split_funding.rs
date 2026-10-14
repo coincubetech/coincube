@@ -151,6 +151,7 @@ pub fn reserve_split_funding(
     super::prepare_directory(directory)?;
     let mut journal = Journal::open(directory)?;
     if journal.load()?.is_some()
+        || journal.load_claim_funding_reservation()?.is_some()
         || std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok()
     {
         return Err(Error::Conflict);
@@ -176,7 +177,9 @@ pub fn load_split_funding(
     context: &Context,
 ) -> Result<Option<SplitFundingReservation>, Error> {
     let journal = Journal::open(directory)?;
-    if std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok() {
+    if journal.load_claim_funding_reservation()?.is_some()
+        || std::fs::symlink_metadata(directory.join(super::SPLIT_TOMBSTONE)).is_ok()
+    {
         return Err(Error::Conflict);
     }
     let saved = journal.load_split_funding_reservation()?;

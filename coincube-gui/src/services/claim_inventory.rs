@@ -6,7 +6,7 @@ use super::{
     claim_observation::http::{DiscoveryError, HttpObservationSource, OwnedClaimFunding},
     coincube::CoincubeClient,
     foreign_scan::{Branch, BranchRange, ScanDescriptor, ScanError, ScanPlan},
-    foreign_split_inventory::{self, InventoryError, TwoChainScan},
+    foreign_split_inventory::{self, FreshDepositAddresses, InventoryError, TwoChainScan},
 };
 use coincube_core::{
     chain::ChainId,
@@ -153,6 +153,14 @@ impl ClaimInventory {
 
     pub fn scan_report(&self) -> &TwoChainScan {
         &self.scan
+    }
+    pub fn descriptor(&self) -> &CoincubeDescriptor {
+        &self.descriptor
+    }
+    /// Read-only candidate indices; reserve durably and recheck both chains'
+    /// address histories before showing any deposit instructions.
+    pub fn fresh_deposit_addresses(&self) -> Option<FreshDepositAddresses> {
+        self.scan.inventory.fresh_deposit_addresses()
     }
     pub fn shared(&self) -> &[CandidateCoin] {
         &self.shared

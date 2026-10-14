@@ -277,6 +277,43 @@ fn version_ten_pair_creation_reopens_without_live_spend_authority() {
         &fork_path.reverify().unwrap(),
     )
     .unwrap();
+    assert!(matches!(
+        Controller::create_ancestry_pair(
+            &temp.0,
+            "bitcoin-cube".into(),
+            "fork-cube".into(),
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            (index, false),
+            5,
+            5,
+            context(),
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let identity = WalletIdentity {
+        bitcoin_cube: "bitcoin-cube".into(),
+        fork_cube: "fork-cube".into(),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let reservation = super::super::claim_funding::ClaimFundingReservation::new(
+        &descriptor,
+        &identity,
+        &context(),
+        crate::services::foreign_split_inventory::FreshDepositAddresses {
+            bitcoin_deposit: 0,
+            btcb2_deposit: 2,
+        },
+    )
+    .unwrap();
+    {
+        let mut journal = Journal::open(&temp.0).unwrap();
+        journal
+            .store_claim_funding_reservation(&reservation)
+            .unwrap();
+    }
     let controller = Controller::create_ancestry_pair(
         &temp.0,
         "bitcoin-cube".into(),

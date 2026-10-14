@@ -152,7 +152,15 @@ a replayable spend.
    pre-display check now reloads that record, binds it to the current Connect
    identity, and checks all three addresses on both chains under one timeout;
    any used address or failed read refuses the instructions. The production
-   wizard has not yet been wired to this check.
+   wizard has not yet been wired to this check. Claim now independently reserves
+   two distinct receive indices from its paired Cube scan in a private journal
+   bound to both Cubes, the Vault descriptor and the Connect identity. Its
+   pre-display check reloads that exact record and requires fresh unused
+   address history on both chains for both addresses. Creation of a version-10
+   paired Claim intent now requires that saved record and checks both funding
+   derivations against its exact external indices under the journal lock. The
+   Claim wizard has not yet been wired to these checks or to the paired
+   transaction builder.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
    replacement goes live. Next remove `split_poison` payload building,

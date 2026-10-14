@@ -118,6 +118,14 @@ pub struct FreshFundingAddresses {
     pub bitcoin_return: u32,
 }
 
+/// Two distinct receive indices unused on both chains within the complete
+/// bounded scans. Claim must persist and recheck these before displaying them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FreshDepositAddresses {
+    pub bitcoin_deposit: u32,
+    pub btcb2_deposit: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitInventory {
     generation: u64,
@@ -141,6 +149,7 @@ pub struct SplitInventory {
     pending: Vec<InventoryCoin>,
     fresh_receive: FreshIndex,
     fresh_funding_addresses: Option<FreshFundingAddresses>,
+    fresh_deposit_addresses: Option<FreshDepositAddresses>,
 }
 
 impl SplitInventory {
@@ -236,6 +245,9 @@ impl SplitInventory {
     pub fn fresh_funding_addresses(&self) -> Option<FreshFundingAddresses> {
         self.fresh_funding_addresses
     }
+    pub fn fresh_deposit_addresses(&self) -> Option<FreshDepositAddresses> {
+        self.fresh_deposit_addresses
+    }
 
     /// Join two complete reports of the same generation and descriptors.
     pub fn join(
@@ -279,6 +291,13 @@ impl SplitInventory {
             btcb2_funding_candidates: BTreeMap::new(),
             pending: Vec::new(),
             fresh_receive: fresh_receive(btcb2, bitcoin, external_ranged),
+            fresh_deposit_addresses: fresh_receive_indices(btcb2, bitcoin, external_ranged, 2)
+                .and_then(|indices| {
+                    Some(FreshDepositAddresses {
+                        bitcoin_deposit: *indices.first()?,
+                        btcb2_deposit: *indices.get(1)?,
+                    })
+                }),
             fresh_funding_addresses: fresh_receive_indices(btcb2, bitcoin, external_ranged, 3)
                 .and_then(|indices| {
                     Some(FreshFundingAddresses {
@@ -750,6 +769,13 @@ mod tests {
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
         assert_eq!(
+            inventory.fresh_deposit_addresses(),
+            Some(FreshDepositAddresses {
+                bitcoin_deposit: 6,
+                btcb2_deposit: 7,
+            })
+        );
+        assert_eq!(
             inventory.fresh_funding_addresses(),
             Some(FreshFundingAddresses {
                 bitcoin_deposit: 6,
@@ -757,6 +783,21 @@ mod tests {
                 bitcoin_return: 8,
             })
         );
+    }
+
+    #[test]
+    fn two_fresh_deposit_addresses_do_not_require_a_third_split_return() {
+        let btcb2 = report(ChainId::BitcoinBlake2b, Vec::new(), walk(8, Some(5)));
+        let bitcoin = report(ChainId::Bitcoin, Vec::new(), walk(8, Some(5)));
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        assert_eq!(
+            inventory.fresh_deposit_addresses(),
+            Some(FreshDepositAddresses {
+                bitcoin_deposit: 6,
+                btcb2_deposit: 7,
+            })
+        );
+        assert_eq!(inventory.fresh_funding_addresses(), None);
     }
 
     #[test]

@@ -1,12 +1,17 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
 mod ancestry;
 pub(crate) use ancestry::RecoveryObservation;
+mod claim_funding;
 mod journal;
 mod recovery;
 mod reorg;
 mod split;
 mod split_funding;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
+pub use claim_funding::{
+    check_reserved_claim_addresses, load_claim_funding, reserve_claim_funding,
+    CheckedClaimFundingAddresses, ClaimAddressError, ClaimFundingReservation,
+};
 use coincube_core::{
     chain::ChainId,
     claim::{self, Assessment, BlockRef, ClaimPlan, Poison, Policy, TransactionLocation},
@@ -438,6 +443,19 @@ impl Controller {
         let mut journal = Journal::open(directory)?;
         if journal.load()?.is_some() {
             return Err(Error::Conflict);
+        }
+        if intent.version == 10 {
+            let saved = journal
+                .load_claim_funding_reservation()?
+                .ok_or(Error::InvalidPlan)?;
+            if !saved.matches_pair(
+                &intent.identity,
+                &context,
+                intent.ancestry.as_ref().ok_or(Error::InvalidPlan)?,
+                &intent.funding_plan.as_ref().ok_or(Error::InvalidPlan)?.fork,
+            ) {
+                return Err(Error::WrongIdentity);
+            }
         }
         journal.store(&intent)?;
         let construction_verified = !matches!(intent.version, 10 | split::ANCESTRY_VERSION);
