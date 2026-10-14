@@ -156,6 +156,10 @@ pub struct PsbtState {
     /// the Claim coordinator. Each signer dispatch consumes a fresh check.
     claim_signing: bool,
     claim_dispatch: Option<Arc<replay::SplitEvidence>>,
+    /// The ordinary two-chain Claim path uses a distinct, exact-PSBT
+    /// one-use permit after a fresh wallet and ancestry requalification.
+    paired_dispatch:
+        Option<crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit>,
     /// A claim signed with local devices has no Connect Keychain vault to fetch.
     keychain_signing_enabled: bool,
     /// The spend screen's own re-check of a replayable spend's inputs
@@ -230,6 +234,7 @@ impl PsbtState {
             replay,
             claim_signing: false,
             claim_dispatch: None,
+            paired_dispatch: None,
             keychain_signing_enabled: true,
             entangled_check: EntangledCheck::Idle,
             revalidated_for: None,
@@ -473,6 +478,24 @@ impl PsbtState {
         }
         self.claim_signing = true;
         self.claim_dispatch = None;
+        self.paired_dispatch = None;
+        true
+    }
+
+    /// The paired ancestry wizard owns submission and asks for a new permit
+    /// before every actual signer request. This also works for its Bitcoin
+    /// PSBT; the old Claim replay evidence is BTCB2-only.
+    #[allow(dead_code)] // The paired signer panel is staged behind the migration gate.
+    pub(crate) fn set_paired_signing_permit(
+        &mut self,
+        permit: crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit,
+    ) -> bool {
+        if !permit.matches(self.wallet.chain, &self.tx.psbt) {
+            return false;
+        }
+        self.claim_signing = true;
+        self.claim_dispatch = None;
+        self.paired_dispatch = Some(permit);
         true
     }
 
@@ -484,6 +507,9 @@ impl PsbtState {
     pub(crate) fn consume_claim_signing_permit(&mut self) -> bool {
         if !self.claim_signing {
             return true;
+        }
+        if let Some(permit) = self.paired_dispatch.take() {
+            return permit.consume(self.wallet.chain, &self.tx.psbt);
         }
         let Some(proof) = self.claim_dispatch.take() else {
             return false;
@@ -507,6 +533,7 @@ impl PsbtState {
             return false;
         }
         self.claim_signing = true;
+        self.paired_dispatch = None;
         self.claim_dispatch = Some(evidence.clone());
         self.replay = Some(ReplayReview::with_split(
             &self.tx.psbt,

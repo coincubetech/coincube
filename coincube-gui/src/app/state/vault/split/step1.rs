@@ -1206,9 +1206,9 @@ impl SplitConnect for ProductionConnect {
                 &descriptor,
                 target_index,
                 &bitcoin,
-                &funding.bitcoin_path,
+                &funding.funding().bitcoin_path,
                 &fork,
-                &funding.fork_path,
+                &funding.funding().fork_path,
                 context,
             )?;
             // The controller owns the journal lock. Release it before the

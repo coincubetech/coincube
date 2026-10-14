@@ -4,6 +4,7 @@ pub(crate) use ancestry::RecoveryObservation;
 mod claim_funding;
 mod journal;
 mod paired_recovery;
+pub(crate) mod paired_signing_permit;
 pub(crate) use paired_recovery::{ChainState as PairedChainState, SideReport as PairedSideReport};
 mod paired_submission;
 mod recovery;

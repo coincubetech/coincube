@@ -2,7 +2,9 @@
 //! It pins address selection and identity across restart; it is never proof
 //! of chain exclusivity or a permission to sign.
 
-use super::{journal::Journal, Context, Error, WalletIdentity};
+use super::{
+    journal::Journal, paired_signing_permit::PairedSigningPermit, Context, Error, WalletIdentity,
+};
 use crate::daemon::{model, Daemon};
 use crate::services::{
     claim_inventory::{ClaimInventory, ClaimInventoryError, ClaimPairSnapshotError},
@@ -21,15 +23,19 @@ use crate::services::{
 };
 use async_trait::async_trait;
 use coincube_core::{
+    chain::ChainId,
     claim::{Policy, PreflightTips},
     claim_ancestry::retained::RetainedPath,
+    claim_finalize::{validate_ancestry_transfer_signing, validate_claim_fork_signing},
     claim_spend::{AncestrySelfTransfer, ClaimForkSweep},
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
         bip32::ChildNumber,
         hashes::{sha256, Hash},
+        psbt::Psbt,
         Address, Network, OutPoint, ScriptBuf, Transaction,
     },
+    psbt_unified::UnifiedPsbt,
     spend::CandidateCoin,
 };
 use serde::{Deserialize, Serialize};
@@ -46,6 +52,62 @@ const MAX_ADDRESS_AGE_SECONDS: i64 = 60;
 // update-derivation-index command. Refuse a pathological gap instead of
 // issuing an unbounded series of remote writes from the Claim screen.
 const MAX_REMOTE_RECEIVE_ADVANCES: u32 = 256;
+
+/// Fresh complete-wallet and two-chain requalification for one exact Claim
+/// pair. Only the saved deposit reservation can produce it. Holding the
+/// PSBTs here prevents a later finalizer from applying this check to a
+/// different transaction with the same funding outpoints.
+#[derive(Debug)]
+#[allow(dead_code)] // The paired signer panel has not yet retained this result.
+pub(crate) struct RequalifiedInitialClaim {
+    pub(super) funding: OwnedClaimFunding,
+    bitcoin_psbt: Psbt,
+    fork_psbt: Psbt,
+    context: Context,
+    checked_at: std::time::Instant,
+}
+
+impl RequalifiedInitialClaim {
+    pub(crate) fn funding(&self) -> &OwnedClaimFunding {
+        &self.funding
+    }
+
+    pub(super) fn matches_pair(
+        &self,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+    ) -> bool {
+        self.bitcoin_psbt == *bitcoin.psbt() && self.fork_psbt == *fork.psbt()
+    }
+
+    /// Issue a one-use permit only for a current, structurally unchanged
+    /// signer PSBT of the exact pair that passed the wallet and chain check.
+    /// The caller must run `requalify_exact_pair` again for every dispatch.
+    #[allow(dead_code)] // The paired signer panel is staged behind the migration gate.
+    pub(crate) fn signer_permit(
+        &self,
+        chain: ChainId,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        current: &Psbt,
+        generation: watch::Receiver<u64>,
+    ) -> Option<PairedSigningPermit> {
+        if !self.matches_pair(bitcoin, fork)
+            || self.checked_at.elapsed() >= Duration::from_secs(10)
+            || *generation.borrow() != self.context.generation
+            || generation.has_changed().is_err()
+        {
+            return None;
+        }
+        let valid = match chain {
+            ChainId::Bitcoin => validate_ancestry_transfer_signing(bitcoin, current).is_ok(),
+            ChainId::BitcoinBlake2b => UnifiedPsbt::from_psbt(current.clone())
+                .is_ok_and(|unified| validate_claim_fork_signing(fork, &unified).is_ok()),
+            _ => false,
+        };
+        valid.then(|| PairedSigningPermit::new(chain, current, generation, self.context.generation))
+    }
+}
 
 fn at_reserved_receive_index(coin: &CandidateCoin, index: u32) -> bool {
     !coin.is_change && coin.deriv_index == ChildNumber::Normal { index }
@@ -731,7 +793,7 @@ impl ClaimFundingReservation {
     /// dispatch must rerun it, and no network send is permitted by it.
     #[allow(clippy::too_many_arguments)]
     #[allow(dead_code)] // The paired signer dispatch is not wired yet.
-    pub async fn requalify_exact_pair(
+    pub(crate) async fn requalify_exact_pair(
         &self,
         directory: PathBuf,
         inventory: &ClaimInventory,
@@ -745,7 +807,7 @@ impl ClaimFundingReservation {
         bitcoin: &AncestrySelfTransfer,
         fork: &ClaimForkSweep,
         rates: (u64, u64),
-    ) -> Result<OwnedClaimFunding, ClaimPairRequalificationError> {
+    ) -> Result<RequalifiedInitialClaim, ClaimPairRequalificationError> {
         source
             .validate_context(&context.provider, context.generation)
             .map_err(ClaimPairRequalificationError::Observation)?;
@@ -843,7 +905,13 @@ impl ClaimFundingReservation {
         source
             .validate_context(&context.provider, context.generation)
             .map_err(ClaimPairRequalificationError::Observation)?;
-        Ok(funding)
+        Ok(RequalifiedInitialClaim {
+            funding,
+            bitcoin_psbt: bitcoin.psbt().clone(),
+            fork_psbt: fork.psbt().clone(),
+            context: context.clone(),
+            checked_at: std::time::Instant::now(),
+        })
     }
 
     /// After the exact Bitcoin spend confirms, check that the paired BTCB2

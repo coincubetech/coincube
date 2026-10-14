@@ -28,6 +28,7 @@ use coincube_core::{
         bitcoin::{
             bip32::ChildNumber,
             hashes::{sha256, Hash},
+            psbt::Psbt,
             Address, Network, OutPoint, ScriptBuf, Transaction,
         },
         Descriptor, DescriptorPublicKey,
@@ -61,6 +62,34 @@ pub enum SplitPostBitcoinError {
     Changed,
     Inventory(InventoryError),
     Observation(FailureKind),
+}
+
+/// Fresh source scan, target binding, saved-address reservation and two-chain
+/// requalification for one exact ordinary Split pair. It grants no signer or
+/// broadcast access by itself.
+#[derive(Debug)]
+pub(crate) struct RequalifiedInitialSplit {
+    pub(super) funding: OwnedSplitFunding,
+    target_descriptor: CoincubeDescriptor,
+    bitcoin_psbt: Psbt,
+    fork_psbt: Psbt,
+}
+
+impl RequalifiedInitialSplit {
+    pub(crate) fn funding(&self) -> &OwnedSplitFunding {
+        &self.funding
+    }
+
+    pub(super) fn matches_pair(
+        &self,
+        target: &CoincubeDescriptor,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+    ) -> bool {
+        self.target_descriptor == *target
+            && self.bitcoin_psbt == *bitcoin.psbt()
+            && self.fork_psbt == *fork.psbt()
+    }
 }
 
 /// Only the saved foreign source/target reservation and fresh stage-two
@@ -442,7 +471,7 @@ impl SplitFundingReservation {
     /// supply a newly completed two-chain source scan, not a saved preview.
     /// This is a prerequisite for signer admission, not an authorization.
     #[allow(clippy::too_many_arguments)]
-    pub async fn requalify_exact_pair(
+    pub(crate) async fn requalify_exact_pair(
         &self,
         directory: PathBuf,
         source: &SplitSource,
@@ -456,7 +485,7 @@ impl SplitFundingReservation {
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
         rates: (u64, u64),
-    ) -> Result<OwnedSplitFunding, SplitPairRequalificationError> {
+    ) -> Result<RequalifiedInitialSplit, SplitPairRequalificationError> {
         observations
             .validate_context(&context.provider, context.generation)
             .map_err(|_| SplitPairRequalificationError::Changed)?;
@@ -561,7 +590,12 @@ impl SplitFundingReservation {
         observations
             .validate_context(&context.provider, context.generation)
             .map_err(|_| SplitPairRequalificationError::Changed)?;
-        Ok(funding)
+        Ok(RequalifiedInitialSplit {
+            funding,
+            target_descriptor: target_vault.1.clone(),
+            bitcoin_psbt: bitcoin.psbt().clone(),
+            fork_psbt: fork.psbt().clone(),
+        })
     }
 
     /// Recheck the saved foreign source and target after Bitcoin has spent

@@ -1104,10 +1104,8 @@ impl Controller {
     pub(crate) fn finalize_ancestry_split_pair_for_review(
         &mut self,
         current: &Context,
-        observed: &crate::services::claim_observation::http::CollectedSpendInputs,
+        requalified: &super::split_funding::RequalifiedInitialSplit,
         target: &CoincubeDescriptor,
-        bitcoin_coin: &SplitCoin,
-        fork_coin: &SplitCoin,
         bitcoin: &AncestrySplitStep1,
         bitcoin_inputs: &AncestrySplitInputs<'_>,
         bitcoin_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
@@ -1124,12 +1122,16 @@ impl Controller {
         ),
         Error,
     > {
+        if !requalified.matches_pair(target, bitcoin, fork) {
+            return Err(Error::WrongIdentity);
+        }
+        let funding = requalified.funding();
         self.validate_ancestry_split_observation(
             current,
-            observed,
+            &funding.inputs,
             target,
-            bitcoin_coin,
-            fork_coin,
+            &funding.bitcoin,
+            &funding.fork,
             bitcoin,
             fork,
             policy,
@@ -1152,7 +1154,7 @@ impl Controller {
             signed.bitcoin().transaction(),
             signed.fork().transaction(),
             tips,
-            observed.observed_at(),
+            funding.inputs.observed_at(),
             policy.max_observation_age_seconds,
         );
         Ok((signed, proof))

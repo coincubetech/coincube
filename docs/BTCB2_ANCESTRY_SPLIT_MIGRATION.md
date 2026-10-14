@@ -340,6 +340,14 @@ a replayable spend.
    exact version-10 intent. It is not yet called by the GUI signer transition
    and does not authorize a send; the signed-pair coordinator and each signer
    dispatch still need it.
+   Claim and Split requalification now return distinct typed results that
+   retain the exact checked PSBT pair. Their journal finalizers require that
+   result, so a raw observation alone cannot be used as a substitute for the
+   complete-wallet or foreign-source and reservation checks. Claim also has a
+   ten-second, one-use signer permit bound to the exact current PSBT, chain and
+   Connect generation; the ordinary picker can consume it while keeping its
+   own broadcast actions closed. The production wizard has not yet wired this
+   permit to a visible signer request.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks

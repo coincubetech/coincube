@@ -715,9 +715,7 @@ impl Controller {
     pub(crate) fn finalize_ancestry_pair_for_review(
         &mut self,
         current: &Context,
-        pair: &crate::services::claim_observation::http::CollectedSpendInputs,
-        bitcoin_coin: &CandidateCoin,
-        fork_coin: &CandidateCoin,
+        requalified: &super::claim_funding::RequalifiedInitialClaim,
         bitcoin: &AncestrySelfTransfer,
         fork: &ClaimForkSweep,
         bitcoin_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
@@ -732,11 +730,15 @@ impl Controller {
         ),
         Error,
     > {
+        if !requalified.matches_pair(bitcoin, fork) {
+            return Err(Error::WrongIdentity);
+        }
+        let funding = requalified.funding();
         self.validate_ancestry_pair_observation(
             current,
-            pair,
-            bitcoin_coin,
-            fork_coin,
+            &funding.inputs,
+            &funding.bitcoin,
+            &funding.fork,
             bitcoin,
             fork,
             policy,
@@ -757,7 +759,7 @@ impl Controller {
             signed.bitcoin().transaction(),
             signed.fork().transaction(),
             tips,
-            pair.observed_at(),
+            funding.inputs.observed_at(),
             policy.max_observation_age_seconds,
         );
         Ok((signed, proof))
