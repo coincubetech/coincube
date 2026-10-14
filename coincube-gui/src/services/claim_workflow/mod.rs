@@ -319,7 +319,7 @@ impl Controller {
         #[cfg(not(test))]
         {
             let _ = (directory, bitcoin_cube, fork_cube, artifact, context);
-            return Err(Error::Unchecked);
+            Err(Error::Unchecked)
         }
         #[cfg(test)]
         {

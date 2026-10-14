@@ -131,8 +131,12 @@ a replayable spend.
    checks. The version-10 Claim journal now retains both *structural* paths,
    marker outpoints and exact unsigned transactions; paired restore rebuilds
    both against current owned coins while keeping signing and submission
-   unavailable. Next bind the live two-chain collector and reservations to
-   this intent. On restart, recollect live proofs before sign, broadcast or
+   unavailable. An exact-pair create-or-reopen boundary now allows a future
+   explicit signer transition to retry only the same unsigned transactions,
+   raw paths, fee rates and destination. Deposit previews do not write this
+   intent because fee quotes can change before the user chooses to sign.
+   Next bind the live two-chain collector and reservations to this intent. On
+   restart, recollect live proofs before sign, broadcast or
    completion. Keep legacy reconstruction and verification only for recorded
    intents and possibly broadcast transactions. Remove them after journal
    migration and reconciliation are complete.
@@ -163,6 +167,8 @@ a replayable spend.
    unsigned constructions, funding paths, fee rates and target identity, and
    restart can rebuild both from current source coins. It remains unchecked;
    reconstruction does not restore chain proof, reservations or signer access.
+   Split also has an exact-pair create-or-reopen boundary, refusing a changed
+   transaction, funding path, source or target on retry.
    A read-only paired construction now takes the qualified funding result and
    builds both ordinary PSBTs together, then validates them against the paired
    observation. It requires the exact source receive index and target script

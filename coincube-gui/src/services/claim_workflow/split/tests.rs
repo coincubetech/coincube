@@ -396,6 +396,35 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     assert!(!controller.construction_verified);
     let identity = controller.identity().clone();
     drop(controller);
+    let same = Controller::create_or_reopen_ancestry_split(
+        &temp.0,
+        TARGET.into(),
+        &target,
+        4,
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(same.status(), Status::Unchecked);
+    assert!(!same.construction_verified);
+    drop(same);
+    assert!(matches!(
+        Controller::create_or_reopen_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            5,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        ),
+        Err(Error::WrongIdentity)
+    ));
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
     assert!(reopened.is_paired_ancestry_split());
     assert_eq!(reopened.status(), Status::Unchecked);

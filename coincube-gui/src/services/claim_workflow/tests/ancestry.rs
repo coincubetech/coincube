@@ -362,6 +362,39 @@ fn version_ten_pair_creation_reopens_without_live_spend_authority() {
     assert!(!controller.construction_verified);
     let identity = controller.identity().clone();
     drop(controller);
+    let reopened_same = Controller::create_or_reopen_ancestry_pair(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        (index, false),
+        5,
+        5,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(reopened_same.status(), Status::Unchecked);
+    assert!(!reopened_same.construction_verified);
+    drop(reopened_same);
+    assert!(matches!(
+        Controller::create_or_reopen_ancestry_pair(
+            &temp.0,
+            "bitcoin-cube".into(),
+            "fork-cube".into(),
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            (index, false),
+            6,
+            5,
+            context(),
+        ),
+        Err(Error::WrongIdentity)
+    ));
     let mut restored = reopen_settled(&temp.0, &identity, context()).unwrap();
     assert!(restored.is_paired_ancestry_claim());
     assert_eq!(restored.status(), Status::Unchecked);

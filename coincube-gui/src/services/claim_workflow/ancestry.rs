@@ -509,6 +509,87 @@ impl Controller {
             }),
         )
     }
+
+    /// Persist the first exact pair, or reopen that same unchecked intent on
+    /// a deposit recheck. A changed transaction, dependency path, fee quote or
+    /// destination cannot silently replace a previously reviewed pair. This
+    /// only establishes durable identity; it grants no signing authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_or_reopen_ancestry_pair(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        bitcoin: &AncestrySelfTransfer,
+        bitcoin_path: &RetainedPath,
+        fork: &ClaimForkSweep,
+        fork_path: &RetainedPath,
+        fork_marker_derivation: (coincube_core::miniscript::bitcoin::bip32::ChildNumber, bool),
+        bitcoin_feerate_vb: u64,
+        fork_feerate_vb: u64,
+        context: Context,
+    ) -> Result<Self, Error> {
+        match Self::create_ancestry_pair(
+            directory,
+            bitcoin_cube.clone(),
+            fork_cube.clone(),
+            bitcoin,
+            bitcoin_path,
+            fork,
+            fork_path,
+            fork_marker_derivation,
+            bitcoin_feerate_vb,
+            fork_feerate_vb,
+            context.clone(),
+        ) {
+            Ok(controller) => Ok(controller),
+            Err(Error::Conflict) => {
+                let identity = WalletIdentity {
+                    bitcoin_cube,
+                    fork_cube,
+                    descriptor_digest: sha256::Hash::hash(
+                        bitcoin.descriptor().to_string().as_bytes(),
+                    ),
+                };
+                let controller = Self::reopen(directory, &identity, context)?;
+                let saved_fork = controller
+                    .intent
+                    .funding_plan
+                    .as_ref()
+                    .ok_or(Error::WrongIdentity)?;
+                let saved_bitcoin_path = controller
+                    .intent
+                    .ancestry
+                    .as_ref()
+                    .ok_or(Error::WrongIdentity)?;
+                let saved_fork_path = &saved_fork.fork;
+                if controller.intent.version != 10
+                    || controller.intent.phase != Phase::Intent
+                    || controller.intent.plan.step1 != bitcoin.psbt().unsigned_tx
+                    || saved_fork.step2_unsigned != fork.psbt().unsigned_tx
+                    || controller.intent.plan.claimed_prevouts != bitcoin.claimed_prevouts()
+                    || saved_bitcoin_path.raw != hex::encode(bitcoin_path.encode())
+                    || saved_fork_path.raw != hex::encode(fork_path.encode())
+                    || saved_fork
+                        .fork
+                        .derivation
+                        .as_ref()
+                        .is_none_or(|derivation| {
+                            (derivation.index, derivation.is_change)
+                                != (
+                                    u32::from(fork_marker_derivation.0),
+                                    fork_marker_derivation.1,
+                                )
+                        })
+                    || saved_fork.bitcoin_feerate_vb != bitcoin_feerate_vb
+                    || saved_fork.fork_feerate_vb != fork_feerate_vb
+                {
+                    return Err(Error::Conflict);
+                }
+                Ok(controller)
+            }
+            Err(error) => Err(error),
+        }
+    }
     /// Reverified structural links only. Callers must obtain new positive chain
     /// observations and rebuild owned construction before any further action.
     pub fn recorded_ancestry(&self) -> Result<Option<RetainedPath>, Error> {

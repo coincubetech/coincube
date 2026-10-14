@@ -864,6 +864,64 @@ impl Controller {
         Self::admit_split(directory, intent, context)
     }
 
+    /// An explicit signer transition may encounter the same journal after a
+    /// retry. Reopen it only if both ordinary unsigned transactions, funding
+    /// paths, source and target are byte-for-byte the saved intent. A changed
+    /// fee quote or address must be handled as a new reviewed plan, never an
+    /// implicit replacement of the existing one.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_or_reopen_ancestry_split(
+        directory: &Path,
+        target_cube: String,
+        target_descriptor: &CoincubeDescriptor,
+        target_index: u32,
+        bitcoin: &AncestrySplitStep1,
+        bitcoin_path: &RetainedPath,
+        fork: &AncestrySplitStep2,
+        fork_path: &RetainedPath,
+        context: Context,
+    ) -> Result<Self, Error> {
+        match Self::create_ancestry_split(
+            directory,
+            target_cube.clone(),
+            target_descriptor,
+            target_index,
+            bitcoin,
+            bitcoin_path,
+            fork,
+            fork_path,
+            context.clone(),
+        ) {
+            Ok(controller) => Ok(controller),
+            Err(Error::Conflict) => {
+                let identity = split_identity(target_cube, bitcoin.source().digest());
+                let controller = Self::reopen(directory, &identity, context)?;
+                let record = controller
+                    .intent
+                    .split
+                    .as_ref()
+                    .ok_or(Error::WrongIdentity)?;
+                let funding = record.funding.as_ref().ok_or(Error::WrongIdentity)?;
+                if controller.intent.version != ANCESTRY_VERSION
+                    || controller.intent.phase != Phase::Intent
+                    || record.kind != SplitKind::Ancestry
+                    || record.source_digest != bitcoin.source().digest()
+                    || record.target_index != Some(target_index)
+                    || funding.target_descriptor_digest
+                        != sha256::Hash::hash(target_descriptor.to_string().as_bytes())
+                    || controller.intent.plan.step1 != bitcoin.psbt().unsigned_tx
+                    || funding.step2_unsigned != fork.psbt().unsigned_tx
+                    || funding.bitcoin.raw != hex::encode(bitcoin_path.encode())
+                    || funding.fork.raw != hex::encode(fork_path.encode())
+                {
+                    return Err(Error::Conflict);
+                }
+                Ok(controller)
+            }
+            Err(error) => Err(error),
+        }
+    }
+
     /// Rebuild both saved ordinary transactions from current source-wallet
     /// coins. The retained paths provide structural ancestry only; this does
     /// not restore live two-chain proof, a reservation, or signing authority.

@@ -911,7 +911,7 @@ impl ClaimStep1Panel {
                 .connect
                 .as_ref()
                 .is_some_and(|bound| same_session(bound, session)))
-        .then(|| self.pre.target.as_deref())
+        .then_some(self.pre.target.as_deref())
         .flatten()
     }
 
