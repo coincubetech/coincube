@@ -249,6 +249,10 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(!p.funding_checking);
     assert!(p.funding_status.as_deref().unwrap().contains("proofs"));
     assert!(!p.can_sign_or_submit());
+    drop(p.apply(ClaimEvent::FundingProofExpired(11, 7, 0)));
+    assert!(p.funding_status.as_deref().unwrap().contains("proofs"));
+    drop(p.apply(ClaimEvent::FundingProofExpired(12, 7, 0)));
+    assert!(p.funding_status.as_deref().unwrap().contains("expired"));
     p.funding_checking = true;
     p.check_seq = 13;
     drop(p.apply(ClaimEvent::FundingChecked(

@@ -521,13 +521,13 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                 body = body
                     .push(p1_bold("Fund the source wallet on each chain"))
                     .push(p1_regular(format!(
-                        "Send at least {} sats of Bitcoin to this Bitcoin address of the wallet being split (current fee estimate: {} sat/vB):",
+                        "Send at least {} sats of Bitcoin to this Bitcoin address of the wallet being split (fee estimate when prepared: {} sat/vB):",
                         addresses.fee_quote.bitcoin_minimum_sats,
                         addresses.fee_quote.bitcoin_rate_sat_vb,
                     )))
                     .push(caption(addresses.bitcoin_deposit.clone()))
                     .push(p1_regular(format!(
-                        "Send at least {} sats of Bitcoin Blake2b to this BTCB2 address of the same wallet (current fee estimate: {} sat/vB):",
+                        "Send at least {} sats of Bitcoin Blake2b to this BTCB2 address of the same wallet (fee estimate when prepared: {} sat/vB):",
                         addresses.fee_quote.btcb2_minimum_sats,
                         addresses.fee_quote.btcb2_rate_sat_vb,
                     )))

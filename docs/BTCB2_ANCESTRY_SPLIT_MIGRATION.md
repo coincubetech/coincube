@@ -198,6 +198,10 @@ a replayable spend.
    without rotating the reserved address; the exact builder still enforces
    the fee bound. The check also distinguishes a shared ancestry root,
    reorganization and unavailable fresh reads in its retry guidance.
+   Successful Split previews and Claim proof statuses expire after 30 seconds
+   in the desktop, with older timers unable to clear newer checks. The user
+   must check both deposits again for a current display. This display limit
+   does not replace live preflight at signing and broadcast.
    Exact per-chain proof failure states, proof refresh and ordinary
    signer admission remain to be wired. Claim now independently reserves
    two distinct receive indices from its paired Cube scan in a private journal

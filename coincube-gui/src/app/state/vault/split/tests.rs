@@ -761,6 +761,27 @@ async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() 
     }
 }
 
+#[test]
+fn old_split_proof_expiry_cannot_clear_a_newer_deposit_check() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.stage = Stage::FundingDeposits;
+    panel.seq = 8;
+    panel.funding_progress = Some(step1::SplitDepositProgress {
+        bitcoin_candidate: true,
+        btcb2_candidate: true,
+        both_verified: false,
+        review: None,
+    });
+
+    drop(panel.apply(SplitEvent::FundingReviewExpired(7)));
+    assert!(panel.funding_progress().is_some());
+    drop(panel.apply(SplitEvent::FundingReviewExpired(8)));
+    assert!(panel.funding_progress().is_none());
+    assert!(panel.notice().unwrap().contains("expired"));
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn funding_only_split_reopens_same_addresses_after_restart() {
     let scan = Scan::new(Shape::Wpkh);

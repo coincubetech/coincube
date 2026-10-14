@@ -328,6 +328,8 @@ pub enum ClaimEvent {
         Result<claim_workflow::CheckedClaimFundingAddresses, String>,
     ),
     FundingChecked(u64, u64, u64, Result<ClaimDepositProgress, String>),
+    /// A read-only ancestry status is only a short-lived observation.
+    FundingProofExpired(u64, u64, u64),
     Restarted(u64, Result<RestartedClaim, String>),
     /// The preconditions probe finished. The sequence number matches it to
     /// the request that started it; a reply to an older request is dropped.
@@ -2057,6 +2059,7 @@ impl ClaimStep1Panel {
                         Some("The Claim session changed during the deposit check.".into());
                     return Task::none();
                 }
+                let proof_complete = matches!(&result, Ok(progress) if progress.both_verified);
                 self.funding_status = Some(match result {
                     Ok(progress) => format!(
                         "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
@@ -2078,6 +2081,31 @@ impl ClaimStep1Panel {
                     ),
                     Err(reason) => reason,
                 });
+                if proof_complete {
+                    Task::perform(
+                        async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
+                        move |()| {
+                            Message::Claim(ClaimEvent::FundingProofExpired(
+                                seq,
+                                generation,
+                                revocations,
+                            ))
+                        },
+                    )
+                } else {
+                    Task::none()
+                }
+            }
+            ClaimEvent::FundingProofExpired(seq, generation, revocations) => {
+                if seq == self.check_seq
+                    && matches!(self.stage, Stage::FundingDeposits(_))
+                    && self.authorized(generation, revocations)
+                {
+                    self.funding_status = Some(
+                        "The deposit proof has expired. Check both deposits again for current chain state and fees."
+                            .into(),
+                    );
+                }
                 Task::none()
             }
             ClaimEvent::FundingPrepared(seq, generation, revocations, result) => {

@@ -321,6 +321,8 @@ pub enum SplitEvent {
         Result<(SplitSource, step1::CheckedFundingAddresses), String>,
     ),
     FundingChecked(u64, Result<step1::SplitDepositProgress, String>),
+    /// Read-only proof and fee preview must not remain displayed as current.
+    FundingReviewExpired(u64),
     Checked(u64, Result<Box<Prepared>, Refusal>),
     Built(u64, Result<Box<SplitStep1>, String>),
     Exported(u64, Result<Option<PathBuf>, String>),
@@ -1636,13 +1638,32 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::FundingChecked(_, Ok(progress)) => {
+                let has_review = progress.review.is_some();
                 self.funding_progress = Some(progress);
                 self.stage = Stage::FundingDeposits;
-                Task::none()
+                if has_review {
+                    let seq = self.seq;
+                    Task::perform(
+                        async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
+                        move |()| Message::Split(Box::new(SplitEvent::FundingReviewExpired(seq))),
+                    )
+                } else {
+                    Task::none()
+                }
             }
             SplitEvent::FundingChecked(_, Err(reason)) => {
                 self.notice = Some(reason);
                 self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::FundingReviewExpired(_) => {
+                if self.stage == Stage::FundingDeposits {
+                    self.funding_progress = None;
+                    self.notice = Some(
+                        "The transaction preview has expired. Check both deposits again to refresh the proof and fees."
+                            .into(),
+                    );
+                }
                 Task::none()
             }
             SplitEvent::Checked(_, Ok(prepared)) => {
@@ -2003,6 +2024,7 @@ impl SplitEvent {
             Self::FundingPrepared(seq, _)
             | Self::FundingRecovered(seq, _)
             | Self::FundingChecked(seq, _)
+            | Self::FundingReviewExpired(seq)
             | Self::Checked(seq, _)
             | Self::Built(seq, _)
             | Self::Exported(seq, _)

@@ -68,7 +68,7 @@ pub fn view<'a>(
                 .push(address_row(addresses.bitcoin_deposit.clone(), "Copied Bitcoin deposit address to clipboard"))
                 .push(p1_bold(format!("Bitcoin Blake2b deposit — at least {} sats ({} sat/vB)", addresses.btcb2_minimum_sats, addresses.btcb2_rate_sat_vb)))
                 .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
-                .push(p1_regular("Send only Bitcoin to the Bitcoin address and only BTCB2 to the BTCB2 address. These minimums use current fees; if fees rise before signing, you may need to add funds. Both deposits must later pass independent ancestry, confirmation, ownership and unspent checks; neither deposit by itself splits the coins."))
+                .push(p1_regular("Send only Bitcoin to the Bitcoin address and only BTCB2 to the BTCB2 address. These minimums use fee quotes from when the addresses were prepared; if fees rise before signing, you may need to add funds. Both deposits must later pass independent ancestry, confirmation, ownership and unspent checks; neither deposit by itself splits the coins."))
                 .push(button::secondary(None, if panel.funding_checking() { "Checking deposits…" } else { "Check deposits" }).on_press_maybe(
                     (!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding))
                 ))
