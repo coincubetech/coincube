@@ -2,6 +2,7 @@
 use super::*;
 mod binding;
 mod collect;
+mod funding;
 mod preferred;
 mod sweep;
 pub use binding::AncestryContext;
@@ -13,6 +14,7 @@ use coincube_core::{
     miniscript::bitcoin::OutPoint,
 };
 pub use collect::CollectedAncestry;
+pub use funding::{CollectedFundingCoin, CollectedFundingPair};
 pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},

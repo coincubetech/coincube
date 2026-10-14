@@ -1,6 +1,7 @@
 //! Anonymous fresh Esplora reads and a separate authenticated anchor context.
 use super::*;
 use crate::services::coincube::{network_anchor::AnchorStartupError, CoincubeClient};
+use coincube_core::miniscript::bitcoin::OutPoint;
 use serde::Deserialize;
 use std::{
     convert::TryFrom,
@@ -13,8 +14,8 @@ mod ancestry;
 mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 pub use discovery::{
-    AncestryContext, CollectedAncestry, CollectedAncestrySweep, DiscoveredAncestry, DiscoveryError,
-    MAX_ANCESTRY_CANDIDATES,
+    AncestryContext, CollectedAncestry, CollectedAncestrySweep, CollectedFundingCoin,
+    CollectedFundingPair, DiscoveredAncestry, DiscoveryError, MAX_ANCESTRY_CANDIDATES,
 };
 
 const BODY_LIMIT: usize = 256 * 1024;
@@ -319,6 +320,33 @@ struct TransactionInfo {
     txid: Txid,
     status: TxStatus,
 }
+/// A fresh current-output read from one chain. This is provider evidence,
+/// never proof that the outpoint does not exist on the other chain.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+pub struct OutspendStatus {
+    pub spent: bool,
+}
+impl HttpObservationSource {
+    /// Require an explicit 200 fresh response for the exact outpoint. A 404,
+    /// cached response or unavailable provider is indeterminate, not unspent.
+    pub async fn outspend(
+        &self,
+        chain: ChainId,
+        outpoint: OutPoint,
+    ) -> Result<FreshRead<OutspendStatus>, FailureKind> {
+        let (status, bytes, headers, stamp) = self
+            .get(
+                chain,
+                &format!("tx/{}/outspend/{}", outpoint.txid, outpoint.vout),
+            )
+            .await?;
+        if status != 200 {
+            return Err(FailureKind::Http(status));
+        }
+        let value = serde_json::from_slice(&bytes).map_err(|_| FailureKind::Malformed)?;
+        FreshRead::from_response(chain, value, stamp, &headers)
+    }
+}
 #[async_trait]
 impl ObservationSource for HttpObservationSource {
     fn now(&self) -> i64 {
@@ -428,6 +456,46 @@ mod tests {
     use super::*;
     use httpmock::prelude::*;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn outspend_requires_fresh_explicit_status_on_each_chain() {
+        let outpoint = OutPoint::new(Txid::from_str(&"11".repeat(32)).unwrap(), 2);
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            for case in ["unspent", "spent", "missing", "cached", "malformed"] {
+                let server = MockServer::start();
+                let (source, _sender) = source(&server);
+                let path = format!(
+                    "/api/v1/esplora/{}/tx/{}/outspend/2",
+                    HttpObservationSource::prefix(chain).unwrap(),
+                    outpoint.txid,
+                );
+                let mock = server.mock(|when, then| {
+                    when.method(GET)
+                        .path(path)
+                        .header("x-coincube-observation", "fresh");
+                    then.status(if case == "missing" { 404 } else { 200 })
+                        .header("x-coincube-observation", "fresh")
+                        .header("x-cache", if case == "cached" { "HIT" } else { "BYPASS" })
+                        .header("cache-control", "no-store")
+                        .body(match case {
+                            "spent" => r#"{"spent":true}"#,
+                            "malformed" => r#"{"other":false}"#,
+                            _ => r#"{"spent":false}"#,
+                        });
+                });
+                let result = source.outspend(chain, outpoint).await;
+                match case {
+                    "unspent" => assert!(!result.unwrap().value().spent),
+                    "spent" => assert!(result.unwrap().value().spent),
+                    "missing" => assert_eq!(result.unwrap_err(), FailureKind::Http(404)),
+                    "cached" => assert_eq!(result.unwrap_err(), FailureKind::FreshnessUnverified),
+                    "malformed" => assert_eq!(result.unwrap_err(), FailureKind::Malformed),
+                    _ => unreachable!(),
+                }
+                mock.assert_hits(1);
+            }
+        }
+    }
 
     pub(super) fn source(server: &MockServer) -> (HttpObservationSource, watch::Sender<u64>) {
         let mut client = CoincubeClient::for_test(server.base_url());

@@ -541,6 +541,69 @@ mod tests {
                     assert_eq!(pair.generation(), 4);
                     assert!(pair.observed_at() <= source.now());
                     if case == "valid" {
+                        // The funding collector requires a fresh current UTXO
+                        // read in addition to the already paired coinbase roots.
+                        let root_path = claim_ancestry::retained::RetainedPath::new(
+                            dependency.selected(),
+                            vec![claim_ancestry::search::OwnedLink {
+                                transaction: serialize(&bitcoin),
+                                parent_input: None,
+                            }],
+                        )
+                        .unwrap();
+                        let unspent = fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/outspend/0",
+                                bitcoin.compute_txid()
+                            ),
+                            json!({"spent": false}).to_string(),
+                        );
+                        let collected = source
+                            .collect_funding_coin(&root_path, ChainId::Bitcoin, policy)
+                            .await
+                            .unwrap();
+                        assert_eq!(collected.selected(), dependency.selected());
+                        assert_eq!(collected.chain(), ChainId::Bitcoin);
+                        assert_eq!(collected.block().height, u64::from(root_height));
+                        unspent.assert_hits(1);
+                        let fork_path = claim_ancestry::retained::RetainedPath::new(
+                            OutPoint::new(fork.compute_txid(), 0),
+                            vec![claim_ancestry::search::OwnedLink {
+                                transaction: serialize(&fork),
+                                parent_input: None,
+                            }],
+                        )
+                        .unwrap();
+                        let fork_status = fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}",
+                                fork.compute_txid()
+                            ),
+                            json!({"txid":fork.compute_txid(),"status":{
+                                "confirmed":true,"block_height":root_height,
+                                "block_hash":fork_block}})
+                            .to_string(),
+                        );
+                        let fork_unspent = fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}/outspend/0",
+                                fork.compute_txid()
+                            ),
+                            json!({"spent": false}).to_string(),
+                        );
+                        let pair_funding = source
+                            .collect_funding_pair(&root_path, &fork_path, policy)
+                            .await
+                            .unwrap();
+                        assert_eq!(pair_funding.bitcoin().selected(), root_path.selected());
+                        assert_eq!(pair_funding.fork().selected(), fork_path.selected());
+                        assert_eq!(pair_funding.fork().chain(), ChainId::BitcoinBlake2b);
+                        assert!(pair_funding.observed_at() <= source.now());
+                        fork_status.assert_hits(2);
+                        fork_unspent.assert_hits(1);
                         // The first input leads to a positively observed pre-fork
                         // root; discovery must continue to the second input.
                         let mut old_root = bitcoin.clone();

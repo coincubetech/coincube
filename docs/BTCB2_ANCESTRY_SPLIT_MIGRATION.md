@@ -50,7 +50,11 @@ a replayable spend.
    coinbase could otherwise have been copied across the fork. The currently displayed Split
    `bitcoin_only_post_fork` candidates are hints only. Add symmetrical
    BTCB2-only candidates for display (now present) and promote neither to
-   proof without the ancestry collector. Bind both proofs to one
+   proof without the ancestry collector. A paired read-only funding collector
+   now refreshes both root paths, selected-transaction confirmations,
+   canonical block mappings, maturity, unspent status and two-chain tips under
+   one session; it is not yet bound to the source wallet or signing intent.
+   Bind both proofs to one
    account/session, source descriptor,
    source UTXO set and current two-chain tips.
 2. **Owned Claim transactions.** `create_ancestry_self_transfer` makes a
