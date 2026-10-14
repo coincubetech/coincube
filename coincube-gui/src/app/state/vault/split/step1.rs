@@ -458,7 +458,10 @@ pub trait SplitConnect: Send + Sync {
 /// a short-lived permit bound to that side's current PSBT and session.
 #[derive(Debug)]
 #[allow(dead_code)] // The paired Split signer UI remains gated.
-pub struct SplitSignerCheck(claim_workflow::RequalifiedInitialSplit);
+pub struct SplitSignerCheck {
+    requalified: claim_workflow::RequalifiedInitialSplit,
+    generation: watch::Receiver<u64>,
+}
 
 #[allow(dead_code)] // Consumed by the staged paired Split signer transition.
 impl SplitSignerCheck {
@@ -468,18 +471,17 @@ impl SplitSignerCheck {
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
         current: &Psbt,
-        generation: watch::Receiver<u64>,
     ) -> Option<claim_workflow::paired_signing_permit::PairedSigningPermit> {
-        self.0
-            .signer_permit(side, bitcoin, fork, current, generation)
+        self.requalified
+            .signer_permit(side, bitcoin, fork, current, self.generation.clone())
     }
 
     pub(crate) fn tips(&self) -> coincube_core::claim::PreflightTips {
-        self.0.tips()
+        self.requalified.tips()
     }
 
     pub(crate) fn context(&self) -> &Context {
-        self.0.context()
+        self.requalified.context()
     }
 }
 
@@ -1255,7 +1257,10 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() {
             return Err("The Connect session changed while recording the split intent.".into());
         }
-        result.map(|()| SplitSignerCheck(funding))
+        result.map(|()| SplitSignerCheck {
+            requalified: funding,
+            generation: self.generation.clone(),
+        })
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
         let production = SplitProduction::new(

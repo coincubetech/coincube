@@ -359,6 +359,8 @@ a replayable spend.
    Split adapter now returns that typed fresh check after recording the exact
    version-11 intent, rather than discarding it; a UI caller must still repeat
    the adapter call for each signer dispatch and consume the one-use permit.
+   The check carries the production Connect generation receiver itself, so a
+   future UI caller cannot substitute a synthetic session when asking for it.
    The paired Split PSBT file importer now uses the same strict core combiner,
    so two valid returns for the same key with conflicting signatures cannot
    be merged by silently keeping whichever file was read first.
