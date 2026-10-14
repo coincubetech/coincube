@@ -355,7 +355,10 @@ a replayable spend.
    authenticates independent Bitcoin and BTCB2 Split signer returns for every
    supported source descriptor, rejects altered returns and only reports the
    pair complete when both thresholds are met. Neither capability is yet
-   connected to the Split signer UI or a submission action.
+   connected to the Split signer UI or a submission action. The production
+   Split adapter now returns that typed fresh check after recording the exact
+   version-11 intent, rather than discarding it; a UI caller must still repeat
+   the adapter call for each signer dispatch and consume the one-use permit.
    The Cube launcher now discovers a funding-only Split record, which has no
    transaction intent yet. Reopening under Connect validates its source
    digest, target Cube and account, then repeats both-chain address checks

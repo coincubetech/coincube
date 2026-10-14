@@ -445,11 +445,42 @@ pub trait SplitConnect: Send + Sync {
         _bitcoin: &AncestrySplitStep1,
         _fork: &AncestrySplitStep2,
         _rates: (u64, u64),
-    ) -> Result<(), String> {
+    ) -> Result<SplitSignerCheck, String> {
         Err("Two-chain Split signer preparation is unavailable for this session.".into())
     }
     /// Opens or creates the journal. Blocking: callers use `spawn_blocking`.
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error>;
+}
+
+/// Opaque result of the production adapter's fresh source scan, reservation
+/// reload, two-chain ancestry check, exact PSBT rebuild and intent recording.
+/// Holding this value alone cannot sign or submit; each dispatch asks it for
+/// a short-lived permit bound to that side's current PSBT and session.
+#[derive(Debug)]
+#[allow(dead_code)] // The paired Split signer UI remains gated.
+pub struct SplitSignerCheck(claim_workflow::RequalifiedInitialSplit);
+
+#[allow(dead_code)] // Consumed by the staged paired Split signer transition.
+impl SplitSignerCheck {
+    pub(crate) fn signer_permit(
+        &self,
+        side: ChainId,
+        bitcoin: &AncestrySplitStep1,
+        fork: &AncestrySplitStep2,
+        current: &Psbt,
+        generation: watch::Receiver<u64>,
+    ) -> Option<claim_workflow::paired_signing_permit::PairedSigningPermit> {
+        self.0
+            .signer_permit(side, bitcoin, fork, current, generation)
+    }
+
+    pub(crate) fn tips(&self) -> coincube_core::claim::PreflightTips {
+        self.0.tips()
+    }
+
+    pub(crate) fn context(&self) -> &Context {
+        self.0.context()
+    }
 }
 
 /// Deposit instructions from an immutable local reservation, released only
@@ -1103,7 +1134,7 @@ impl SplitConnect for ProductionConnect {
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
         rates: (u64, u64),
-    ) -> Result<(), String> {
+    ) -> Result<SplitSignerCheck, String> {
         if !self.session_current() {
             return Err("The Connect session changed before preparing this split.".into());
         }
@@ -1198,6 +1229,8 @@ impl SplitConnect for ProductionConnect {
         let descriptor = descriptor.clone();
         let bitcoin = bitcoin.clone();
         let fork = fork.clone();
+        let bitcoin_path = funding.funding().bitcoin_path.clone();
+        let fork_path = funding.funding().fork_path.clone();
         let target_cube = target_cube.to_owned();
         let result = tokio::task::spawn_blocking(move || {
             let controller = Controller::create_or_reopen_ancestry_split(
@@ -1206,9 +1239,9 @@ impl SplitConnect for ProductionConnect {
                 &descriptor,
                 target_index,
                 &bitcoin,
-                &funding.funding().bitcoin_path,
+                &bitcoin_path,
                 &fork,
-                &funding.funding().fork_path,
+                &fork_path,
                 context,
             )?;
             // The controller owns the journal lock. Release it before the
@@ -1222,7 +1255,7 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() {
             return Err("The Connect session changed while recording the split intent.".into());
         }
-        result
+        result.map(|()| SplitSignerCheck(funding))
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {
         let production = SplitProduction::new(

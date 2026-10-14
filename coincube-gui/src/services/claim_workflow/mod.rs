@@ -36,6 +36,7 @@ pub use split::{
     peek_split_journal, split_identity, RecordedSplit, SplitJournalSummary, SplitKind,
     Step1Conflict, MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE,
 };
+pub(crate) use split_funding::RequalifiedInitialSplit;
 pub use split_funding::{
     load_split_funding, peek_split_funding, release_split_funding, reserve_split_funding,
     reserve_split_funding_with_target, SplitFundingDiscoveryError, SplitFundingReservation,
