@@ -318,7 +318,10 @@ a replayable spend.
    the pair to signers.
 5. **Retire the old route now.** New builds, signing, first submission and
    resubmission of the 90-byte OP_RETURN transaction are disabled before the
-   replacement goes live. Next remove `split_poison` payload building,
+   replacement goes live. The old one-sided Claim signer, Bitcoin handoff and
+   completion path are now test-fixture-only or permanently denied in
+   production, independent of the paired ancestry gate. Enabling that gate
+   later cannot turn the old path back on. Next remove `split_poison` payload building,
    `Poison::OpReturn` production selection, the remaining RDTS expiry checks
    that exist only for the 90-byte output, OP_RETURN review details and the transport path for
    newly created claims. Migrate or explicitly refuse any persisted,

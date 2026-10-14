@@ -469,11 +469,11 @@ impl Coordinator {
         // Confirmed conflicting spends separate the chains even after RDTS
         // expires. This is historical metadata, never signing authority.
         let plan = self.controller.plan();
-        // New ancestry completion and GUI signer dispatch share one production
-        // authorization. Existing markers can still be reconciled below.
-        if plan.poison == coincube_core::claim::Poison::InputAncestry
-            && crate::services::claim_ancestry_gate::authorization().is_none()
-        {
+        // This is the retired one-sided coordinator. The new paired
+        // coordinator must record completion only after both ordinary
+        // transactions and their independent chain observations are bound.
+        // A future paired signing gate must never authorize this path.
+        if plan.poison == coincube_core::claim::Poison::InputAncestry {
             return Ok(None);
         }
         let observations = checked.assessment().observations;

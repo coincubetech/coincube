@@ -67,11 +67,11 @@ pub(super) async fn check(
     expected: u64,
     generation: watch::Receiver<u64>,
 ) -> Result<CheckedInputs, String> {
-    let checked = check_inputs(built, daemon, wallet, connect, expected, generation).await?;
-    // Full flow acceptance is still required before returning this to a signer.
-    crate::services::claim_ancestry_gate::authorization()
-        .ok_or_else(|| crate::services::claim_ancestry_gate::CLOSED_MESSAGE.to_string())?;
-    Ok(checked)
+    let _checked = check_inputs(built, daemon, wallet, connect, expected, generation).await?;
+    // Historical one-sided checks remain testable, but no production switch
+    // can turn their result into signer authority. The paired path needs a
+    // separate check of both chains and both complete wallet coin sets.
+    Err(crate::services::claim_ancestry_gate::CLOSED_MESSAGE.to_string())
 }
 
 pub(super) async fn check_inputs(

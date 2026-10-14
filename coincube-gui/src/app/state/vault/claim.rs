@@ -641,10 +641,10 @@ impl ClaimStep1Panel {
         }
     }
 
-    /// New Claim signing remains closed until the two-chain funding flow is ready.
+    /// This is the retired, one-sided signer. The paired ancestry signer will
+    /// have its own admission path; opening its gate must not enable this one.
     pub fn can_sign_or_submit(&self) -> bool {
         self.legacy_flow_fixture()
-            || crate::services::claim_ancestry_gate::authorization().is_some()
     }
 
     pub fn can_prepare_funding(&self) -> bool {
@@ -1137,11 +1137,9 @@ impl ClaimStep1Panel {
         if let Err(reason) = &checked.feerate_vb {
             return refuse(&format!("Couldn't fetch a fee rate: {reason}"), true);
         }
-        // Existing records may still be reconciled; fresh transactions wait
-        // for both chain-specific funding inputs and their proof path.
-        if crate::services::claim_ancestry_gate::authorization().is_none()
-            && !self.legacy_flow_fixture()
-        {
+        // Existing records may still be reconciled. The one-sided builder is
+        // a test fixture only; paired Claim has separate deposit stages.
+        if !self.legacy_flow_fixture() {
             return refuse(
                 crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE,
                 false,
@@ -1177,8 +1175,7 @@ impl ClaimStep1Panel {
     }
 
     pub fn can_continue_on_fork(&self) -> bool {
-        (self.legacy_flow_fixture()
-            || crate::services::claim_ancestry_gate::authorization().is_some())
+        self.legacy_flow_fixture()
             && !self.revoked
             && !self.handoff_pending
             && self.backend_ready()
@@ -1755,9 +1752,7 @@ impl ClaimStep1Panel {
     }
 
     fn request_signing(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
-        if crate::services::claim_ancestry_gate::authorization().is_none()
-            && !self.legacy_flow_fixture()
-        {
+        if !self.legacy_flow_fixture() {
             return Task::done(Message::View(view::Message::ShowError(
                 crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into(),
             )));
@@ -1872,7 +1867,7 @@ impl ClaimStep1Panel {
     /// construction leaves with the task and comes back if anything refuses.
     fn maybe_finalize(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
         let legacy_fixture = self.legacy_flow_fixture();
-        if crate::services::claim_ancestry_gate::authorization().is_none() && !legacy_fixture {
+        if !legacy_fixture {
             return Task::none();
         }
         // A finalisation binds the daemon it is given: not one being
@@ -2012,7 +2007,7 @@ impl ClaimStep1Panel {
 
     fn confirm(&mut self) -> Task<Message> {
         let legacy_fixture = self.legacy_flow_fixture();
-        if crate::services::claim_ancestry_gate::authorization().is_none() && !legacy_fixture {
+        if !legacy_fixture {
             if let Stage::Review { error, .. } = &mut self.stage {
                 *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
             }
@@ -2096,29 +2091,22 @@ impl ClaimStep1Panel {
                 session: Some(session),
                 busy: false,
                 ..
-            } if self.legacy_flow_fixture()
-                || (session.built.selected_ancestry_input().is_some()
-                    && crate::services::claim_ancestry_gate::authorization().is_some()) =>
-            {
-                session
-                    .resubmission
-                    .as_ref()
-                    .map(|review| (review.snapshot().clone(), review.previous_attempts()))
-            }
+            } if self.legacy_flow_fixture() => session
+                .resubmission
+                .as_ref()
+                .map(|review| (review.snapshot().clone(), review.previous_attempts())),
             _ => None,
         }
     }
 
     pub fn can_broadcast_review(&self) -> bool {
-        matches!(&self.stage, Stage::Review { session: Some(session), .. }
-            if self.legacy_flow_fixture()
-                || (session.built.selected_ancestry_input().is_some()
-                    && crate::services::claim_ancestry_gate::authorization().is_some()))
+        matches!(&self.stage, Stage::Review { session: Some(_), .. }
+            if self.legacy_flow_fixture())
     }
 
     fn resubmit(&mut self, confirm: bool) -> Task<Message> {
         let legacy_fixture = self.legacy_flow_fixture();
-        if crate::services::claim_ancestry_gate::authorization().is_none() && !legacy_fixture {
+        if !legacy_fixture {
             if let Stage::Track { error, .. } = &mut self.stage {
                 *error = Some(crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
             }

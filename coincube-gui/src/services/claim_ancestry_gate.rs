@@ -1,10 +1,8 @@
-//! Final production gate for Bitcoin-only-input Claim ancestry.
+//! Reserved production gate for the paired BTCB2 ancestry migration.
 //!
-//! The proof, signing preparation, reorg handling and two-chain harness remain
-//! compiled and testable while this gate is closed. Opening it authorizes both
-//! GUI signer dispatch and creation of new durable completion metadata; those
-//! two capabilities must move together so a signed ancestry Claim cannot finish
-//! without restart-safe completion tracking.
+//! The old one-sided Claim signer and completion route stay closed regardless
+//! of this switch. The new paired signer and durable completion coordinator
+//! must be wired together before this authorization is consumed in production.
 //!
 //! Keep this closed until issue #547 records owner acceptance of the live
 //! two-chain flow and its independent final review. `InputProofUnsupported` in
@@ -17,22 +15,24 @@ pub(crate) const CLOSED_MESSAGE: &str = "Bitcoin-only input signing is not avail
 /// needs independently verified Bitcoin-only and BTCB2-only funding coins.
 pub(crate) const NEW_CLAIM_MESSAGE: &str = "Claim will require confirmed Bitcoin-only and Bitcoin Blake2b-only funding coins in this Vault. This transaction cannot be signed until both funding coins can be verified.";
 
-// This is the only production switch for ancestry signer dispatch and durable
-// completion. Changing it requires the acceptance evidence documented above.
+// No production path consumes this token yet. Changing it requires the
+// acceptance evidence documented above and a separate paired coordinator.
 const ENABLED: bool = false;
 
 /// An unforgeable authorization token for production ancestry side effects.
+#[allow(dead_code)] // Paired signer and completion coordinator are not wired yet.
 pub(crate) struct Authorization(());
 
+#[allow(dead_code)] // Paired signer and completion coordinator are not wired yet.
 pub(crate) fn authorization() -> Option<Authorization> {
     ENABLED.then_some(Authorization(()))
 }
 
-/// Whether a Claim build may search for a Bitcoin-only input (#547).
+/// Historical one-sided discovery is test-only. The paired deposit check uses
+/// its own two-chain collector and cannot be opened by this switch.
 ///
-/// A construction found while the gate is closed could never be signed, so a
-/// closed gate means no ancestry discovery at all. Tests may open discovery on
-/// a specific client; that never grants [`authorization`].
+/// Tests may open discovery on a specific client; that never grants
+/// [`authorization`].
 pub(crate) fn discovery_open(client: &crate::services::coincube::CoincubeClient) -> bool {
     #[cfg(test)]
     if client.ancestry_discovery_opened_for_test() {
@@ -40,7 +40,7 @@ pub(crate) fn discovery_open(client: &crate::services::coincube::CoincubeClient)
     }
     #[cfg(not(test))]
     let _ = client;
-    authorization().is_some()
+    false
 }
 
 #[cfg(test)]
