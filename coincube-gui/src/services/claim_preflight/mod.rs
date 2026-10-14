@@ -360,6 +360,56 @@ impl PreflightClient {
         }
         Ok(PairEvidence { bitcoin, fork })
     }
+
+    /// Preflight the exact signed Claim pair after the journal and fresh
+    /// ancestry checks have admitted it. A typed pair prevents callers from
+    /// supplying two unrelated raw transactions. This remains observation
+    /// only and grants no signer or broadcast authority.
+    pub async fn observe_verified_claim_pair(
+        &self,
+        pair: &coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+        bitcoin_tip: BlockHash,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<PairEvidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_pair(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            bitcoin_tip,
+            fork_tip,
+            policy,
+        )
+        .await
+    }
+
+    /// Preflight the exact signed foreign Split pair on both Connect routes.
+    /// The source and target reservations still require separate fresh checks.
+    pub async fn observe_verified_split_pair(
+        &self,
+        pair: &coincube_core::foreign_split::VerifiedAncestrySplitPair,
+        bitcoin_tip: BlockHash,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<PairEvidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_pair(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            bitcoin_tip,
+            fork_tip,
+            policy,
+        )
+        .await
+    }
 }
 #[allow(clippy::too_many_arguments)]
 fn parse(

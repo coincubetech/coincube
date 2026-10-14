@@ -369,6 +369,9 @@ marker spend cases remain.
    are not called from the wizard: the paired coordinator still has to bind
    fresh two-chain proof, reservations, preflight and explicit approval to
    separate durable submission intents before either gate can be entered.
+   Paired Connect preflight also accepts the typed, signature-verified Claim
+   or Split pair directly, observes both exact witnesses under one session,
+   and refuses non-mainnet pairs; it remains read-only evidence.
    These artifacts are cryptographic evidence only; the coordinator still must
    bind them to the saved intent, fresh two-chain proof, reservations and paired
    Connect preflight before either transaction can be submitted.
