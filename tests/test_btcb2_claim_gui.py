@@ -173,14 +173,22 @@ class Bridge:
                                         k: rdts[k] for k in ("height", "expiry_time", "active")}}}}}})
                         return
                     _, indexer, suffix, _ = self.route()
+                    requested_address = None
                     if suffix.startswith("address/"):
                         path = suffix.split("/")
+                        requested_address = path[1]
                         path[1] = regtest_address(path[1])
                         suffix = "/".join(path)
                     try:
                         with urlopen(indexer.url + "/" + suffix, timeout=4) as response:
+                            body = response.read(262145)
+                            if requested_address is not None and suffix.count("/") == 1:
+                                stats = json.loads(body)
+                                assert stats["address"] == regtest_address(requested_address)
+                                stats["address"] = requested_address
+                                body = json.dumps(stats).encode()
                             self.reply(
-                                response.status, response.read(262145),
+                                response.status, body,
                                 response.headers.get("Content-Type", "application/json"),
                                 "stale" if owner.stale_outspend and "/outspend/" in suffix else "fresh",
                             )
