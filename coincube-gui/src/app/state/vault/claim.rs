@@ -830,8 +830,7 @@ impl ClaimStep1Panel {
         generation: watch::Receiver<u64>,
     ) -> Result<Context, String> {
         if connect.account.is_empty()
-            || generation.has_changed().is_err()
-            || *generation.borrow() != expected
+            || !crate::services::claim_observation::session_current(&generation, expected)
         {
             return Err("The Connect claim session is unavailable.".into());
         }
@@ -1117,6 +1116,13 @@ impl ClaimStep1Panel {
         // claim should bind to: the App calls again once it settles.
         if !self.backend_ready() {
             return Task::none();
+        }
+        // The App revokes this panel before publishing a new generation. Old
+        // task clones keep that notification unread and must fail; only this
+        // panel's receiver may acknowledge it when starting a fresh recovery
+        // under an installed session and backend.
+        if self.revoked && self.connect.is_some() {
+            self.generation.borrow_and_update();
         }
         if self.restart_pending {
             return self.restart(daemon);
@@ -1719,7 +1725,7 @@ impl ClaimStep1Panel {
                 } else {
                     ((0, 0), (0, 0))
                 };
-                if generation.has_changed().is_err() || *generation.borrow() != expected {
+                if !crate::services::claim_observation::session_current(&generation, expected) {
                     return Err("The Connect session changed during the deposit check.".into());
                 }
                 let (bitcoin_eligible, btcb2_eligible) = saved
@@ -1792,7 +1798,7 @@ impl ClaimStep1Panel {
                             "The paired BTCB2 Vault's complete coin set or sync state changed. Reopen it and check deposits again."
                                 .to_string()
                         })?;
-                    if generation.has_changed().is_err() || *generation.borrow() != expected {
+                    if !crate::services::claim_observation::session_current(&generation, expected) {
                         return Err("The Connect session changed during the deposit check.".into());
                     }
                     if !fork_binding.current() {
@@ -1911,7 +1917,7 @@ impl ClaimStep1Panel {
                 } else {
                     (None, None)
                 };
-                if generation.has_changed().is_err() || *generation.borrow() != expected {
+                if !crate::services::claim_observation::session_current(&generation, expected) {
                     return Err("The Connect session changed during the deposit check.".into());
                 }
                 if review.is_some()
@@ -4577,7 +4583,7 @@ async fn restore_recorded_claim(
             )
             .await
             .map_err(|error| format!("The saved Claim deposits could not be checked: {error:?}"))?;
-            if generation.has_changed().is_err() || *generation.borrow() != expected {
+            if !crate::services::claim_observation::session_current(&generation, expected) {
                 return Err(SESSION_ENDED.into());
             }
             return Ok(RestartedClaim {
@@ -4646,7 +4652,7 @@ async fn restore_recorded_claim(
                 "No signed BTCB2 transaction is recorded.".into(),
             )
         };
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             return Err(SESSION_ENDED.into());
         }
         return Ok(RestartedClaim {
@@ -4694,7 +4700,7 @@ async fn restore_recorded_claim(
     let txid = controller.signed_txid();
     let stored_transaction = controller.recorded_bitcoin_transaction().cloned();
     let check = || {
-        if *generation.borrow() != expected || generation.has_changed().is_err() {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err(SESSION_ENDED.to_string())
         } else {
             Ok(())
@@ -4851,7 +4857,7 @@ async fn reconstruct_recorded_claim(
         index
     } else {
         loop {
-            if *generation.borrow() != expected || generation.has_changed().is_err() {
+            if !crate::services::claim_observation::session_current(&generation, expected) {
                 return Err(SESSION_ENDED.into());
             }
             let page = daemon
@@ -4878,7 +4884,7 @@ async fn reconstruct_recorded_claim(
             }
         }
     };
-    if *generation.borrow() != expected || generation.has_changed().is_err() {
+    if !crate::services::claim_observation::session_current(&generation, expected) {
         return Err(SESSION_ENDED.into());
     }
     reconstruct_poison_self_transfer(
@@ -4912,7 +4918,7 @@ async fn finalize_and_journal(
     generation: watch::Receiver<u64>,
     resume: bool,
 ) -> Result<Box<ClaimSession>, (Box<Construction>, String)> {
-    if *generation.borrow() != expected || generation.has_changed().is_err() {
+    if !crate::services::claim_observation::session_current(&generation, expected) {
         return Err((built, SIGNED_OUT_BEFORE_RECORD.to_string()));
     }
     let verified = match built.verify(&signed, None) {

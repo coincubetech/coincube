@@ -21,7 +21,7 @@ pub(super) async fn build_preferred(
     generation: watch::Receiver<u64>,
 ) -> Result<Box<Construction>, String> {
     let current = || {
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err(SESSION_ENDED.to_string())
         } else {
             Ok(())

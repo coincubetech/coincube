@@ -79,6 +79,10 @@ a replayable spend.
    every Connect session notification as revocation, including one that
    repeats the same numeric generation. Reads from either side cannot be
    combined across that boundary.
+   Claim signer and recovery checks use the same unread-notification rule.
+   After an explicit panel revocation, a newly recovered Claim acknowledges
+   the new generation only on its own receiver; in-flight task clones stay
+   revoked. A GUI regression covers recovery after a same-value notification.
    Selected coins are matched to live paths and confirmation blocks. A saved
    Split deposit reservation now restricts the search to the two exact
    external receive indices shown to the user. The search reloads and compares

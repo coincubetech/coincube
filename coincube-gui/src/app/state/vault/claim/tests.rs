@@ -1716,6 +1716,41 @@ mod flow {
         f
     }
 
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn recovered_panel_uses_fresh_generation_without_reauthorizing_old_tasks() {
+        let mut f = reach_review().await;
+        let old_task_generation = f.p.generation.clone();
+        f.p.revoke();
+        // A replacement Connect session can carry the same numeric value.
+        // Its notification must still cancel every task cloned earlier.
+        f.sender.send_replace(1);
+        assert!(!crate::services::claim_observation::session_current(
+            &old_task_generation,
+            1
+        ));
+
+        let rebound = f.p.recover(Some(f.dyn_daemon.clone()));
+        assert!(crate::services::claim_observation::session_current(
+            &f.p.generation,
+            1
+        ));
+        let seen = drive(&mut f, rebound).await;
+        assert!(matches!(
+            &seen[..],
+            [Message::Claim(ClaimEvent::Reviewed(_, _, Ok(_)))]
+        ));
+        let mut seen = seen;
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, seen.remove(0));
+        review_snapshot(&f.p);
+        assert!(!crate::services::claim_observation::session_current(
+            &old_task_generation,
+            1
+        ));
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
     async fn reopen(f: &mut Flow) {
         let mut panel = ClaimStep1Panel::new(
             f.wallet.clone(),

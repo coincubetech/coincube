@@ -22,7 +22,7 @@ pub(super) async fn restore_recorded_initial_pair(
     generation: watch::Receiver<u64>,
 ) -> Result<PreparedClaimPair, String> {
     let current = || {
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err("The Connect session changed during Claim recovery.".to_string())
         } else {
             Ok(())
@@ -160,8 +160,7 @@ pub(super) async fn prepare_recorded_initial_review(
     )
     .await?;
     if !fork_binding.current()
-        || generation.has_changed().is_err()
-        || *generation.borrow() != expected
+        || !crate::services::claim_observation::session_current(&generation, expected)
     {
         return Err("The paired BTCB2 Vault or Connect session changed before review.".into());
     }
@@ -189,8 +188,7 @@ pub(super) async fn prepare_recorded_initial_review(
         )
         .map_err(|error| format!("The signed Claim pair is no longer verified: {error:?}"))?;
     if !fork_binding.current()
-        || generation.has_changed().is_err()
-        || *generation.borrow() != expected
+        || !crate::services::claim_observation::session_current(&generation, expected)
     {
         return Err(
             "The paired BTCB2 Vault or Connect session changed during Claim review.".into(),
@@ -274,7 +272,7 @@ pub(super) async fn prepare_recorded_post_bitcoin_review(
     String,
 > {
     let current_session = || {
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err("The Connect session changed during BTCB2 review.".to_string())
         } else {
             Ok(())
@@ -549,7 +547,7 @@ pub(super) async fn prepare_exact_pair_intent(
     generation: watch::Receiver<u64>,
 ) -> Result<claim_workflow::RequalifiedInitialClaim, String> {
     let current = || {
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err("The Connect session changed during Claim preparation.".to_string())
         } else {
             Ok(())
@@ -775,8 +773,7 @@ pub(super) async fn record_exact_signed_pair(
             tips,
         )
         .map_err(|error| format!("The signed Claim pair is no longer verified: {error:?}"))?;
-    if generation.has_changed().is_err()
-        || *generation.borrow() != expected
+    if !crate::services::claim_observation::session_current(&generation, expected)
         || !fork_binding.current()
     {
         return Err("The Claim session changed before saving the signed pair.".into());
@@ -826,8 +823,7 @@ impl CheckedInputs {
         });
         if std::time::Instant::now() >= self.deadline
             || generation != self.expected
-            || *self.generation.borrow() != self.expected
-            || self.generation.has_changed().is_err()
+            || !crate::services::claim_observation::session_current(&self.generation, self.expected)
             || !valid_session
             || wallet.chain != ChainId::Bitcoin
             || wallet.main_descriptor.to_string() != self.descriptor
@@ -841,8 +837,7 @@ impl CheckedInputs {
         // Hashing bounded proof data may still take time or be descheduled.
         // Recheck live authority at the final consumption boundary as well.
         if std::time::Instant::now() >= self.deadline
-            || *self.generation.borrow() != self.expected
-            || self.generation.has_changed().is_err()
+            || !crate::services::claim_observation::session_current(&self.generation, self.expected)
         {
             return Err(
                 "The ancestry signing check expired or changed. Check the Claim again.".into(),
@@ -876,7 +871,7 @@ pub(super) async fn check_inputs(
     generation: watch::Receiver<u64>,
 ) -> Result<CheckedInputs, String> {
     let current = || {
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err(SESSION_ENDED.to_string())
         } else {
             Ok(())
