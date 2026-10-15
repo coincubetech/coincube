@@ -170,8 +170,10 @@ imports into one durable pair. It rejects spent and stale funding reads before
 broadcast review and reopens that pair in a new panel process without
 restoring send authority. Its Connect bridge supplies fresh, chain-specific
 regtest fee estimates because a quiet regtest mempool has no usable estimate.
-It does not exercise the rendered UI, physical hardware devices, or historical
-journal reconciliation. Build and select
+The paired Claim and Split child processes inspect labels from their actual
+rendered wizard elements at deposit, signing, broadcast and recovery stages.
+This is headless content coverage, not visual, accessibility or physical
+hardware-device approval. Build and select
 the lib-test executable (not the GUI application):
 
 ```sh

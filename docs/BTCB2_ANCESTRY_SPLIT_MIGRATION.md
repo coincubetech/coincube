@@ -18,6 +18,8 @@ review, physical BitBox and Ledger PSBT approval, and independent review are
 still required before enabling signing. The implementation notes below record
 incremental work; statements about a next step describe the state at that
 point, while the acceptance checks at the end govern release readiness.
+Record those checks against the exact release commit using
+[`BTCB2_ANCESTRY_ACCEPTANCE.md`](BTCB2_ANCESTRY_ACCEPTANCE.md).
 
 ## Decision and safety invariant
 
