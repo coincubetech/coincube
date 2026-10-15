@@ -237,6 +237,16 @@ async fn split_gui_regtest_driver() {
                 &review_labels,
                 &recovered_bitcoin_txid.unwrap().to_string()
             ));
+            let saved_review = panel.paired_bitcoin_review.clone();
+            panel.paired_bitcoin_review.as_mut().unwrap().fork.output[0].script_pubkey =
+                Default::default();
+            let invalid_labels = rendered_labels(&panel).await;
+            assert!(has_label(
+                &invalid_labels,
+                "Cannot display both signed destinations"
+            ));
+            assert!(!has_label(&invalid_labels, "Broadcast Transaction"));
+            panel.paired_bitcoin_review = saved_review;
             let task = panel.update(SplitMessage::ConfirmPairedBitcoin);
             drive_panel(&mut panel, task, false).await;
             let recorded = Controller::reopen_settling(

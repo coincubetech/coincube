@@ -542,6 +542,21 @@ async fn claim_gui_regtest_driver() {
                     &review_labels,
                     &recovery.bitcoin_txid.unwrap().to_string()
                 ));
+                let saved_script = match &mut panel.stage {
+                    Stage::PairedBitcoinReview(_, review) => {
+                        std::mem::take(&mut review.fork.output[0].script_pubkey)
+                    }
+                    _ => unreachable!(),
+                };
+                let invalid_labels = rendered_labels(&panel, &cache).await;
+                assert!(has_label(
+                    &invalid_labels,
+                    "Cannot display both signed destinations"
+                ));
+                assert!(!has_label(&invalid_labels, "Broadcast Transaction"));
+                if let Stage::PairedBitcoinReview(_, review) = &mut panel.stage {
+                    review.fork.output[0].script_pubkey = saved_script;
+                }
                 let task = panel.update(
                     Some(dyn_daemon.clone()),
                     &cache,

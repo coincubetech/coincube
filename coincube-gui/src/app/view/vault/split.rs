@@ -643,47 +643,63 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         }
         Stage::PairedBitcoinReview => {
             if let Some(review) = panel.paired_bitcoin_review() {
+                let outputs =
+                    crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(
+                        &review.bitcoin,
+                        &review.fork,
+                    );
                 body = body
                     .push(p1_regular("Review these exact signed transactions. Only the Bitcoin transaction will be broadcast now; BTCB2 requires a separate review after Bitcoin confirmation."))
                     .push(p1_bold("Bitcoin — broadcast now"))
                     .push(caption(format!("Txid: {}", review.bitcoin.compute_txid())))
                     .push(caption(format!("Fee: {} sats", review.bitcoin_fee_sats)))
-                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                    .push_maybe(outputs.as_ref().map(|(output, _)| {
                         caption(format!("{} sats to {}", output.amount_sats, output.destination))
                     }))
                     .push(p1_bold("Bitcoin Blake2b — recorded, not sent now"))
                     .push(caption(format!("Txid: {}", review.fork.compute_txid())))
                     .push(caption(format!("Fee: {} sats", review.fork_fee_sats)))
-                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                    .push_maybe(outputs.as_ref().map(|(_, output)| {
                         caption(format!("{} sats to {}", output.amount_sats, output.destination))
-                    }));
+                    }))
+                    .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())));
                 actions = actions.push(action("Back", SplitMessage::CheckPaired));
-                actions = actions.push(action(
-                    "Broadcast Transaction",
-                    SplitMessage::ConfirmPairedBitcoin,
-                ));
+                if outputs.is_some() {
+                    actions = actions.push(action(
+                        "Broadcast Transaction",
+                        SplitMessage::ConfirmPairedBitcoin,
+                    ));
+                }
             }
         }
         Stage::PairedForkReview => {
             if let Some(review) = panel.paired_fork_review() {
+                let outputs =
+                    crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(
+                        &review.bitcoin,
+                        &review.fork,
+                    );
                 body = body
                     .push(p1_regular("Bitcoin has six current confirmations. Review the exact signed BTCB2 destination and fee before this separate broadcast."))
                     .push(p1_bold("Bitcoin — already recorded"))
                     .push(caption(format!("Txid: {}", review.bitcoin.compute_txid())))
-                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                    .push_maybe(outputs.as_ref().map(|(output, _)| {
                         caption(format!("{} sats to {}", output.amount_sats, output.destination))
                     }))
                     .push(p1_bold("Bitcoin Blake2b — broadcast now"))
                     .push(caption(format!("Txid: {}", review.fork.compute_txid())))
                     .push(caption(format!("Fee: {} sats", review.fork_fee_sats)))
-                    .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                    .push_maybe(outputs.as_ref().map(|(_, output)| {
                         caption(format!("{} sats to {}", output.amount_sats, output.destination))
-                    }));
+                    }))
+                    .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())));
                 actions = actions.push(action("Back", SplitMessage::CheckPaired));
-                actions = actions.push(action(
-                    "Broadcast Transaction",
-                    SplitMessage::ConfirmPairedFork,
-                ));
+                if outputs.is_some() {
+                    actions = actions.push(action(
+                        "Broadcast Transaction",
+                        SplitMessage::ConfirmPairedFork,
+                    ));
+                }
             }
         }
         Stage::FundingDeposits => {

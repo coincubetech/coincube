@@ -130,24 +130,28 @@ pub fn view<'a>(
         StageView::PairedBitcoinReview(review) => dashboard(
             menu,
             cache,
-            Column::new()
+            {
+                let outputs = crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(&review.bitcoin, &review.fork);
+                Column::new()
                 .spacing(20)
                 .push(header("Review Bitcoin broadcast"))
                 .push(p1_regular("Review these exact signed transactions. Only Bitcoin will be broadcast now; BTCB2 requires a separate review after Bitcoin confirmation."))
                 .push(p1_bold("Bitcoin — broadcast now"))
                 .push(p2_regular(format!("Txid: {}", review.bitcoin.compute_txid())))
                 .push(p2_regular(format!("Fee: {} sats", review.bitcoin_fee_sats)))
-                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                .push_maybe(outputs.as_ref().map(|(output, _)| {
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
                 .push(p1_bold("Bitcoin Blake2b — recorded, not sent now"))
                 .push(p2_regular(format!("Txid: {}", review.fork.compute_txid())))
                 .push(p2_regular(format!("Fee: {} sats", review.fork_fee_sats)))
-                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                .push_maybe(outputs.as_ref().map(|(_, output)| {
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
+                .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())))
                 .push(button::secondary(None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedBitcoin)))
-                .push(button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedBitcoin))),
+                .push_maybe(outputs.is_some().then(|| button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedBitcoin))))
+            },
         ),
         StageView::PairedBitcoinSubmitting => dashboard(
             menu,
@@ -160,23 +164,27 @@ pub fn view<'a>(
         StageView::PairedForkReview(review) => dashboard(
             menu,
             cache,
-            Column::new()
+            {
+                let outputs = crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(&review.bitcoin, &review.fork);
+                Column::new()
                 .spacing(20)
                 .push(header("Review Bitcoin Blake2b broadcast"))
                 .push(p1_regular("The recorded Bitcoin transaction has six canonical confirmations. Review the exact signed BTCB2 transaction before broadcasting it."))
                 .push(p1_bold("Bitcoin Blake2b — broadcast now"))
                 .push(p2_regular(format!("Txid: {}", review.fork.compute_txid())))
                 .push(p2_regular(format!("Fee: {} sats", review.fork_fee_sats)))
-                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.fork).map(|output| {
+                .push_maybe(outputs.as_ref().map(|(_, output)| {
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
                 .push(p1_bold("Bitcoin — recorded and confirmed"))
                 .push(p2_regular(format!("Txid: {}", review.bitcoin.compute_txid())))
-                .push_maybe(crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed(&review.bitcoin).map(|output| {
+                .push_maybe(outputs.as_ref().map(|(output, _)| {
                     p2_regular(format!("{} sats to {}", output.amount_sats, output.destination))
                 }))
+                .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())))
                 .push(button::secondary(None, "Back").on_press(Message::Claim(ClaimMessage::BackPairedFork)))
-                .push(button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedFork))),
+                .push_maybe(outputs.is_some().then(|| button::primary(None, "Broadcast Transaction").on_press(Message::Claim(ClaimMessage::ConfirmPairedFork))))
+            },
         ),
         StageView::PairedForkSubmitting => dashboard(
             menu,

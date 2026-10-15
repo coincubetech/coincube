@@ -1,7 +1,7 @@
 """Exercise Claim and Split paired funding on disposable nodes.
 
-The test drivers run the real deposit and paired signing transitions, but do
-not render the UI or use physical hardware signers.
+The test drivers run the real deposit and paired signing transitions and
+inspect rendered wizard elements. They do not use physical hardware signers.
 """
 import json
 import os
