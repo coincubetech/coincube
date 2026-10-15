@@ -91,7 +91,15 @@ async fn drive(
     while let Some(message) = queue.pop_front() {
         count += 1;
         assert!(count <= 50, "unexpected task loop");
-        queue.extend(outputs(p.update(Some(daemon.clone()), cache, message)).await);
+        let checked_funding = matches!(&message, Message::Claim(ClaimEvent::FundingChecked(..)));
+        let next = p.update(Some(daemon.clone()), cache, message);
+        if checked_funding {
+            // The only follow-up is the 30-second proof-expiry timer. A real
+            // event loop schedules it; draining it here would expire the
+            // successful proof before this driver can inspect or sign it.
+            break;
+        }
+        queue.extend(outputs(next).await);
     }
 }
 
