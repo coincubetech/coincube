@@ -183,6 +183,8 @@ class Bridge:
                         with urlopen(indexer.url + "/" + suffix, timeout=4) as response:
                             body = response.read(262145)
                             if requested_address is not None and suffix.count("/") == 1:
+                                # Esplora echoes the regtest HRP; the GUI
+                                # validates the original mainnet-style address.
                                 stats = json.loads(body)
                                 assert stats["address"] == regtest_address(requested_address)
                                 stats["address"] = requested_address

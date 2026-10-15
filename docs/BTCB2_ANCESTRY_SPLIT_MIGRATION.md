@@ -778,6 +778,12 @@ confirmation is reorganized out. All five supported source shapes also reject
 the opposite transaction after a six-block reorg of either chain.
 The Split-only fixture needs the two pinned Knots binaries, not electrs.
 Coordinator restart, stale observation and marker spend cases remain.
+The pinned BLAKE2b-aware electrs currently panics on the disposable harness's
+100-block BTCB2 coinbase reorg. The harness can rebuild its index to verify
+that the desktop collector then refuses the obsolete funding proof, but this
+does not establish that the deployed indexer recovers from a deep reorg. Keep
+the mainnet gate closed until indexer recovery is fixed and exercised against
+the pinned node and indexer builds.
 - Exercise Claim and Split through their actual GUI intents and signed-PSBT
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device
