@@ -1,6 +1,6 @@
 //! Authenticated operator-trusted fork evidence. This is not a spend permission.
 use super::{
-    network_status::{NetworkObservation, NetworkStatusError, RdtsStatus},
+    network_status::{NetworkObservation, NetworkStatusError},
     CoincubeClient, CoincubeError,
 };
 use crate::services::http::NotSuccessResponseInfo;
@@ -401,6 +401,7 @@ impl Drop for ConnectAnchorSession {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::services::coincube::network_status::RdtsStatus;
     use httpmock::prelude::*;
     use serde_json::{json, Value};
     #[tokio::test]
