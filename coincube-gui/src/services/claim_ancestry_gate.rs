@@ -20,13 +20,37 @@ pub(crate) const NEW_CLAIM_MESSAGE: &str = "Claim will require confirmed Bitcoin
 // Changing it requires the acceptance evidence documented above.
 const ENABLED: bool = false;
 
+// The disposable regtest child is a separate test-binary process. It may
+// exercise the whole paired signing route without making a production build
+// or an ordinary unit-test run capable of opening the launch gate.
+#[cfg(all(test, feature = "regtest-harness"))]
+static REGTEST_ACCEPTANCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(all(test, feature = "regtest-harness"))]
+pub(crate) fn enable_disposable_regtest_acceptance() {
+    assert_eq!(
+        std::env::var("CLAIM_GUI_REGTEST_CHILD").as_deref(),
+        Ok("1"),
+        "only the disposable two-chain child may open the test gate"
+    );
+    REGTEST_ACCEPTANCE.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
 /// An unforgeable authorization token for production ancestry side effects.
 #[allow(dead_code)] // Paired signer and submission remain gated in production.
 pub(crate) struct Authorization(());
 
 #[allow(dead_code)] // Paired signer and submission remain gated in production.
 pub(crate) fn authorization() -> Option<Authorization> {
-    ENABLED.then_some(Authorization(()))
+    if ENABLED {
+        return Some(Authorization(()));
+    }
+    #[cfg(all(test, feature = "regtest-harness"))]
+    if REGTEST_ACCEPTANCE.load(std::sync::atomic::Ordering::SeqCst) {
+        return Some(Authorization(()));
+    }
+    None
 }
 
 /// Historical one-sided discovery is test-only. The paired deposit check uses

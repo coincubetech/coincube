@@ -479,11 +479,75 @@ async fn claim_gui_regtest_driver() {
         drive(&mut panel, &dyn_daemon, &cache, task).await;
         let verified = panel.funding_review().is_some() && panel.prepared_pair.is_some();
         assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
+        assert!(
+            !panel.can_sign_or_submit(),
+            "the production signer gate remains closed"
+        );
         emit(json!({
             "event":"paired-deposits-checked",
             "verified":verified,
             "status":panel.funding_status,
             "error":panel.funding_error,
+        }));
+        let command = read(&mut input);
+        if command["action"] == "quit" {
+            return;
+        }
+        assert_eq!(command["action"], "sign_pair");
+        crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::SignPair)),
+        );
+        drive(&mut panel, &dyn_daemon, &cache, task).await;
+        let signer = panel.wallet.signer.as_ref().unwrap().clone();
+        let (bitcoin_psbt, fork_psbt) = match &panel.stage {
+            Stage::PairedSign { bitcoin, fork, .. } => {
+                (bitcoin.tx.psbt.clone(), fork.tx.psbt.clone())
+            }
+            _ => panic!("paired signer admission failed: {:?}", panel.funding_error),
+        };
+        let signed_bitcoin = signer.sign_psbt(bitcoin_psbt.clone()).unwrap();
+        let signed_fork = signer.sign_psbt(fork_psbt.clone()).unwrap();
+        emit(json!({
+            "event":"paired-signing-ready",
+            "bitcoin_unsigned":bitcoin_psbt.to_string(),
+            "btcb2_unsigned":fork_psbt.to_string(),
+            "bitcoin_signed":signed_bitcoin.to_string(),
+            "btcb2_signed":signed_fork.to_string(),
+        }));
+        let returned = read(&mut input);
+        assert_eq!(returned["action"], "return_signatures");
+        for (side, field) in [
+            (ChainId::Bitcoin, "bitcoin_signed"),
+            (ChainId::BitcoinBlake2b, "btcb2_signed"),
+        ] {
+            let psbt = returned[field].as_str().unwrap().parse::<Psbt>().unwrap();
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::Claim(ClaimEvent::PairedPsbt(
+                    panel.paired_sign_seq,
+                    side,
+                    Box::new(Message::Export(
+                        crate::export::ImportExportMessage::Progress(
+                            crate::export::Progress::Psbt(psbt),
+                        ),
+                    )),
+                )),
+            );
+            drive(&mut panel, &dyn_daemon, &cache, task).await;
+        }
+        let (bitcoin_txid, btcb2_txid) = match &panel.stage {
+            Stage::PairedRecovery(recovery) => (recovery.bitcoin_txid, recovery.fork_txid),
+            Stage::PairedSign { error, .. } => panic!("paired signatures refused: {:?}", error),
+            _ => panic!("paired signing did not record the exact pair"),
+        };
+        emit(json!({
+            "event":"paired-signatures-recorded",
+            "bitcoin_txid":bitcoin_txid,
+            "btcb2_txid":btcb2_txid,
         }));
         assert_eq!(read(&mut input)["action"], "quit");
         return;

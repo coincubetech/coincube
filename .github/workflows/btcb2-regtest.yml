@@ -220,8 +220,10 @@ jobs:
           # historical Claim consensus modules cover recorded constructions;
           # test_btcb2_claim_pair_consensus.py checks ordinary S+B/S+F against
           # both pinned nodes, including reverse broadcast order and reorgs.
-          # The Claim GUI module checks that retired one-sided routes refuse;
-          # it does not yet exercise paired GUI signing. Split consensus covers
+          # The Claim GUI module checks retired one-sided refusal and paired
+          # deposit proof plus synthetic signed-PSBT imports through the real
+          # panel transitions. Physical hardware is still a separate gate.
+          # Split consensus covers
           # the ordinary pair and historical alternatives, while Split
           # observation covers step-1 reorgs through the service and journal.
           # test_btcb2_blockfile.py drives concurrent getblock batches at one

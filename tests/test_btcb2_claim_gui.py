@@ -1,6 +1,7 @@
-"""Exercise retired Claim refusal and paired funding proof on disposable nodes.
+"""Exercise retired Claim refusal and paired funding on disposable nodes.
 
-This does not exercise the paired Claim wizard, rendered UI or hardware signing.
+The test driver runs the real Claim deposit and paired signing transitions,
+but does not render the UI or use physical hardware signers.
 """
 import json
 import os
@@ -369,8 +370,8 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
                 harness.cleanup()
 
 
-def test_paired_claim_wizard_checks_two_chain_deposits(tmp_path):
-    """Drive deposit reservation and paired funding review against both indexers."""
+def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
+    """Drive deposit proof and both signed PSBT imports through the real panel."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -470,7 +471,18 @@ def test_paired_claim_wizard_checks_two_chain_deposits(tmp_path):
                               "btcb2": fork_funding}, timeout=180)
         assert checked["event"] == "paired-deposits-checked", checked
         assert checked["verified"] and checked["error"] is None, checked
-        assert not bridge.preflights and not bridge.submissions and not bridge.errors
+        ready = child.send({"action": "sign_pair"}, timeout=180)
+        assert ready["event"] == "paired-signing-ready", ready
+        for side in ("bitcoin", "btcb2"):
+            assert ready[f"{side}_unsigned"] != ready[f"{side}_signed"]
+        recorded = child.send({
+            "action": "return_signatures",
+            "bitcoin_signed": ready["bitcoin_signed"],
+            "btcb2_signed": ready["btcb2_signed"],
+        }, timeout=180)
+        assert recorded["event"] == "paired-signatures-recorded", recorded
+        assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64
+        assert not bridge.submissions and not bridge.errors
         child.proc.stdin.write('{"action":"quit"}\n')
         child.proc.stdin.flush()
         assert child.proc.wait(timeout=10) == 0

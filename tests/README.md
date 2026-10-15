@@ -160,9 +160,12 @@ conflict and a block carrying it is accepted, until the chain is restored. Its
 offline cases need only the bridge. The unified `ALL|UNIFIED` fallback (#568 B4b)
 is not built yet and is not covered.
 
-The headless Claim GUI test now checks that both retired one-sided constructions
-refuse before signing against disposable pinned nodes. It does not exercise the
-new paired Claim wizard or historical journal reconciliation. Build and select
+The headless Claim GUI test checks that both retired one-sided constructions
+refuse before signing against disposable pinned nodes. It also drives the
+paired Claim wizard through separate deposit address reservation, a two-chain
+funding check using mature post-fork coins, and both synthetic signed-PSBT
+imports into one durable pair. It does not exercise the rendered UI, physical
+hardware devices, or historical journal reconciliation. Build and select
 the lib-test executable (not the GUI application):
 
 ```sh
