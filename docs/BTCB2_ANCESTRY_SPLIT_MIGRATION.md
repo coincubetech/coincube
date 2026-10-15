@@ -780,13 +780,14 @@ confirmation is reorganized out. All five supported source shapes also reject
 the opposite transaction after a six-block reorg of either chain.
 The Split-only fixture needs the two pinned Knots binaries, not electrs.
 Coordinator restart, stale observation and marker spend cases remain.
-The pinned BLAKE2b-aware electrs currently panics on the disposable harness's
-100-block coinbase reorg on either Bitcoin or BTCB2. The harness can rebuild
-its disposable index to verify that the desktop collector then refuses the
-obsolete funding proof, but this
-does not establish that the deployed indexer recovers from a deep reorg. Keep
-the mainnet gate closed until indexer recovery is fixed and exercised against
-the pinned node and indexer builds.
+The pinned BLAKE2b-aware electrs can panic while the disposable harness moves
+the node tip across a 100-block coinbase reorg. The harness now stops it and
+reopens the **same** index database after the new tip settles. Both chain cases
+pass: the indexer reaches the replacement tip and the desktop collector then
+refuses the obsolete funding proof. This establishes manual same-database
+recovery in that fixture, not deployed automatic recovery from a deep reorg.
+Keep the mainnet gate closed until that operational recovery is exercised
+against the deployed node and indexer builds.
 - Exercise Claim and Split through their actual GUI intents and signed-PSBT
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device
@@ -806,6 +807,9 @@ the pinned node and indexer builds.
   disposable bridge supplies separate fresh six-block fee quotes because a
   quiet regtest mempool cannot estimate a mainnet fee; production continues to
   refuse deposit preparation when either chain has no usable quote. The
+  fixture configures the disposable fork boundary explicitly so the actual
+  ancestry collector can qualify those funding coins; candidate presence
+  alone never opens signing. The
   fixture also asks the broadcast review to reject a reported spent Bitcoin
   funding output, asserts the exact outpoint was read, and reopens a signed
   pair in a new panel process without restoring submission authority. The

@@ -303,7 +303,7 @@ async fn claim_gui_regtest_driver() {
     let mut fork_panel: Option<ForkClaimPanel> = None;
     let mut client = CoincubeClient::for_test(base.to_string());
     client.set_token("synthetic-regtest-only");
-    if init["ancestry_previous"].is_string() {
+    if init["ancestry_first_fork_height"].is_u64() {
         client.enable_regtest_ancestry(
             u32::try_from(init["ancestry_first_fork_height"].as_u64().unwrap()).unwrap(),
             u32::try_from(init["ancestry_historical_limit"].as_u64().unwrap()).unwrap(),

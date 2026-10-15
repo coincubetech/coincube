@@ -449,6 +449,16 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
             "previous": first["previous"], "vout": first["vout"],
             "coin_height": first["height"], "tip_height": node.rpc.getblockcount(),
             "shared_extra": [shared_coin(1), shared_coin(2)],
+            # Use the disposable nodes' actual fork boundary for the same
+            # ancestry collector exercised by the standalone proof cases.
+            "ancestry_first_fork_height": harness.activation_height,
+            # The test mines each funding coin and 99 maturity blocks after
+            # opening the panel; this exclusive bound must include both.
+            "ancestry_historical_limit": max(
+                node.rpc.getblockcount(), harness.blake2b.rpc.getblockcount()
+            ) + 256,
+            "ancestry_shared_history_height": harness.activation_height - 1,
+            "ancestry_shared_history_hash": harness.fork_parent_hash,
         }
         result = child.send(initial, timeout=180)
         assert result["event"] == "paired-deposit-addresses", result

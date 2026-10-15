@@ -120,7 +120,9 @@ through the disposable Connect/Esplora bridge. It proves separate mature
 post-fork coinbases on both chains, refuses a stale outspend response, then
 spends either chain's funding output and requires a fresh paired collection
 to refuse after both indexers catch up.
-The driver does not open the signing UI or authorize a broadcast.
+The funding-collector case does not open the signing UI or authorize a
+broadcast. The separate paired-wizard case below exercises synthetic signing
+through the panel without opening a physical device.
 
 The ordinary foreign Split pair has a separate `test_split_ancestry_pair_*`
 path in `test_btcb2_split_consensus.py`. Its offline vectors cover all five
@@ -164,8 +166,12 @@ The headless Claim GUI test checks that both retired one-sided constructions
 refuse before signing against disposable pinned nodes. It also drives the
 paired Claim wizard through separate deposit address reservation, a two-chain
 funding check using mature post-fork coins, and both synthetic signed-PSBT
-imports into one durable pair. It does not exercise the rendered UI, physical
-hardware devices, or historical journal reconciliation. Build and select
+imports into one durable pair. It rejects spent and stale funding reads before
+broadcast review and reopens that pair in a new panel process without
+restoring send authority. Its Connect bridge supplies fresh, chain-specific
+regtest fee estimates because a quiet regtest mempool has no usable estimate.
+It does not exercise the rendered UI, physical hardware devices, or historical
+journal reconciliation. Build and select
 the lib-test executable (not the GUI application):
 
 ```sh
