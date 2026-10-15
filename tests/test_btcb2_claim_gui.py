@@ -23,6 +23,41 @@ import pytest
 from test_framework.btcb2 import TwoChainRegtest, missing_binaries
 
 
+BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+
+
+def regtest_address(mainnet):
+    """Translate only a valid v0 mainnet SegWit address's HRP for regtest.
+
+    The public descriptor and witness program are unchanged. This bridge
+    exists solely because the GUI's logical chain identity is mainnet while
+    the disposable Knots indexers enforce regtest address encoding.
+    """
+    assert mainnet == mainnet.lower() and mainnet.startswith("bc1q")
+    values = [BECH32_ALPHABET.index(char) for char in mainnet[3:]]
+
+    def expand(hrp):
+        return [ord(char) >> 5 for char in hrp] + [0] + [ord(char) & 31 for char in hrp]
+
+    def polymod(data):
+        checksum = 1
+        for value in data:
+            top = checksum >> 25
+            checksum = ((checksum & 0x1ffffff) << 5) ^ value
+            for bit, generator in enumerate(
+                (0x3b6a57b2, 0x26508e6d, 0x1ea119fa, 0x3d4233dd, 0x2a1462b3)
+            ):
+                if (top >> bit) & 1:
+                    checksum ^= generator
+        return checksum
+
+    assert len(values) >= 7 and polymod(expand("bc") + values) == 1
+    payload = values[:-6]
+    checksum = polymod(expand("bcrt") + payload + [0] * 6) ^ 1
+    digits = payload + [(checksum >> (5 * (5 - index))) & 31 for index in range(6)]
+    return "bcrt1" + "".join(BECH32_ALPHABET[digit] for digit in digits)
+
+
 class Child:
     def __init__(self, tool, home, multisig=False):
         home.mkdir()
@@ -45,8 +80,8 @@ class Child:
             self.lines.put(line)
         self.lines.put(None)
 
-    def receive(self):
-        deadline = time.monotonic() + 45
+    def receive(self, timeout=45):
+        deadline = time.monotonic() + timeout
         while True:
             line = self.lines.get(timeout=max(0.01, deadline - time.monotonic()))
             assert line is not None, "GUI child exited:\n" + "".join(self.transcript)
@@ -56,10 +91,10 @@ class Child:
                 return json.loads(line.split(marker, 1)[1])
             assert time.monotonic() < deadline, "GUI child timeout"
 
-    def send(self, value):
+    def send(self, value, timeout=45):
         self.proc.stdin.write(json.dumps(value) + "\n")
         self.proc.stdin.flush()
-        return self.receive()
+        return self.receive(timeout)
 
     def close(self):
         if self.proc.poll() is None:
@@ -135,6 +170,10 @@ class Bridge:
                                         k: rdts[k] for k in ("height", "expiry_time", "active")}}}}}})
                         return
                     _, indexer, suffix, _ = self.route()
+                    if suffix.startswith("address/"):
+                        path = suffix.split("/")
+                        path[1] = regtest_address(path[1])
+                        suffix = "/".join(path)
                     try:
                         with urlopen(indexer.url + "/" + suffix, timeout=4) as response:
                             self.reply(
@@ -318,6 +357,81 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
         assert not bridge.preflights and not bridge.submissions
         assert not bridge.errors
         assert set(node.rpc.getrawmempool()) == initial_legacy_mempool
+        assert child.proc.wait(timeout=10) == 0
+    finally:
+        child.close()
+        (tmp_path / "log").write_text("".join(child.transcript))
+        try:
+            if bridge:
+                bridge.close()
+        finally:
+            if harness:
+                harness.cleanup()
+
+
+def test_paired_claim_wizard_reserves_two_distinct_deposit_addresses(tmp_path):
+    """Drive the GUI's real deposit-start transition against both indexers."""
+    tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
+    missing = missing_binaries()
+    if not tool or not os.access(tool, os.X_OK) or missing:
+        message = "Build GUI lib tests with regtest-harness and set CLAIM_GUI_REGTEST_TEST_PATH plus pinned node/indexer paths"
+        if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    if os.getenv("TEST_DIR"):
+        Path(os.environ["TEST_DIR"]).mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-paired-wizard-", dir=os.environ["TEST_DIR"]))
+    child = Child(tool, tmp_path / "gui-home")
+    harness = bridge = None
+    try:
+        descriptor = child.receive()
+        assert descriptor["event"] == "descriptor"
+
+        def testnet_public_key(match):
+            payload = base58.b58decode_check(match.group())
+            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
+
+        public_descriptor = re.sub(
+            r"xpub[1-9A-HJ-NP-Za-km-z]+", testnet_public_key,
+            descriptor["descriptor"].split("#")[0],
+        )
+        harness = TwoChainRegtest(str(tmp_path / "nodes"), public_descriptor=public_descriptor)
+        harness.setup()
+        bridge = Bridge(harness)
+        node = harness.legacy
+        root = tmp_path / "gui"
+        root.mkdir()
+
+        def shared_coin(index):
+            txid, vout, _ = harness.prefork_outpoints[index]
+            block = harness.prefork_block_hashes[txid]
+            return {"previous": node.rpc.getrawtransaction(txid, False, block),
+                    "vout": vout, "height": node.rpc.getblockheader(block)["height"],
+                    "index": index}
+
+        first = shared_coin(0)
+        initial = {
+            "mode": "paired-wizard-deposits",
+            "root": str(root), "bridge": bridge.url, "backend": "esplora",
+            "rpc": f"127.0.0.1:{node.rpcport}",
+            "cookie": Path(node.node_rpc.cookie_path).read_text().strip(),
+            "fork_rpc": f"127.0.0.1:{harness.blake2b.rpcport}",
+            "fork_cookie": Path(harness.blake2b.node_rpc.cookie_path).read_text().strip(),
+            "fork_tip_height": harness.blake2b.rpc.getblockcount(),
+            "previous": first["previous"], "vout": first["vout"],
+            "coin_height": first["height"], "tip_height": node.rpc.getblockcount(),
+            "shared_extra": [shared_coin(1), shared_coin(2)],
+        }
+        result = child.send(initial, timeout=180)
+        assert result["event"] == "paired-deposit-addresses", result
+        assert result["bitcoin"].startswith("bc1") and result["btcb2"].startswith("bc1")
+        assert result["bitcoin"] != result["btcb2"]
+        assert result["bitcoin_minimum"] > 0 and result["btcb2_minimum"] > 0
+        assert result["bitcoin_receive_index"] >= 1
+        assert not bridge.preflights and not bridge.submissions and not bridge.errors
+        child.proc.stdin.write('{"action":"quit"}\n')
+        child.proc.stdin.flush()
         assert child.proc.wait(timeout=10) == 0
     finally:
         child.close()

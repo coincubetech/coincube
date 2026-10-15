@@ -124,6 +124,10 @@ fn flow_daemon(fixture: &Fixture, base_url: &str, selected: &Coin) -> Arc<FlowDa
         ancestry_coin: Some(selected.clone()),
         #[cfg(feature = "regtest-harness")]
         live: None,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex::new(Vec::new()),
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex::new((1, 0)),
     })
 }
 
@@ -150,6 +154,10 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         ancestry_coin: Some(selected.clone()),
         #[cfg(feature = "regtest-harness")]
         live: None,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex::new(Vec::new()),
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex::new((1, 0)),
     });
     let wallet = Arc::new(Wallet::new(fixture.descriptor));
     let mut client = CoincubeClient::for_test(server.base_url());
@@ -379,6 +387,10 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         ancestry_coin: Some(immature),
         #[cfg(feature = "regtest-harness")]
         live: None,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex::new(Vec::new()),
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex::new((1, 0)),
     });
     assert!(super::super::super::preferred::build_preferred(
         changed.clone(),
@@ -424,6 +436,10 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
             ancestry_coin: Some(bad_coin),
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let refusal = super::super::super::signing::check(
             &built,

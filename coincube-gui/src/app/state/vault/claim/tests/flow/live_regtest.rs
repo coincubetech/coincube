@@ -146,6 +146,42 @@ async fn claim_gui_regtest_driver() {
             is_from_self: false,
         }
     });
+    let shared_extra: Vec<(Coin, Transaction)> = init["shared_extra"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|entry| {
+            let transaction: Transaction =
+                coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex(
+                    entry["previous"].as_str().unwrap(),
+                )
+                .unwrap();
+            let vout = u32::try_from(entry["vout"].as_u64().unwrap()).unwrap();
+            let index = u32::try_from(entry["index"].as_u64().unwrap()).unwrap();
+            let derivation_index = ChildNumber::from_normal_idx(index).unwrap();
+            let output = transaction.output.get(vout as usize).unwrap();
+            let expected = fixture
+                .descriptor
+                .receive_descriptor()
+                .derive(derivation_index, &secp256k1::Secp256k1::verification_only())
+                .script_pubkey();
+            assert_eq!(output.script_pubkey, expected);
+            (
+                Coin {
+                    amount: output.value,
+                    outpoint: OutPoint::new(transaction.compute_txid(), vout),
+                    address: Address::from_script(&output.script_pubkey, Network::Bitcoin).unwrap(),
+                    block_height: Some(i32::try_from(entry["height"].as_u64().unwrap()).unwrap()),
+                    derivation_index,
+                    spend_info: None,
+                    is_immature: false,
+                    is_change: false,
+                    is_from_self: false,
+                },
+                transaction,
+            )
+        })
+        .collect();
     let base = init["bridge"].as_str().unwrap();
     let mut config: coincubed::config::Config = toml::from_str(&format!(
         "main_descriptor = '{}'\ndata_directory = '{}'\n[bitcoin_config]\nnetwork = 'bitcoin'\n[esplora_config]\naddr = '{}/api/v1/esplora/bitcoin/mainnet'\n",
@@ -190,6 +226,8 @@ async fn claim_gui_regtest_driver() {
             transport,
             height: i32::try_from(init["tip_height"].as_u64().unwrap()).unwrap(),
         }),
+        extra_coins: Mutex::new(shared_extra.clone()),
+        indices: Mutex::new((1, 0)),
     });
     let dyn_daemon: Arc<dyn Daemon + Send + Sync> = daemon.clone();
     let mut wallet = Wallet::new(fixture.descriptor);
@@ -250,6 +288,8 @@ async fn claim_gui_regtest_driver() {
             )
             .unwrap(),
         }),
+        extra_coins: Mutex::new(shared_extra),
+        indices: Mutex::new((1, 0)),
     });
     let fork_dyn: Arc<dyn Daemon + Send + Sync> = fork_daemon.clone();
     let fork_cache = Cache {
@@ -355,6 +395,45 @@ async fn claim_gui_regtest_driver() {
     };
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
+    if init["mode"].as_str() == Some("paired-wizard-deposits") {
+        // The fixture supplies a checked precondition so this test targets
+        // the real two-chain reservation and address-preparation transition.
+        // It does not manufacture a signer or submission authorization.
+        panel.pre.target = Some("fork-cube".into());
+        panel.pre.shape = None;
+        panel.pre.checked = Some(checked_ok(unix_now()));
+        panel.backend = BackendState::Ready;
+        panel.bind_fork_daemon(Some(ClaimForkBinding::new(
+            &fork_dyn,
+            &fork_wallet,
+            _sender.subscribe(),
+        )));
+        assert!(panel.can_prepare_funding());
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::StartFunding)),
+        );
+        drive(&mut panel, &dyn_daemon, &cache, task).await;
+        let Stage::FundingDeposits(addresses) = &panel.stage else {
+            panic!(
+                "paired deposit preparation failed: {:?}",
+                panel.funding_error
+            );
+        };
+        assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
+        assert!(!panel.can_sign_or_submit());
+        emit(json!({
+            "event":"paired-deposit-addresses",
+            "bitcoin":addresses.bitcoin_deposit,
+            "btcb2":addresses.btcb2_deposit,
+            "bitcoin_minimum":addresses.bitcoin_minimum_sats,
+            "btcb2_minimum":addresses.btcb2_minimum_sats,
+            "bitcoin_receive_index":daemon.indices.lock().unwrap().0,
+        }));
+        assert_eq!(read(&mut input)["action"], "quit");
+        return;
+    }
     if !resume {
         assert!(
             panel.refusal().is_some(),

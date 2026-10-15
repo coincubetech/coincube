@@ -909,6 +909,10 @@ mod flow {
         ancestry_coin: Option<Coin>,
         #[cfg(feature = "regtest-harness")]
         live: Option<live_regtest::LiveTransport>,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex<Vec<(Coin, Transaction)>>,
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex<(u32, u32)>,
     }
     impl FlowDaemon {
         fn hit(&self, name: &'static str) {
@@ -937,7 +941,9 @@ mod flow {
             self.hit("get_info");
             #[cfg(feature = "regtest-harness")]
             if let Some(live) = &self.live {
-                return Ok(live.info(&self.config));
+                let mut info = live.info(&self.config);
+                (info.receive_index, info.change_index) = *self.indices.lock().unwrap();
+                return Ok(info);
             }
             Ok(GetInfoResult {
                 version: String::new(),
@@ -970,20 +976,35 @@ mod flow {
         }
         async fn list_revealed_addresses(
             &self,
-            _: bool,
+            is_change: bool,
             _: bool,
             _: usize,
-            _: Option<ChildNumber>,
+            start: Option<ChildNumber>,
         ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
             self.hit("list_revealed_addresses");
+            #[cfg(feature = "regtest-harness")]
+            let index = if self.live.is_some() {
+                start.unwrap_or(ChildNumber::from_normal_idx(0).unwrap())
+            } else {
+                ChildNumber::from_normal_idx(12).unwrap()
+            };
+            #[cfg(not(feature = "regtest-harness"))]
             let index = ChildNumber::from_normal_idx(12).unwrap();
+            let _ = &start;
+            #[cfg(feature = "regtest-harness")]
+            let live_receive = self.live.is_some() && !is_change;
+            #[cfg(not(feature = "regtest-harness"))]
+            let live_receive = false;
+            let _ = is_change;
+            let descriptor = if live_receive {
+                self.config.main_descriptor.receive_descriptor()
+            } else {
+                self.config.main_descriptor.change_descriptor()
+            };
             Ok(model::ListRevealedAddressesResult {
                 addresses: vec![coincubed::commands::ListRevealedAddressesEntry {
                     index,
-                    address: self
-                        .config
-                        .main_descriptor
-                        .change_descriptor()
+                    address: descriptor
                         .derive(index, &secp256k1::Secp256k1::verification_only())
                         .address(Network::Bitcoin),
                     label: None,
@@ -994,9 +1015,20 @@ mod flow {
         }
         async fn update_deriv_indexes(
             &self,
-            _: Option<u32>,
-            _: Option<u32>,
+            receive: Option<u32>,
+            change: Option<u32>,
         ) -> Result<UpdateDerivIndexesResult, DaemonError> {
+            #[cfg(feature = "regtest-harness")]
+            if self.live.is_some() {
+                let mut indices = self.indices.lock().unwrap();
+                indices.0 = indices.0.max(receive.unwrap_or(indices.0));
+                indices.1 = indices.1.max(change.unwrap_or(indices.1));
+                return Ok(UpdateDerivIndexesResult {
+                    receive: indices.0,
+                    change: indices.1,
+                });
+            }
+            let _ = (receive, change);
             unreachable!()
         }
         async fn list_coins(
@@ -1019,6 +1051,14 @@ mod flow {
             if let Some(ancestry) = &self.ancestry_coin {
                 coins.push(ancestry.clone());
             }
+            #[cfg(feature = "regtest-harness")]
+            coins.extend(
+                self.extra_coins
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(coin, _)| coin.clone()),
+            );
             if !outpoints.is_empty() {
                 coins.retain(|coin| outpoints.contains(&coin.outpoint));
             }
@@ -1061,7 +1101,29 @@ mod flow {
         }
         async fn reserve_change(&self) -> Result<ChildNumber, DaemonError> {
             self.hit("reserve_change");
+            #[cfg(feature = "regtest-harness")]
+            if self.live.is_some() {
+                let mut indices = self.indices.lock().unwrap();
+                indices.1 += 1;
+                return ChildNumber::from_normal_idx(indices.1)
+                    .map_err(|_| DaemonError::ClientNotSupported);
+            }
             Ok(ChildNumber::from_normal_idx(12).unwrap())
+        }
+        async fn reserve_claim_change(
+            &self,
+            chain: ChainId,
+            descriptor: &CoincubeDescriptor,
+        ) -> Result<ChildNumber, DaemonError> {
+            #[cfg(feature = "regtest-harness")]
+            if self.live.is_some()
+                && self.config.bitcoin_config.chain == chain
+                && self.config.main_descriptor == *descriptor
+            {
+                return self.reserve_change().await;
+            }
+            let _ = (chain, descriptor);
+            Err(DaemonError::ClientNotSupported)
         }
         async fn claim_backend_binding(
             &self,
@@ -1249,6 +1311,19 @@ mod flow {
                     time: None,
                 });
             }
+            #[cfg(feature = "regtest-harness")]
+            transactions.extend(
+                self.extra_coins
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(coin, _)| txids.contains(&coin.outpoint.txid))
+                    .map(|(coin, tx)| coincubed::commands::TransactionInfo {
+                        tx: tx.clone(),
+                        height: coin.block_height,
+                        time: None,
+                    }),
+            );
             if let Some(tx) = self.submitted.lock().unwrap().as_ref() {
                 if txids.contains(&tx.compute_txid()) {
                     transactions.push(coincubed::commands::TransactionInfo {
@@ -1445,6 +1520,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
         let mut wallet = Wallet::new(f.descriptor.clone());
@@ -2225,6 +2304,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let mut excluded = None;
         if ancestry {
@@ -3765,6 +3848,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -4030,6 +4117,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
