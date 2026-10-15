@@ -1081,8 +1081,10 @@ impl SplitPanel {
     pub fn set_connect(&mut self, connect: Option<Arc<dyn SplitConnect>>) {
         let same = match (&self.connect, &connect) {
             (Some(a), Some(b)) => a.context() == b.context(),
-            (None, None) => true,
-            _ => false,
+            // A new panel has no previous session to revoke. Its target
+            // binding is installed before the App attaches Connect.
+            (None, _) => true,
+            (Some(_), None) => false,
         };
         if !same {
             self.revoke();

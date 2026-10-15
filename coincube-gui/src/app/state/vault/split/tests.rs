@@ -36,6 +36,7 @@ use reqwest::header::{HeaderMap, CACHE_CONTROL};
 use std::{
     collections::{BTreeSet, HashMap},
     os::unix::fs::PermissionsExt,
+    str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
@@ -768,6 +769,28 @@ async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() 
         assert!(panel.paired_signing.is_none());
         assert!(temp.root().exists());
     }
+}
+
+#[test]
+fn first_connect_attachment_preserves_funding_target_but_session_change_revokes_it() {
+    let scan = Scan::new(Shape::Wpkh);
+    let descriptor =
+        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let wallet_id = crate::app::settings::WalletId::new(
+        descriptor.to_string().split_once('#').unwrap().1.to_owned(),
+        Some(1),
+    );
+    let binding =
+        crate::services::claim_workflow::SplitTargetBinding::for_test(wallet_id, &descriptor, 4);
+    let mut panel = SplitPanel::start(TARGET.into(), Temp::new().root(), scan.intent());
+    panel.bind_funding_target(binding);
+    panel.set_connect(Some(FakeConnect::new(&scan.coins) as Arc<dyn SplitConnect>));
+    assert!(panel.funding_target_binding.is_some());
+
+    let mut replacement = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut replacement).unwrap().context.account = "another-account".into();
+    panel.set_connect(Some(replacement as Arc<dyn SplitConnect>));
+    assert!(panel.funding_target_binding.is_none());
 }
 
 #[test]
