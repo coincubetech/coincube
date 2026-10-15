@@ -53,7 +53,8 @@ a replayable spend.
    proof without the ancestry collector. A paired read-only funding collector
    now refreshes both root paths, selected-transaction confirmations,
    canonical block mappings, maturity, unspent status and two-chain tips under
-   one session; it is not yet bound to the source wallet or signing intent.
+   one session. Claim and Split admission bind its result to the source wallet,
+   reserved deposits and exact saved pair before signing.
    The foreign inventory now retains previous transactions for covered,
    post-fork funding candidates. Review-only validators compare those bytes,
    retained paths, session, source constructions and two current tips for
@@ -96,9 +97,9 @@ a replayable spend.
    refreshes both tips, proof age and Connect generation. The production
    Connect implementation can run this against a new two-chain source scan,
    reject a changed fee quote and create or reopen only the exact version-11
-   intent under the saved journal lock. This operation is not yet called by
-   signer dispatch and does not reconcile a full source wallet or permit a
-   send.
+   intent under the saved journal lock. Split signer and file-import dispatch
+   call this operation before handling an exact PSBT; it does not by itself
+   reconcile a full source wallet or permit a send.
    Claim now has an equivalent read-only paired search that binds the selected
    Bitcoin and BTCB2 funding outputs and every shared output to its Vault
    descriptor. A Cube-specific entry point to the bounded two-chain scanner
@@ -387,8 +388,9 @@ a replayable spend.
    requalification, consumes a one-use permit before opening the device, and
    sends returned PSBTs through the same strict combiner as files. Once both
    sides are complete, the panel invokes the finalization boundary and
-   reopens read-only recovery. This route does not yet have paired preflight,
-   a submission coordinator or broadcast, and device support still needs
+   reopens read-only recovery. Separate Bitcoin and BTCB2 broadcast reviews
+   now repeat paired preflight and use the durable submission coordinator;
+   production submission remains gated, and device support still needs
    independent hardware smoke tests.
    The production Split session check now rejects an unread Connect session
    notification even if it carries the same numeric generation; signer and
@@ -818,8 +820,17 @@ against the deployed node and indexer builds.
   tests on implementation commit `113ea1e0`, including this Claim wizard
   path, signed-pair restart, spent-input refusal and same-database indexer
   recovery after deep reorg.
-  The rendered UI, paired Split GUI signing, coordinator restart and physical
-  device round trips remain outstanding.
+  The headless paired Split wizard now reserves separate chain-specific
+  addresses, checks mature deposits through the production Connect adapter,
+  refuses to sign while the production gate is closed, and imports ordinary
+  software-signed PSBTs for both sides. A new panel process reopens the exact
+  signed pair without submission authority; the fixture checks that each
+  signed transaction enters its own chain's mempool and is refused by the
+  opposite chain. The pinned two-chain CI run passed this Split case and the
+  paired Claim case (106 passed, 1 deselected overall) on commit `52147c26`.
+  The rendered UI, coordinator restart and physical device round trips remain
+  outstanding. A further Split signer-admission regression for a spent marker
+  is awaiting the next pinned harness run.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for

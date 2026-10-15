@@ -567,7 +567,7 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
 
 
 def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
-    """Drive Split's production Connect adapter and panel against two nodes."""
+    """Refuse a newly spent marker, then sign and reopen Split on two nodes."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -618,13 +618,22 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         assert first["bitcoin"] != first["btcb2"]
         assert first["bitcoin_minimum"] > 0 and first["btcb2_minimum"] > 0
 
-        for node, address in (
-            (harness.legacy, first["bitcoin"]),
-            (harness.blake2b, first["btcb2"]),
+        funding_outpoints = {}
+        for chain, node, address in (
+            ("bitcoin", harness.legacy, first["bitcoin"]),
+            ("btcb2", harness.blake2b, first["btcb2"]),
         ):
             block = node.rpc.generatetoaddress(1, regtest_address(address))[0]
+            txid = node.rpc.getblock(block)["tx"][0]
+            transaction = node.rpc.getrawtransaction(txid, True, block)
+            vout = next(
+                output["n"] for output in transaction["vout"]
+                if output["scriptPubKey"].get("address") == regtest_address(address)
+            )
+            funding_outpoints[chain] = (txid, vout)
             node.generate_block(99)
             assert node.rpc.getblockcount() >= node.rpc.getblockheader(block)["height"] + 99
+        assert funding_outpoints["bitcoin"][0] != funding_outpoints["btcb2"][0]
         for node, indexer in (
             (harness.legacy, harness.electrs_legacy),
             (harness.blake2b, harness.electrs_blake2b),
@@ -644,6 +653,16 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
 
         checked = child.send({"action": "deposited"}, timeout=180)
         assert checked["event"] == "split-deposits-checked", checked
+        assert checked["verified"] and checked["notice"] is None, checked
+        txid, vout = funding_outpoints["bitcoin"]
+        bridge.spent_outspend = ("mainnet", f"tx/{txid}/outspend/{vout}")
+        refused = child.send({"action": "sign_pair_spent"}, timeout=180)
+        assert refused["event"] == "split-signing-refused-spent", refused
+        assert refused["notice"] and bridge.spent_outspend_hits > 0, refused
+        assert not bridge.submissions and not bridge.errors
+        bridge.spent_outspend = None
+        checked = child.send({"action": "deposited"}, timeout=180)
+        assert checked["event"] == "split-deposits-checked-again", checked
         assert checked["verified"] and checked["notice"] is None, checked
         recorded = child.send({"action": "sign_pair"}, timeout=180)
         assert recorded["event"] == "split-signed-pair-recorded", recorded

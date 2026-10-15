@@ -218,8 +218,29 @@ async fn split_gui_regtest_driver() {
         "live Split funding proof was refused: {:?}",
         panel.notice()
     );
-    assert_eq!(read(&mut input)["action"], "sign_pair");
+    assert_eq!(read(&mut input)["action"], "sign_pair_spent");
     crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+    let task = panel.update(SplitMessage::BeginPairedSigning);
+    drive_panel(&mut panel, task, false).await;
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
+    assert!(panel.paired_signing_view().is_none());
+    emit(json!({
+        "event":"split-signing-refused-spent",
+        "notice":panel.notice(),
+    }));
+    assert_eq!(read(&mut input)["action"], "deposited");
+    let task = panel.update(SplitMessage::CheckDeposits);
+    drive_panel(&mut panel, task, true).await;
+    let verified = panel
+        .funding_progress()
+        .is_some_and(|progress| progress.both_verified && progress.review.is_some());
+    emit(json!({
+        "event":"split-deposits-checked-again",
+        "verified":verified,
+        "notice":panel.notice(),
+    }));
+    assert!(verified, "live Split funding proof did not recover");
+    assert_eq!(read(&mut input)["action"], "sign_pair");
     let task = panel.update(SplitMessage::BeginPairedSigning);
     drive_panel(&mut panel, task, false).await;
     assert_eq!(panel.stage(), &Stage::PairedSign, "{:?}", panel.notice());
