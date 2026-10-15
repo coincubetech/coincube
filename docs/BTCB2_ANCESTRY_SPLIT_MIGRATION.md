@@ -816,10 +816,10 @@ against the deployed node and indexer builds.
   funding output, asserts the exact outpoint was read, and reopens a signed
   pair in a new panel process without restoring submission authority. The
   test acceptance gate opens only inside the disposable test-binary child; the
-  production gate remains closed. The pinned two-chain CI run passed all 105
-  tests on implementation commit `113ea1e0`, including this Claim wizard
-  path, signed-pair restart, spent-input refusal and same-database indexer
-  recovery after deep reorg.
+  production gate remains closed. The pinned two-chain CI run passed 106
+  tests with one intentionally deselected on commit `a41ec0e8`, including
+  this Claim wizard path, signed-pair restart, spent-input refusal and
+  same-database indexer recovery after deep reorg.
   The headless paired Split wizard now reserves separate chain-specific
   addresses, checks mature deposits through the production Connect adapter,
   refuses to sign while the production gate is closed, and imports ordinary
@@ -828,9 +828,13 @@ against the deployed node and indexer builds.
   signed transaction enters its own chain's mempool and is refused by the
   opposite chain. The pinned two-chain CI run passed this Split case and the
   paired Claim case (106 passed, 1 deselected overall) on commit `52147c26`.
-  The rendered UI, coordinator restart and physical device round trips remain
-  outstanding. A further Split signer-admission regression for a spent marker
-  is awaiting the next pinned harness run.
+  A Split signer-admission regression for a spent Bitcoin funding marker also
+  passed in that pinned run. Test-only Claim and Split fixtures now drive
+  separate Bitcoin and BTCB2 broadcast reviews across process restarts,
+  including six Bitcoin confirmations, exact-byte node submission and
+  per-chain attempt journaling; those additions still need a pinned live run.
+  Rendered UI, deployed recovery, realistic Connect scan latency and physical
+  device round trips remain outstanding.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for
