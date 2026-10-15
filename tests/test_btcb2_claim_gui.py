@@ -119,6 +119,7 @@ class Bridge:
         self.policy_node = None
         self.withhold_submission_reply = False
         self.stale_outspend = False
+        self.spent_outspend = None
         self.errors = []
         owner = self
 
@@ -171,7 +172,10 @@ class Bridge:
                                     "rdts": {"state": "flagday", "flagday": {
                                         k: rdts[k] for k in ("height", "expiry_time", "active")}}}}}})
                         return
-                    _, indexer, suffix, _ = self.route()
+                    _, indexer, suffix, network = self.route()
+                    if owner.spent_outspend == (network, suffix):
+                        self.reply(200, {"spent": True, "txid": "00" * 32})
+                        return
                     requested_address = None
                     if suffix.startswith("address/"):
                         path = suffix.split("/")
@@ -382,7 +386,7 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
 
 
 def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
-    """Drive deposit proof and both signed PSBT imports through the real panel."""
+    """Drive paired signing, reject changed reads, then reopen the saved pair."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -495,6 +499,14 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         assert recorded["event"] == "paired-signatures-recorded", recorded
         assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64
         assert not bridge.submissions and not bridge.errors
+        funding_txid = node.rpc.decoderawtransaction(bitcoin_funding["previous"])["txid"]
+        bridge.spent_outspend = (
+            "mainnet", f"tx/{funding_txid}/outspend/{bitcoin_funding['vout']}"
+        )
+        spent = child.send({"action": "recheck_spent"}, timeout=180)
+        assert spent["event"] == "paired-review-refused-spent", spent
+        assert spent["reason"] and not bridge.submissions and not bridge.errors
+        bridge.spent_outspend = None
         bridge.stale_outspend = True
         stale = child.send({"action": "recheck_stale"}, timeout=180)
         assert stale["event"] == "paired-review-refused-stale", stale
