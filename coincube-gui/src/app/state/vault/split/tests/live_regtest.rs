@@ -73,6 +73,52 @@ fn sign(psbt: &Psbt, keys: &[coincube_core::miniscript::bitcoin::bip32::Xpriv]) 
     signed
 }
 
+/// Inspect the same Iced element the desktop presents, using the software
+/// renderer so the disposable two-chain fixture checks its visible facts too.
+async fn rendered_labels(panel: &SplitPanel) -> Vec<String> {
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+
+    #[derive(Default)]
+    struct Labels(Vec<String>);
+    impl Operation for Labels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+            self.0.push(value.to_owned());
+        }
+    }
+
+    let renderer = <iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    )
+    .await
+    .expect("software renderer for the paired Split wizard");
+    let mut element = crate::app::view::vault::split::split_panel(panel);
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 2400.0)),
+    );
+    let mut labels = Labels::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+    labels.0
+}
+
+fn has_label(labels: &[String], text: &str) -> bool {
+    labels.iter().any(|label| label.contains(text))
+}
+
 #[tokio::test]
 #[ignore = "requires the disposable two-chain Python parent"]
 async fn split_gui_regtest_driver() {
@@ -135,6 +181,12 @@ async fn split_gui_regtest_driver() {
         drive_panel(&mut panel, denied, false).await;
         assert_eq!(panel.stage(), &Stage::PairedRecovery);
         let recovered = panel.paired_recovery().expect("reopened signed Split pair");
+        let recovery_labels = rendered_labels(&panel).await;
+        assert!(has_label(&recovery_labels, "Recorded two-chain split"));
+        assert!(has_label(&recovery_labels, "Bitcoin transaction"));
+        assert!(has_label(&recovery_labels, "Bitcoin Blake2b transaction"));
+        assert!(has_label(&recovery_labels, "Check again"));
+        assert!(!has_label(&recovery_labels, "Broadcast Transaction"));
         assert_eq!(
             recovered.bitcoin_unattempted,
             !init["broadcast_btcb2"].as_bool().unwrap_or(false)
@@ -174,6 +226,17 @@ async fn split_gui_regtest_driver() {
                 panel.notice()
             );
             assert!(panel.paired_bitcoin_review().is_some());
+            let review_labels = rendered_labels(&panel).await;
+            assert!(has_label(&review_labels, "Bitcoin — broadcast now"));
+            assert!(has_label(
+                &review_labels,
+                "Bitcoin Blake2b — recorded, not sent now"
+            ));
+            assert!(has_label(&review_labels, "Broadcast Transaction"));
+            assert!(has_label(
+                &review_labels,
+                &recovered_bitcoin_txid.unwrap().to_string()
+            ));
             let task = panel.update(SplitMessage::ConfirmPairedBitcoin);
             drive_panel(&mut panel, task, false).await;
             let recorded = Controller::reopen_settling(
@@ -206,6 +269,14 @@ async fn split_gui_regtest_driver() {
                 panel.notice()
             );
             assert!(panel.paired_fork_review().is_some());
+            let review_labels = rendered_labels(&panel).await;
+            assert!(has_label(&review_labels, "Bitcoin — already recorded"));
+            assert!(has_label(&review_labels, "Bitcoin Blake2b — broadcast now"));
+            assert!(has_label(&review_labels, "Broadcast Transaction"));
+            assert!(has_label(
+                &review_labels,
+                &recovered_fork_txid.unwrap().to_string()
+            ));
             if init["pause_before_fork_confirm"].as_bool().unwrap_or(false) {
                 emit(json!({"event":"split-btcb2-reviewed"}));
                 assert_eq!(read(&mut input)["action"], "confirm_after_reorg");
@@ -288,6 +359,15 @@ async fn split_gui_regtest_driver() {
         panel.notice()
     );
     let addresses = panel.funding_addresses().unwrap();
+    let deposit_labels = rendered_labels(&panel).await;
+    assert!(has_label(
+        &deposit_labels,
+        "Fund the source wallet on each chain"
+    ));
+    assert!(has_label(&deposit_labels, &addresses.bitcoin_deposit));
+    assert!(has_label(&deposit_labels, &addresses.btcb2_deposit));
+    assert!(has_label(&deposit_labels, "Check deposits"));
+    assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
     emit(json!({
         "event":"split-deposit-addresses",
         "bitcoin":addresses.bitcoin_deposit,
@@ -316,6 +396,15 @@ async fn split_gui_regtest_driver() {
         "live Split funding proof was refused: {:?}",
         panel.notice()
     );
+    let preview_labels = rendered_labels(&panel).await;
+    assert!(has_label(
+        &preview_labels,
+        "Paired transaction preview — read only"
+    ));
+    assert!(has_label(&preview_labels, "Bitcoin-only"));
+    assert!(has_label(&preview_labels, "BTCB2-only"));
+    assert!(has_label(&preview_labels, "Before fork · both chains"));
+    assert!(!has_label(&preview_labels, "OP_RETURN"));
     assert_eq!(read(&mut input)["action"], "sign_pair_spent");
     crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
     let task = panel.update(SplitMessage::BeginPairedSigning);
@@ -363,6 +452,13 @@ async fn split_gui_regtest_driver() {
     let task = panel.update(SplitMessage::BeginPairedSigning);
     drive_panel(&mut panel, task, false).await;
     assert_eq!(panel.stage(), &Stage::PairedSign, "{:?}", panel.notice());
+    let signing_labels = rendered_labels(&panel).await;
+    assert!(has_label(&signing_labels, "Split: sign both transactions"));
+    assert!(has_label(&signing_labels, "Save Bitcoin PSBT"));
+    assert!(has_label(&signing_labels, "Save BTCB2 PSBT"));
+    assert!(has_label(&signing_labels, "Import Bitcoin signatures"));
+    assert!(has_label(&signing_labels, "Import BTCB2 signatures"));
+    assert!(!has_label(&signing_labels, "OP_RETURN"));
     let (bitcoin, fork, _, _) = panel.paired_signing_view().unwrap();
     for psbt in [bitcoin.psbt(), fork.psbt()] {
         assert_eq!(
