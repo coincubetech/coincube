@@ -41,8 +41,11 @@ Writes use a new owner-only temporary file, full file sync, atomic same-director
 rename and parent-directory sync. A failed/uncertain write poisons that journal
 handle; reopen from disk rather than continuing from an old snapshot. Temp files
 left by a crash carry intent metadata only and are never selected as recovery
-state. Windows currently refuses with `UnsupportedPlatform`; equivalent durable
-replacement/ACL validation must land before enabling this workflow there.
+state. On Windows, the journal requires a fixed local NTFS volume, pins each
+directory component against replacement, and validates a protected owner-only
+ACL on every journal file. Its replacement uses write-through semantics;
+Windows crash, ACL, hard-link, and reparse-point tests remain part of platform
+acceptance before enabling this workflow.
 
 A runtime context binds account, exact provider identity and generation. The
 caller must revoke both this controller and its observation source on logout,

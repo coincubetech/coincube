@@ -9,6 +9,9 @@ harness passed 106 tests with one intentionally deselected, including the
 paired Claim and Split wizards, signed-pair recovery, staged submissions and
 headless rendering checks of the actual wizard elements. This establishes
 software fixture behavior only. The production signing gate remains closed.
+The journal has a Windows backend that pins directory components, requires
+private owner-only NTFS files, and replaces intents with write-through
+semantics; Windows crash and access-control tests remain in platform CI.
 Deployed same-database indexer recovery, a realistic authenticated Connect
 scan within the 30-second and 256-request bounds, visual and accessibility
 review, physical BitBox and Ledger PSBT approval, and independent review are
