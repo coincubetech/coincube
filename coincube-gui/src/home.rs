@@ -4874,7 +4874,7 @@ fn global_settings_view(home: &Home) -> Element<Message> {
 }
 
 fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
-    use coincube_ui::{component::button as btn, component::text as txt, icon as ic};
+    use coincube_ui::{component::button as btn, icon as ic};
 
     let msg = |vm: ViewMessage| -> Message { Message::View(vm) };
 
@@ -4932,28 +4932,6 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         .on_press(msg(ViewMessage::ToggleConnect))
         .into();
         col = col.push(connect_button);
-        if let Some(user) = &home.connect_account.user {
-            col = col.push(
-                Button::new(
-                    txt::caption(&user.email)
-                        .style(theme::text::secondary)
-                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
-                        .align_x(Alignment::Start)
-                        .width(Length::Fill),
-                )
-                .padding(iced::Padding {
-                    top: 0.0,
-                    right: 10.0,
-                    bottom: 10.0,
-                    left: 45.0,
-                })
-                .width(Length::Fill)
-                .style(theme::button::menu)
-                .on_press(msg(ViewMessage::GoToSection(HomeSection::Connect(
-                    app::menu::ConnectSubMenu::Overview,
-                )))),
-            );
-        }
     }
 
     if home.connect_expanded && is_authenticated {
@@ -5078,12 +5056,52 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         );
     }
 
+    bottom_col = bottom_col.push(connect_status_row(&home.connect_account));
+
     // Outer layout: scrollable menu fills, bottom section pinned
     Column::new()
         .push(scrollable(col).height(Length::Fill))
         .push(bottom_col)
         .height(Length::Fill)
         .into()
+}
+
+/// Connect session indicator, pinned as the sidebar's last row in every state
+/// so it never moves. Display-only — the Sign In button owns the action. The
+/// label is not optional: red/green alone is unreadable for the most common
+/// colour-vision deficiencies.
+fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message> {
+    use coincube_ui::component::text as txt;
+
+    // A pending check must not read as signed out, or every launch with a
+    // stored session flashes red before turning green.
+    let (label, dot_style): (_, fn(&theme::Theme) -> iced::widget::text::Style) =
+        if account.is_checking_session() {
+            ("Checking…", theme::text::warning)
+        } else if account.is_authenticated() {
+            ("Signed in", theme::text::success)
+        } else {
+            ("Not signed in", theme::text::error)
+        };
+
+    // Same geometry as `component::button::menu` (10 button + 10 content
+    // padding, 20px icon slot, 10 spacing) so the dot sits in the icon column
+    // and the label lines up with the menu labels.
+    Container::new(
+        Row::new()
+            .spacing(10)
+            .align_y(iced::alignment::Vertical::Center)
+            .push(icon::dot_icon().size(8).style(dot_style))
+            .push(txt::caption(label).style(theme::text::secondary)),
+    )
+    .padding(iced::Padding {
+        top: 10.0,
+        right: 20.0,
+        bottom: 14.0,
+        left: 20.0,
+    })
+    .width(Length::Fill)
+    .into()
 }
 
 fn create_cube_form<'a>(
