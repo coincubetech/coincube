@@ -25,7 +25,11 @@ use std::sync::{
 };
 pub use sweep::CollectedAncestrySweep;
 
-const MAX_REQUESTS: usize = 128;
+// A pair with several shared Vault coins rechecks each coin on both chains in
+// addition to the two funding paths. Keep a finite cap alongside the shared
+// wall-clock and response-byte limits, but allow an ordinary small Vault to
+// finish its complete proof instead of truncating it after 128 reads.
+const MAX_REQUESTS: usize = 256;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct CollectionBudget {

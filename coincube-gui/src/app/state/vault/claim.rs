@@ -1776,8 +1776,11 @@ impl ClaimStep1Panel {
                     )
                     .await
                     .map_err(|error| match error {
-                        claim_workflow::ClaimFundingDiscoveryError::Discovery(error) =>
-                            funding_proof_refusal(error).to_string(),
+                        claim_workflow::ClaimFundingDiscoveryError::Discovery(error) => {
+                            #[cfg(all(test, feature = "regtest-harness"))]
+                            eprintln!("disposable Claim funding discovery refused: {error:?}");
+                            funding_proof_refusal(error).to_string()
+                        }
                         claim_workflow::ClaimFundingDiscoveryError::WalletState(_) =>
                             "The Bitcoin Vault's coins or sync state changed. Reopen it and check deposits again.".to_string(),
                         claim_workflow::ClaimFundingDiscoveryError::InvalidReservation(_) =>
