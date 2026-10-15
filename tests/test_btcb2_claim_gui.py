@@ -369,8 +369,8 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
                 harness.cleanup()
 
 
-def test_paired_claim_wizard_reserves_two_distinct_deposit_addresses(tmp_path):
-    """Drive the GUI's real deposit-start transition against both indexers."""
+def test_paired_claim_wizard_checks_two_chain_deposits(tmp_path):
+    """Drive deposit reservation and paired funding review against both indexers."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -428,7 +428,48 @@ def test_paired_claim_wizard_reserves_two_distinct_deposit_addresses(tmp_path):
         assert result["bitcoin"].startswith("bc1") and result["btcb2"].startswith("bc1")
         assert result["bitcoin"] != result["btcb2"]
         assert result["bitcoin_minimum"] > 0 and result["btcb2_minimum"] > 0
-        assert result["bitcoin_receive_index"] >= 1
+        assert result["bitcoin_index"] != result["btcb2_index"]
+
+        def fund(node, mainnet_address, index):
+            address = regtest_address(mainnet_address)
+            block = node.rpc.generatetoaddress(1, address)[0]
+            txid = node.rpc.getblock(block)["tx"][0]
+            transaction = node.rpc.getrawtransaction(txid, True, block)
+            vout = next(
+                output["n"] for output in transaction["vout"]
+                if output["scriptPubKey"].get("address") == address
+            )
+            node.generate_block(99)
+            assert node.rpc.gettxout(txid, vout)["confirmations"] == 100
+            return {"previous": transaction["hex"], "vout": vout,
+                    "height": node.rpc.getblockheader(block)["height"],
+                    "tip_height": node.rpc.getblockcount(), "index": index}
+
+        bitcoin_funding = fund(node, result["bitcoin"], result["bitcoin_index"])
+        fork_funding = fund(
+            harness.blake2b, result["btcb2"], result["btcb2_index"]
+        )
+        for chain_node, indexer in (
+            (node, harness.electrs_legacy),
+            (harness.blake2b, harness.electrs_blake2b),
+        ):
+            tip = chain_node.rpc.getbestblockhash()
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                try:
+                    with urlopen(indexer.url + "/blocks/tip/hash", timeout=3) as response:
+                        if response.read().decode() == tip:
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            else:
+                pytest.fail(f"{indexer.url} did not index {tip}")
+
+        checked = child.send({"action": "deposited", "bitcoin": bitcoin_funding,
+                              "btcb2": fork_funding}, timeout=180)
+        assert checked["event"] == "paired-deposits-checked", checked
+        assert checked["verified"] and checked["error"] is None, checked
         assert not bridge.preflights and not bridge.submissions and not bridge.errors
         child.proc.stdin.write('{"action":"quit"}\n')
         child.proc.stdin.flush()

@@ -4,10 +4,11 @@ use super::*;
 use coincubed::poison_broadcast::regtest_harness::RegtestTransport;
 use serde_json::Value;
 use std::io::{BufRead, Write};
+use std::sync::atomic::{AtomicI32, Ordering};
 
 pub(super) struct LiveTransport {
     pub transport: RegtestTransport,
-    pub height: i32,
+    pub height: AtomicI32,
     pub bound: Option<crate::daemon::embedded::EmbeddedDaemon>,
 }
 impl std::fmt::Debug for LiveTransport {
@@ -21,7 +22,7 @@ impl LiveTransport {
             version: "synthetic-regtest-adapter".into(),
             network: Network::Bitcoin,
             chain_id: Some(config.bitcoin_config.chain),
-            block_height: self.height,
+            block_height: self.height.load(Ordering::SeqCst),
             sync: 1.0,
             descriptors: GetInfoDescriptors {
                 main: config.main_descriptor.clone(),
@@ -48,6 +49,36 @@ fn read(input: &mut impl BufRead) -> Value {
         "parent closed command channel"
     );
     serde_json::from_str(&line).unwrap()
+}
+fn received_coin(descriptor: &CoincubeDescriptor, entry: &Value) -> (Coin, Transaction) {
+    let transaction: Transaction =
+        coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex(
+            entry["previous"].as_str().unwrap(),
+        )
+        .unwrap();
+    let vout = u32::try_from(entry["vout"].as_u64().unwrap()).unwrap();
+    let index = u32::try_from(entry["index"].as_u64().unwrap()).unwrap();
+    let derivation_index = ChildNumber::from_normal_idx(index).unwrap();
+    let output = transaction.output.get(vout as usize).unwrap();
+    let expected = descriptor
+        .receive_descriptor()
+        .derive(derivation_index, &secp256k1::Secp256k1::verification_only())
+        .script_pubkey();
+    assert_eq!(output.script_pubkey, expected);
+    (
+        Coin {
+            amount: output.value,
+            outpoint: OutPoint::new(transaction.compute_txid(), vout),
+            address: Address::from_script(&output.script_pubkey, Network::Bitcoin).unwrap(),
+            block_height: Some(i32::try_from(entry["height"].as_u64().unwrap()).unwrap()),
+            derivation_index,
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        },
+        transaction,
+    )
 }
 async fn drive(
     p: &mut ClaimStep1Panel,
@@ -150,37 +181,7 @@ async fn claim_gui_regtest_driver() {
         .as_array()
         .into_iter()
         .flatten()
-        .map(|entry| {
-            let transaction: Transaction =
-                coincube_core::miniscript::bitcoin::consensus::encode::deserialize_hex(
-                    entry["previous"].as_str().unwrap(),
-                )
-                .unwrap();
-            let vout = u32::try_from(entry["vout"].as_u64().unwrap()).unwrap();
-            let index = u32::try_from(entry["index"].as_u64().unwrap()).unwrap();
-            let derivation_index = ChildNumber::from_normal_idx(index).unwrap();
-            let output = transaction.output.get(vout as usize).unwrap();
-            let expected = fixture
-                .descriptor
-                .receive_descriptor()
-                .derive(derivation_index, &secp256k1::Secp256k1::verification_only())
-                .script_pubkey();
-            assert_eq!(output.script_pubkey, expected);
-            (
-                Coin {
-                    amount: output.value,
-                    outpoint: OutPoint::new(transaction.compute_txid(), vout),
-                    address: Address::from_script(&output.script_pubkey, Network::Bitcoin).unwrap(),
-                    block_height: Some(i32::try_from(entry["height"].as_u64().unwrap()).unwrap()),
-                    derivation_index,
-                    spend_info: None,
-                    is_immature: false,
-                    is_change: false,
-                    is_from_self: false,
-                },
-                transaction,
-            )
-        })
+        .map(|entry| received_coin(&fixture.descriptor, entry))
         .collect();
     let base = init["bridge"].as_str().unwrap();
     let mut config: coincubed::config::Config = toml::from_str(&format!(
@@ -224,7 +225,7 @@ async fn claim_gui_regtest_driver() {
         live: Some(LiveTransport {
             bound,
             transport,
-            height: i32::try_from(init["tip_height"].as_u64().unwrap()).unwrap(),
+            height: AtomicI32::new(i32::try_from(init["tip_height"].as_u64().unwrap()).unwrap()),
         }),
         extra_coins: Mutex::new(shared_extra.clone()),
         indices: Mutex::new((1, 0)),
@@ -279,7 +280,9 @@ async fn claim_gui_regtest_driver() {
         ancestry_coin: None,
         live: Some(LiveTransport {
             bound: None,
-            height: i32::try_from(init["fork_tip_height"].as_u64().unwrap()).unwrap(),
+            height: AtomicI32::new(
+                i32::try_from(init["fork_tip_height"].as_u64().unwrap()).unwrap(),
+            ),
             transport: RegtestTransport::new(
                 init["fork_rpc"].as_str().unwrap().parse().unwrap(),
                 init["fork_cookie"].as_str().unwrap(),
@@ -423,13 +426,64 @@ async fn claim_gui_regtest_driver() {
         };
         assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
         assert!(!panel.can_sign_or_submit());
+        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
+        let descriptor = panel.wallet.main_descriptor.clone();
+        let identity = claim_workflow::WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+        };
+        let context = ClaimStep1Panel::funding_context(
+            panel.connect.as_ref().unwrap(),
+            1,
+            panel.generation.clone(),
+        )
+        .unwrap();
+        let saved = claim_workflow::load_claim_funding(
+            &journal_directory(&datadir, &panel.wallet),
+            &descriptor,
+            &identity,
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(serde_json::to_value(&saved).unwrap()["released"], true);
         emit(json!({
             "event":"paired-deposit-addresses",
             "bitcoin":addresses.bitcoin_deposit,
             "btcb2":addresses.btcb2_deposit,
             "bitcoin_minimum":addresses.bitcoin_minimum_sats,
             "btcb2_minimum":addresses.btcb2_minimum_sats,
-            "bitcoin_receive_index":daemon.indices.lock().unwrap().0,
+            "bitcoin_index":saved.indices.bitcoin_deposit,
+            "btcb2_index":saved.indices.btcb2_deposit,
+        }));
+        let command = read(&mut input);
+        if command["action"] == "quit" {
+            return;
+        }
+        assert_eq!(command["action"], "deposited");
+        for (daemon, field) in [(&daemon, "bitcoin"), (&fork_daemon, "btcb2")] {
+            let entry = &command[field];
+            let (coin, previous) = received_coin(&descriptor, entry);
+            daemon.extra_coins.lock().unwrap().push((coin, previous));
+            daemon.live.as_ref().unwrap().height.store(
+                i32::try_from(entry["tip_height"].as_u64().unwrap()).unwrap(),
+                Ordering::SeqCst,
+            );
+        }
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::CheckFunding)),
+        );
+        drive(&mut panel, &dyn_daemon, &cache, task).await;
+        let verified = panel.funding_review().is_some() && panel.prepared_pair.is_some();
+        assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
+        emit(json!({
+            "event":"paired-deposits-checked",
+            "verified":verified,
+            "status":panel.funding_status,
+            "error":panel.funding_error,
         }));
         assert_eq!(read(&mut input)["action"], "quit");
         return;
