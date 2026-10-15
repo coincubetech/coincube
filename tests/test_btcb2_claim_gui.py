@@ -120,6 +120,7 @@ class Bridge:
         self.withhold_submission_reply = False
         self.stale_outspend = False
         self.spent_outspend = None
+        self.spent_outspend_hits = 0
         self.errors = []
         owner = self
 
@@ -179,6 +180,7 @@ class Bridge:
                         self.reply(200, {"6": 2.0})
                         return
                     if owner.spent_outspend == (network, suffix):
+                        owner.spent_outspend_hits += 1
                         self.reply(200, {"spent": True, "txid": "00" * 32})
                         return
                     requested_address = None
@@ -513,6 +515,7 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         )
         spent = child.send({"action": "recheck_spent"}, timeout=180)
         assert spent["event"] == "paired-review-refused-spent", spent
+        assert bridge.spent_outspend_hits > 0
         assert spent["reason"] and not bridge.submissions and not bridge.errors
         bridge.spent_outspend = None
         bridge.stale_outspend = True
