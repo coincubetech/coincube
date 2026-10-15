@@ -1,5 +1,5 @@
 //! Exact-byte transport only. This module grants no Claim/broadcast authorization.
-//! Historical OP_RETURN and one-chain Split submissions are fixture-only;
+//! Historical OP_RETURN and one-sided Claim/Split submissions are fixture-only;
 //! production methods refuse them before backend access. Paired ancestry
 //! transports use separate typed entry points.
 mod binding;
@@ -30,7 +30,7 @@ use std::sync::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionError {
     UnsupportedChain,
-    /// A historical Claim/Split transport is retained for fixtures only.
+    /// A historical one-sided Claim/Split transport is retained for fixtures only.
     RetiredRoute,
     DescriptorMismatch,
     BackendUnavailable,
@@ -56,7 +56,7 @@ impl std::fmt::Display for SubmissionError {
                 f.write_str("Claim submission chain is unsupported or mismatched")
             }
             Self::RetiredRoute => {
-                f.write_str("The retired split route cannot submit a transaction")
+                f.write_str("The retired Claim or Split route cannot submit a transaction")
             }
             Self::BackendUnavailable => {
                 f.write_str("Chain backend is unavailable before submission")
@@ -461,6 +461,7 @@ impl DaemonControl {
         verified: &VerifiedAncestryTransfer,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         if self.config.bitcoin_config.chain != ChainId::Bitcoin
             || verified.chain() != ChainId::Bitcoin
         {
@@ -532,6 +533,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -571,6 +573,7 @@ impl DaemonControl {
         gate: &SubmissionGate,
         origin: &str,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
