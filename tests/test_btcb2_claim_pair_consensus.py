@@ -7,12 +7,32 @@ not grant GUI signing authority or replace physical BitBox/Ledger approval.
 import json
 import os
 import subprocess
+import tempfile
 from decimal import Decimal
 
 import pytest
 
 from fixtures import *
 from test_framework.serializations import PSBT
+from test_framework.btcb2 import TwoChainRegtest, missing_binaries
+
+
+@pytest.fixture
+def two_chain(test_base_dir):
+    """Each consensus case mutates shared UTXOs, so isolate its node pair."""
+    missing = missing_binaries()
+    if missing:
+        message = f"BTCB2 harness binaries unavailable: {', '.join(missing)}"
+        if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    directory = tempfile.mkdtemp(prefix="btcb2_spent_pair-", dir=test_base_dir)
+    harness = TwoChainRegtest(directory)
+    try:
+        harness.setup()
+        yield harness
+    finally:
+        harness.cleanup()
 
 
 def _coinbase_for_vault(node, address):
@@ -199,8 +219,10 @@ def test_spent_funding_coin_refuses_the_saved_pair(two_chain, spent_chain):
         PSBT.from_base64(unsigned["fork_psbt"]), [0, 1]
     ).to_base64()
     pair = vectors()
-    assert bitcoin.rpc.testmempoolaccept([pair["step1_raw"]])[0]["allowed"]
-    assert fork.rpc.testmempoolaccept([pair["fork_raw"]])[0]["allowed"]
+    bitcoin_verdict = bitcoin.rpc.testmempoolaccept([pair["step1_raw"]])[0]
+    fork_verdict = fork.rpc.testmempoolaccept([pair["fork_raw"]])[0]
+    assert bitcoin_verdict["allowed"], bitcoin_verdict
+    assert fork_verdict["allowed"], fork_verdict
 
     if spent_chain == "bitcoin":
         side, other = bitcoin, fork

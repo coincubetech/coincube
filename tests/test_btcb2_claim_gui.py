@@ -8,6 +8,7 @@ import os
 import queue
 import re
 import base58
+import shutil
 import threading
 import time
 import subprocess
@@ -22,6 +23,7 @@ from urllib.error import HTTPError
 import pytest
 
 from test_framework.btcb2 import TwoChainRegtest, missing_binaries
+from test_framework.esplora import EsploraElectrs
 
 
 BECH32_ALPHABET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
@@ -663,6 +665,25 @@ def test_live_paired_funding_proof_expires_after_marker_change(tmp_path, mutatio
             assert changed_node.rpc.getblockcount() == previous_height
             assert changed_node.rpc.getbestblockhash() != previous_tip
             assert changed_node.rpc.getblockhash(marker_height) != changed_marker["block"]
+            if mutation == "btcb2-reorg":
+                # The pinned BLAKE2b-aware indexer cannot roll back a
+                # 100-block coinbase reorg; it panics instead. Rebuild its
+                # disposable index against the new canonical chain so this
+                # test can still exercise the collector's reorg rejection.
+                old = harness.electrs_blake2b
+                old.stop()
+                shutil.rmtree(old.db_dir)
+                replacement = EsploraElectrs(
+                    electrs_dir=old.electrs_dir,
+                    bitcoind_dir=harness.blake2b_dir,
+                    bitcoind_rpcport=fork.rpcport,
+                    electrs_path=harness.electrs_path,
+                    http_port=old.http_port,
+                )
+                replacement.env.update(old.env)
+                harness.electrs_blake2b = replacement
+                replacement.startup()
+                replacement.wait_for_tip(fork.rpc.getbestblockhash(), timeout=90)
         wait_for_indexers()
         assert changed_node.rpc.gettxout(changed_marker["txid"], changed_marker["vout"]) is None
         assert other_node.rpc.gettxout(other_marker["txid"], other_marker["vout"]) is not None

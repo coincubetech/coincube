@@ -1613,10 +1613,14 @@ impl ClaimStep1Panel {
                     shared_count,
                 )
                 .await
-                .map_err(|error| if error == claim_workflow::ClaimAddressError::FeeUnavailable {
-                    "Current Bitcoin and BTCB2 fee quotes are needed before showing deposit amounts.".to_string()
-                } else {
-                    "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.".to_string()
+                .map_err(|error| {
+                    #[cfg(test)]
+                    eprintln!("Claim funding preparation refused: {error:?}");
+                    if error == claim_workflow::ClaimAddressError::FeeUnavailable {
+                        "Current Bitcoin and BTCB2 fee quotes are needed before showing deposit amounts.".to_string()
+                    } else {
+                        "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.".to_string()
+                    }
                 })
             },
             move |result| {
