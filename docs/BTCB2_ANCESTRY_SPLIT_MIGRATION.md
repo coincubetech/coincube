@@ -711,6 +711,10 @@ cases remain.
    wizards behind the closed acceptance gate. The post-Bitcoin coordinator
    must still join fresh source and target checks to its BTCB2 review, and
    both paths need GUI and end-to-end tests.
+   Paired preflight and both one-use submission boundaries now also revoke on
+   any Connect session notification, including a same-value generation
+   refresh. An interrupted attempt after its durable possible-send record is
+   reported as uncertain and is never retried automatically.
    Initial Claim and Split requalification now each have a typed handoff that
    rechecks the exact saved signatures and prepares a first-send review under
    the same live controller. The desktop invokes that handoff only after a

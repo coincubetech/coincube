@@ -150,7 +150,7 @@ impl RequalifiedInitialSplit {
     ) -> Option<PairedSigningPermit> {
         if !self.matches_pair(&self.target_descriptor, bitcoin, fork)
             || self.checked_at.elapsed() >= Duration::from_secs(10)
-            || generation.has_changed().is_err()
+            || !matches!(generation.has_changed(), Ok(false))
             || *generation.borrow() != self.context.generation
         {
             return None;

@@ -461,6 +461,15 @@ async fn unsupported_invalid_and_revoked_requests_perform_no_io() {
             .await,
         Err(Error::Cancelled)
     );
+    let (same_client, sender) = self::client(&server);
+    sender.send(7).unwrap();
+    assert_eq!(
+        same_client
+            .observe(ChainId::Bitcoin, &tx(), tip(), policy())
+            .await,
+        Err(Error::Cancelled),
+        "a same-value session refresh also revokes preflight"
+    );
     any.assert_hits(0);
 }
 #[tokio::test]
@@ -540,7 +549,7 @@ async fn generation_cancellation_discards_inflight_response() {
     let transaction = tx();
     let revoke = async {
         tokio::time::sleep(Duration::from_millis(30)).await;
-        sender.send(8).unwrap();
+        sender.send(7).unwrap();
     };
     let (result, ()) = tokio::join!(
         client.observe(ChainId::Bitcoin, &transaction, tip(), policy()),

@@ -29,8 +29,13 @@ use coincubed::poison_broadcast::{self, SubmissionGate, SubmissionOutcome, Submi
 use serde::{Deserialize, Serialize};
 use std::convert::TryFrom;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use tokio::sync::watch;
 
 const MAX_PROOF_AGE_SECONDS: i64 = 30;
+
+fn session_current(generation: &watch::Receiver<u64>, expected: u64) -> bool {
+    matches!(generation.has_changed(), Ok(false)) && *generation.borrow() == expected
+}
 
 /// A live, controller-bound result of checking both chain-specific and all
 /// shared inputs against the exact signed pair. Never serialized or restored.
@@ -401,6 +406,19 @@ impl Controller {
     }
 }
 
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn possible_send_revokes_on_same_value_session_refresh() {
+        let (sender, generation) = watch::channel(7);
+        assert!(session_current(&generation, 7));
+        sender.send(7).unwrap();
+        assert!(!session_current(&generation, 7));
+    }
+}
+
 impl InitialPairReview {
     pub(crate) fn snapshot(&self) -> &InitialPairReviewSnapshot {
         &self.snapshot
@@ -489,7 +507,7 @@ impl InitialPairReview {
             return Ok(uncertain);
         };
         let mut generation = preflight.session_generation();
-        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+        if !session_current(&generation, current.generation) {
             revoker.revoke();
             return Ok(uncertain);
         }
@@ -503,20 +521,14 @@ impl InitialPairReview {
             }
         });
         let cancelled = async {
-            loop {
-                if generation.changed().await.is_err()
-                    || *generation.borrow_and_update() != current.generation
-                {
-                    break;
-                }
-            }
+            let _ = generation.changed().await;
         };
         let result = tokio::select! { biased;
             _ = cancelled => None,
             result = tokio::time::timeout(Duration::from_secs(30), submit) => result.ok().and_then(Result::ok),
         };
         revoker.revoke();
-        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+        if !session_current(&generation, current.generation) {
             return Ok(uncertain);
         }
         match result {
@@ -689,7 +701,7 @@ impl PostBitcoinPairReview {
             return Ok(uncertain);
         };
         let mut generation = preflight.session_generation();
-        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+        if !session_current(&generation, current.generation) {
             revoker.revoke();
             return Ok(uncertain);
         }
@@ -703,20 +715,14 @@ impl PostBitcoinPairReview {
             }
         });
         let cancelled = async {
-            loop {
-                if generation.changed().await.is_err()
-                    || *generation.borrow_and_update() != current.generation
-                {
-                    break;
-                }
-            }
+            let _ = generation.changed().await;
         };
         let result = tokio::select! { biased;
             _ = cancelled => None,
             result = tokio::time::timeout(Duration::from_secs(30), submit) => result.ok().and_then(Result::ok),
         };
         revoker.revoke();
-        if generation.has_changed().is_err() || *generation.borrow() != current.generation {
+        if !session_current(&generation, current.generation) {
             return Ok(uncertain);
         }
         match result {

@@ -175,7 +175,7 @@ impl RequalifiedInitialClaim {
         if !self.matches_pair(bitcoin, fork)
             || self.checked_at.elapsed() >= Duration::from_secs(10)
             || *generation.borrow() != self.context.generation
-            || generation.has_changed().is_err()
+            || !matches!(generation.has_changed(), Ok(false))
         {
             return None;
         }
@@ -481,7 +481,7 @@ impl AddressHistory for ConnectEsplora {
 }
 
 fn current(generation: &watch::Receiver<u64>, expected: u64) -> bool {
-    *generation.borrow() == expected && generation.has_changed().is_ok()
+    *generation.borrow() == expected && matches!(generation.has_changed(), Ok(false))
 }
 
 async fn checked_history(
@@ -1658,6 +1658,14 @@ mod tests {
         collections::{HashMap, HashSet},
         sync::Mutex,
     };
+
+    #[test]
+    fn paired_claim_session_rejects_same_value_refresh() {
+        let (sender, generation) = watch::channel(7);
+        assert!(current(&generation, 7));
+        sender.send(7).unwrap();
+        assert!(!current(&generation, 7));
+    }
 
     #[test]
     fn reserved_funding_rejects_other_indices_and_change_outputs() {

@@ -339,21 +339,17 @@ impl PreflightClient {
             return Err(Error::InvalidRequest);
         }
         let mut generation = self.generation.clone();
-        if *generation.borrow() != self.expected || generation.has_changed().is_err() {
+        if *generation.borrow() != self.expected || !matches!(generation.has_changed(), Ok(false)) {
             return Err(Error::Cancelled);
         }
         let request = Request {
             transaction: consensus::encode::serialize_hex(transaction),
             tip_hash: expected_tip,
         };
+        // Any notification replaces this session, even if a refreshed
+        // sender happens to publish the same numeric generation.
         let cancelled = async {
-            loop {
-                if generation.changed().await.is_err()
-                    || *generation.borrow_and_update() != self.expected
-                {
-                    break;
-                }
-            }
+            let _ = generation.changed().await;
         };
         let operation = async {
             let mut response = self
@@ -401,7 +397,7 @@ impl PreflightClient {
             _=cancelled=>Err(Error::Cancelled),
             result=tokio::time::timeout(DEADLINE,operation)=>result.map_err(|_|Error::Deadline)?,
         };
-        if *generation.borrow() != self.expected || generation.has_changed().is_err() {
+        if *generation.borrow() != self.expected || !matches!(generation.has_changed(), Ok(false)) {
             return Err(Error::Cancelled);
         }
         result
