@@ -14,7 +14,8 @@ import tempfile
 from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.request import urlopen
+from types import SimpleNamespace
+from urllib.request import Request, urlopen
 from urllib.error import HTTPError
 
 import pytest
@@ -156,10 +157,9 @@ class Bridge:
                     assert 0 < length <= 262144
                     body = self.rfile.read(length)
                     if suffix == "tx":
-                        assert network == "mainnet"
                         raw = body.decode("ascii")
                         txid = node.rpc.sendrawtransaction(raw)
-                        owner.submissions.append({"raw": raw, "txid": txid})
+                        owner.submissions.append({"network": network, "raw": raw, "txid": txid})
                         if owner.withhold_submission_reply:
                             # The real node accepted every byte; let the client's
                             # 15-second deadline expire without acknowledgement.
@@ -175,7 +175,7 @@ class Bridge:
                     result = node.rpc.testmempoolaccept([request["transaction"]])[0]
                     decoded = node.rpc.decoderawtransaction(request["transaction"])
                     assert node.rpc.getbestblockhash() == tip
-                    owner.preflights.append(result)
+                    owner.preflights.append({"network": network, "result": result})
                     verdict = {"txid": decoded["txid"], "wtxid": decoded["hash"],
                                "tip_hash": tip, "observed_at": int(time.time()), "allowed": result["allowed"]}
                     if not result["allowed"]:
@@ -195,6 +195,63 @@ class Bridge:
         self.server.shutdown()
         self.server.server_close()
         self.thread.join(timeout=5)
+
+
+@pytest.mark.parametrize(
+    ("route", "network"),
+    [("bitcoin", "mainnet"), ("bitcoin-blake2b", "bitcoin-blake2b")],
+)
+def test_bridge_preflight_and_submission_use_the_selected_chain(route, network):
+    """A paired GUI test must never preflight or submit on the other node."""
+    class Rpc:
+        def __init__(self, chain):
+            self.chain = chain
+            self.calls = []
+
+        def getbestblockhash(self):
+            return f"{self.chain}-tip"
+
+        def testmempoolaccept(self, transactions):
+            self.calls.append(("preflight", transactions[0]))
+            return [{"allowed": True}]
+
+        def decoderawtransaction(self, raw):
+            assert raw == f"{self.chain}-raw"
+            return {"txid": f"{self.chain}-txid", "hash": f"{self.chain}-wtxid"}
+
+        def sendrawtransaction(self, raw):
+            self.calls.append(("submit", raw))
+            return f"{self.chain}-txid"
+
+    bitcoin, fork = Rpc("bitcoin"), Rpc("btcb2")
+    harness = SimpleNamespace(
+        legacy=SimpleNamespace(rpc=bitcoin),
+        blake2b=SimpleNamespace(rpc=fork),
+        electrs_legacy=None,
+        electrs_blake2b=None,
+    )
+    bridge = Bridge(harness)
+    selected = bitcoin if route == "bitcoin" else fork
+    other = fork if route == "bitcoin" else bitcoin
+    prefix = f"{bridge.url}/api/v1/esplora/{route}/mainnet"
+    try:
+        raw = f"{selected.chain}-raw"
+        body = json.dumps({"tip_hash": selected.getbestblockhash(), "transaction": raw}).encode()
+        with urlopen(Request(prefix + "/tx/preflight", body), timeout=5) as response:
+            verdict = json.load(response)["data"]
+        assert verdict["network"] == network
+        assert verdict["result"]["txid"] == f"{selected.chain}-txid"
+        with urlopen(Request(prefix + "/tx", raw.encode()), timeout=5) as response:
+            assert response.read().decode() == f"{selected.chain}-txid"
+        assert selected.calls == [("preflight", raw), ("submit", raw)]
+        assert other.calls == []
+        assert bridge.preflights == [{"network": network, "result": {"allowed": True}}]
+        assert bridge.submissions == [
+            {"network": network, "raw": raw, "txid": f"{selected.chain}-txid"}
+        ]
+        assert not bridge.errors
+    finally:
+        bridge.close()
 
 
 @pytest.mark.parametrize("ancestry", [False, True], ids=["op-return", "input-ancestry"])

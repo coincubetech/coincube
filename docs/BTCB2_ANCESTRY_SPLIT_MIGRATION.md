@@ -785,6 +785,9 @@ Coordinator restart, stale observation and marker spend cases remain.
   The existing headless Claim fixture now asserts that both retired one-sided
   routes refuse before construction;
   it does not count as an end-to-end test of the new paired Claim wizard.
+  Its disposable Connect bridge now routes preflight and submission to the
+  selected Bitcoin or BTCB2 node, with a local routing test for each chain.
+  The paired wizard still needs to drive that bridge through both signed PSBTs.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for
