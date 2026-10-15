@@ -737,6 +737,14 @@ fn paired_sign_view<'a>(
     recording: bool,
     error: Option<&'a str>,
 ) -> Element<'a, Message> {
+    let shared_count = bitcoin
+        .tx
+        .psbt
+        .unsigned_tx
+        .input
+        .len()
+        .checked_sub(1)
+        .filter(|count| *count > 0 && fork.tx.psbt.unsigned_tx.input.len() == count + 1);
     let state = if active == coincube_core::chain::ChainId::Bitcoin {
         bitcoin
     } else {
@@ -751,6 +759,11 @@ fn paired_sign_view<'a>(
             .push(header("Sign both ordinary Claim transactions"))
             .push_maybe(recording.then(|| p1_regular("Checking both chains and recording the signed pair…")))
             .push(p1_regular("Each transaction spends the same shared coins with its own verified chain-specific deposit. Both PSBTs need this Vault's normal signing threshold. A fresh two-chain check runs before every signer request."))
+            .push_maybe(shared_count.map(|count| p1_regular(format!(
+                "Bitcoin: {count} shared coin{} + 1 Bitcoin-only coin → this Vault. Bitcoin Blake2b: {count} shared coin{} + 1 BTCB2-only coin → the paired Vault. The inputs on each chain must be spent together.",
+                if count == 1 { "" } else { "s" },
+                if count == 1 { "" } else { "s" },
+            ))))
             .push(Row::new().spacing(10)
                 .push(button::secondary(None, "Bitcoin transaction").on_press(Message::Claim(ClaimMessage::ShowPairBitcoin)))
                 .push(button::secondary(None, "Bitcoin Blake2b transaction").on_press(Message::Claim(ClaimMessage::ShowPairBtcb2))))

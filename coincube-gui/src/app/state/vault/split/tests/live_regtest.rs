@@ -513,6 +513,8 @@ async fn split_gui_regtest_driver() {
     assert!(has_label(&signing_labels, "Save BTCB2 PSBT"));
     assert!(has_label(&signing_labels, "Import Bitcoin signatures"));
     assert!(has_label(&signing_labels, "Import BTCB2 signatures"));
+    assert!(has_label(&signing_labels, "+ 1 Bitcoin-only coin"));
+    assert!(has_label(&signing_labels, "+ 1 BTCB2-only coin"));
     assert!(!has_label(&signing_labels, "OP_RETURN"));
     let (bitcoin, fork, _, _) = panel.paired_signing_view().unwrap();
     for psbt in [bitcoin.psbt(), fork.psbt()] {

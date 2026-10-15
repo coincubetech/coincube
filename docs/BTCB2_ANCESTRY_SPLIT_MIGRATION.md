@@ -515,6 +515,9 @@ both ordinary PSBTs. The model alone
 cannot enable signing. Both deposit previews now render the same read-only coin
 rows with full scrollable outpoints, right-aligned amounts and a confirmation
 badge for each verified chain-specific input; no selection control is shown.
+Both signing stages also show the shared-coin count plus the required
+chain-specific input for each exact PSBT, immediately before its destination
+and fee details. The headless two-chain wizard cases assert those labels.
 
 Build this as a reusable *read-only* coin summary for Claim and foreign Split,
 using the existing amount formatting and badge components. Keep the normal

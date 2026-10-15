@@ -893,6 +893,8 @@ async fn claim_gui_regtest_driver() {
         ));
         assert!(has_label(&signing_labels, "Bitcoin transaction"));
         assert!(has_label(&signing_labels, "Bitcoin Blake2b transaction"));
+        assert!(has_label(&signing_labels, "+ 1 Bitcoin-only coin"));
+        assert!(has_label(&signing_labels, "+ 1 BTCB2-only coin"));
         assert!(!has_label(&signing_labels, "OP_RETURN"));
         let signed_bitcoin = signer.sign_psbt(bitcoin_psbt.clone()).unwrap();
         let signed_fork = signer.sign_psbt(fork_psbt.clone()).unwrap();

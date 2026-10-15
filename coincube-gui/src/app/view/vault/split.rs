@@ -811,9 +811,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         Stage::PairedSign => {
             body = body.push(p1_regular("Both ordinary transactions are bound to the same source coins and separately verified chain-specific deposits. Recheck the full destination and fee on each signing device. Nothing has been sent."));
             if let Some((bitcoin, fork, bitcoin_files, fork_files)) = panel.paired_signing_view() {
+                let shared_count = bitcoin.claimed_prevouts().len();
                 body = body.push(p1_regular(format!(
-                    "Both transactions spend the same {} shared pre-fork coin(s).",
-                    bitcoin.claimed_prevouts().len()
+                    "Bitcoin: {shared_count} shared coin{} + 1 Bitcoin-only coin → the source wallet. Bitcoin Blake2b: {shared_count} shared coin{} + 1 BTCB2-only coin → the paired Cube. The inputs on each chain must be spent together.",
+                    if shared_count == 1 { "" } else { "s" },
+                    if shared_count == 1 { "" } else { "s" },
                 )));
                 if let Some(threshold) = panel.funding_signing_threshold() {
                     body = body.push(caption(format!(
