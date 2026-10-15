@@ -124,6 +124,10 @@ fn flow_daemon(fixture: &Fixture, base_url: &str, selected: &Coin) -> Arc<FlowDa
         ancestry_coin: Some(selected.clone()),
         #[cfg(feature = "regtest-harness")]
         live: None,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex::new(Vec::new()),
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex::new((1, 0)),
     })
 }
 
@@ -150,6 +154,10 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         ancestry_coin: Some(selected.clone()),
         #[cfg(feature = "regtest-harness")]
         live: None,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex::new(Vec::new()),
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex::new((1, 0)),
     });
     let wallet = Arc::new(Wallet::new(fixture.descriptor));
     let mut client = CoincubeClient::for_test(server.base_url());
@@ -198,8 +206,8 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
     };
     assert_eq!(transfer.claimed_prevouts(), &[fixture.coin.outpoint]);
     // Positive ancestry above is independent of expired RDTS. With no
-    // qualifying candidate, the same expiry must refuse OP_RETURN fallback
-    // before it reserves another address.
+    // qualifying candidate, it refuses rather than building the retired
+    // OP_RETURN fallback before reserving another address.
     let mut no_candidates = coins.clone();
     no_candidates.ancestry_candidates.clear();
     let refused = super::super::super::preferred::build_preferred(
@@ -214,7 +222,7 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
     )
     .await
     .unwrap_err();
-    assert!(refused.contains("expired"), "{}", refused);
+    assert!(refused.contains("No confirmed Bitcoin-only"), "{}", refused);
     assert_eq!(
         daemon
             .hits()
@@ -329,6 +337,9 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         Some(connect.clone()),
     );
     panel.stage = Stage::Plan { built: bounded };
+    // Exercise the test-only signer path even though production authorization
+    // remains closed until both chain-specific inputs are supported.
+    panel.legacy_flow_fixture = true;
     let cache = Cache::default();
     let menu = Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
     let check_task = panel.request_signing(daemon.clone());
@@ -376,6 +387,10 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
         ancestry_coin: Some(immature),
         #[cfg(feature = "regtest-harness")]
         live: None,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex::new(Vec::new()),
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex::new((1, 0)),
     });
     assert!(super::super::super::preferred::build_preferred(
         changed.clone(),
@@ -421,6 +436,10 @@ async fn automatic_ancestry_build_prefers_owned_input_and_never_falls_back_on_pr
             ancestry_coin: Some(bad_coin),
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let refusal = super::super::super::signing::check(
             &built,
@@ -551,11 +570,10 @@ async fn revoked_or_refreshed_build_result_cannot_install_a_plan() {
 }
 
 /// #547 (547-A): while the production ancestry gate is closed, an ancestry
-/// construction can never reach a signer. The build must therefore not search
-/// at all and must build OP_RETURN, both when a candidate would positively
-/// qualify and when every ancestry lookup would fail.
+/// construction can never reach a signer. The build must not search or
+/// reserve an address, and must refuse both candidate inventories.
 #[tokio::test]
-async fn closed_gate_builds_op_return_without_any_ancestry_discovery() {
+async fn closed_gate_refuses_without_any_ancestry_discovery() {
     assert!(crate::services::claim_ancestry_gate::authorization().is_none());
     let fixture = fixture_with_multisig(false);
     let wallet = Arc::new(Wallet::new(fixture.descriptor.clone()));
@@ -588,7 +606,7 @@ async fn closed_gate_builds_op_return_without_any_ancestry_discovery() {
             post_fork: 1,
             tip_height: HEIGHT as i32 + 200,
         };
-        let built = super::super::super::preferred::build_preferred(
+        let refused = super::super::super::preferred::build_preferred(
             daemon.clone(),
             wallet.clone(),
             coins,
@@ -602,28 +620,11 @@ async fn closed_gate_builds_op_return_without_any_ancestry_discovery() {
             generation.clone(),
         )
         .await
-        .unwrap_or_else(|e| panic!("{}: a closed gate must build OP_RETURN: {}", label, e));
-        assert!(
-            matches!(&*built, Construction::OpReturn(_)),
-            "{}: a closed gate must never select an ancestry input",
-            label
-        );
-        assert_eq!(built.selected_ancestry_input(), None, "{}", label);
-        assert!(
-            built
-                .psbt()
-                .unsigned_tx
-                .output
-                .iter()
-                .any(|o| o.script_pubkey.is_op_return()),
-            "{}",
-            label
-        );
+        .unwrap_err();
         assert_eq!(
-            built.psbt().unsigned_tx.input.len(),
-            1,
-            "{}: only the pre-fork coin is split",
-            label
+            refused,
+            crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE,
+            "{label}"
         );
         assert_eq!(
             daemon
@@ -631,7 +632,7 @@ async fn closed_gate_builds_op_return_without_any_ancestry_discovery() {
                 .iter()
                 .filter(|h| **h == "reserve_change")
                 .count(),
-            1,
+            0,
             "{}",
             label
         );

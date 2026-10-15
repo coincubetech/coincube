@@ -3187,6 +3187,7 @@ mod local_start_cancel_tests {
         let info = GetInfoResult {
             version: "synthetic".into(),
             network: bitcoin::Network::Bitcoin,
+            chain_id: Some(cfg.bitcoin_config.chain),
             block_height: 0,
             sync: 1.0,
             descriptors: coincubed::commands::GetInfoDescriptors {

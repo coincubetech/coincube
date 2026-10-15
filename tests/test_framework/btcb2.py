@@ -213,6 +213,7 @@ class TwoChainRegtest:
         electrs_path=None,
         csv_value=10,
         public_descriptor=None,
+        start_daemons=True,
     ):
         if activation_height < MIN_ACTIVATION_HEIGHT:
             raise ValueError(
@@ -228,6 +229,7 @@ class TwoChainRegtest:
         self.electrs_path = electrs_path or ELECTRS_BLAKE2B_PATH
         self.csv_value = csv_value
         self.public_descriptor = public_descriptor
+        self.start_daemons = start_daemons
 
         self.home_dir = os.path.join(directory, "home-sandbox")
         self.legacy_dir = os.path.join(directory, "knots-legacy")
@@ -265,7 +267,8 @@ class TwoChainRegtest:
         self._fork()
         self._mine_past_fork_and_create_poison()
         self._start_indexers()
-        self._start_daemons()
+        if self.start_daemons:
+            self._start_daemons()
 
     def cleanup(self):
         for proc in (

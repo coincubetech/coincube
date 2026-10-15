@@ -1122,6 +1122,11 @@ pub async fn restart(
         if step1::is_closed(&directory) {
             return Ok(Restart::Closed);
         }
+        if controller.is_paired_ancestry_split() {
+            return Err(Step2Refusal::final_(
+                "This paired split must be reopened through its two-chain recovery check.",
+            ));
+        }
         // #568 B4b-3c: restart by kind. A fork-only record has no step 1 to
         // restore and the two-step reconciler refuses it (U2), so it never
         // reaches either: what it has recorded decides how it reopens.

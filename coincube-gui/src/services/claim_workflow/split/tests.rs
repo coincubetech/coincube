@@ -48,7 +48,7 @@ fn context() -> Context {
     Context {
         generation: 1,
         account: "synthetic-account".into(),
-        provider: "https://synthetic.invalid".into(),
+        provider: "bitcoin|https://synthetic.invalid/api/v1/esplora/bitcoin/mainnet".into(),
     }
 }
 fn policy() -> Policy {
@@ -193,6 +193,1219 @@ fn construction_at(wallet: &Wallet, feerate: u64) -> SplitStep1 {
         hash(7),
     )
     .unwrap()
+}
+
+#[test]
+fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path() {
+    use crate::services::{
+        foreign_scan::{Branch, BranchCoverage, DiscoveredCoin, ScanReport},
+        foreign_split_inventory::SplitInventory,
+    };
+    use coincube_core::{
+        claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+        descriptors::CoincubeDescriptor,
+        foreign_split::{
+            create_ancestry_split_step1, create_ancestry_split_step2, AncestrySplitInputs,
+            AncestrySplitStep2Inputs,
+        },
+        miniscript::bitcoin::{bip32::ChildNumber, consensus::serialize},
+    };
+
+    let wallet = make_wallet(Shape::WshMulti, 70);
+    let target = CoincubeDescriptor::from_str(super::super::tests::WSH_DESC).unwrap();
+    let shared = vec![
+        coin(&wallet.source, SplitBranch::External, 0, 250_000),
+        coin(&wallet.source, SplitBranch::Internal, 1, 200_000),
+    ];
+    let mut bitcoin_marker = coin(&wallet.source, SplitBranch::External, 2, 150_000);
+    bitcoin_marker.previous.input[0].previous_output = OutPoint::null();
+    bitcoin_marker.outpoint = OutPoint::new(bitcoin_marker.previous.compute_txid(), 0);
+    bitcoin_marker.bitcoin_block = Some(BlockRef {
+        height: FORK + 1,
+        hash: hash(0x44),
+    });
+    bitcoin_marker.btcb2_block = None;
+    let mut fork_marker = coin(&wallet.source, SplitBranch::External, 3, 150_000);
+    fork_marker.previous.input[0].previous_output = OutPoint::null();
+    fork_marker.outpoint = OutPoint::new(fork_marker.previous.compute_txid(), 0);
+    fork_marker.bitcoin_block = None;
+    fork_marker.btcb2_block = Some(BlockRef {
+        height: FORK + 1,
+        hash: hash(0x55),
+    });
+    let path = |marker: &SplitCoin| {
+        RetainedPath::new(
+            marker.outpoint,
+            vec![OwnedLink {
+                transaction: serialize(&marker.previous),
+                parent_input: None,
+            }],
+        )
+        .unwrap()
+    };
+    let bitcoin_path = path(&bitcoin_marker);
+    let fork_path = path(&fork_marker);
+    let bitcoin = create_ancestry_split_step1(
+        &AncestrySplitInputs {
+            chain: ChainId::Bitcoin,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &bitcoin_marker,
+            dependency: &bitcoin_path.reverify().unwrap(),
+            fork_height: FORK,
+            destination: 4,
+        },
+        2,
+        LockTime::from_height(TIP).unwrap(),
+        TIP,
+    )
+    .unwrap();
+    let target_script = target
+        .receive_descriptor()
+        .derive(
+            ChildNumber::from_normal_idx(4).unwrap(),
+            &Secp256k1::verification_only(),
+        )
+        .script_pubkey();
+    let fork = create_ancestry_split_step2(
+        &AncestrySplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &fork_marker,
+            dependency: &fork_path.reverify().unwrap(),
+            fork_height: FORK,
+            claimed: bitcoin.claimed_prevouts(),
+            target: &target_script,
+        },
+        2,
+        LockTime::from_height(TIP).unwrap(),
+        TIP,
+    )
+    .unwrap();
+    let temp = Temp::new();
+    assert!(matches!(
+        Controller::create_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            4,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let report = |chain, byte| {
+        ScanReport::for_test(chain, 1, hash(byte), Vec::new()).with_coverage(vec![BranchCoverage {
+            branch: Branch::External,
+            start: 0,
+            end_exclusive: 10,
+            last_used: Some(1),
+        }])
+    };
+    let inventory = SplitInventory::join(
+        &report(ChainId::BitcoinBlake2b, 3).with_fork_height(Some(FORK)),
+        &report(ChainId::Bitcoin, 4),
+        1,
+        true,
+    )
+    .unwrap();
+    assert_eq!(
+        inventory.fresh_funding_addresses(),
+        Some(
+            crate::services::foreign_split_inventory::FreshFundingAddresses {
+                bitcoin_deposit: 2,
+                btcb2_deposit: 3,
+                bitcoin_return: 4,
+            }
+        )
+    );
+    let target_id = crate::app::settings::WalletId::new(
+        target.to_string().split_once('#').unwrap().1.to_string(),
+        Some(1),
+    );
+    let other = Temp::new();
+    let wrong_target = super::super::SplitTargetBinding::for_test(target_id.clone(), &target, 5);
+    super::super::reserve_split_funding_with_target(
+        &other.0,
+        &wallet.source,
+        TARGET,
+        &context(),
+        &inventory,
+        &wrong_target,
+    )
+    .unwrap();
+    assert!(matches!(
+        Controller::create_ancestry_split(
+            &other.0,
+            TARGET.into(),
+            &target,
+            4,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let target_binding = super::super::SplitTargetBinding::for_test(target_id, &target, 4);
+    super::super::reserve_split_funding_with_target(
+        &temp.0,
+        &wallet.source,
+        TARGET,
+        &context(),
+        &inventory,
+        &target_binding,
+    )
+    .unwrap();
+    let mut changed_account = context();
+    changed_account.account = "another-account".into();
+    assert!(matches!(
+        Controller::create_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            4,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            changed_account,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let controller = Controller::create_ancestry_split(
+        &temp.0,
+        TARGET.into(),
+        &target,
+        4,
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(controller.intent.version, ANCESTRY_VERSION);
+    assert!(controller.is_paired_ancestry_split());
+    assert_eq!(controller.status(), Status::Unchecked);
+    assert!(!controller.construction_verified);
+    let identity = controller.identity().clone();
+    drop(controller);
+    let same = Controller::create_or_reopen_ancestry_split(
+        &temp.0,
+        TARGET.into(),
+        &target,
+        4,
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(same.status(), Status::Unchecked);
+    assert!(!same.construction_verified);
+    drop(same);
+    assert!(matches!(
+        Controller::create_or_reopen_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            5,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert!(reopened.is_paired_ancestry_split());
+    assert_eq!(reopened.status(), Status::Unchecked);
+    assert!(!reopened.construction_verified);
+    let record = reopened.intent.split.as_ref().unwrap();
+    let stored_funding = record.funding.as_ref().unwrap();
+    assert!(stored_funding.bitcoin.matches_coin(&bitcoin_marker));
+    assert!(stored_funding.fork.matches_coin(&fork_marker));
+    let mut wrong_derivation = bitcoin_marker.clone();
+    wrong_derivation.index += 1;
+    assert!(!stored_funding.bitcoin.matches_coin(&wrong_derivation));
+    wrong_derivation = fork_marker.clone();
+    wrong_derivation.branch = SplitBranch::Internal;
+    assert!(!stored_funding.fork.matches_coin(&wrong_derivation));
+    assert_eq!(stored_funding.step2_unsigned, fork.psbt().unsigned_tx);
+    assert_eq!(reopened.intent.plan.step1, bitcoin.psbt().unsigned_tx);
+    let (restored_bitcoin, restored_fork) = reopened
+        .restore_ancestry_split_pair(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &bitcoin_marker,
+            TIP,
+            &shared,
+            &fork_marker,
+            TIP,
+        )
+        .unwrap();
+    assert_eq!(restored_bitcoin.psbt(), bitcoin.psbt());
+    assert_eq!(restored_fork.psbt(), fork.psbt());
+    let recovered_fork = reopened
+        .restore_ancestry_split_fork(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &fork_marker,
+            TIP,
+        )
+        .unwrap();
+    assert_eq!(recovered_fork.psbt(), fork.psbt());
+    assert!(!reopened.construction_verified);
+    // Both ordinary witnesses remain bound to the exact unsigned journal
+    // pair across restart. This record is only reconciliation data; the
+    // controller remains Unchecked and cannot use the retired signer path.
+    let bitcoin_inputs = AncestrySplitInputs {
+        chain: ChainId::Bitcoin,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &bitcoin_marker,
+        dependency: &bitcoin_path.reverify().unwrap(),
+        fork_height: FORK,
+        destination: 4,
+    };
+    let fork_inputs = AncestrySplitStep2Inputs {
+        chain: ChainId::BitcoinBlake2b,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &fork_marker,
+        dependency: &fork_path.reverify().unwrap(),
+        fork_height: FORK,
+        claimed: bitcoin.claimed_prevouts(),
+        target: &target_script,
+    };
+    let secp = Secp256k1::new();
+    let sign_one = |psbt: &Psbt, signer: &Xpriv| {
+        let mut signed = psbt.clone();
+        signed.sign(signer, &secp).unwrap();
+        signed
+    };
+    let bitcoin_files: Vec<_> = wallet
+        .signers
+        .iter()
+        .take(2)
+        .map(|signer| sign_one(bitcoin.psbt(), signer))
+        .collect();
+    let fork_files: Vec<_> = wallet
+        .signers
+        .iter()
+        .take(2)
+        .map(|signer| sign_one(fork.psbt(), signer))
+        .collect();
+    let partial = crate::services::split_psbt_file::combine_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_files[..1],
+        &fork,
+        &fork_inputs,
+        &fork_files[..1],
+    )
+    .unwrap();
+    assert!(!partial.complete);
+    let bitcoin_only = crate::services::split_psbt_file::combine_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_files,
+        &fork,
+        &fork_inputs,
+        &[],
+    )
+    .unwrap();
+    assert!(!bitcoin_only.complete);
+    assert_eq!(bitcoin_only.fork, *fork.psbt());
+    let combined = crate::services::split_psbt_file::combine_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &bitcoin_files,
+        &fork,
+        &fork_inputs,
+        &fork_files,
+    )
+    .unwrap();
+    assert!(combined.complete);
+    let mut changed = bitcoin_files[0].clone();
+    changed.unsigned_tx.output[0].value = coincube_core::miniscript::bitcoin::Amount::from_sat(1);
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &[changed],
+            &fork,
+            &fork_inputs,
+            &fork_files,
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::Bitcoin(
+            _
+        ))
+    ));
+    let mut changed_fork = fork_files[0].clone();
+    changed_fork.unsigned_tx.output[0].value = Amount::from_sat(1);
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_files,
+            &fork,
+            &fork_inputs,
+            &[changed_fork],
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::BitcoinBlake2b(_))
+    ));
+    let mut non_all = bitcoin_files[0].clone();
+    non_all.inputs[0].sighash_type = Some(
+        coincube_core::miniscript::bitcoin::psbt::PsbtSighashType::from(EcdsaSighashType::None),
+    );
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &[non_all],
+            &fork,
+            &fork_inputs,
+            &fork_files,
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::Bitcoin(
+            _
+        ))
+    ));
+    assert!(matches!(
+        crate::services::split_psbt_file::combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork_files[..1],
+            &fork,
+            &fork_inputs,
+            &bitcoin_files[..1],
+        ),
+        Err(crate::services::split_psbt_file::PairedFileError::Bitcoin(
+            _
+        ))
+    ));
+    let signed = coincube_core::foreign_split::finalize_ancestry_split_pair(
+        &bitcoin,
+        &bitcoin_inputs,
+        &combined.bitcoin,
+        &fork,
+        &fork_inputs,
+        &combined.fork,
+        &Secp256k1::verification_only(),
+    )
+    .unwrap();
+    reopened
+        .record_signed_ancestry_split_pair(&context(), &signed)
+        .unwrap();
+    assert!(matches!(
+        reopened.record_signed_ancestry_split_pair(&context(), &signed),
+        Err(Error::Conflict)
+    ));
+    assert_eq!(reopened.status(), Status::Unchecked);
+    let bitcoin_id = reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .bitcoin_identity();
+    let fork_id = reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .fork_identity();
+    drop(reopened);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    let recorded = reopened.recorded_signed_ancestry_pair().unwrap().clone();
+    assert_eq!(recorded.bitcoin_identity(), bitcoin_id);
+    assert_eq!(recorded.fork_identity(), fork_id);
+    assert_eq!(recorded.bitcoin(), signed.bitcoin().transaction());
+    assert_eq!(recorded.fork(), signed.fork().transaction());
+    let saved_plan = reopened.recorded_initial_pair_plan(&context()).unwrap();
+    assert_eq!(saved_plan.bitcoin_funding, bitcoin_marker.outpoint);
+    assert_eq!(saved_plan.fork_funding, fork_marker.outpoint);
+    assert_eq!(saved_plan.bitcoin_rate_vb, 2);
+    assert_eq!(saved_plan.fork_rate_vb, 2);
+    let discovered = |coin: &SplitCoin, block: BlockRef| DiscoveredCoin {
+        branch: match coin.branch {
+            SplitBranch::External => Branch::External,
+            SplitBranch::Internal => Branch::Internal,
+        },
+        index: coin.index,
+        outpoint: coin.outpoint,
+        output: coin.previous.output[coin.outpoint.vout as usize].clone(),
+        previous: coin.previous.clone(),
+        confirmed: true,
+        block_height: Some(block.height as u32),
+        block_hash: Some(block.hash),
+    };
+    let scan_report = |chain, marker: &SplitCoin, block: BlockRef| {
+        let coins = shared
+            .iter()
+            .map(|coin| discovered(coin, coin.bitcoin_block.unwrap()))
+            .chain(std::iter::once(discovered(marker, block)))
+            .collect();
+        ScanReport::for_test(chain, 1, hash(7), coins)
+            .with_tip_height(TIP)
+            .with_coverage(vec![
+                BranchCoverage {
+                    branch: Branch::External,
+                    start: 0,
+                    end_exclusive: 10,
+                    last_used: Some(3),
+                },
+                BranchCoverage {
+                    branch: Branch::Internal,
+                    start: 0,
+                    end_exclusive: 10,
+                    last_used: Some(1),
+                },
+            ])
+    };
+    let fresh_inventory = SplitInventory::join(
+        &scan_report(
+            ChainId::BitcoinBlake2b,
+            &fork_marker,
+            fork_marker.btcb2_block.unwrap(),
+        )
+        .with_fork_height(Some(FORK)),
+        &scan_report(
+            ChainId::Bitcoin,
+            &bitcoin_marker,
+            bitcoin_marker.bitcoin_block.unwrap(),
+        ),
+        1,
+        true,
+    )
+    .unwrap();
+    let (rebuilt_bitcoin, rebuilt_fork) = reopened
+        .restore_unattempted_split_pair_from_scan(
+            &context(),
+            &wallet.source,
+            &target,
+            &fresh_inventory,
+        )
+        .unwrap();
+    assert_eq!(rebuilt_bitcoin.psbt(), bitcoin.psbt());
+    assert_eq!(rebuilt_fork.psbt(), fork.psbt());
+    assert_eq!(reopened.status(), Status::Unchecked);
+    assert!(!reopened.construction_verified);
+    let reverified = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    assert_eq!(reverified.bitcoin().transaction(), recorded.bitcoin());
+    assert_eq!(reverified.fork().transaction(), recorded.fork());
+    assert_eq!(reopened.status(), Status::Unchecked);
+    let review_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        recorded.bitcoin(),
+        recorded.fork(),
+        hash(7),
+        100,
+    );
+    let review = reopened
+        .prepare_initial_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(reverified),
+            review_proof,
+            100,
+        )
+        .unwrap();
+    assert_eq!(review.snapshot().bitcoin, *recorded.bitcoin());
+    assert_eq!(review.snapshot().fork, *recorded.fork());
+    assert!(review.snapshot().bitcoin_fee_sats > 0);
+    assert!(review.snapshot().fork_fee_sats > 0);
+    assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
+    let mut changed_snapshot = review.snapshot().clone();
+    changed_snapshot.bitcoin_fee_sats += 1;
+    let (_generation, receiver) = tokio::sync::watch::channel(context().generation);
+    // A changed displayed fee is refused before preflight or any durable
+    // possible-send record, even when the Connect origin matches.
+    let matching_provider = crate::services::claim_preflight::PreflightClient::new(
+        "https://synthetic.invalid",
+        crate::services::claim_observation::CollectionContext {
+            expected_generation: context().generation,
+            generation: receiver,
+        },
+    )
+    .unwrap();
+    let refusal = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(review.confirm_exact_snapshot_and_submit(
+            &changed_snapshot,
+            &mut reopened,
+            &context(),
+            &matching_provider,
+            crate::services::claim_preflight::FreshnessPolicy {
+                max_age_seconds: 30,
+                max_future_skew_seconds: 5,
+            },
+        ));
+    assert!(matches!(
+        refusal,
+        Err(super::super::paired_submission::InitialPairSubmissionError::SnapshotChanged)
+    ));
+    assert!(recorded.possible_attempt(ChainId::Bitcoin).is_none());
+    let preflight = crate::services::claim_preflight::accepted_pair_for_test(
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        context().generation,
+        100,
+    );
+    let freshness = crate::services::claim_preflight::FreshnessPolicy {
+        max_age_seconds: 30,
+        max_future_skew_seconds: 5,
+    };
+    let confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.bitcoin().transaction(),
+        context(),
+        100,
+    );
+    let initial_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    let post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &confirmation,
+        hash(7),
+        100,
+    );
+    let wrong_tip_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(8),
+        100,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &wrong_tip_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let wrong_witness_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.fork().transaction(),
+        signed.bitcoin().transaction(),
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &wrong_witness_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::LateObservation)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &post_proof,
+            preflight.fork(),
+            &confirmation,
+            freshness,
+            100,
+        ),
+        Err(Error::Conflict)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    #[cfg(unix)]
+    {
+        // Unix permits moving an open directory. The next journal write must
+        // fail without recording an attempt at the original path.
+        let moved = temp.0.with_extension("moved");
+        fs::rename(&temp.0, &moved).unwrap();
+        assert!(reopened
+            .record_possible_ancestry_bitcoin_attempt(
+                &context(),
+                &initial_proof,
+                &preflight,
+                freshness,
+                100
+            )
+            .is_err());
+        assert!(reopened
+            .recorded_signed_ancestry_pair()
+            .unwrap()
+            .possible_attempt(ChainId::Bitcoin)
+            .is_none());
+        fs::rename(moved, &temp.0).unwrap();
+    }
+    #[cfg(windows)]
+    assert!(
+        fs::rename(&temp.0, temp.0.with_extension("moved")).is_err(),
+        "the pinned Windows journal directory cannot be moved while open"
+    );
+    drop(reopened);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let initial_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    let bitcoin_attempt = reopened
+        .record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100,
+        )
+        .unwrap();
+    assert!(matches!(
+        reopened.recorded_initial_pair_plan(&context()),
+        Err(Error::Unchecked)
+    ));
+    let post_plan = reopened
+        .recorded_post_bitcoin_pair_plan(&context())
+        .unwrap();
+    assert_eq!(post_plan.bitcoin_path.selected(), bitcoin_path.selected());
+    assert_eq!(post_plan.fork_path.selected(), fork_path.selected());
+    assert_eq!(post_plan.signed_bitcoin, *signed.bitcoin().transaction());
+    let (bitcoin_gate, bitcoin_revoker) = bitcoin_attempt
+        .into_split_gate(
+            &signed,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    assert_eq!(
+        bitcoin_gate.state(),
+        coincubed::poison_broadcast::SubmissionState::Pending
+    );
+    assert_eq!(
+        bitcoin_revoker.revoke(),
+        coincubed::poison_broadcast::SubmissionState::Revoked
+    );
+    let saved_pair = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    let repeated_review_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.prepare_initial_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(saved_pair),
+            repeated_review_proof,
+            100,
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    drop(reopened);
+    let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::Bitcoin)
+        .is_some());
+    assert_eq!(
+        reopened
+            .restore_ancestry_split_fork(
+                &context(),
+                &wallet.source,
+                &target,
+                &shared,
+                &fork_marker,
+                TIP,
+            )
+            .unwrap()
+            .psbt(),
+        fork.psbt()
+    );
+    assert!(!reopened.construction_verified);
+    let recovered_inputs = crate::services::foreign_split_inventory::PostBitcoinSplitCoins {
+        shared: shared.clone(),
+        funding: fork_marker.clone(),
+    };
+    let recovery_tips = PreflightTips {
+        bitcoin: BlockRef {
+            height: u64::from(TIP),
+            hash: hash(7),
+        },
+        fork: BlockRef {
+            height: u64::from(TIP),
+            hash: hash(8),
+        },
+    };
+    let (verified_after_bitcoin, recovered_fork_psbt) =
+        super::super::split_funding::reverify_post_bitcoin_split_pair(
+            &mut reopened,
+            &context(),
+            &wallet.source,
+            &target,
+            &recovered_inputs,
+            &bitcoin_marker,
+            &bitcoin_path,
+            &fork_path,
+            recovery_tips,
+        )
+        .unwrap();
+    assert_eq!(
+        verified_after_bitcoin.bitcoin().transaction(),
+        signed.bitcoin().transaction()
+    );
+    assert_eq!(
+        verified_after_bitcoin.fork().transaction(),
+        signed.fork().transaction()
+    );
+    assert_eq!(recovered_fork_psbt, *fork.psbt());
+    assert!(!reopened.construction_verified);
+    let mut changed_fork_marker = fork_marker.clone();
+    changed_fork_marker.index += 1;
+    assert!(matches!(
+        super::super::split_funding::reverify_post_bitcoin_split_pair(
+            &mut reopened,
+            &context(),
+            &wallet.source,
+            &target,
+            &crate::services::foreign_split_inventory::PostBitcoinSplitCoins {
+                shared: shared.clone(),
+                funding: changed_fork_marker,
+            },
+            &bitcoin_marker,
+            &bitcoin_path,
+            &fork_path,
+            recovery_tips,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let initial_proof = super::super::paired_submission::initial_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_bitcoin_attempt(
+            &context(),
+            &initial_proof,
+            &preflight,
+            freshness,
+            100,
+        ),
+        Err(Error::Conflict)
+    ));
+    let saved_pair = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    let review_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &confirmation,
+        hash(7),
+        100,
+    );
+    let post_review = reopened
+        .prepare_post_bitcoin_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(saved_pair),
+            review_proof,
+            confirmation.clone(),
+            100,
+        )
+        .unwrap();
+    assert_eq!(
+        post_review.snapshot().bitcoin,
+        *signed.bitcoin().transaction()
+    );
+    assert_eq!(post_review.snapshot().fork, *signed.fork().transaction());
+    assert!(post_review.snapshot().fork_fee_sats > 0);
+    let refusal = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap()
+        .block_on(post_review.confirm_and_submit(
+            &mut reopened,
+            &context(),
+            &matching_provider,
+            freshness,
+        ));
+    assert!(matches!(
+        refusal,
+        Err(super::super::paired_submission::InitialPairSubmissionError::InvalidReview)
+    ));
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::BitcoinBlake2b)
+        .is_none());
+    let saved_pair = reopened
+        .verify_recorded_ancestry_split_pair(
+            &context(),
+            &bitcoin,
+            &bitcoin_inputs,
+            &fork,
+            &fork_inputs,
+        )
+        .unwrap();
+    let wrong_confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.fork().transaction(),
+        context(),
+        100,
+    );
+    let post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &confirmation,
+        hash(7),
+        100,
+    );
+    let wrong_review_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &confirmation,
+        hash(7),
+        100,
+    );
+    assert!(matches!(
+        reopened.prepare_post_bitcoin_pair_review(
+            &context(),
+            super::super::paired_submission::InitialSignedPair::Split(saved_pair),
+            wrong_review_proof,
+            wrong_confirmation,
+            100,
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &post_proof,
+            preflight.fork(),
+            &confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let refreshed_fork = crate::services::claim_preflight::accepted_pair_for_test(
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        hash(8),
+        context().generation,
+        200,
+    );
+    let refreshed_confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.bitcoin().transaction(),
+        context(),
+        200,
+    );
+    let wrong_confirmation = super::super::paired_recovery::confirmed_bitcoin_for_test(
+        signed.fork().transaction(),
+        context(),
+        200,
+    );
+    let refreshed_post_proof = super::super::paired_submission::post_bitcoin_proof_for_test(
+        &reopened,
+        &context(),
+        signed.bitcoin().transaction(),
+        signed.fork().transaction(),
+        &refreshed_confirmation,
+        hash(8),
+        200,
+    );
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &post_proof,
+            refreshed_fork.fork(),
+            &refreshed_confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &wrong_confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let reorged_confirmation =
+        refreshed_confirmation
+            .clone()
+            .with_block_for_test(coincube_core::claim::BlockRef {
+                height: 2,
+                hash: hash(9),
+            });
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &reorged_confirmation,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let changed_bitcoin_tip =
+        refreshed_confirmation
+            .clone()
+            .with_tip_for_test(coincube_core::claim::BlockRef {
+                height: 2,
+                hash: hash(10),
+            });
+    assert!(matches!(
+        reopened.record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &changed_bitcoin_tip,
+            freshness,
+            200,
+        ),
+        Err(Error::LateObservation)
+    ));
+    let fork_attempt = reopened
+        .record_possible_ancestry_fork_attempt(
+            &context(),
+            &refreshed_post_proof,
+            refreshed_fork.fork(),
+            &refreshed_confirmation,
+            freshness,
+            200,
+        )
+        .unwrap();
+    let (fork_gate, fork_revoker) = fork_attempt
+        .into_split_gate(
+            &signed,
+            std::time::Instant::now() + std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+    assert_eq!(
+        fork_gate.state(),
+        coincubed::poison_broadcast::SubmissionState::Pending
+    );
+    assert_eq!(
+        fork_revoker.revoke(),
+        coincubed::poison_broadcast::SubmissionState::Revoked
+    );
+    assert!(reopened
+        .recorded_signed_ancestry_pair()
+        .unwrap()
+        .possible_attempt(ChainId::BitcoinBlake2b)
+        .is_some());
+    assert!(matches!(
+        reopened.recorded_post_bitcoin_pair_plan(&context()),
+        Err(Error::Unchecked)
+    ));
+    let mut altered = serde_json::to_value(&reopened.intent).unwrap();
+    let mut changed_fork = recorded.fork().clone();
+    changed_fork.input[0].witness =
+        coincube_core::miniscript::bitcoin::Witness::from_slice(&[vec![0x42]]);
+    assert_ne!(changed_fork.compute_wtxid(), recorded.fork_identity().1);
+    altered["paired_submission"]["fork"] = serde_json::to_value(changed_fork).unwrap();
+    let altered: Intent = serde_json::from_value(altered).unwrap();
+    let validation = super::super::validate(&altered);
+    assert!(
+        matches!(validation, Err(Error::InvalidPlan)),
+        "{:?}",
+        validation
+    );
+    assert_ne!(bitcoin_id.0, fork_id.0);
+    let mut changed_attempt = serde_json::to_value(&reopened.intent).unwrap();
+    changed_attempt["paired_submission"]["bitcoin_attempt"]["txid"] =
+        serde_json::to_value(fork_id.0).unwrap();
+    let changed_attempt: Intent = serde_json::from_value(changed_attempt).unwrap();
+    assert!(matches!(
+        super::super::validate(&changed_attempt),
+        Err(Error::InvalidPlan)
+    ));
+    let mut wrong_marker = fork_marker.clone();
+    wrong_marker.index += 1;
+    assert!(matches!(
+        reopened.restore_ancestry_split_pair(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &bitcoin_marker,
+            TIP,
+            &shared,
+            &wrong_marker,
+            TIP,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(matches!(
+        reopened.restore_ancestry_split_fork(
+            &context(),
+            &wallet.source,
+            &target,
+            &shared,
+            &wrong_marker,
+            TIP,
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    assert!(matches!(
+        reopened.restore_ancestry_split_fork(
+            &context(),
+            &wallet.source,
+            &target,
+            &[],
+            &fork_marker,
+            TIP,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(!reopened.construction_verified);
+    let mut missing_funding = reopened.intent.clone();
+    missing_funding
+        .split
+        .as_mut()
+        .unwrap()
+        .funding
+        .as_mut()
+        .unwrap()
+        .step2_unsigned
+        .input
+        .retain(|input| input.previous_output != fork_marker.outpoint);
+    assert!(matches!(
+        validate(&missing_funding),
+        Err(Error::InvalidPlan)
+    ));
+    let mut wrong_destination = reopened.intent.clone();
+    wrong_destination
+        .split
+        .as_mut()
+        .unwrap()
+        .funding
+        .as_mut()
+        .unwrap()
+        .step2_unsigned
+        .output[0]
+        .script_pubkey = ScriptBuf::new_op_return([]);
+    assert!(matches!(
+        validate(&wrong_destination),
+        Err(Error::InvalidPlan)
+    ));
+    let mut downgraded = reopened.intent.clone();
+    downgraded.version = 8;
+    assert!(matches!(validate(&downgraded), Err(Error::InvalidPlan)));
+    drop(reopened);
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let legacy_restart = runtime.block_on(crate::app::state::vault::split::step2::restart(
+        context(),
+        None,
+        None,
+        temp.0.clone(),
+        TARGET.into(),
+        identity.descriptor_digest,
+    ));
+    assert!(matches!(legacy_restart, Err(ref refusal) if !refusal.retry));
+    fs::write(
+        temp.0.join("intent.json"),
+        serde_json::to_vec(&altered).unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Controller::reopen_settling_blocking(&temp.0, &identity, context()),
+        Err(Error::InvalidPlan)
+    ));
 }
 
 /// Two signers for multisig (the first two keys), one otherwise.

@@ -27,8 +27,8 @@ use std::{
 
 use coincube_core::{
     chain::ChainId,
-    claim::BlockRef,
-    foreign_split::{SplitBranch, SplitCoin},
+    claim::{BlockRef, PreflightTips},
+    foreign_split::{SplitBranch, SplitCoin, SplitSource},
     miniscript::bitcoin::{BlockHash, OutPoint},
 };
 use tokio::sync::watch;
@@ -84,12 +84,10 @@ impl InventoryCoin {
     }
 }
 
-/// A Bitcoin output confirmed at or after the observed fork height. Shown to
-/// the user as a possible input poison; never proof that it is absent from
-/// BTCB2 (see `coincube_core::claim`). It carries no prevout data, but that
-/// does not stop a caller re-fetching the outpoint. Step 1 (A3) must instead
-/// require a positive poison-proof type built from verified ancestry, never
-/// this candidate.
+/// An output confirmed at or after the observed fork height and seen only on
+/// one chain within both scans' address coverage. This is a display hint,
+/// never proof that the transaction cannot be replayed onto the other chain.
+/// It carries no prevout data, and cannot be used for transaction construction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PoisonCandidate(InventoryCoin);
 
@@ -110,6 +108,24 @@ pub enum FreshIndex {
     NotProven,
 }
 
+/// Three distinct addresses proved unused inside both complete source-wallet
+/// scans. These indices are hints until a durable wizard record reserves them
+/// and Connect rechecks their history immediately before showing deposits.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FreshFundingAddresses {
+    pub bitcoin_deposit: u32,
+    pub btcb2_deposit: u32,
+    pub bitcoin_return: u32,
+}
+
+/// Two distinct receive indices unused on both chains within the complete
+/// bounded scans. Claim must persist and recheck these before displaying them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FreshDepositAddresses {
+    pub bitcoin_deposit: u32,
+    pub btcb2_deposit: u32,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SplitInventory {
     generation: u64,
@@ -125,8 +141,15 @@ pub struct SplitInventory {
     spent_on_btcb2: Vec<InventoryCoin>,
     btcb2_post_fork: Vec<InventoryCoin>,
     bitcoin_only_post_fork: Vec<PoisonCandidate>,
+    btcb2_only_post_fork: Vec<PoisonCandidate>,
+    /// Previous transactions retained for later live proof binding. These are
+    /// scan-time candidates, never authorization to spend.
+    bitcoin_funding_candidates: BTreeMap<OutPoint, SplitCoin>,
+    btcb2_funding_candidates: BTreeMap<OutPoint, SplitCoin>,
     pending: Vec<InventoryCoin>,
     fresh_receive: FreshIndex,
+    fresh_funding_addresses: Option<FreshFundingAddresses>,
+    fresh_deposit_addresses: Option<FreshDepositAddresses>,
 }
 
 impl SplitInventory {
@@ -181,12 +204,100 @@ impl SplitInventory {
     pub fn bitcoin_only_post_fork(&self) -> &[PoisonCandidate] {
         &self.bitcoin_only_post_fork
     }
+    /// Display-only candidates seen on BTCB2 but not in Bitcoin's covered
+    /// address range. Positive two-chain ancestry is still required.
+    pub fn btcb2_only_post_fork(&self) -> &[PoisonCandidate] {
+        &self.btcb2_only_post_fork
+    }
+    /// Candidate input for a later ancestry proof. The caller must collect a
+    /// fresh, canonical two-chain funding proof and recheck ownership before
+    /// constructing, signing or submitting either transaction.
+    pub fn funding_candidate(&self, chain: ChainId, outpoint: OutPoint) -> Option<SplitCoin> {
+        match chain {
+            ChainId::Bitcoin => self.bitcoin_funding_candidates.get(&outpoint),
+            ChainId::BitcoinBlake2b => self.btcb2_funding_candidates.get(&outpoint),
+            _ => None,
+        }
+        .cloned()
+    }
+    /// All scan-time funding candidates in deterministic outpoint order.
+    /// These remain hints; only the live paired collector can qualify one
+    /// candidate on each chain for review.
+    pub fn funding_candidates(&self, chain: ChainId) -> Vec<SplitCoin> {
+        match chain {
+            ChainId::Bitcoin => self.bitcoin_funding_candidates.values(),
+            ChainId::BitcoinBlake2b => self.btcb2_funding_candidates.values(),
+            _ => return Vec::new(),
+        }
+        .cloned()
+        .collect()
+    }
+    /// Restrict a proof search to the two addresses durably reserved before
+    /// the user sent deposits. A later scan can discover unrelated post-fork
+    /// outputs, but none of them may silently become this split's marker.
+    pub fn funding_at_reserved_addresses(&self, indices: FreshFundingAddresses) -> Self {
+        let mut restricted = self.clone();
+        restricted.bitcoin_funding_candidates.retain(|_, coin| {
+            coin.branch == SplitBranch::External && coin.index == indices.bitcoin_deposit
+        });
+        restricted.btcb2_funding_candidates.retain(|_, coin| {
+            coin.branch == SplitBranch::External && coin.index == indices.btcb2_deposit
+        });
+        restricted
+    }
+    /// Narrow an already reserved funding search to the exact two reviewed
+    /// outpoints. A second deposit to either saved address must never replace
+    /// a coin between review and signer admission.
+    pub fn funding_at_outpoints(&self, bitcoin: OutPoint, btcb2: OutPoint) -> Self {
+        let mut restricted = self.clone();
+        restricted
+            .bitcoin_funding_candidates
+            .retain(|outpoint, _| *outpoint == bitcoin);
+        restricted
+            .btcb2_funding_candidates
+            .retain(|outpoint, _| *outpoint == btcb2);
+        restricted
+    }
+    /// Exclude deposits that cannot individually pay the estimated fee for
+    /// their chain. A later eligible output to the same reserved address must
+    /// remain selectable even if an earlier, smaller output sorts first.
+    /// This is only candidate filtering; the paired live proof and exact
+    /// transaction construction still decide whether the coin is usable.
+    pub fn funding_covering_estimated_fees(
+        &self,
+        bitcoin_minimum_sats: u64,
+        btcb2_minimum_sats: u64,
+    ) -> Self {
+        let mut eligible = self.clone();
+        eligible.bitcoin_funding_candidates.retain(|_, coin| {
+            coin.previous
+                .output
+                .get(coin.outpoint.vout as usize)
+                .is_some_and(|output| output.value.to_sat() >= bitcoin_minimum_sats)
+        });
+        eligible.btcb2_funding_candidates.retain(|_, coin| {
+            coin.previous
+                .output
+                .get(coin.outpoint.vout as usize)
+                .is_some_and(|output| output.value.to_sat() >= btcb2_minimum_sats)
+        });
+        eligible
+    }
     /// Unconfirmed on either chain, or present on both after the fork.
     pub fn pending(&self) -> &[InventoryCoin] {
         &self.pending
     }
     pub fn fresh_receive(&self) -> FreshIndex {
         self.fresh_receive
+    }
+    /// Read-only candidates for the two deposits and Bitcoin self-transfer.
+    /// The distinct indexes prevent an address reused across chains from
+    /// being mistaken for chain-specific funding evidence.
+    pub fn fresh_funding_addresses(&self) -> Option<FreshFundingAddresses> {
+        self.fresh_funding_addresses
+    }
+    pub fn fresh_deposit_addresses(&self) -> Option<FreshDepositAddresses> {
+        self.fresh_deposit_addresses
     }
 
     /// Join two complete reports of the same generation and descriptors.
@@ -226,8 +337,26 @@ impl SplitInventory {
             spent_on_btcb2: Vec::new(),
             btcb2_post_fork: Vec::new(),
             bitcoin_only_post_fork: Vec::new(),
+            btcb2_only_post_fork: Vec::new(),
+            bitcoin_funding_candidates: BTreeMap::new(),
+            btcb2_funding_candidates: BTreeMap::new(),
             pending: Vec::new(),
             fresh_receive: fresh_receive(btcb2, bitcoin, external_ranged),
+            fresh_deposit_addresses: fresh_receive_indices(btcb2, bitcoin, external_ranged, 2)
+                .and_then(|indices| {
+                    Some(FreshDepositAddresses {
+                        bitcoin_deposit: *indices.first()?,
+                        btcb2_deposit: *indices.get(1)?,
+                    })
+                }),
+            fresh_funding_addresses: fresh_receive_indices(btcb2, bitcoin, external_ranged, 3)
+                .and_then(|indices| {
+                    Some(FreshFundingAddresses {
+                        bitcoin_deposit: *indices.first()?,
+                        btcb2_deposit: *indices.get(1)?,
+                        bitcoin_return: *indices.get(2)?,
+                    })
+                }),
         };
         for coin in btcb2.coins() {
             let fork_side = btcb2.fork_side(coin);
@@ -237,7 +366,18 @@ impl SplitInventory {
                         covered(bitcoin, coin)?;
                         inventory.spent_on_bitcoin.push(InventoryCoin::of(coin));
                     }
-                    ForkSide::PostFork => inventory.btcb2_post_fork.push(InventoryCoin::of(coin)),
+                    ForkSide::PostFork => {
+                        inventory.btcb2_post_fork.push(InventoryCoin::of(coin));
+                        if covered(bitcoin, coin).is_ok() {
+                            inventory.btcb2_funding_candidates.insert(
+                                coin.outpoint,
+                                funding_coin(coin, ChainId::BitcoinBlake2b)?,
+                            );
+                            inventory
+                                .btcb2_only_post_fork
+                                .push(PoisonCandidate(InventoryCoin::of(coin)));
+                        }
+                    }
                     ForkSide::Unconfirmed | ForkSide::Unknown => {
                         inventory.pending.push(InventoryCoin::of(coin))
                     }
@@ -275,9 +415,16 @@ impl SplitInventory {
                     covered(btcb2, coin)?;
                     inventory.spent_on_btcb2.push(InventoryCoin::of(coin));
                 }
-                ForkSide::PostFork => inventory
-                    .bitcoin_only_post_fork
-                    .push(PoisonCandidate(InventoryCoin::of(coin))),
+                ForkSide::PostFork => {
+                    if covered(btcb2, coin).is_ok() {
+                        inventory
+                            .bitcoin_funding_candidates
+                            .insert(coin.outpoint, funding_coin(coin, ChainId::Bitcoin)?);
+                        inventory
+                            .bitcoin_only_post_fork
+                            .push(PoisonCandidate(InventoryCoin::of(coin)));
+                    }
+                }
                 ForkSide::Unconfirmed | ForkSide::Unknown => {
                     inventory.pending.push(InventoryCoin::of(coin))
                 }
@@ -285,6 +432,33 @@ impl SplitInventory {
         }
         Ok(inventory)
     }
+}
+
+fn funding_coin(coin: &DiscoveredCoin, chain: ChainId) -> Result<SplitCoin, InventoryError> {
+    let (Some(height), Some(hash)) = (coin.block_height, coin.block_hash) else {
+        return Err(InventoryError::Inconsistent(coin.outpoint));
+    };
+    if !coin.confirmed
+        || coin.previous.compute_txid() != coin.outpoint.txid
+        || coin.previous.output.get(coin.outpoint.vout as usize) != Some(&coin.output)
+    {
+        return Err(InventoryError::Inconsistent(coin.outpoint));
+    }
+    let block = BlockRef {
+        height: u64::from(height),
+        hash,
+    };
+    Ok(SplitCoin {
+        outpoint: coin.outpoint,
+        branch: match coin.branch {
+            Branch::External => SplitBranch::External,
+            Branch::Internal => SplitBranch::Internal,
+        },
+        index: coin.index,
+        previous: coin.previous.clone(),
+        bitcoin_block: (chain == ChainId::Bitcoin).then_some(block),
+        btcb2_block: (chain == ChainId::BitcoinBlake2b).then_some(block),
+    })
 }
 
 /// A shared pre-fork coin as a step-1 input. Both previous transactions are
@@ -344,34 +518,51 @@ fn fresh_receive(btcb2: &ScanReport, bitcoin: &ScanReport, external_ranged: bool
     if !external_ranged {
         return FreshIndex::FixedDescriptor;
     }
+    fresh_receive_indices(btcb2, bitcoin, true, 1)
+        .and_then(|indices| indices.first().copied())
+        .map_or(FreshIndex::NotProven, FreshIndex::Proven)
+}
+
+fn fresh_receive_indices(
+    btcb2: &ScanReport,
+    bitcoin: &ScanReport,
+    external_ranged: bool,
+    count: u32,
+) -> Option<Vec<u32>> {
+    if !external_ranged || count == 0 || count > 3 {
+        return None;
+    }
     let (Some(a), Some(b)) = (
         btcb2.coverage(Branch::External),
         bitcoin.coverage(Branch::External),
     ) else {
-        return FreshIndex::NotProven;
+        return None;
     };
     // Indices below a nonzero start were never observed.
     if a.start != 0 || b.start != 0 {
-        return FreshIndex::NotProven;
+        return None;
     }
     let next = match a.last_used.max(b.last_used) {
         Some(index) => index.checked_add(1),
         None => Some(0),
     };
-    match next {
-        Some(index)
-            if a.contains(index)
-                && b.contains(index)
-                && !btcb2
-                    .coins()
-                    .iter()
-                    .chain(bitcoin.coins())
-                    .any(|c| c.branch == Branch::External && c.index == index) =>
+    let first = next?;
+    let mut indices = Vec::with_capacity(count as usize);
+    for offset in 0..count {
+        let index = first.checked_add(offset)?;
+        if !a.contains(index)
+            || !b.contains(index)
+            || btcb2
+                .coins()
+                .iter()
+                .chain(bitcoin.coins())
+                .any(|c| c.branch == Branch::External && c.index == index)
         {
-            FreshIndex::Proven(index)
+            return None;
         }
-        _ => FreshIndex::NotProven,
+        indices.push(index);
     }
+    Some(indices)
 }
 
 /// The Bitcoin mirror of a BTCB2 plan: same descriptors, ranges and gap.
@@ -400,6 +591,179 @@ pub struct TwoChainScan {
     pub btcb2: ScanReport,
     pub bitcoin: ScanReport,
     pub inventory: SplitInventory,
+}
+
+/// Source-owned BTCB2 inputs recovered from a post-Bitcoin scan. The Bitcoin
+/// block references must come from a fresh canonical post-Bitcoin collector;
+/// these coins are construction data, never signing or send authority.
+#[derive(Debug)]
+pub struct PostBitcoinSplitCoins {
+    pub shared: Vec<SplitCoin>,
+    pub funding: SplitCoin,
+}
+
+impl TwoChainScan {
+    /// Rebuild the fork-side input data after the Bitcoin spend has removed
+    /// the shared outputs from that chain's UTXO scan. Require the collector's
+    /// canonical Bitcoin blocks to agree exactly with the BTCB2 scan.
+    #[allow(dead_code)] // Used when the stage-two coordinator opens the pair.
+    #[allow(clippy::too_many_arguments)]
+    pub fn post_bitcoin_fork_coins(
+        &self,
+        source: &SplitSource,
+        shared_blocks: &[(OutPoint, BlockRef)],
+        fork_funding: OutPoint,
+        fork_funding_index: u32,
+        expected_generation: u64,
+        tips: PreflightTips,
+    ) -> Result<PostBitcoinSplitCoins, InventoryError> {
+        let shared_outpoints: Vec<_> = shared_blocks
+            .iter()
+            .map(|(outpoint, _)| *outpoint)
+            .collect();
+        self.reconcile_post_bitcoin_split(
+            source,
+            &shared_outpoints,
+            fork_funding,
+            fork_funding_index,
+            expected_generation,
+            tips,
+        )?;
+        let mut shared = Vec::with_capacity(shared_blocks.len());
+        for (outpoint, bitcoin_block) in shared_blocks {
+            let coin = self
+                .btcb2
+                .coins()
+                .iter()
+                .find(|coin| coin.outpoint == *outpoint)
+                .ok_or(InventoryError::Stale)?;
+            let mut reconstructed = funding_coin(coin, ChainId::BitcoinBlake2b)?;
+            if reconstructed.btcb2_block != Some(*bitcoin_block)
+                || bitcoin_block.height >= self.inventory.fork_height()
+            {
+                return Err(InventoryError::Inconsistent(*outpoint));
+            }
+            reconstructed.bitcoin_block = Some(*bitcoin_block);
+            shared.push(reconstructed);
+        }
+        let saved_funding = self
+            .inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, fork_funding)
+            .ok_or(InventoryError::Stale)?;
+        let current_funding = self
+            .btcb2
+            .coins()
+            .iter()
+            .find(|coin| coin.outpoint == fork_funding)
+            .ok_or(InventoryError::Stale)?;
+        let funding = funding_coin(current_funding, ChainId::BitcoinBlake2b)?;
+        if funding != saved_funding {
+            return Err(InventoryError::Stale);
+        }
+        Ok(PostBitcoinSplitCoins { shared, funding })
+    }
+
+    /// Reconcile a fresh foreign-source scan after the Bitcoin side of an
+    /// ordinary Split confirms. The exact shared inputs must now be absent
+    /// from Bitcoin's scanned UTXO set but remain confirmed and unspent in
+    /// the BTCB2 source; the reserved BTCB2-only input must also remain there.
+    /// Chain ancestry, the exact signed Bitcoin spend, target reservation and
+    /// BTCB2 policy are separate checks for the stage-two coordinator.
+    #[allow(dead_code)] // The stage-two coordinator is not wired yet.
+    pub fn reconcile_post_bitcoin_split(
+        &self,
+        source: &SplitSource,
+        shared: &[OutPoint],
+        fork_funding: OutPoint,
+        fork_funding_index: u32,
+        expected_generation: u64,
+        tips: PreflightTips,
+    ) -> Result<(), InventoryError> {
+        let expected: BTreeSet<_> = shared.iter().copied().collect();
+        let spent_on_bitcoin: BTreeSet<_> = self
+            .inventory
+            .spent_on_bitcoin()
+            .iter()
+            .map(|coin| coin.outpoint)
+            .collect();
+        let fork_pre_fork: BTreeSet<_> = self
+            .btcb2
+            .coins()
+            .iter()
+            .filter(|coin| self.btcb2.fork_side(coin) == ForkSide::PreFork)
+            .map(|coin| coin.outpoint)
+            .collect();
+        if self.bitcoin.chain() != ChainId::Bitcoin
+            || self.btcb2.chain() != ChainId::BitcoinBlake2b
+            || self.bitcoin.generation() != expected_generation
+            || self.btcb2.generation() != expected_generation
+            || self.inventory.generation() != expected_generation
+            || self.bitcoin.tip() != tips.bitcoin.hash
+            || u64::from(self.bitcoin.tip_height()) != tips.bitcoin.height
+            || self.btcb2.tip() != tips.fork.hash
+            || u64::from(self.btcb2.tip_height()) != tips.fork.height
+            || expected.is_empty()
+            || expected.len() != shared.len()
+            || expected.contains(&fork_funding)
+            || expected != spent_on_bitcoin
+            || expected != fork_pre_fork
+        {
+            return Err(InventoryError::Stale);
+        }
+        let funding = self
+            .inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, fork_funding)
+            .ok_or(InventoryError::Stale)?;
+        if funding.branch != SplitBranch::External || funding.index != fork_funding_index {
+            return Err(InventoryError::Stale);
+        }
+        for outpoint in expected
+            .iter()
+            .copied()
+            .chain(std::iter::once(fork_funding))
+        {
+            let coin = self
+                .btcb2
+                .coins()
+                .iter()
+                .find(|coin| coin.outpoint == outpoint)
+                .ok_or(InventoryError::Stale)?;
+            let other_coverage = self
+                .bitcoin
+                .coverage(coin.branch)
+                .ok_or(InventoryError::Stale)?;
+            let fork_coverage = self
+                .btcb2
+                .coverage(coin.branch)
+                .ok_or(InventoryError::Stale)?;
+            let descriptor = match coin.branch {
+                Branch::External => source.external(),
+                Branch::Internal => source.internal().ok_or(InventoryError::Stale)?,
+            };
+            let owned_script = descriptor
+                .at_derivation_index(coin.index)
+                .map_err(|_| InventoryError::Stale)?
+                .script_pubkey();
+            if !other_coverage.contains(coin.index)
+                || !fork_coverage.contains(coin.index)
+                || !coin.confirmed
+                || coin
+                    .block_height
+                    .is_none_or(|height| height > self.btcb2.tip_height())
+                || coin.previous.compute_txid() != outpoint.txid
+                || coin.previous.output.get(outpoint.vout as usize) != Some(&coin.output)
+                || coin.output.script_pubkey != owned_script
+                || (outpoint == fork_funding
+                    && (coin.branch != Branch::External
+                        || coin.index != fork_funding_index
+                        || self.btcb2.fork_side(coin) != ForkSide::PostFork))
+                || (outpoint != fork_funding && self.btcb2.fork_side(coin) != ForkSide::PreFork)
+            {
+                return Err(InventoryError::Stale);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Scan both chains under one generation. Cancelling the generation cancels
@@ -466,6 +830,8 @@ mod tests {
         secp256k1::Secp256k1,
         transaction, Amount, Transaction, TxIn, TxOut,
     };
+    use coincube_core::miniscript::{Descriptor, DescriptorPublicKey};
+    use std::str::FromStr;
 
     const FORK: u64 = 100;
 
@@ -479,6 +845,16 @@ mod tests {
 
     fn descriptor() -> ScanDescriptor {
         descriptor_at("*")
+    }
+
+    fn source(seed: u8) -> SplitSource {
+        let xpub = Xpub::from_priv(
+            &Secp256k1::new(),
+            &Xpriv::new_master(bitcoin::Network::Bitcoin, &[seed; 32]).unwrap(),
+        );
+        let external =
+            Descriptor::<DescriptorPublicKey>::from_str(&format!("wpkh({xpub}/0/*)")).unwrap();
+        SplitSource::new(external, None).unwrap()
     }
 
     fn hash(height: u32) -> BlockHash {
@@ -590,10 +966,336 @@ mod tests {
             vec![bitcoin_post.outpoint]
         );
         assert_eq!(
+            inventory
+                .btcb2_only_post_fork()
+                .iter()
+                .map(|c| c.display().outpoint)
+                .collect::<Vec<_>>(),
+            vec![btcb2_post.outpoint]
+        );
+        let bitcoin_funding = inventory
+            .funding_candidate(ChainId::Bitcoin, bitcoin_post.outpoint)
+            .unwrap();
+        assert_eq!(bitcoin_funding.previous, bitcoin_post.previous);
+        assert_eq!(bitcoin_funding.bitcoin_block.unwrap().height, 150);
+        assert!(bitcoin_funding.btcb2_block.is_none());
+        assert_eq!(
+            inventory.funding_candidates(ChainId::Bitcoin),
+            vec![bitcoin_funding.clone()]
+        );
+        let fork_funding = inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, btcb2_post.outpoint)
+            .unwrap();
+        assert_eq!(fork_funding.previous, btcb2_post.previous);
+        assert_eq!(fork_funding.btcb2_block.unwrap().height, 151);
+        assert!(fork_funding.bitcoin_block.is_none());
+        assert_eq!(
+            inventory.funding_candidates(ChainId::BitcoinBlake2b),
+            vec![fork_funding.clone()]
+        );
+        let reserved = inventory.funding_at_reserved_addresses(FreshFundingAddresses {
+            bitcoin_deposit: 3,
+            btcb2_deposit: 4,
+            bitcoin_return: 6,
+        });
+        assert_eq!(reserved.funding_candidates(ChainId::Bitcoin).len(), 1);
+        assert_eq!(
+            reserved.funding_candidates(ChainId::BitcoinBlake2b).len(),
+            1
+        );
+        let mut with_earlier_small_deposit = reserved.clone();
+        let mut small = bitcoin_funding.clone();
+        small.previous.output[0].value = Amount::from_sat(1_000);
+        small.outpoint.txid = small.previous.compute_txid();
+        with_earlier_small_deposit
+            .bitcoin_funding_candidates
+            .insert(small.outpoint, small.clone());
+        let mut later = bitcoin_funding.clone();
+        later.previous.output[0].value = Amount::from_sat(6_000);
+        later.outpoint.txid = later.previous.compute_txid();
+        with_earlier_small_deposit
+            .bitcoin_funding_candidates
+            .insert(later.outpoint, later.clone());
+        let exact = with_earlier_small_deposit
+            .funding_at_outpoints(bitcoin_funding.outpoint, fork_funding.outpoint);
+        assert_eq!(
+            exact.funding_candidates(ChainId::Bitcoin),
+            vec![bitcoin_funding.clone()]
+        );
+        assert_eq!(
+            exact.funding_candidates(ChainId::BitcoinBlake2b),
+            vec![fork_funding.clone()]
+        );
+        assert!(with_earlier_small_deposit
+            .funding_at_outpoints(OutPoint::null(), fork_funding.outpoint)
+            .funding_candidates(ChainId::Bitcoin)
+            .is_empty());
+        let eligible = with_earlier_small_deposit
+            .funding_covering_estimated_fees(4_000, 5_000)
+            .funding_candidates(ChainId::Bitcoin);
+        assert_eq!(eligible.len(), 2);
+        assert!(eligible.contains(&bitcoin_funding));
+        assert!(eligible.contains(&later));
+        let bitcoin_too_small = reserved.funding_covering_estimated_fees(4_001, 5_000);
+        assert!(bitcoin_too_small
+            .funding_candidates(ChainId::Bitcoin)
+            .is_empty());
+        assert_eq!(
+            bitcoin_too_small.funding_candidates(ChainId::BitcoinBlake2b),
+            vec![fork_funding.clone()]
+        );
+        let fork_too_small = reserved.funding_covering_estimated_fees(4_000, 5_001);
+        assert_eq!(
+            fork_too_small.funding_candidates(ChainId::Bitcoin),
+            vec![bitcoin_funding.clone()]
+        );
+        assert!(fork_too_small
+            .funding_candidates(ChainId::BitcoinBlake2b)
+            .is_empty());
+        let elsewhere = inventory.funding_at_reserved_addresses(FreshFundingAddresses {
+            bitcoin_deposit: 4,
+            btcb2_deposit: 3,
+            bitcoin_return: 6,
+        });
+        assert!(elsewhere.funding_candidates(ChainId::Bitcoin).is_empty());
+        assert!(elsewhere
+            .funding_candidates(ChainId::BitcoinBlake2b)
+            .is_empty());
+        assert!(inventory
+            .funding_candidate(ChainId::Bitcoin, btcb2_post.outpoint)
+            .is_none());
+        assert!(inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, both.outpoint)
+            .is_none());
+        assert_eq!(
             outpoints(inventory.pending()),
             vec![replayed.outpoint, bitcoin_unconfirmed.outpoint]
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
+        assert_eq!(
+            inventory.fresh_deposit_addresses(),
+            Some(FreshDepositAddresses {
+                bitcoin_deposit: 6,
+                btcb2_deposit: 7,
+            })
+        );
+        assert_eq!(
+            inventory.fresh_funding_addresses(),
+            Some(FreshFundingAddresses {
+                bitcoin_deposit: 6,
+                btcb2_deposit: 7,
+                bitcoin_return: 8,
+            })
+        );
+    }
+
+    #[test]
+    fn post_bitcoin_split_rechecks_exact_source_coins_and_fork_funding() {
+        let shared = coin(1, 0, 10_000, Some(90));
+        let funding = coin(2, 1, 10_000, Some(150));
+        let bitcoin = report(ChainId::Bitcoin, vec![], walk(10, Some(1))).with_tip_height(200);
+        let btcb2 = report(
+            ChainId::BitcoinBlake2b,
+            vec![shared.clone(), funding.clone()],
+            walk(10, Some(1)),
+        )
+        .with_tip_height(200);
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        let scan = TwoChainScan {
+            bitcoin,
+            btcb2,
+            inventory,
+        };
+        let tips = PreflightTips {
+            bitcoin: BlockRef {
+                height: 200,
+                hash: hash(200),
+            },
+            fork: BlockRef {
+                height: 200,
+                hash: hash(200),
+            },
+        };
+        assert_eq!(
+            scan.reconcile_post_bitcoin_split(
+                &source(42),
+                &[shared.outpoint],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            ),
+            Ok(())
+        );
+        let shared_block = BlockRef {
+            height: 90,
+            hash: hash(90),
+        };
+        let recovered = scan
+            .post_bitcoin_fork_coins(
+                &source(42),
+                &[(shared.outpoint, shared_block)],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            )
+            .unwrap();
+        assert_eq!(recovered.shared.len(), 1);
+        assert_eq!(recovered.shared[0].previous, shared.previous);
+        assert_eq!(recovered.shared[0].bitcoin_block, Some(shared_block));
+        assert_eq!(recovered.shared[0].btcb2_block, Some(shared_block));
+        assert_eq!(recovered.funding.previous, funding.previous);
+        assert!(recovered.funding.bitcoin_block.is_none());
+        assert_eq!(
+            scan.post_bitcoin_fork_coins(
+                &source(42),
+                &[(
+                    shared.outpoint,
+                    BlockRef {
+                        height: 90,
+                        hash: hash(89),
+                    },
+                )],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            )
+            .err(),
+            Some(InventoryError::Inconsistent(shared.outpoint))
+        );
+        for (source, shared, index) in [
+            (source(43), vec![shared.outpoint], 1),
+            (source(42), vec![], 1),
+            (source(42), vec![shared.outpoint], 2),
+        ] {
+            assert_eq!(
+                scan.reconcile_post_bitcoin_split(
+                    &source,
+                    &shared,
+                    funding.outpoint,
+                    index,
+                    5,
+                    tips,
+                ),
+                Err(InventoryError::Stale)
+            );
+        }
+        assert_eq!(
+            scan.reconcile_post_bitcoin_split(
+                &source(42),
+                &[shared.outpoint],
+                funding.outpoint,
+                1,
+                5,
+                PreflightTips {
+                    fork: BlockRef {
+                        height: 201,
+                        hash: hash(201),
+                    },
+                    ..tips
+                },
+            ),
+            Err(InventoryError::Stale)
+        );
+        let spent_funding_scan = TwoChainScan {
+            bitcoin: scan.bitcoin.clone(),
+            btcb2: report(
+                ChainId::BitcoinBlake2b,
+                vec![shared.clone()],
+                walk(10, Some(1)),
+            )
+            .with_tip_height(200),
+            inventory: scan.inventory.clone(),
+        };
+        assert_eq!(
+            spent_funding_scan.reconcile_post_bitcoin_split(
+                &source(42),
+                &[shared.outpoint],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            ),
+            Err(InventoryError::Stale)
+        );
+        let mut changed_funding = funding.clone();
+        changed_funding.previous.output[0].value = Amount::from_sat(9_999);
+        changed_funding.output.value = Amount::from_sat(9_999);
+        let changed_funding_scan = TwoChainScan {
+            bitcoin: scan.bitcoin.clone(),
+            btcb2: report(
+                ChainId::BitcoinBlake2b,
+                vec![shared.clone(), changed_funding],
+                walk(10, Some(1)),
+            )
+            .with_tip_height(200),
+            inventory: scan.inventory.clone(),
+        };
+        assert!(changed_funding_scan
+            .post_bitcoin_fork_coins(
+                &source(42),
+                &[(shared.outpoint, shared_block)],
+                funding.outpoint,
+                1,
+                5,
+                tips,
+            )
+            .is_err());
+    }
+
+    #[test]
+    fn two_fresh_deposit_addresses_do_not_require_a_third_split_return() {
+        let btcb2 = report(ChainId::BitcoinBlake2b, Vec::new(), walk(8, Some(5)));
+        let bitcoin = report(ChainId::Bitcoin, Vec::new(), walk(8, Some(5)));
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        assert_eq!(
+            inventory.fresh_deposit_addresses(),
+            Some(FreshDepositAddresses {
+                bitcoin_deposit: 6,
+                btcb2_deposit: 7,
+            })
+        );
+        assert_eq!(inventory.fresh_funding_addresses(), None);
+    }
+
+    #[test]
+    fn post_fork_candidate_requires_other_chains_address_coverage() {
+        let fork_coin = coin(8, 8, 2_000, Some(150));
+        let bitcoin_coin = coin(9, 9, 3_000, Some(151));
+        let btcb2 = report(
+            ChainId::BitcoinBlake2b,
+            vec![fork_coin.clone()],
+            walk(9, Some(8)),
+        );
+        let bitcoin = report(ChainId::Bitcoin, vec![bitcoin_coin.clone()], walk(8, None));
+        let inventory = SplitInventory::join(&btcb2, &bitcoin, 5, true).unwrap();
+        assert_eq!(inventory.btcb2_post_fork().len(), 1);
+        assert!(inventory.btcb2_only_post_fork().is_empty());
+        assert!(inventory.bitcoin_only_post_fork().is_empty());
+        assert!(inventory
+            .funding_candidate(ChainId::BitcoinBlake2b, fork_coin.outpoint)
+            .is_none());
+        assert!(inventory
+            .funding_candidate(ChainId::Bitcoin, bitcoin_coin.outpoint)
+            .is_none());
+    }
+
+    #[test]
+    fn malformed_funding_candidate_cannot_enter_transaction_inventory() {
+        let mut wrong_previous = coin(10, 10, 10_000, Some(150));
+        wrong_previous.previous.output[0].value = Amount::from_sat(9_999);
+        let btcb2 = report(ChainId::BitcoinBlake2b, Vec::new(), walk(26, None));
+        let bitcoin = report(
+            ChainId::Bitcoin,
+            vec![wrong_previous.clone()],
+            walk(26, Some(10)),
+        );
+        assert_eq!(
+            SplitInventory::join(&btcb2, &bitcoin, 5, true),
+            Err(InventoryError::Inconsistent(wrong_previous.outpoint))
+        );
     }
 
     /// #568 B1a: each splittable coin is a step-1 input with its previous
@@ -752,6 +1454,15 @@ mod tests {
         let mut late = walk(20, None);
         late[0].start = 5;
         assert_eq!(fresh(late, walk(20, None), true), FreshIndex::NotProven);
+        let too_narrow = SplitInventory::join(
+            &report(ChainId::BitcoinBlake2b, vec![], walk(9, Some(7))),
+            &report(ChainId::Bitcoin, vec![], walk(20, Some(7))),
+            5,
+            true,
+        )
+        .unwrap();
+        assert_eq!(too_narrow.fresh_receive(), FreshIndex::Proven(8));
+        assert_eq!(too_narrow.fresh_funding_addresses(), None);
         // A coin at the candidate index contradicts "unused": refuse it.
         let inventory = SplitInventory::join(
             &report(
@@ -960,7 +1671,7 @@ mod tests {
     /// No code outside this module and the Split panel's display may name a
     /// poison candidate: absence on BTCB2 is never poison proof.
     #[test]
-    fn split_bitcoin_only_candidates_are_display_only() {
+    fn split_funding_candidates_are_display_only() {
         fn walk_dir(dir: &std::path::Path, hits: &mut Vec<String>) {
             for entry in std::fs::read_dir(dir).unwrap() {
                 let path = entry.unwrap().path();
@@ -968,7 +1679,10 @@ mod tests {
                     walk_dir(&path, hits);
                 } else if path.extension().is_some_and(|e| e == "rs") {
                     let text = std::fs::read_to_string(&path).unwrap();
-                    if text.contains("PoisonCandidate") || text.contains("bitcoin_only_post_fork") {
+                    if text.contains("PoisonCandidate")
+                        || text.contains("bitcoin_only_post_fork")
+                        || text.contains("btcb2_only_post_fork")
+                    {
                         hits.push(path.file_name().unwrap().to_string_lossy().into_owned());
                     }
                 }
@@ -985,7 +1699,9 @@ mod tests {
         let panel = include_str!("../split_wallet.rs");
         let uses: Vec<_> = panel
             .lines()
-            .filter(|line| line.contains("bitcoin_only_post_fork"))
+            .filter(|line| {
+                line.contains("bitcoin_only_post_fork") || line.contains("btcb2_only_post_fork")
+            })
             .collect();
         assert!(!uses.is_empty());
         assert!(

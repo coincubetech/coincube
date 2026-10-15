@@ -4,8 +4,8 @@ use coincube_core::{
     claim_ancestry::retained::{RetainedPath, MAX_ENCODED_BYTES},
     claim_finalize::{verify_ancestry_transaction, VerifiedAncestryTransfer},
     claim_spend::{
-        reconstruct_ancestry_fork_sweep, reconstruct_ancestry_self_transfer, AncestrySelfTransfer,
-        ClaimForkSweep,
+        reconstruct_ancestry_fork_sweep, reconstruct_ancestry_fork_sweep_with_marker,
+        reconstruct_ancestry_self_transfer, AncestrySelfTransfer, ClaimForkSweep,
     },
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::OutPoint,
@@ -16,19 +16,124 @@ use std::collections::BTreeSet;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct StoredAncestry {
-    selected: OutPoint,
-    raw: String,
+    pub(super) selected: OutPoint,
+    pub(super) raw: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    derivation: Option<StoredDerivation>,
+    pub(super) derivation: Option<StoredDerivation>,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredDerivation {
-    index: u32,
-    is_change: bool,
+pub(super) struct StoredDerivation {
+    pub(super) index: u32,
+    pub(super) is_change: bool,
+}
+/// Version-10 Claim metadata. Both paths are structural records only; a
+/// restart must rebuild and recollect live proof before any signing or send.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct StoredFundingPlan {
+    pub(super) fork: StoredAncestry,
+    pub(super) step2_unsigned: Transaction,
+    pub(super) bitcoin_feerate_vb: u64,
+    pub(super) fork_feerate_vb: u64,
+    pub(super) fork_change_index: u32,
+}
+
+impl StoredFundingPlan {
+    pub(super) fn fork_selected(&self) -> OutPoint {
+        self.fork.selected
+    }
+    fn validate(&self, intent: &Intent, bitcoin: &StoredAncestry) -> Result<(), Error> {
+        let p = &intent.plan;
+        let bitcoin_path = bitcoin.decode()?;
+        let fork_path = self.fork.decode()?;
+        let shared: BTreeSet<_> = p.claimed_prevouts.iter().copied().collect();
+        let mut first: BTreeSet<_> = p.step1.input.iter().map(|i| i.previous_output).collect();
+        let mut second: BTreeSet<_> = self
+            .step2_unsigned
+            .input
+            .iter()
+            .map(|i| i.previous_output)
+            .collect();
+        if !matches!(
+            (p.bitcoin_chain, p.fork_chain),
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+                | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+        ) || p.poison != Poison::InputAncestry
+            || p.tracked_txid.is_some()
+            || bitcoin.derivation.is_none()
+            || self.fork.derivation.is_none()
+            || self.fork_change_index >= (1 << 31)
+            || !(1..=coincube_core::spend::MAX_FEERATE).contains(&self.bitcoin_feerate_vb)
+            || !(1..=coincube_core::spend::MAX_FEERATE).contains(&self.fork_feerate_vb)
+            || shared.is_empty()
+            || shared.len() != p.claimed_prevouts.len()
+            || first.len() != p.step1.input.len()
+            || second.len() != self.step2_unsigned.input.len()
+            || !first.remove(&bitcoin_path.selected())
+            || !second.remove(&fork_path.selected())
+            || bitcoin_path.selected() == fork_path.selected()
+            || first != shared
+            || second != shared
+            || self.step2_unsigned.output.len() != 1
+            || !self.step2_unsigned.output[0].script_pubkey.is_p2wsh()
+            || self.step2_unsigned.output[0].value
+                == coincube_core::miniscript::bitcoin::Amount::ZERO
+            || self.step2_unsigned.input.iter().any(|input| {
+                input.previous_output.is_null()
+                    || !input.script_sig.is_empty()
+                    || !input.witness.is_empty()
+            })
+            || p.step1.output.len() != 1
+            || !p.step1.output[0].script_pubkey.is_p2wsh()
+            || p.step1.output[0].value == coincube_core::miniscript::bitcoin::Amount::ZERO
+            || intent
+                .fork_change_index
+                .is_some_and(|i| i != self.fork_change_index)
+            || intent
+                .fork_sweep
+                .as_ref()
+                .is_some_and(|sweep| sweep != &self.step2_unsigned)
+        {
+            return Err(Error::InvalidPlan);
+        }
+        Ok(())
+    }
+}
+
+/// The journal's fee rate must describe the exact unsigned transaction, not
+/// merely fall within the policy range. A different rate after restart is a
+/// different construction even when a caller supplies the same PSBT bytes.
+fn exact_claim_fee_rate(
+    psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+    descriptor: &CoincubeDescriptor,
+    rate: u64,
+) -> bool {
+    let Some(inputs) = psbt.inputs.iter().try_fold(0u64, |sum, input| {
+        sum.checked_add(input.witness_utxo.as_ref()?.value.to_sat())
+    }) else {
+        return false;
+    };
+    let Some(outputs) = psbt
+        .unsigned_tx
+        .output
+        .iter()
+        .try_fold(0u64, |sum, output| sum.checked_add(output.value.to_sat()))
+    else {
+        return false;
+    };
+    matches!(
+        (
+            inputs.checked_sub(outputs),
+            descriptor
+                .unsigned_tx_max_vbytes(&psbt.unsigned_tx, true)
+                .checked_mul(rate),
+        ),
+        (Some(actual), Some(expected)) if actual == expected
+    )
 }
 impl StoredAncestry {
-    fn decode(&self) -> Result<RetainedPath, Error> {
+    pub(super) fn decode(&self) -> Result<RetainedPath, Error> {
         if self.raw.len() > 2 * MAX_ENCODED_BYTES
             || self
                 .derivation
@@ -40,6 +145,75 @@ impl StoredAncestry {
         let raw = hex::decode(&self.raw).map_err(|_| Error::InvalidJournal)?;
         RetainedPath::decode(self.selected, &raw).map_err(|_| Error::InvalidJournal)
     }
+
+    fn owned_input(
+        &self,
+        descriptor: &CoincubeDescriptor,
+    ) -> Result<Option<(CandidateCoin, Transaction)>, Error> {
+        let path = self.decode()?;
+        let Some(hint) = self.derivation.as_ref() else {
+            return Ok(None);
+        };
+        let index =
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(hint.index)
+                .map_err(|_| Error::InvalidJournal)?;
+        let raw = path.links().first().ok_or(Error::InvalidJournal)?;
+        let transaction: Transaction =
+            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw.transaction)
+                .map_err(|_| Error::InvalidJournal)?;
+        if transaction.compute_txid() != self.selected.txid {
+            return Err(Error::InvalidJournal);
+        }
+        let output = transaction
+            .output
+            .get(self.selected.vout as usize)
+            .ok_or(Error::InvalidJournal)?;
+        let derived = if hint.is_change {
+            descriptor.change_descriptor()
+        } else {
+            descriptor.receive_descriptor()
+        }
+        .derive(
+            index,
+            &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        );
+        if derived.script_pubkey() != output.script_pubkey {
+            return Err(Error::InvalidJournal);
+        }
+        Ok(Some((
+            CandidateCoin {
+                outpoint: self.selected,
+                amount: output.value,
+                deriv_index: index,
+                is_change: hint.is_change,
+                must_select: true,
+                sequence: None,
+                ancestor_info: None,
+            },
+            transaction,
+        )))
+    }
+}
+
+fn ordered_exact_coins(
+    transaction: &Transaction,
+    coins: &[CandidateCoin],
+) -> Result<Vec<CandidateCoin>, Error> {
+    let by_outpoint: std::collections::BTreeMap<_, _> =
+        coins.iter().map(|coin| (coin.outpoint, coin)).collect();
+    if by_outpoint.len() != coins.len() || coins.len() != transaction.input.len() {
+        return Err(Error::InvalidPlan);
+    }
+    transaction
+        .input
+        .iter()
+        .map(|input| {
+            by_outpoint
+                .get(&input.previous_output)
+                .map(|coin| **coin)
+                .ok_or(Error::InvalidPlan)
+        })
+        .collect()
 }
 pub(super) fn validate_poison(intent: &Intent) -> Result<(), Error> {
     let p = &intent.plan;
@@ -71,6 +245,13 @@ pub(super) fn validate_poison(intent: &Intent) -> Result<(), Error> {
             {
                 return Err(Error::InvalidPlan);
             }
+        }
+        (Some(stored), Poison::InputAncestry) if intent.version == 10 => {
+            intent
+                .funding_plan
+                .as_ref()
+                .ok_or(Error::InvalidPlan)?
+                .validate(intent, stored)?;
         }
         _ => return Err(Error::InvalidPlan),
     }
@@ -224,7 +405,190 @@ impl Controller {
                     is_change: artifact.poison_derivation().1,
                 }),
             }),
+            None,
         )
+    }
+
+    /// Persist both ordinary transactions and the two raw dependency paths
+    /// atomically. This is an unchecked intent, never cached spend authority.
+    /// The fork marker's derivation is checked against the same Vault descriptor
+    /// that constructed both PSBTs before the record is written.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_ancestry_pair(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        bitcoin: &AncestrySelfTransfer,
+        bitcoin_path: &RetainedPath,
+        fork: &ClaimForkSweep,
+        fork_path: &RetainedPath,
+        fork_marker_derivation: (coincube_core::miniscript::bitcoin::bip32::ChildNumber, bool),
+        bitcoin_feerate_vb: u64,
+        fork_feerate_vb: u64,
+        context: Context,
+    ) -> Result<Self, Error> {
+        bitcoin_path.reverify().map_err(|_| Error::InvalidPlan)?;
+        fork_path.reverify().map_err(|_| Error::InvalidPlan)?;
+        if !matches!(
+            (bitcoin.chain(), fork.chain()),
+            (ChainId::Bitcoin, ChainId::BitcoinBlake2b)
+                | (ChainId::Testnet4, ChainId::BitcoinBlake2bTestnet4)
+        ) || bitcoin_path.selected() != bitcoin.poison_input()
+            || fork.fork_marker() != Some(fork_path.selected())
+            || fork.bitcoin_step1() != bitcoin.psbt().unsigned_tx.compute_txid()
+            || fork.descriptor() != bitcoin.descriptor()
+            || fork_marker_derivation.0.is_hardened()
+            || !exact_claim_fee_rate(bitcoin.psbt(), bitcoin.descriptor(), bitcoin_feerate_vb)
+            || !exact_claim_fee_rate(fork.psbt(), fork.descriptor(), fork_feerate_vb)
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let raw = fork_path.links().first().ok_or(Error::InvalidPlan)?;
+        let previous: Transaction =
+            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw.transaction)
+                .map_err(|_| Error::InvalidPlan)?;
+        let output = previous
+            .output
+            .get(fork_path.selected().vout as usize)
+            .ok_or(Error::InvalidPlan)?;
+        let descriptor = if fork_marker_derivation.1 {
+            bitcoin.descriptor().change_descriptor()
+        } else {
+            bitcoin.descriptor().receive_descriptor()
+        };
+        if descriptor
+            .derive(
+                fork_marker_derivation.0,
+                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
+            .script_pubkey()
+            != output.script_pubkey
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let identity = WalletIdentity {
+            bitcoin_cube,
+            fork_cube,
+            descriptor_digest: sha256::Hash::hash(bitcoin.descriptor().to_string().as_bytes()),
+        };
+        Self::create_intent_with_ancestry(
+            directory,
+            identity,
+            ClaimPlan {
+                bitcoin_chain: bitcoin.chain(),
+                fork_chain: fork.chain(),
+                step1: bitcoin.psbt().unsigned_tx.clone(),
+                claimed_prevouts: bitcoin.claimed_prevouts().to_vec(),
+                poison: Poison::InputAncestry,
+                previous_confirmation: None,
+                tracked_txid: None,
+            },
+            context,
+            Some(u32::from(bitcoin.change_index())),
+            Some(StoredAncestry {
+                selected: bitcoin_path.selected(),
+                raw: hex::encode(bitcoin_path.encode()),
+                derivation: Some(StoredDerivation {
+                    index: u32::from(bitcoin.poison_derivation().0),
+                    is_change: bitcoin.poison_derivation().1,
+                }),
+            }),
+            Some(StoredFundingPlan {
+                fork: StoredAncestry {
+                    selected: fork_path.selected(),
+                    raw: hex::encode(fork_path.encode()),
+                    derivation: Some(StoredDerivation {
+                        index: u32::from(fork_marker_derivation.0),
+                        is_change: fork_marker_derivation.1,
+                    }),
+                },
+                step2_unsigned: fork.psbt().unsigned_tx.clone(),
+                bitcoin_feerate_vb,
+                fork_feerate_vb,
+                fork_change_index: u32::from(fork.change_index()),
+            }),
+        )
+    }
+
+    /// Persist the first exact pair, or reopen that same unchecked intent on
+    /// a deposit recheck. A changed transaction, dependency path, fee quote or
+    /// destination cannot silently replace a previously reviewed pair. This
+    /// only establishes durable identity; it grants no signing authority.
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_or_reopen_ancestry_pair(
+        directory: &Path,
+        bitcoin_cube: String,
+        fork_cube: String,
+        bitcoin: &AncestrySelfTransfer,
+        bitcoin_path: &RetainedPath,
+        fork: &ClaimForkSweep,
+        fork_path: &RetainedPath,
+        fork_marker_derivation: (coincube_core::miniscript::bitcoin::bip32::ChildNumber, bool),
+        bitcoin_feerate_vb: u64,
+        fork_feerate_vb: u64,
+        context: Context,
+    ) -> Result<Self, Error> {
+        match Self::create_ancestry_pair(
+            directory,
+            bitcoin_cube.clone(),
+            fork_cube.clone(),
+            bitcoin,
+            bitcoin_path,
+            fork,
+            fork_path,
+            fork_marker_derivation,
+            bitcoin_feerate_vb,
+            fork_feerate_vb,
+            context.clone(),
+        ) {
+            Ok(controller) => Ok(controller),
+            Err(Error::Conflict) => {
+                let identity = WalletIdentity {
+                    bitcoin_cube,
+                    fork_cube,
+                    descriptor_digest: sha256::Hash::hash(
+                        bitcoin.descriptor().to_string().as_bytes(),
+                    ),
+                };
+                let controller = Self::reopen_settling_blocking(directory, &identity, context)?;
+                let saved_fork = controller
+                    .intent
+                    .funding_plan
+                    .as_ref()
+                    .ok_or(Error::WrongIdentity)?;
+                let saved_bitcoin_path = controller
+                    .intent
+                    .ancestry
+                    .as_ref()
+                    .ok_or(Error::WrongIdentity)?;
+                let saved_fork_path = &saved_fork.fork;
+                if controller.intent.version != 10
+                    || controller.intent.phase != Phase::Intent
+                    || controller.intent.plan.step1 != bitcoin.psbt().unsigned_tx
+                    || saved_fork.step2_unsigned != fork.psbt().unsigned_tx
+                    || controller.intent.plan.claimed_prevouts != bitcoin.claimed_prevouts()
+                    || saved_bitcoin_path.raw != hex::encode(bitcoin_path.encode())
+                    || saved_fork_path.raw != hex::encode(fork_path.encode())
+                    || saved_fork
+                        .fork
+                        .derivation
+                        .as_ref()
+                        .is_none_or(|derivation| {
+                            (derivation.index, derivation.is_change)
+                                != (
+                                    u32::from(fork_marker_derivation.0),
+                                    fork_marker_derivation.1,
+                                )
+                        })
+                    || saved_fork.bitcoin_feerate_vb != bitcoin_feerate_vb
+                    || saved_fork.fork_feerate_vb != fork_feerate_vb
+                {
+                    return Err(Error::Conflict);
+                }
+                Ok(controller)
+            }
+            Err(error) => Err(error),
+        }
     }
     /// Reverified structural links only. Callers must obtain new positive chain
     /// observations and rebuild owned construction before any further action.
@@ -251,49 +615,154 @@ impl Controller {
         {
             return Err(Error::WrongIdentity);
         }
-        let Some(stored) = self.intent.ancestry.as_ref() else {
-            return Ok(None);
-        };
-        let path = stored.decode()?;
-        let Some(hint) = stored.derivation.as_ref() else {
-            return Ok(None);
-        };
-        let index =
-            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(hint.index)
-                .map_err(|_| Error::InvalidJournal)?;
-        let raw = path.links().first().ok_or(Error::InvalidJournal)?;
-        let transaction: Transaction =
-            coincube_core::miniscript::bitcoin::consensus::deserialize(&raw.transaction)
-                .map_err(|_| Error::InvalidJournal)?;
-        if transaction.compute_txid() != stored.selected.txid {
-            return Err(Error::InvalidJournal);
+        self.intent
+            .ancestry
+            .as_ref()
+            .map(|stored| stored.owned_input(descriptor))
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    /// Check a fresh two-chain marker and shared-input collection against
+    /// this exact saved pair and owned constructions. This is review-only:
+    /// the controller stays unchecked until reservations and a second
+    /// preflight are bound by the signer admission path.
+    #[allow(clippy::too_many_arguments)]
+    pub fn validate_ancestry_pair_observation(
+        &mut self,
+        current: &Context,
+        pair: &crate::services::claim_observation::http::CollectedSpendInputs,
+        bitcoin_coin: &CandidateCoin,
+        fork_coin: &CandidateCoin,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<(), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        if self.intent.version != 10 || self.intent.phase != Phase::Intent {
+            return Err(Error::Unchecked);
         }
-        let output = transaction
-            .output
-            .get(stored.selected.vout as usize)
+        let funding = self
+            .intent
+            .funding_plan
+            .as_ref()
             .ok_or(Error::InvalidJournal)?;
-        let derived = if hint.is_change {
-            descriptor.change_descriptor()
-        } else {
-            descriptor.receive_descriptor()
+        let bitcoin_hint = self
+            .intent
+            .ancestry
+            .as_ref()
+            .and_then(|stored| stored.derivation.as_ref())
+            .ok_or(Error::InvalidJournal)?;
+        let fork_hint = funding
+            .fork
+            .derivation
+            .as_ref()
+            .ok_or(Error::InvalidJournal)?;
+        let bitcoin_path = self.recorded_ancestry()?.ok_or(Error::InvalidJournal)?;
+        let fork_path = funding.fork.decode()?;
+        if bitcoin.psbt().unsigned_tx != self.intent.plan.step1
+            || fork.psbt().unsigned_tx != funding.step2_unsigned
+            || bitcoin.poison_input() != bitcoin_path.selected()
+            || fork.fork_marker() != Some(fork_path.selected())
+            || bitcoin.claimed_prevouts() != self.intent.plan.claimed_prevouts
+            || (bitcoin_hint.index, bitcoin_hint.is_change)
+                != (u32::from(bitcoin_coin.deriv_index), bitcoin_coin.is_change)
+            || (fork_hint.index, fork_hint.is_change)
+                != (u32::from(fork_coin.deriv_index), fork_coin.is_change)
+            || u32::from(bitcoin.change_index())
+                != self.intent.bitcoin_change_index.unwrap_or(u32::MAX)
+            || u32::from(fork.change_index()) != funding.fork_change_index
+            || sha256::Hash::hash(bitcoin.descriptor().to_string().as_bytes())
+                != self.intent.identity.descriptor_digest
+            || !exact_claim_fee_rate(
+                bitcoin.psbt(),
+                bitcoin.descriptor(),
+                funding.bitcoin_feerate_vb,
+            )
+            || !exact_claim_fee_rate(fork.psbt(), fork.descriptor(), funding.fork_feerate_vb)
+        {
+            return Err(Error::WrongIdentity);
         }
-        .derive(
-            index,
+        pair.validate_for_claim(
+            &bitcoin_path,
+            &fork_path,
+            bitcoin_coin,
+            fork_coin,
+            bitcoin,
+            fork,
+            crate::services::claim_observation::http::FundingContext {
+                provider: &current.provider,
+                generation: current.generation,
+                now,
+                max_age_seconds: policy.max_observation_age_seconds,
+                tips,
+            },
+        )
+        .map_err(|_| Error::Unchecked)
+    }
+
+    /// Authenticate both signed ordinary Claim PSBTs against this exact saved
+    /// pair and a fresh two-chain funding collection. The collection is
+    /// consumed only for this check and never persisted as spend authority.
+    /// A coordinator still needs paired mempool preflight, revocable review,
+    /// submission-intent journaling and reorg handling before broadcast.
+    #[allow(clippy::too_many_arguments)]
+    #[allow(dead_code)] // Paired signer route remains gated.
+    pub(crate) fn finalize_ancestry_pair_for_review(
+        &mut self,
+        current: &Context,
+        requalified: &super::claim_funding::RequalifiedInitialClaim,
+        bitcoin: &AncestrySelfTransfer,
+        fork: &ClaimForkSweep,
+        bitcoin_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
+        fork_signed: &coincube_core::psbt_unified::UnifiedPsbt,
+        policy: Policy,
+        now: i64,
+        tips: coincube_core::claim::PreflightTips,
+    ) -> Result<
+        (
+            coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+            super::paired_submission::InitialAncestryProof,
+        ),
+        Error,
+    > {
+        if !requalified.matches_pair(bitcoin, fork) {
+            return Err(Error::WrongIdentity);
+        }
+        let funding = requalified.funding();
+        self.validate_ancestry_pair_observation(
+            current,
+            &funding.inputs,
+            &funding.bitcoin,
+            &funding.fork,
+            bitcoin,
+            fork,
+            policy,
+            now,
+            tips,
+        )?;
+        let signed = coincube_core::claim_finalize::finalize_ancestry_claim_pair(
+            bitcoin,
+            fork,
+            bitcoin_signed,
+            fork_signed,
             &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        let proof = super::paired_submission::InitialAncestryProof::after_finalization(
+            self,
+            current,
+            signed.bitcoin().transaction(),
+            signed.fork().transaction(),
+            tips,
+            funding.inputs.observed_at(),
+            policy.max_observation_age_seconds,
         );
-        if derived.script_pubkey() != output.script_pubkey {
-            return Err(Error::InvalidJournal);
-        }
-        let coin = CandidateCoin {
-            outpoint: stored.selected,
-            amount: output.value,
-            deriv_index: index,
-            is_change: hint.is_change,
-            must_select: true,
-            sequence: None,
-            ancestor_info: None,
-        };
-        Ok(Some((coin, transaction)))
+        Ok((signed, proof))
     }
 
     /// Bind a new positive ancestry collection to the saved intent. This clears
@@ -326,6 +795,111 @@ impl Controller {
             )
             .map_err(|_| Error::Unchecked)
     }
+    /// Rebuild both version-10 transactions from current owned coins and the
+    /// two retained paths. This never restores signing or submission rights:
+    /// fresh two-chain proof and reservation must follow the reconstruction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn restore_ancestry_pair(
+        &mut self,
+        current: &Context,
+        descriptor: &CoincubeDescriptor,
+        bitcoin_getter: &mut impl TxGetter,
+        bitcoin_coins: &[CandidateCoin],
+        fork_getter: &mut impl TxGetter,
+        fork_coins: &[CandidateCoin],
+    ) -> Result<(AncestrySelfTransfer, ClaimForkSweep), Error> {
+        self.ensure_context(current)?;
+        self.clear_check();
+        self.construction_verified = false;
+        if self.intent.version != 10 || self.intent.phase != Phase::Intent {
+            return Err(Error::Unchecked);
+        }
+        if sha256::Hash::hash(descriptor.to_string().as_bytes())
+            != self.intent.identity.descriptor_digest
+        {
+            return Err(Error::WrongIdentity);
+        }
+        let bitcoin_stored = self.intent.ancestry.as_ref().ok_or(Error::InvalidJournal)?;
+        let funding = self
+            .intent
+            .funding_plan
+            .as_ref()
+            .ok_or(Error::InvalidJournal)?;
+        let bitcoin_path = bitcoin_stored.decode()?;
+        let fork_path = funding.fork.decode()?;
+        let bitcoin_dependency = bitcoin_path.reverify().map_err(|_| Error::InvalidJournal)?;
+        let fork_dependency = fork_path.reverify().map_err(|_| Error::InvalidJournal)?;
+        let bitcoin_marker = bitcoin_stored
+            .owned_input(descriptor)?
+            .ok_or(Error::InvalidJournal)?
+            .0;
+        let fork_marker = funding
+            .fork
+            .owned_input(descriptor)?
+            .ok_or(Error::InvalidJournal)?
+            .0;
+        let bitcoin_ordered = ordered_exact_coins(&self.intent.plan.step1, bitcoin_coins)?;
+        let fork_ordered = ordered_exact_coins(&funding.step2_unsigned, fork_coins)?;
+        if !bitcoin_ordered.iter().any(|coin| {
+            coin.outpoint == bitcoin_marker.outpoint
+                && coin.amount == bitcoin_marker.amount
+                && coin.deriv_index == bitcoin_marker.deriv_index
+                && coin.is_change == bitcoin_marker.is_change
+        }) || !fork_ordered.iter().any(|coin| {
+            coin.outpoint == fork_marker.outpoint
+                && coin.amount == fork_marker.amount
+                && coin.deriv_index == fork_marker.deriv_index
+                && coin.is_change == fork_marker.is_change
+        }) {
+            return Err(Error::InvalidPlan);
+        }
+        let bitcoin_index =
+            coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(
+                self.intent
+                    .bitcoin_change_index
+                    .ok_or(Error::InvalidJournal)?,
+            )
+            .map_err(|_| Error::InvalidJournal)?;
+        let fork_index = coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(
+            funding.fork_change_index,
+        )
+        .map_err(|_| Error::InvalidJournal)?;
+        let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
+        let bitcoin = reconstruct_ancestry_self_transfer(
+            self.intent.plan.bitcoin_chain,
+            descriptor,
+            &secp,
+            bitcoin_getter,
+            &bitcoin_ordered,
+            bitcoin_index,
+            &bitcoin_dependency,
+            &self.intent.plan.step1,
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        if bitcoin.poison_derivation() != (bitcoin_marker.deriv_index, bitcoin_marker.is_change)
+            || bitcoin.claimed_prevouts() != self.intent.plan.claimed_prevouts
+        {
+            return Err(Error::InvalidPlan);
+        }
+        let fork = reconstruct_ancestry_fork_sweep_with_marker(
+            &bitcoin,
+            self.intent.plan.fork_chain,
+            &secp,
+            fork_getter,
+            &fork_ordered,
+            fork_index,
+            &fork_dependency,
+            &funding.step2_unsigned,
+        )
+        .map_err(|_| Error::InvalidPlan)?;
+        if fork.fork_marker() != Some(fork_marker.outpoint)
+            || fork.bitcoin_step1() != bitcoin.psbt().unsigned_tx.compute_txid()
+        {
+            return Err(Error::InvalidPlan);
+        }
+        Ok((bitcoin, fork))
+    }
+
     /// Rebuild a reopened intent from current owned metadata and authenticate
     /// any recorded witness. No address is reserved, journal rewritten, or fresh
     /// chain eligibility restored. Callers must requalify the ancestry and check
@@ -340,6 +914,9 @@ impl Controller {
         self.ensure_context(current)?;
         self.clear_check();
         self.construction_verified = false;
+        if self.intent.version == 10 {
+            return Err(Error::Unchecked);
+        }
         let path = self.recorded_ancestry()?.ok_or(Error::WrongIdentity)?;
         let dependency = path.reverify().map_err(|_| Error::InvalidJournal)?;
         let index = self
@@ -443,6 +1020,9 @@ impl Controller {
         self.ensure_context(current)?;
         self.clear_check();
         self.construction_verified = false;
+        if self.intent.version == 10 {
+            return Err(Error::Unchecked);
+        }
         let path = self.recorded_ancestry()?.ok_or(Error::WrongIdentity)?;
         if artifact.chain() != self.intent.plan.bitcoin_chain
             || path.selected() != artifact.poison_input()

@@ -22,6 +22,145 @@ fn wallet(descriptor: &str) -> Arc<Wallet> {
     ))
 }
 
+#[test]
+fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backend() {
+    let descriptor = CoincubeDescriptor::from_str(SINGLE_WSH).unwrap();
+    let mut info = model::GetInfoResult {
+        version: String::new(),
+        network: Network::Bitcoin,
+        chain_id: Some(ChainId::Bitcoin),
+        block_height: 1_000,
+        sync: 1.0,
+        descriptors: coincubed::commands::GetInfoDescriptors {
+            main: descriptor.clone(),
+        },
+        rescan_progress: None,
+        refused_reorg_depth: None,
+        chain_divergence: false,
+        timestamp: 0,
+        last_poll_timestamp: None,
+        history_sync: Default::default(),
+        receive_index: 1,
+        change_index: 1,
+    };
+    assert!(bitcoin_funding_wallet_ready(&info, &descriptor));
+
+    // Bitcoin and BTCB2 share mainnet address encoding. An older Connect
+    // response with no explicit chain identity must not pass by inference.
+    info.chain_id = None;
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+    info.chain_id = Some(ChainId::BitcoinBlake2b);
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+    info.chain_id = Some(ChainId::Bitcoin);
+    info.sync = 0.9;
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+    info.sync = 1.0;
+    info.block_height = 0;
+    assert!(!bitcoin_funding_wallet_ready(&info, &descriptor));
+}
+
+#[test]
+fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
+    let mut panel = panel(SINGLE_WSH);
+    let state = || {
+        Stage::PairedRecovery(PairedClaimRecovery {
+            bitcoin_unattempted: false,
+            fork_ready_for_review: false,
+            bitcoin_txid: None,
+            fork_txid: None,
+            bitcoin_output: None,
+            fork_output: None,
+            bitcoin_status: "No broadcast attempt recorded.".into(),
+            fork_status: "No broadcast attempt recorded.".into(),
+        })
+    };
+    panel.stage = state();
+    assert!(!panel.can_sign_or_submit());
+    assert!(!panel.can_broadcast_review());
+    if let Stage::PairedRecovery(recovery) = &mut panel.stage {
+        recovery.bitcoin_unattempted = true;
+    }
+    let _ = panel.review_paired_bitcoin(Arc::new(Recording::default()));
+    assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
+    if let Stage::PairedRecovery(recovery) = &mut panel.stage {
+        recovery.bitcoin_unattempted = false;
+        recovery.fork_ready_for_review = true;
+    }
+    // A recovery status is never authority to reopen or broadcast a saved
+    // fork witness while the production acceptance gate remains closed.
+    let _ = panel.review_paired_fork(Arc::new(Recording::default()));
+    assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
+    panel.restart_error = Some("The two-chain status source is unavailable.".into());
+    assert!(matches!(
+        panel.stage(),
+        StageView::PairedRecovery(
+            _,
+            false,
+            Some("The two-chain status source is unavailable.")
+        )
+    ));
+    panel.cancel();
+    assert!(panel.restart_pending);
+    assert!(matches!(panel.stage, Stage::Preconditions));
+
+    panel.stage = state();
+    panel.restart_pending = false;
+    panel.revoke();
+    assert!(panel.restart_pending);
+    assert!(matches!(panel.stage, Stage::Preconditions));
+}
+
+#[test]
+fn paired_claim_rechecks_collected_unified_signatures_before_accepting_next_return() {
+    use coincube_core::{
+        psbt_unified::unified_signatures, unified_signing::sign_p2wsh_all_unified,
+    };
+
+    let (bitcoin, fork, signers) = crate::services::claim_pair_signing::tests::fixture();
+    let pair = PreparedClaimPair {
+        bitcoin,
+        fork,
+        bitcoin_funding: OutPoint::null(),
+        fork_funding: OutPoint::null(),
+        bitcoin_rate_vb: 5,
+        fork_rate_vb: 5,
+    };
+    let secp = secp256k1::Secp256k1::new();
+    let unsigned = UnifiedPsbt::from_psbt(pair.fork.psbt().clone()).unwrap();
+    let first = sign_p2wsh_all_unified(&signers[0], &unsigned, &secp).unwrap();
+    let second = sign_p2wsh_all_unified(&signers[1], &unsigned, &secp).unwrap();
+    assert!(first
+        .psbt()
+        .inputs
+        .iter()
+        .all(|input| input.partial_sigs.is_empty()));
+    assert!(!unified_signatures(&first).unwrap().is_empty());
+    assert!(check_paired_signer_return(
+        &pair,
+        ChainId::BitcoinBlake2b,
+        first.psbt(),
+        second.psbt(),
+    )
+    .is_ok());
+
+    // A previous BTCB2 signer lives in the proprietary unified records.
+    // It must not be skipped just because there are no legacy partial_sigs.
+    let mut corrupted = first.psbt().clone();
+    let stored_signature = corrupted
+        .inputs
+        .iter_mut()
+        .flat_map(|input| input.proprietary.values_mut())
+        .next()
+        .unwrap();
+    let scalar_byte = stored_signature.len() - 2; // before ALL|UNIFIED
+    stored_signature[scalar_byte] ^= 1;
+    assert!(UnifiedPsbt::from_psbt(corrupted.clone()).is_ok());
+    assert!(
+        check_paired_signer_return(&pair, ChainId::BitcoinBlake2b, &corrupted, second.psbt(),)
+            .is_err()
+    );
+}
+
 fn coin(height: Option<i32>, spent: bool, immature: bool, n: u32) -> Coin {
     Coin {
         amount: Amount::from_sat(10_000 + u64::from(n)),
@@ -39,6 +178,16 @@ fn coin(height: Option<i32>, spent: bool, immature: bool, n: u32) -> Coin {
         is_change: false,
         is_from_self: false,
     }
+}
+
+#[test]
+fn deposit_proof_refusals_distinguish_shared_roots_reorgs_and_missing_fresh_reads() {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    let message = |kind| funding_proof_refusal(DiscoveryError::Observation(kind));
+    assert!(message(FailureKind::AncestryRootShared { observed_at: 1 })
+        .contains("present on both chains"));
+    assert!(message(FailureKind::AncestryRootChanged { observed_at: 1 }).contains("reorganized"));
+    assert!(message(FailureKind::FreshnessUnverified).contains("Fresh data"));
 }
 
 #[test]
@@ -198,6 +347,145 @@ fn panel(descriptor: &str) -> ClaimStep1Panel {
     )
 }
 
+#[test]
+fn claim_funding_results_require_the_current_panel_and_session() {
+    let (_sender, receiver) = watch::channel(7);
+    let (fork_sender, fork_receiver) = watch::channel(1);
+    let fork_daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
+    let mut p = panel(SINGLE_WSH);
+    let fork_wallet =
+        Arc::new(Wallet::new(p.wallet.main_descriptor.clone()).with_chain(ChainId::BitcoinBlake2b));
+    p.generation = receiver;
+    p.bind_fork_daemon(Some(ClaimForkBinding::new(
+        &fork_daemon,
+        &fork_wallet,
+        fork_receiver,
+    )));
+    assert_eq!(
+        p.fork_daemon
+            .as_ref()
+            .and_then(ClaimForkBinding::wallet)
+            .as_ref()
+            .map(|wallet| wallet.chain),
+        Some(ChainId::BitcoinBlake2b)
+    );
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    p.pre.target = Some("fork-cube".into());
+    p.pre.shape = None;
+    p.pre.checked = Some(checked_ok(1_000_000));
+    assert!(p.can_prepare_funding());
+    p.stage = Stage::FundingChecking;
+    p.check_seq = 11;
+    let addresses = claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "bitcoin-address".into(),
+        btcb2_deposit: "btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
+    };
+    drop(p.apply(ClaimEvent::FundingPrepared(10, 7, 0, Ok(addresses.clone()))));
+    assert!(matches!(p.stage, Stage::FundingChecking));
+    drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
+    assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
+    let session = p.connect.clone().unwrap();
+    assert_eq!(p.funding_pair_target(&session), Some("fork-cube"));
+    let mut other = session.clone();
+    other.account = "another-account".into();
+    assert_eq!(p.funding_pair_target(&other), None);
+    assert!(!p.can_sign_or_submit());
+    p.funding_checking = true;
+    p.check_seq = 12;
+    let progress = ClaimDepositProgress {
+        bitcoin_candidate: true,
+        btcb2_candidate: true,
+        both_verified: true,
+        review: None,
+        prepared: None,
+    };
+    drop(p.apply(ClaimEvent::FundingChecked(
+        11,
+        7,
+        0,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: true,
+            both_verified: true,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    assert!(p.funding_checking);
+    assert!(p.funding_status.is_none());
+    drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Ok(progress))));
+    assert!(!p.funding_checking);
+    assert!(p.funding_status.as_deref().unwrap().contains("proofs"));
+    assert!(!p.can_sign_or_submit());
+    drop(p.apply(ClaimEvent::FundingProofExpired(11, 7, 0)));
+    assert!(p.funding_status.as_deref().unwrap().contains("proofs"));
+    drop(p.apply(ClaimEvent::FundingProofExpired(12, 7, 0)));
+    assert!(p.funding_status.as_deref().unwrap().contains("expired"));
+    p.funding_checking = true;
+    p.check_seq = 13;
+    drop(p.apply(ClaimEvent::FundingChecked(
+        13,
+        7,
+        0,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: false,
+            both_verified: false,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    let status = p.funding_status.as_deref().unwrap();
+    assert!(status.contains("Bitcoin deposit: post-fork candidate found"));
+    assert!(status.contains("Bitcoin Blake2b deposit: no confirmed candidate"));
+    assert!(!p.can_sign_or_submit());
+    fork_sender.send_modify(|generation| *generation += 1);
+    p.funding_checking = true;
+    p.check_seq = 14;
+    drop(p.apply(ClaimEvent::FundingChecked(
+        14,
+        7,
+        0,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: true,
+            both_verified: true,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    assert!(p
+        .funding_status()
+        .unwrap()
+        .contains("paired BTCB2 Cube changed"));
+    p.revoke();
+    assert!(matches!(p.stage, Stage::Preconditions));
+    assert!(p.funding_status.is_none());
+    drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
+    assert!(matches!(p.stage, Stage::Preconditions));
+}
+
+#[test]
+fn claim_fork_pairing_expires_when_the_open_wallet_is_dropped() {
+    let (_sender, receiver) = watch::channel(1);
+    let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
+    let fork_wallet = Arc::new(
+        Wallet::new(wallet(SINGLE_WSH).main_descriptor.clone()).with_chain(ChainId::BitcoinBlake2b),
+    );
+    let binding = ClaimForkBinding::new(&daemon, &fork_wallet, receiver);
+    assert!(binding.current());
+    drop(fork_wallet);
+    assert!(!binding.current());
+    assert!(binding.wallet().is_none());
+}
+
 fn checked_ok(now: i64) -> Checked {
     Checked {
         window: evaluate_anchor(
@@ -257,8 +545,11 @@ fn refusals_come_in_actionable_order() {
 
     let now = 1_000_000;
     p.pre.checked = Some(checked_ok(now));
-    assert_eq!(p.refusal(), None);
-    assert!(p.can_build());
+    assert_eq!(
+        p.refusal().unwrap().reason,
+        crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
+    );
+    assert!(!p.can_build());
 
     let mut backend = checked_ok(now);
     backend.backend = Err("wrong backend".into());
@@ -275,15 +566,9 @@ fn refusals_come_in_actionable_order() {
     );
     p.pre.checked = Some(margin);
     let refused = p.refusal().unwrap();
-    assert!(
-        refused.reason.contains("expires too soon"),
-        "{}",
-        refused.reason
-    );
-    assert!(
-        refused.reason.contains("36 hours needed"),
-        "{}",
-        refused.reason
+    assert_eq!(
+        refused.reason,
+        crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
     );
     assert!(!refused.retry);
 
@@ -624,6 +909,10 @@ mod flow {
         ancestry_coin: Option<Coin>,
         #[cfg(feature = "regtest-harness")]
         live: Option<live_regtest::LiveTransport>,
+        #[cfg(feature = "regtest-harness")]
+        extra_coins: Mutex<Vec<(Coin, Transaction)>>,
+        #[cfg(feature = "regtest-harness")]
+        indices: Mutex<(u32, u32)>,
     }
     impl FlowDaemon {
         fn hit(&self, name: &'static str) {
@@ -652,11 +941,14 @@ mod flow {
             self.hit("get_info");
             #[cfg(feature = "regtest-harness")]
             if let Some(live) = &self.live {
-                return Ok(live.info(&self.config));
+                let mut info = live.info(&self.config);
+                (info.receive_index, info.change_index) = *self.indices.lock().unwrap();
+                return Ok(info);
             }
             Ok(GetInfoResult {
                 version: String::new(),
                 network: Network::Bitcoin,
+                chain_id: Some(coincube_core::chain::ChainId::Bitcoin),
                 block_height: self
                     .ancestry_coin
                     .as_ref()
@@ -684,20 +976,35 @@ mod flow {
         }
         async fn list_revealed_addresses(
             &self,
-            _: bool,
+            is_change: bool,
             _: bool,
             _: usize,
-            _: Option<ChildNumber>,
+            start: Option<ChildNumber>,
         ) -> Result<model::ListRevealedAddressesResult, DaemonError> {
             self.hit("list_revealed_addresses");
+            #[cfg(feature = "regtest-harness")]
+            let index = if self.live.is_some() {
+                start.unwrap_or(ChildNumber::from_normal_idx(0).unwrap())
+            } else {
+                ChildNumber::from_normal_idx(12).unwrap()
+            };
+            #[cfg(not(feature = "regtest-harness"))]
             let index = ChildNumber::from_normal_idx(12).unwrap();
+            let _ = &start;
+            #[cfg(feature = "regtest-harness")]
+            let live_receive = self.live.is_some() && !is_change;
+            #[cfg(not(feature = "regtest-harness"))]
+            let live_receive = false;
+            let _ = is_change;
+            let descriptor = if live_receive {
+                self.config.main_descriptor.receive_descriptor()
+            } else {
+                self.config.main_descriptor.change_descriptor()
+            };
             Ok(model::ListRevealedAddressesResult {
                 addresses: vec![coincubed::commands::ListRevealedAddressesEntry {
                     index,
-                    address: self
-                        .config
-                        .main_descriptor
-                        .change_descriptor()
+                    address: descriptor
                         .derive(index, &secp256k1::Secp256k1::verification_only())
                         .address(Network::Bitcoin),
                     label: None,
@@ -708,9 +1015,20 @@ mod flow {
         }
         async fn update_deriv_indexes(
             &self,
-            _: Option<u32>,
-            _: Option<u32>,
+            receive: Option<u32>,
+            change: Option<u32>,
         ) -> Result<UpdateDerivIndexesResult, DaemonError> {
+            #[cfg(feature = "regtest-harness")]
+            if self.live.is_some() {
+                let mut indices = self.indices.lock().unwrap();
+                indices.0 = indices.0.max(receive.unwrap_or(indices.0));
+                indices.1 = indices.1.max(change.unwrap_or(indices.1));
+                return Ok(UpdateDerivIndexesResult {
+                    receive: indices.0,
+                    change: indices.1,
+                });
+            }
+            let _ = (receive, change);
             unreachable!()
         }
         async fn list_coins(
@@ -733,6 +1051,14 @@ mod flow {
             if let Some(ancestry) = &self.ancestry_coin {
                 coins.push(ancestry.clone());
             }
+            #[cfg(feature = "regtest-harness")]
+            coins.extend(
+                self.extra_coins
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|(coin, _)| coin.clone()),
+            );
             if !outpoints.is_empty() {
                 coins.retain(|coin| outpoints.contains(&coin.outpoint));
             }
@@ -775,7 +1101,29 @@ mod flow {
         }
         async fn reserve_change(&self) -> Result<ChildNumber, DaemonError> {
             self.hit("reserve_change");
+            #[cfg(feature = "regtest-harness")]
+            if self.live.is_some() {
+                let mut indices = self.indices.lock().unwrap();
+                indices.1 += 1;
+                return ChildNumber::from_normal_idx(indices.1)
+                    .map_err(|_| DaemonError::ClientNotSupported);
+            }
             Ok(ChildNumber::from_normal_idx(12).unwrap())
+        }
+        async fn reserve_claim_change(
+            &self,
+            chain: ChainId,
+            descriptor: &CoincubeDescriptor,
+        ) -> Result<ChildNumber, DaemonError> {
+            #[cfg(feature = "regtest-harness")]
+            if self.live.is_some()
+                && self.config.bitcoin_config.chain == chain
+                && self.config.main_descriptor == *descriptor
+            {
+                return self.reserve_change().await;
+            }
+            let _ = (chain, descriptor);
+            Err(DaemonError::ClientNotSupported)
         }
         async fn claim_backend_binding(
             &self,
@@ -963,6 +1311,19 @@ mod flow {
                     time: None,
                 });
             }
+            #[cfg(feature = "regtest-harness")]
+            transactions.extend(
+                self.extra_coins
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(coin, _)| txids.contains(&coin.outpoint.txid))
+                    .map(|(coin, tx)| coincubed::commands::TransactionInfo {
+                        tx: tx.clone(),
+                        height: coin.block_height,
+                        time: None,
+                    }),
+            );
             if let Some(tx) = self.submitted.lock().unwrap().as_ref() {
                 if txids.contains(&tx.compute_txid()) {
                     transactions.push(coincubed::commands::TransactionInfo {
@@ -1159,6 +1520,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let dyn_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
         let mut wallet = Wallet::new(f.descriptor.clone());
@@ -1185,6 +1550,7 @@ mod flow {
             }),
         )
         .with_feerate_source(FeerateSource::Fixed(5));
+        p.legacy_flow_fixture = true;
         // The target, as the installer leaves it on disk: a Bitcoin Blake2b
         // Cube in the fork chain's settings file reusing this descriptor. The
         // probe re-reads it on every entry, so a poked field would not do.
@@ -1480,14 +1846,50 @@ mod flow {
         f
     }
 
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn recovered_panel_uses_fresh_generation_without_reauthorizing_old_tasks() {
+        let mut f = reach_review().await;
+        let old_task_generation = f.p.generation.clone();
+        f.p.revoke();
+        // A replacement Connect session can carry the same numeric value.
+        // Its notification must still cancel every task cloned earlier.
+        f.sender.send_replace(1);
+        assert!(!crate::services::claim_observation::session_current(
+            &old_task_generation,
+            1
+        ));
+
+        let rebound = f.p.recover(Some(f.dyn_daemon.clone()));
+        assert!(crate::services::claim_observation::session_current(
+            &f.p.generation,
+            1
+        ));
+        let seen = drive(&mut f, rebound).await;
+        assert!(matches!(
+            &seen[..],
+            [Message::Claim(ClaimEvent::Reviewed(_, _, Ok(_)))]
+        ));
+        let mut seen = seen;
+        let _ =
+            f.p.update(Some(f.dyn_daemon.clone()), &f.cache, seen.remove(0));
+        review_snapshot(&f.p);
+        assert!(!crate::services::claim_observation::session_current(
+            &old_task_generation,
+            1
+        ));
+        let _ = std::fs::remove_dir_all(&f.root);
+    }
+
     async fn reopen(f: &mut Flow) {
-        let panel = ClaimStep1Panel::new(
+        let mut panel = ClaimStep1Panel::new(
             f.wallet.clone(),
             f.datadir.clone(),
             "bitcoin-cube".into(),
             f.sender.subscribe(),
             f.p.connect.clone(),
         );
+        panel.legacy_flow_fixture = true;
         f.p = panel;
         let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
         for event in outputs(task).await {
@@ -1496,6 +1898,30 @@ mod flow {
                 let _ = f.p.update(Some(f.dyn_daemon.clone()), &f.cache, event);
             }
         }
+    }
+
+    #[cfg(any(unix, windows))]
+    #[tokio::test]
+    async fn production_refuses_submission_of_a_retired_recorded_claim() {
+        let mut f = reach_review().await;
+        f.p.legacy_flow_fixture = false;
+        let task = f.p.update(
+            Some(f.dyn_daemon.clone()),
+            &f.cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+        );
+        assert!(outputs(task).await.is_empty());
+        assert_eq!(submissions(&f), 0);
+        assert!(matches!(
+            &f.p.stage,
+            Stage::Review { error: Some(reason), .. }
+                if reason == crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
+        ));
+        assert!(journal_directory(&f.datadir, &f.wallet)
+            .join("intent.json")
+            .is_file());
+        drop(f.p);
+        let _ = std::fs::remove_dir_all(&f.root);
     }
 
     #[cfg(any(unix, windows))]
@@ -1603,6 +2029,7 @@ mod flow {
             f.sender.subscribe(),
             f.p.connect.clone(),
         );
+        f.p.legacy_flow_fixture = true;
         assert!(outputs(f.p.reload(None, None)).await.is_empty());
         assert!(!f.p.can_build());
         let task = f.p.reload(Some(f.dyn_daemon.clone()), None);
@@ -1877,6 +2304,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let mut excluded = None;
         if ancestry {
@@ -3417,6 +3848,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -3682,6 +4117,10 @@ mod flow {
             ancestry_coin: None,
             #[cfg(feature = "regtest-harness")]
             live: None,
+            #[cfg(feature = "regtest-harness")]
+            extra_coins: Mutex::new(Vec::new()),
+            #[cfg(feature = "regtest-harness")]
+            indices: Mutex::new((1, 0)),
         });
         let installed_dyn: Arc<dyn Daemon + Sync + Send> = installed.clone();
         let settle = app.update(Message::DaemonRestarted(
@@ -4811,7 +5250,7 @@ mod flow {
 }
 
 #[test]
-fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observations() {
+fn ancestry_candidates_do_not_authorize_an_incomplete_two_chain_claim() {
     let mut p = panel(SINGLE_WSH);
     p.pre.target = Some("fork-cube".into());
     // Discovery opened for the test; the closed-gate case is the next test.
@@ -4830,7 +5269,7 @@ fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observat
         let mut checked = checked_ok(1_000_000);
         checked.window.as_mut().unwrap().rdts = Err(assessment);
         p.pre.checked = Some(checked);
-        assert!(!p.can_build(), "no candidate and no valid fallback");
+        assert!(!p.can_build(), "new Claim is still gated");
         p.pre
             .checked
             .as_mut()
@@ -4840,10 +5279,10 @@ fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observat
             .unwrap()
             .ancestry_candidates
             .push(coin(Some(95), false, false, 2));
-        assert!(
-            p.can_build(),
-            "candidate search should be possible: {:?}",
-            assessment
+        assert!(!p.can_build(), "one-chain discovery is insufficient");
+        assert_eq!(
+            p.refusal().unwrap().reason,
+            crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
         );
         assert!(matches!(p.stage, Stage::Preconditions));
     }
@@ -4860,17 +5299,16 @@ fn ancestry_candidates_allow_search_outside_rdts_but_never_override_bad_observat
             .as_mut()
             .unwrap()
             .rdts = Err(assessment);
-        assert!(!p.can_build(), "invalid observations remain refused");
+        assert!(!p.can_build(), "new Claim is still gated");
     }
     p.pre.checked.as_mut().unwrap().window = Err("stale anchor".into());
     assert!(!p.can_build());
 }
 
-/// #547 (547-A): while the ancestry gate is closed a candidate never licenses
-/// a search, so an RDTS window that disallows OP_RETURN shows its timing
-/// refusal instead of offering a build that could not be signed.
+/// RDTS affects the retired OP_RETURN route, not the input-ancestry Claim.
+/// The production gate remains the only refusal for a fresh valid precheck.
 #[test]
-fn closed_gate_candidates_never_bypass_the_op_return_timing_refusal() {
+fn closed_gate_candidates_are_refused_independently_of_rdts_window() {
     assert!(crate::services::claim_ancestry_gate::authorization().is_none());
     let mut p = panel(SINGLE_WSH);
     p.pre.target = Some("fork-cube".into());
@@ -4892,15 +5330,17 @@ fn closed_gate_candidates_never_bypass_the_op_return_timing_refusal() {
             .unwrap()
             .ancestry_candidates
             .push(coin(Some(95), false, false, 2));
-        let window = checked.window.clone().unwrap();
         p.pre.checked = Some(checked);
         assert!(
             !p.can_build(),
             "a closed gate cannot search ancestry: {:?}",
             assessment
         );
-        let refusal = p.refusal().expect("the OP_RETURN timing refusal");
-        assert_eq!(refusal.reason, rdts_refusal(assessment, &window));
+        let refusal = p.refusal().expect("the new Claim gate refusal");
+        assert_eq!(
+            refusal.reason,
+            crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE
+        );
         assert!(!refusal.retry);
         assert!(matches!(p.stage, Stage::Preconditions));
     }

@@ -140,11 +140,7 @@ impl NetworkStatus {
                 return false;
             }
             Some(fork) if !fork.active => ForkInactive,
-            Some(_) => match observation.rdts {
-                RdtsStatus::Absent => RdtsAbsent,
-                RdtsStatus::Unsupported => RdtsUnsupported,
-                RdtsStatus::Flagday { .. } => Available,
-            },
+            Some(_) => Available,
         };
         self.state == expected
     }
@@ -293,18 +289,11 @@ mod tests {
             assert_eq!(status.state, state);
             assert_eq!(status.observation, None);
         }
-        for (wire, state) in [
-            ("fork_absent", ForkAbsent),
-            ("fork_inactive", ForkInactive),
-            ("rdts_absent", RdtsAbsent),
-            ("rdts_unsupported", RdtsUnsupported),
-        ] {
+        for (wire, state) in [("fork_absent", ForkAbsent), ("fork_inactive", ForkInactive)] {
             let mut observed = observation();
             match state {
                 ForkAbsent => observed["fork"] = Value::Null,
                 ForkInactive => observed["fork"]["active"] = json!(false),
-                RdtsAbsent => observed["rdts"] = json!({"state": "absent"}),
-                RdtsUnsupported => observed["rdts"] = json!({"state": "unsupported"}),
                 _ => unreachable!(),
             }
             let status = fetch(
@@ -316,6 +305,27 @@ mod tests {
             .unwrap();
             assert_eq!(status.state, state);
             assert!(status.observation.is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn active_fork_status_does_not_depend_on_rdts() {
+        for rdts in [json!({"state": "absent"}), json!({"state": "unsupported"})] {
+            let mut observed = observation();
+            observed["rdts"] = rdts.clone();
+            let status = fetch(
+                ChainId::BitcoinBlake2b,
+                200,
+                envelope("bitcoin-blake2b", "available", Some(observed)),
+            )
+            .await
+            .unwrap();
+            assert_eq!(status.state, NetworkStatusState::Available);
+            assert!(matches!(
+                (status.observation.unwrap().rdts, rdts["state"].as_str()),
+                (RdtsStatus::Absent, Some("absent"))
+                    | (RdtsStatus::Unsupported, Some("unsupported"))
+            ));
         }
     }
 

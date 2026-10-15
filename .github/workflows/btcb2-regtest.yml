@@ -216,17 +216,21 @@ jobs:
           set -xe
           mkdir -p "$TEST_DIR"
           "$KNOTS_LEGACY_PATH" --version | head -1
-          # B4.1 proves the harness; B4.2 runs the QA matrices on it; the three
-          # test_btcb2_claim_* modules run Claim end to end on both chains;
-          # test_btcb2_split_consensus.py runs Split steps 1 and 2 and the
-          # single-step unified fallback on both (#568), and
-          # test_btcb2_split_observation.py a step-1 reorg through the Split
-          # services and their journal (#568 B6c-2);
+          # B4.1 proves the harness; B4.2 runs the QA matrices on it. The
+          # historical Claim consensus modules cover recorded constructions;
+          # test_btcb2_claim_pair_consensus.py checks ordinary S+B/S+F against
+          # both pinned nodes, including reverse broadcast order and reorgs.
+          # The Claim GUI module checks retired one-sided refusal and paired
+          # deposit proof plus synthetic signed-PSBT imports through the real
+          # panel transitions. Physical hardware is still a separate gate.
+          # Split consensus covers
+          # the ordinary pair and historical alternatives, while Split
+          # observation covers step-1 reorgs through the service and journal.
           # test_btcb2_blockfile.py drives concurrent getblock batches at one
           # node to reproduce the block-file fault in #394. The modules are
           # named explicitly: a bare `pytest tests/` here would also pull in
           # the functional suite, which this job does not set up.
-          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_gui.py tests/test_btcb2_split_consensus.py tests/test_btcb2_split_observation.py"
+          modules="tests/test_btcb2_harness.py tests/test_btcb2_b42_matrices.py tests/test_btcb2_blockfile.py tests/test_btcb2_claim_consensus.py tests/test_btcb2_claim_ancestry_consensus.py tests/test_btcb2_claim_pair_consensus.py tests/test_btcb2_claim_gui.py tests/test_btcb2_split_consensus.py tests/test_btcb2_split_observation.py"
           # The stress reproduction itself runs only when it is asked for: it
           # reproduces a node defect nothing here can fix, about one attempt in
           # eight, and a pull request is not the place to discover that. Its

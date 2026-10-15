@@ -36,12 +36,16 @@ use reqwest::header::{HeaderMap, CACHE_CONTROL};
 use std::{
     collections::{BTreeSet, HashMap},
     os::unix::fs::PermissionsExt,
+    str::FromStr,
     sync::{
         atomic::{AtomicBool, AtomicUsize, Ordering},
         Mutex,
     },
 };
 use step1::{Recovery, ReviewView, SplitConnect};
+
+#[cfg(feature = "regtest-harness")]
+mod live_regtest;
 
 pub(super) const TARGET: &str = "btcb2-target-cube";
 
@@ -336,6 +340,9 @@ impl SplitConnect for FakeConnect {
     fn context(&self) -> Context {
         self.context.clone()
     }
+    fn session_current(&self) -> bool {
+        true
+    }
     fn evidence(&self) -> &dyn SplitEvidenceSource {
         &self.chains
     }
@@ -344,6 +351,21 @@ impl SplitConnect for FakeConnect {
     }
     async fn bitcoin_feerate(&self) -> Option<u64> {
         self.feerate
+    }
+    async fn funding_fee_quote(
+        &self,
+        _source: &SplitSource,
+        _reservation: &crate::services::claim_workflow::SplitFundingReservation,
+    ) -> Result<step1::SplitFundingQuote, String> {
+        let rate = self
+            .feerate
+            .ok_or_else(|| "The Bitcoin funding fee quote is unavailable.".to_string())?;
+        Ok(step1::SplitFundingQuote {
+            bitcoin_rate_sat_vb: rate,
+            btcb2_rate_sat_vb: 2,
+            bitcoin_minimum_sats: 2_000,
+            btcb2_minimum_sats: 2_000,
+        })
     }
     async fn address_used(&self, chain: ChainId, address: &str) -> Result<bool, FailureKind> {
         self.calls
@@ -531,6 +553,129 @@ impl Scan {
     }
 }
 
+#[tokio::test]
+async fn reserved_split_deposit_addresses_require_six_fresh_history_checks() {
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    crate::services::claim_workflow::reserve_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+    )
+    .unwrap();
+    let addresses = step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .unwrap();
+    assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
+    assert_ne!(addresses.bitcoin_return, addresses.bitcoin_deposit);
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 6);
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    let resumed =
+        step1::check_reserved_funding_addresses(connect.as_ref(), directory, &source, TARGET)
+            .await
+            .unwrap();
+    assert_eq!(resumed, addresses);
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+}
+
+#[tokio::test]
+async fn split_deposit_addresses_are_not_released_without_a_fee_quote() {
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let mut connect = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut connect).unwrap().feerate = None;
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    let saved = crate::services::claim_workflow::reserve_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+    )
+    .unwrap();
+    assert!(step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .is_err());
+    assert_eq!(
+        crate::services::claim_workflow::load_split_funding(
+            &directory,
+            &source,
+            TARGET,
+            &connect.context,
+        )
+        .unwrap(),
+        Some(saved)
+    );
+}
+
+#[tokio::test]
+async fn split_deposit_addresses_with_history_before_first_release_are_refused() {
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    crate::services::claim_workflow::reserve_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+    )
+    .unwrap();
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    assert!(step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .is_err());
+    assert!(!crate::services::claim_workflow::load_split_funding(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+    )
+    .unwrap()
+    .unwrap()
+    .is_released());
+}
+
 /// Run a task the panel returned; collect the Split events it produced.
 pub(super) async fn events(task: Task<Message>) -> Vec<SplitEvent> {
     let mut out = Vec::new();
@@ -576,6 +721,7 @@ use std::path::Path;
 /// A started panel's begin, choosing the two-step route (#568 B4b-3c: a
 /// started panel chooses its route first).
 async fn begin_two_step(panel: &mut SplitPanel) {
+    panel.legacy_flow_fixture = true;
     let task = panel.begin();
     drive(panel, task).await;
     assert_eq!(panel.stage(), &Stage::ChooseRoute);
@@ -583,6 +729,331 @@ async fn begin_two_step(panel: &mut SplitPanel) {
         unified::Route::TwoStep,
     )));
     drive(panel, task).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() {
+    for route in [unified::Route::TwoStep, unified::Route::Seeds] {
+        let scan = Scan::new(Shape::Wpkh);
+        let connect = FakeConnect::new(&scan.coins);
+        let temp = Temp::new();
+        let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+        panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+        let task = panel.begin();
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        let addresses = panel.funding_addresses().expect("checked addresses");
+        assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
+        assert_ne!(addresses.bitcoin_deposit, addresses.bitcoin_return);
+        assert_ne!(addresses.btcb2_deposit, addresses.bitcoin_return);
+        assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 6);
+        let task = panel.update(SplitMessage::Unified(unified::UnifiedMessage::Choose(
+            route,
+        )));
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        assert!(panel.construction().is_none());
+        // A transport with no paired rescan/proof implementation cannot
+        // promote visible deposit addresses into signing authority.
+        let task = panel.update(SplitMessage::CheckDeposits);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        assert!(panel.funding_progress().is_none());
+        assert!(panel.notice().is_some());
+        assert!(panel.construction().is_none());
+        // A deposit address or an unproven candidate cannot open either
+        // ordinary PSBT for signing, even when Connect is authenticated.
+        let task = panel.update(SplitMessage::BeginPairedSigning);
+        drive(&mut panel, task).await;
+        assert_eq!(panel.stage(), &Stage::FundingDeposits);
+        assert!(panel.paired_signing.is_none());
+        assert!(temp.root().exists());
+    }
+}
+
+#[test]
+fn first_connect_attachment_preserves_funding_target_but_session_change_revokes_it() {
+    let scan = Scan::new(Shape::Wpkh);
+    let descriptor =
+        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let wallet_id = crate::app::settings::WalletId::new(
+        descriptor.to_string().split_once('#').unwrap().1.to_owned(),
+        Some(1),
+    );
+    let binding =
+        crate::services::claim_workflow::SplitTargetBinding::for_test(wallet_id, &descriptor, 4);
+    let mut panel = SplitPanel::start(TARGET.into(), Temp::new().root(), scan.intent());
+    panel.bind_funding_target(binding);
+    panel.set_connect(Some(FakeConnect::new(&scan.coins) as Arc<dyn SplitConnect>));
+    assert!(panel.funding_target_binding.is_some());
+
+    let mut replacement = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut replacement).unwrap().context.account = "another-account".into();
+    panel.set_connect(Some(replacement as Arc<dyn SplitConnect>));
+    assert!(panel.funding_target_binding.is_none());
+}
+
+#[test]
+fn old_split_proof_expiry_cannot_clear_a_newer_deposit_check() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.stage = Stage::FundingDeposits;
+    panel.seq = 8;
+    panel.funding_progress = Some(step1::SplitDepositProgress {
+        bitcoin_candidate: true,
+        btcb2_candidate: true,
+        both_verified: false,
+        review: None,
+        prepared: None,
+    });
+
+    drop(panel.apply(SplitEvent::FundingReviewExpired(7)));
+    assert!(panel.funding_progress().is_some());
+    drop(panel.apply(SplitEvent::FundingReviewExpired(8)));
+    assert!(panel.funding_progress().is_none());
+    assert!(panel.notice().unwrap().contains("expired"));
+}
+
+#[test]
+fn verified_split_progress_without_exact_review_is_refused() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.stage = Stage::FundingDeposits;
+    panel.seq = 1;
+
+    drop(panel.apply(SplitEvent::FundingChecked(
+        1,
+        Ok(step1::SplitDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: true,
+            both_verified: true,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    assert!(panel.funding_progress().is_none());
+    assert!(panel.notice().unwrap().contains("preview changed"));
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
+}
+
+#[test]
+fn candidate_only_split_progress_stays_visible_without_signing_review() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.stage = Stage::FundingDeposits;
+    panel.seq = 1;
+
+    drop(panel.apply(SplitEvent::FundingChecked(
+        1,
+        Ok(step1::SplitDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: false,
+            both_verified: false,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    let progress = panel
+        .funding_progress()
+        .expect("candidate status remains visible");
+    assert!(progress.bitcoin_candidate);
+    assert!(!progress.btcb2_candidate);
+    assert!(!progress.both_verified);
+    assert!(panel.notice().is_none());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn funding_only_split_reopens_same_addresses_after_restart() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
+    let addresses = panel.funding_addresses().unwrap().clone();
+    let (digest, directory) = panel.funding_journal.clone().unwrap();
+    assert_eq!(
+        step1::discover_funding(&temp.root(), TARGET),
+        Some((digest, directory.clone()))
+    );
+
+    let mut reopened = SplitPanel::resume_funding(TARGET.into(), temp.root(), digest, directory);
+    reopened.set_connect(Some(connect as Arc<dyn SplitConnect>));
+    let task = reopened.begin();
+    drive(&mut reopened, task).await;
+    assert_eq!(reopened.stage(), &Stage::FundingDeposits);
+    assert_eq!(reopened.funding_addresses(), Some(&addresses));
+    assert!(reopened.construction().is_none());
+}
+
+#[tokio::test]
+async fn unsigned_paired_split_reopens_only_with_original_target_and_account() {
+    use std::str::FromStr;
+
+    let scan = Scan::new(Shape::Wpkh);
+    let intent = scan.intent();
+    let source =
+        crate::services::split_source::split_source(&intent.external, intent.internal.as_ref())
+            .unwrap();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let directory = step1::journal_directory(&temp.root(), source.digest());
+    let descriptor =
+        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let wallet_id = crate::app::settings::WalletId::new(
+        descriptor.to_string().split_once('#').unwrap().1.to_owned(),
+        Some(1),
+    );
+    let target = crate::services::claim_workflow::SplitTargetBinding::for_test(
+        wallet_id.clone(),
+        &descriptor,
+        4,
+    );
+    crate::services::claim_workflow::reserve_split_funding_with_target(
+        &directory,
+        &source,
+        TARGET,
+        &connect.context,
+        &intent.inventory,
+        &target,
+    )
+    .unwrap();
+    let addresses = step1::check_reserved_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+    )
+    .await
+    .unwrap();
+
+    let vault = (wallet_id.clone(), descriptor.clone());
+    assert_eq!(
+        step1::recover_unsigned_paired_funding_addresses(
+            connect.as_ref(),
+            directory.clone(),
+            &source,
+            TARGET,
+            Some(&vault),
+        )
+        .await
+        .unwrap(),
+        addresses
+    );
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+    let wrong_vault = (
+        crate::app::settings::WalletId::new("other".into(), Some(1)),
+        descriptor,
+    );
+    assert!(step1::recover_unsigned_paired_funding_addresses(
+        connect.as_ref(),
+        directory.clone(),
+        &source,
+        TARGET,
+        Some(&wrong_vault),
+    )
+    .await
+    .is_err());
+    assert_eq!(connect.calls.address_reads.lock().unwrap().len(), 12);
+    let mut other_account = FakeConnect::new(&scan.coins);
+    Arc::get_mut(&mut other_account).unwrap().context.account = "another-account".into();
+    assert!(step1::recover_unsigned_paired_funding_addresses(
+        other_account.as_ref(),
+        directory,
+        &source,
+        TARGET,
+        Some(&vault),
+    )
+    .await
+    .is_err());
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn used_split_deposit_address_is_never_displayed_or_signed() {
+    let scan = Scan::new(Shape::Wpkh);
+    let connect = FakeConnect::new(&scan.coins);
+    connect
+        .used
+        .lock()
+        .unwrap()
+        .insert(ChainId::Bitcoin, Ok(true));
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.set_connect(Some(connect as Arc<dyn SplitConnect>));
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+    assert!(matches!(panel.stage(), Stage::Refused(_)));
+    assert!(panel.funding_addresses().is_none());
+    assert!(panel.construction().is_none());
+    assert!(
+        temp.root().exists(),
+        "the address reservation is not rerolled"
+    );
+}
+
+#[test]
+fn paired_recovery_has_no_sign_or_resend_action_and_is_cleared_on_revocation() {
+    let mut panel = SplitPanel::empty(TARGET.into(), PathBuf::from("unused-split-journals"));
+    panel.journal = Some((sha256::Hash::all_zeros(), PathBuf::from("recorded-split")));
+    panel.stage = Stage::PairedRecovery;
+    panel.paired_recovery = Some(PairedSplitRecovery {
+        bitcoin_unattempted: false,
+        fork_ready_for_review: false,
+        bitcoin_txid: None,
+        fork_txid: None,
+        bitcoin_output: None,
+        fork_output: None,
+        bitcoin_status: "No broadcast attempt recorded.".into(),
+        fork_status: "No broadcast attempt recorded.".into(),
+    });
+    for message in [
+        SplitMessage::ExportUnsigned(Encoding::Binary),
+        SplitMessage::ImportSigned,
+        SplitMessage::Confirm,
+        SplitMessage::ConfirmResend,
+        SplitMessage::ReviewPairedBitcoin,
+        SplitMessage::ConfirmPairedBitcoin,
+        SplitMessage::ReviewPairedFork,
+        SplitMessage::ConfirmPairedFork,
+    ] {
+        let _ = panel.update(message);
+        assert_eq!(panel.stage(), &Stage::PairedRecovery);
+    }
+    panel.revoke();
+    assert!(panel.paired_recovery().is_none());
+    assert_eq!(panel.stage(), &Stage::NeedsSession);
+}
+
+#[test]
+fn recorded_legacy_split_cannot_export_sign_or_submit_again() {
+    let mut panel = SplitPanel::empty(TARGET.into(), PathBuf::from("unused-split-journals"));
+    panel.stage = Stage::Sign;
+    for message in [
+        SplitMessage::ExportUnsigned(Encoding::Binary),
+        SplitMessage::ImportSigned,
+        SplitMessage::ExportSigned,
+    ] {
+        let _ = panel.update(message);
+        assert_eq!(panel.stage(), &Stage::Sign);
+        assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+    }
+    panel.stage = Stage::Review;
+    let _ = panel.update(SplitMessage::Confirm);
+    assert_eq!(panel.stage(), &Stage::Review);
+    assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+    panel.stage = Stage::Resend;
+    let _ = panel.update(SplitMessage::ConfirmResend);
+    assert_eq!(panel.stage(), &Stage::Resend);
+    assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
+    panel.stage = Stage::Step2(Step2Stage::Ready);
+    let _ = panel.update(SplitMessage::Step2Build);
+    assert_eq!(panel.stage(), &Stage::Step2(Step2Stage::Ready));
+    assert_eq!(panel.notice(), Some(step1::RETIRED_MARKER));
 }
 
 /// Fresh flow up to a recorded, unsubmitted step 1.
@@ -821,7 +1292,7 @@ async fn split_preconditions_refuse_before_building() {
                 *c.window.lock().unwrap() = Ok(w);
             }),
             None,
-            "expires too soon",
+            step1::RETIRED_MARKER,
         ),
         (
             "stale anchor",
@@ -939,6 +1410,7 @@ async fn resumed(connect: &Arc<FakeConnect>, temp: &Temp) -> SplitPanel {
     assert_eq!(found.len(), 1);
     let (digest, directory) = found.into_iter().next().unwrap();
     let mut panel = SplitPanel::resume(TARGET.into(), temp.root(), digest, directory);
+    panel.legacy_flow_fixture = true;
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
     let task = panel.begin();
     drive(&mut panel, task).await;
@@ -1523,7 +1995,7 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
         .map(|(file, text)| (file, crate::utils::source_text::lf_only(&checkout(&text))))
         .collect();
     for (file, text) in &files {
-        let starts = text.matches("SplitPanel::start").count();
+        let starts = text.matches("SplitPanel::start(").count();
         if !file.starts_with("app/state/vault/split/") {
             match file.as_str() {
                 "app/mod.rs" => assert_eq!(starts, 1, "{}", file),
@@ -1539,11 +2011,18 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
             assert!(!text.contains("StartSplit"), "{} names StartSplit", file);
         }
         let resumes =
-            text.matches("SplitPanel::resume").count() + text.matches("SplitPanel::{").count();
+            text.matches("SplitPanel::resume(").count() + text.matches("SplitPanel::{").count();
+        let funding_resumes = text.matches("SplitPanel::resume_funding(").count();
         if !file.starts_with("app/state/vault/split/") {
             match file.as_str() {
-                "app/mod.rs" => assert_eq!(resumes, 1, "{}", file),
-                _ => assert_eq!(resumes, 0, "{} constructs the Split panel", file),
+                "app/mod.rs" => {
+                    assert_eq!(resumes, 1, "{}", file);
+                    assert_eq!(funding_resumes, 1, "{}", file);
+                }
+                _ => {
+                    assert_eq!(resumes, 0, "{} constructs the Split panel", file);
+                    assert_eq!(funding_resumes, 0, "{} resumes funding", file);
+                }
             }
         }
     }
@@ -1553,16 +2032,18 @@ fn assert_split_start_is_gated(checkout: fn(&str) -> String) {
     let discovery = &discovery[..discovery.find("\n}\n").unwrap()];
     // #568 D19: the resumable journal, passing over a recorded completion.
     assert!(discovery.contains(
-        "step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)?"
+        "step1::discover_resumable(&root, &cube_settings.id, &cube_settings.split_from)"
     ));
+    assert!(discovery.contains("step1::discover_funding(&root, &cube_settings.id)?"));
     assert!(discovery.contains("SplitPanel::resume("));
-    assert!(!discovery.contains("SplitPanel::start"));
+    assert!(discovery.contains("SplitPanel::resume_funding("));
+    assert!(!discovery.contains("SplitPanel::start("));
     // #568 B5c-2: the start is `start_split_from_review`'s, after every one
     // of its checks, each of which refuses (consuming the handoff) before
     // the panel is constructed; the handoff is consumed and the session
     // handed over after it.
     let production = &app[..app.find("\n#[cfg(test)]\n").unwrap()];
-    assert_eq!(production.matches("SplitPanel::start").count(), 1);
+    assert_eq!(production.matches("SplitPanel::start(").count(), 1);
     let start = &production[production.find("    fn start_split_from_review(").unwrap()..];
     let start = &start[..start.find("\n    }\n").unwrap()];
     let at = |marker: &str| {
@@ -1926,20 +2407,29 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     let build = open.find("build_listing(").unwrap();
     assert!(open[..build]
         .ends_with("tokio::task::spawn_blocking(move || {\n                            "));
-    // #653 F1: scoped to the signing arm, the run is the spawned task's own
-    // future (nothing between the spawn and the run), and nothing in the
-    // device module blocks on a future.
+    // Both the paired and ordinary routes run the device inside a spawned
+    // task. The paired route first repeats live two-chain admission there.
     let sign = &open[open
         .find("            DeviceMessage::Sign(id) => {")
         .unwrap()..];
     let sign = &sign[..sign.find("            DeviceMessage::Cancel").unwrap()];
-    assert_eq!(sign.matches(".run()").count(), 1);
-    let run = sign.find(".run()").unwrap();
-    let spawned = sign[..run]
+    let runs: Vec<_> = sign
+        .match_indices(".run()")
+        .map(|(index, _)| index)
+        .collect();
+    assert_eq!(runs.len(), 2);
+    let paired_spawned = sign[..runs[0]]
         .rfind("self.spawn(")
-        .expect("the signing run is spawned");
+        .expect("the paired signing run is spawned");
+    assert!(sign[paired_spawned..runs[0]].contains("prepare_exact_pair_intent("));
+    assert!(sign[paired_spawned..runs[0]].contains("permit.consume(chain, &psbt)"));
+    let spawned = sign[..runs[1]]
+        .rfind("self.spawn(")
+        .expect("the ordinary signing run is spawned");
     assert_eq!(
-        sign[spawned..run].split_whitespace().collect::<String>(),
+        sign[spawned..runs[1]]
+            .split_whitespace()
+            .collect::<String>(),
         "self.spawn(asyncmove{signing"
     );
     let production = &device[..device.find("\n#[cfg(all(test, unix))]\n").unwrap()];
@@ -1966,6 +2456,26 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
 /// read on Connect's allowlisted path of each chain, and `open` records and
 /// resumes through the real Split coordinator (`Coordinator::create_split` /
 /// `resume_split`) without any network call.
+#[test]
+fn split_production_connect_revokes_on_any_session_notification() {
+    let mut client = CoincubeClient::new();
+    client.base_url = "https://api.coincube.io/".into();
+    client.set_token("synthetic-test-token");
+    let (sender, generation) = tokio::sync::watch::channel(7u64);
+    let connect = step1::ProductionConnect::new(
+        crate::app::state::vault::claim::ConnectSession {
+            client,
+            account: "synthetic-account".into(),
+        },
+        generation,
+    )
+    .unwrap();
+
+    assert!(connect.session_current());
+    sender.send(7).unwrap();
+    assert!(!connect.session_current());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn split_production_connect_reads_freshness_and_opens_the_real_coordinator() {
     use crate::services::split_test_connect::{serve_fresh, strict};
@@ -2023,7 +2533,7 @@ async fn split_production_connect_reads_freshness_and_opens_the_real_coordinator
     refused.assert_hits(0);
 
     // Record, release, resume: the real coordinator over a real journal.
-    let construction = step1::build(&step1::Prepared {
+    let construction = step1::build_legacy_for_test(&step1::Prepared {
         source,
         coins: intent.inventory.splittable_coins(),
         destination: index,

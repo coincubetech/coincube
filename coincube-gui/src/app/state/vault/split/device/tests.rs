@@ -97,6 +97,7 @@ fn signers(shape: Shape) -> (Vec<(&'static str, Fake)>, Arc<FakeOpener>) {
 /// the datadir `root` for the listing.
 fn step1_panel(shape: Shape, root: &std::path::Path, opener: Arc<FakeOpener>) -> SplitPanel {
     let mut panel = SplitPanel::empty(TARGET.into(), root.join("split-journals"));
+    panel.legacy_flow_fixture = true;
     panel.construction = Some(Box::new(construction(shape)));
     panel.stage = Stage::Sign;
     panel.set_device_datadir(CoincubeDirectory::new(root.to_path_buf()));
@@ -260,6 +261,7 @@ fn step2_panel(shape: Shape, root: &std::path::Path, opener: Arc<FakeOpener>) ->
     );
     let (verified, finished) = (Arc::new(AtomicUsize::new(0)), Arc::default());
     let mut panel = SplitPanel::empty(TARGET.into(), root.join("split-journals"));
+    panel.legacy_flow_fixture = true;
     panel.construction = Some(Box::new(step1));
     panel.step2_psbt = Some(construction.psbt().clone());
     panel.coins = coins.clone();
@@ -403,6 +405,7 @@ async fn device_signing_copy_per_step_and_registration_notice() {
             let mut panel = match step {
                 DeviceStep::Step1 => step1_panel(shape, &root, opener.clone()),
                 DeviceStep::Step2 => step2_panel(shape, &root, opener.clone()).panel,
+                DeviceStep::PairedBitcoin | DeviceStep::PairedFork => unreachable!(),
             };
             assert_eq!(panel.device_step(), Some(step));
             open(&mut panel, &devices).await;
@@ -468,6 +471,7 @@ async fn device_signing_copy_per_step_and_registration_notice() {
             let other = match step {
                 DeviceStep::Step1 => STEP2_DEVICE_SHOWS_BITCOIN_WARNING,
                 DeviceStep::Step2 => STEP1_DATA_OUTPUT_NOTE,
+                DeviceStep::PairedBitcoin | DeviceStep::PairedFork => unreachable!(),
             };
             assert!(!labels.iter().any(|l| l == other), "{:?}", step);
             for (notice, rows) in [

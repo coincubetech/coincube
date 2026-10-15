@@ -506,6 +506,19 @@ impl Daemon for EmbeddedDaemon {
         .await
     }
 
+    async fn reserve_claim_change(
+        &self,
+        chain: coincube_core::chain::ChainId,
+        descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
+        if self.config.bitcoin_config.chain != chain || self.config.main_descriptor != *descriptor {
+            return Err(DaemonError::Unexpected(
+                "Claim wallet identity does not match this daemon".into(),
+            ));
+        }
+        self.reserve_change().await
+    }
+
     async fn claim_backend_binding(
         &self,
     ) -> Result<coincubed::poison_broadcast::ClaimBackendBinding, DaemonError> {

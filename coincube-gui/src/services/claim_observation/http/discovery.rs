@@ -2,6 +2,7 @@
 use super::*;
 mod binding;
 mod collect;
+mod funding;
 mod preferred;
 mod sweep;
 pub use binding::AncestryContext;
@@ -13,6 +14,10 @@ use coincube_core::{
     miniscript::bitcoin::OutPoint,
 };
 pub use collect::CollectedAncestry;
+pub use funding::{
+    ClaimPairError, CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs,
+    CollectedSpendInputs, FundingContext, OwnedClaimFunding, OwnedSplitFunding, SplitPairError,
+};
 pub use preferred::MAX_ANCESTRY_CANDIDATES;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -20,7 +25,11 @@ use std::sync::{
 };
 pub use sweep::CollectedAncestrySweep;
 
-const MAX_REQUESTS: usize = 128;
+// A pair with several shared Vault coins rechecks each coin on both chains in
+// addition to the two funding paths. Keep a finite cap alongside the shared
+// wall-clock and response-byte limits, but allow an ordinary small Vault to
+// finish its complete proof instead of truncating it after 128 reads.
+const MAX_REQUESTS: usize = 256;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
 
 pub(super) struct CollectionBudget {
@@ -104,11 +113,14 @@ impl HttpObservationSource {
         &self,
         dependency: &claim_ancestry::CoinbaseDependency,
         policy: Policy,
+        root_chain: ChainId,
     ) -> Result<(CoinbasePair, i64), FailureKind> {
+        if !matches!(root_chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
+            return Err(FailureKind::WrongChain);
+        }
         let (root, stamp) = super::super::read(
-            self.transaction(ChainId::Bitcoin, dependency.root().txid)
-                .await?,
-            ChainId::Bitcoin,
+            self.transaction(root_chain, dependency.root().txid).await?,
+            root_chain,
             self,
             policy,
             Stage::BitcoinInclusion,
@@ -118,8 +130,17 @@ impl HttpObservationSource {
             return Err(FailureKind::Changed);
         };
         let height = u32::try_from(block.height).map_err(|_| FailureKind::Malformed)?;
-        let pair = self.coinbase_pair(dependency, height, policy).await?;
-        if pair.bitcoin().block != block {
+        let pair = match root_chain {
+            ChainId::Bitcoin => self.coinbase_pair(dependency, height, policy).await?,
+            ChainId::BitcoinBlake2b => self.fork_coinbase_pair(dependency, height, policy).await?,
+            _ => return Err(FailureKind::WrongChain),
+        };
+        let canonical_block = match root_chain {
+            ChainId::Bitcoin => pair.bitcoin().block,
+            ChainId::BitcoinBlake2b => pair.fork().block,
+            _ => return Err(FailureKind::WrongChain),
+        };
+        if canonical_block != block {
             return Err(FailureKind::Changed);
         }
         let oldest = pair.observed_at().min(stamp);
@@ -136,21 +157,40 @@ impl HttpObservationSource {
         path: &claim_ancestry::retained::RetainedPath,
         policy: Policy,
     ) -> Result<DiscoveredAncestry, DiscoveryError> {
-        if policy.max_observation_age_seconds <= 0 || policy.expiry_margin_seconds <= 0 {
+        self.requalify_ancestry_for(path, policy, ChainId::Bitcoin)
+            .await
+    }
+
+    /// Refresh a retained BTCB2 path against both canonical chains. This is
+    /// structural evidence only; it does not authorize signing or submission.
+    pub async fn requalify_fork_ancestry(
+        &self,
+        path: &claim_ancestry::retained::RetainedPath,
+        policy: Policy,
+    ) -> Result<DiscoveredAncestry, DiscoveryError> {
+        self.requalify_ancestry_for(path, policy, ChainId::BitcoinBlake2b)
+            .await
+    }
+
+    async fn requalify_ancestry_for(
+        &self,
+        path: &claim_ancestry::retained::RetainedPath,
+        policy: Policy,
+        root_chain: ChainId,
+    ) -> Result<DiscoveredAncestry, DiscoveryError> {
+        if policy.max_observation_age_seconds <= 0 {
             return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
         }
         let dependency = path.reverify().map_err(DiscoveryError::Structural)?;
         let snapshot = self.discovery_snapshot();
         let (pair, observed_at) = tokio::time::timeout(
             MAX_COLLECTION_TIME,
-            snapshot.qualify_dependency(&dependency, policy),
+            snapshot.qualify_dependency(&dependency, policy, root_chain),
         )
         .await
         .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))?
         .map_err(DiscoveryError::Observation)?;
-        if *snapshot.generation.borrow() != snapshot.expected
-            || snapshot.generation.has_changed().is_err()
-        {
+        if !session_current(&snapshot.generation, snapshot.expected) {
             return Err(DiscoveryError::Observation(FailureKind::Cancelled));
         }
         Ok(DiscoveredAncestry {
@@ -170,7 +210,28 @@ impl HttpObservationSource {
         selected: OutPoint,
         policy: Policy,
     ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
-        if policy.max_observation_age_seconds <= 0 || policy.expiry_margin_seconds <= 0 {
+        self.discover_ancestry_for(selected, policy, ChainId::Bitcoin)
+            .await
+    }
+
+    /// Search a BTCB2 transaction graph for a positive post-fork coinbase
+    /// dependency. Candidate ownership, maturity and spendability are separate.
+    pub async fn discover_fork_ancestry(
+        &self,
+        selected: OutPoint,
+        policy: Policy,
+    ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
+        self.discover_ancestry_for(selected, policy, ChainId::BitcoinBlake2b)
+            .await
+    }
+
+    async fn discover_ancestry_for(
+        &self,
+        selected: OutPoint,
+        policy: Policy,
+        root_chain: ChainId,
+    ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
+        if policy.max_observation_age_seconds <= 0 {
             return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
         }
         let mut search = Search::new(selected).map_err(DiscoveryError::Structural)?;
@@ -181,14 +242,14 @@ impl HttpObservationSource {
                 match search.step().map_err(DiscoveryError::Structural)? {
                     Step::Fetch { txid, max_bytes } => {
                         let raw = snapshot
-                            .ancestry_transaction_limited(ChainId::Bitcoin, txid, max_bytes)
+                            .ancestry_transaction_limited(root_chain, txid, max_bytes)
                             .await
                             .map_err(observation)?;
                         search.provide(raw).map_err(DiscoveryError::Structural)?;
                     }
                     Step::Candidate(candidate) => {
                         match snapshot
-                            .qualify_dependency(&candidate.dependency, policy)
+                            .qualify_dependency(&candidate.dependency, policy, root_chain)
                             .await
                         {
                             // Only positively disqualified roots allow another branch.
@@ -214,9 +275,7 @@ impl HttpObservationSource {
         })
         .await
         .map_err(|_| observation(FailureKind::Deadline))?;
-        if *snapshot.generation.borrow() != snapshot.expected
-            || snapshot.generation.has_changed().is_err()
-        {
+        if !session_current(&snapshot.generation, snapshot.expected) {
             return Err(observation(FailureKind::Cancelled));
         }
         result
@@ -234,6 +293,38 @@ mod tests {
             max_observation_age_seconds: 60,
             expiry_margin_seconds: 600,
         }
+    }
+
+    #[tokio::test]
+    async fn fork_discovery_reads_only_the_fork_graph_and_fails_closed_on_observation_error() {
+        let server = MockServer::start();
+        let (source, _sender) = make_source(&server);
+        let (txid, raw) = ancestry_fixture();
+        let fork_raw = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{txid}/hex"
+            ));
+            then.status(200).body(hex::encode(&raw));
+        });
+        let fork_status = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{txid}"));
+            then.status(503);
+        });
+        let bitcoin_read = server.mock(|when, then| {
+            when.method(GET)
+                .path_contains("/api/v1/esplora/bitcoin/mainnet/tx/");
+            then.status(500);
+        });
+        assert!(matches!(
+            source
+                .discover_fork_ancestry(OutPoint::new(txid, 0), policy())
+                .await,
+            Err(DiscoveryError::Observation(FailureKind::Http(503)))
+        ));
+        fork_raw.assert_hits(1);
+        fork_status.assert_hits(1);
+        bitcoin_read.assert_hits(0);
     }
 
     #[tokio::test]

@@ -379,6 +379,7 @@ impl From<&Error> for UserError {
                         ),
                         // Each guard returns before broadcast_tx:
                         SubmissionError::UnsupportedChain // Bitcoin-mainnet boundary.
+                        | SubmissionError::RetiredRoute // Historical transport is closed.
                         | SubmissionError::DescriptorMismatch // Construction identity check.
                         | SubmissionError::OutputMismatch // Split step-2 target check.
                         | SubmissionError::BackendUnavailable // Backend acquisition.
@@ -828,6 +829,7 @@ mod tests {
         use coincubed::poison_broadcast::SubmissionError;
         for (error, uncertain) in [
             (SubmissionError::UnsupportedChain, false),
+            (SubmissionError::RetiredRoute, false),
             (SubmissionError::DescriptorMismatch, false),
             (SubmissionError::BackendUnavailable, false),
             (SubmissionError::GateMismatch, false),

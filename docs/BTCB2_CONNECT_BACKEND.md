@@ -1,5 +1,15 @@
 # BTCB2 Connect backend integration
 
+This is a September 19 backend audit, retained for its implementation history.
+BTCB2 Cubes can now be created and opened with Connect on mainnet, and the
+dedicated BTCB2 RPC and Esplora endpoints have been exercised through the
+production API. The current launch gate is the separate Claim/Split migration:
+the 90-byte OP_RETURN routes are retired, and the replacement paired
+input-ancestry flow remains disabled pending acceptance. See
+[BTCB2_ANCESTRY_SPLIT_MIGRATION.md](BTCB2_ANCESTRY_SPLIT_MIGRATION.md) for the
+current design, progress and release criteria. The notes below describe the
+state at the audit base, not the current application or server state.
+
 Audit base: `b45a9d4853319133593d1e01992f5ac9a8dc8676` (2026-09-19).
 This is preparation for runtime activation; this build still refuses BTCB2
 Cube creation/opening. A server feature flag does not override that gate.

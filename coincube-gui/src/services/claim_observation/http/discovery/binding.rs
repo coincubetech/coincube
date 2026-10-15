@@ -24,17 +24,14 @@ impl DiscoveredAncestry {
         context: AncestryContext<'_>,
     ) -> Result<(), FailureKind> {
         if context.generation != self.generation()
-            || *self.live_generation.borrow() != self.generation()
-            || self.live_generation.has_changed().is_err()
+            || !session_current(&self.live_generation, self.generation())
         {
             return Err(FailureKind::Cancelled);
         }
         if context.provider.trim_end_matches('/') != self.provider {
             return Err(FailureKind::Changed);
         }
-        if context.policy.max_observation_age_seconds <= 0
-            || context.policy.expiry_margin_seconds <= 0
-        {
+        if context.policy.max_observation_age_seconds <= 0 {
             return Err(FailureKind::InvalidPlan);
         }
         if !super::super::super::fresh(
@@ -50,6 +47,9 @@ impl DiscoveredAncestry {
             return Err(FailureKind::Changed);
         }
         if plan.bitcoin_chain != ChainId::Bitcoin || plan.fork_chain != ChainId::BitcoinBlake2b {
+            return Err(FailureKind::WrongChain);
+        }
+        if self.pair.root_chain() != ChainId::Bitcoin {
             return Err(FailureKind::WrongChain);
         }
         if path.selected() != self.pair.selected()

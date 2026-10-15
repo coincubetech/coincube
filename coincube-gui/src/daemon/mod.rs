@@ -165,21 +165,30 @@ pub trait Daemon: Debug {
     async fn broadcast_spend_tx(&self, txid: &Txid) -> Result<(), DaemonError>;
     /// Durably reserve a fresh local change index for this wallet.
     ///
-    /// Embedded-only, and deliberately **not** on the JSON-RPC surface: the
-    /// reservation is a durable local write bound to the persisted chain and
-    /// descriptor identity, so an external `coincubed` cannot serve one for a
-    /// wallet this process is not the owner of. A claim needs it because
-    /// `coincube_core::claim_spend` builds the poison self-transfer against a
-    /// change index the caller has already reserved — reusing a live index
-    /// would put the poison's change on an address another spend may also use.
+    /// This unbound form remains embedded-only. The separate
+    /// `reserve_claim_change` method requires the exact chain and descriptor
+    /// and can be served over the local JSON-RPC socket. A Claim transaction
+    /// needs a reserved change destination; reusing a live index could put
+    /// another spend on that address.
     /// Returns the reserved index only. The reservation object itself stays
     /// inside the daemon: `DaemonControl::reserve_change` binds it to the
     /// persisted chain and descriptor before returning, so the check that
-    /// matters has already happened where the state lives, and the GUI needs
-    /// nothing but the index to hand to `coincube_core::claim_spend`.
+    /// matters has already happened where the state lives.
     async fn reserve_change(
         &self,
     ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
+        Err(DaemonError::ClientNotSupported)
+    }
+
+    /// Reserve a change index in a wallet that positively matches both
+    /// identities. This is the cross-Cube Claim operation; a generic remote
+    /// wallet cannot implement it by reading an index or generating a receive
+    /// address. Unsupported backends fail closed.
+    async fn reserve_claim_change(
+        &self,
+        _chain: coincube_core::chain::ChainId,
+        _descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    ) -> Result<ChildNumber, DaemonError> {
         Err(DaemonError::ClientNotSupported)
     }
 

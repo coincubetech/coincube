@@ -1,5 +1,11 @@
 # Dormant owned Claim step-one coordinator
 
+This describes the retired OP_RETURN coordinator for historical record
+reconciliation. It is not the design for new transactions. The current
+two-chain, ordinary-input Claim and Split design, its implementation status,
+and its closed production gate are documented in
+[BTCB2_ANCESTRY_SPLIT_MIGRATION.md](BTCB2_ANCESTRY_SPLIT_MIGRATION.md).
+
 `services::claim_coordinator` joins the existing opaque poison construction,
 verified final witness, observation collector, anonymous preflight, private
 journal and exact-byte transport. It is not an enabled Claim workflow. No UI,

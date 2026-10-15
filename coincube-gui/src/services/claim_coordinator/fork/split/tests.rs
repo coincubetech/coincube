@@ -1139,9 +1139,17 @@ fn split_step2_gate_has_no_gui_caller() {
     );
     let mut unexpected = Vec::new();
     for (file, text) in &files {
-        if file.starts_with("src/services/claim_coordinator/fork/split") {
+        if file.starts_with("src/services/claim_coordinator/fork/split")
+            || file.ends_with("/tests.rs")
+            || file.contains("/tests/")
+        {
             continue;
         }
+        let text = if file == "src/services/coincube/network_anchor.rs" {
+            production_text(file, text)
+        } else {
+            text.as_str()
+        };
         for ident in [
             "SplitPreparation",
             "SplitForkProduction",

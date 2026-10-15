@@ -473,6 +473,20 @@ async fn generation_change_and_timeout_cancel_collection_without_retry() {
         failure(Stage::Context, FailureKind::Deadline)
     );
     assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+
+    let f = Fixture::new(Fault::None);
+    let context = f.context();
+    f.sender.send_replace(7);
+    assert_eq!(
+        collect(&f, &plan(), policy(), Duration::from_secs(1), context)
+            .await
+            .unwrap_err(),
+        failure(Stage::Context, FailureKind::Cancelled),
+        "a same-value session refresh must invalidate a collection"
+    );
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+
+    let f = Fixture::new(Fault::None);
     let context = f.context();
     f.sender.send_replace(8);
     assert_eq!(
@@ -482,7 +496,7 @@ async fn generation_change_and_timeout_cancel_collection_without_retry() {
             .kind,
         FailureKind::Cancelled
     );
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]
@@ -529,6 +543,36 @@ fn malformed_anchor_projection_cannot_invent_a_coherent_view() {
             FailureKind::Malformed
         );
     }
+}
+
+#[tokio::test]
+async fn fork_only_ancestry_anchor_does_not_require_rdts() {
+    for (rdts, expected) in [
+        (RdtsStatus::Absent, DeploymentState::RdtsAbsent),
+        (RdtsStatus::Unsupported, DeploymentState::RdtsUnsupported),
+    ] {
+        let mut fixture = Fixture::new(Fault::None);
+        fixture.anchor.anchor.as_mut().unwrap().observation.rdts = rdts;
+        let view = fork_anchor(&fixture, ChainId::BitcoinBlake2b, policy())
+            .await
+            .unwrap();
+        assert_eq!(view.fork_height, 90);
+        assert_eq!(view.tip.height, 100);
+        assert_eq!(view.deployment, expected);
+    }
+}
+
+#[test]
+fn ancestry_plan_shape_does_not_require_rdts_expiry_margin() {
+    let policy = Policy {
+        expiry_margin_seconds: 0,
+        ..policy()
+    };
+    assert!(validate_plan_shape(&plan(), policy, Duration::from_secs(1)).is_ok());
+    assert_eq!(
+        validate_plan(&plan(), policy, Duration::from_secs(1)),
+        Err(failure(Stage::Plan, FailureKind::InvalidPlan))
+    );
 }
 
 #[tokio::test]

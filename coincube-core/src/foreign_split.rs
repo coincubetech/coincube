@@ -1,11 +1,10 @@
-//! Split step 1: the Bitcoin-side poison self-transfer of a foreign (non-Cube)
-//! wallet. Construction, deterministic reconstruction and finalization only.
+//! Foreign-wallet split construction, deterministic reconstruction and
+//! finalization only.
 //!
-//! Step 1 spends every selected pre-fork coin of the foreign wallet on Bitcoin
-//! to one fresh address of the same wallet, with the OP_RETURN poison shared
-//! with Claim ([`crate::split_poison`]). It is the Bitcoin half of #568's
-//! primary poison split; the BTCB2 half (step 2) spends the same original
-//! outpoints into the target Cube once step 1 is confirmed.
+//! The old step 1 spent every selected pre-fork coin on Bitcoin with the
+//! OP_RETURN marker shared with Claim ([`crate::split_poison`]). The ordinary
+//! ancestry pair instead adds a chain-specific funding input on each chain;
+//! both halves spend the same shared outpoints to their respective destinations.
 //!
 //! Supported source shapes, matching [`crate::unified_foreign`]: `pkh`, `wpkh`,
 //! `sh(wpkh)`, `wsh(multi)` and `wsh(sortedmulti)`. Taproot (`tr`) is scan-only
@@ -20,8 +19,9 @@
 //! observations and the observed fork height, and establish all of the above
 //! separately before any signature is requested or broadcast.
 //!
-//! Only a Bitcoin OP_RETURN poison is built. Input poison waits for the #547
-//! ancestry gate (owner decision D2).
+//! The legacy OP_RETURN builders remain for recorded intents; new ancestry
+//! builders create ordinary `S + B` and `S + F` transactions. Neither builder
+//! grants chain proof or signing authority on its own.
 
 use std::{collections::BTreeSet, fmt};
 
@@ -116,6 +116,12 @@ pub enum Error {
     /// address types), or is one of the foreign wallet's own scripts within
     /// the scanner's gap of a claimed coin's index.
     InvalidTarget,
+    /// A post-fork funding coin is missing, malformed, or not bound to the
+    /// supplied structural dependency. Live chain exclusivity is separate.
+    InvalidFunding(&'static str),
+    /// The selected chain-specific funding input cannot cover the current
+    /// transaction fee; shared pre-fork value must never subsidize it.
+    FundingBelowFee(ChainId),
 }
 
 impl fmt::Display for Error {
@@ -158,6 +164,13 @@ impl fmt::Display for Error {
                 f.write_str("Step 2 must spend exactly the coins step 1 claimed")
             }
             Self::InvalidTarget => f.write_str("Step 2 target address is not usable"),
+            Self::InvalidFunding(reason) => write!(f, "Invalid split funding coin: {reason}"),
+            Self::FundingBelowFee(chain) => {
+                write!(
+                    f,
+                    "{chain:?} funding coin does not cover this transaction's fee"
+                )
+            }
         }
     }
 }
@@ -195,6 +208,24 @@ impl SplitSource {
 
     pub fn internal(&self) -> Option<&Descriptor<DescriptorPublicKey>> {
         self.internal.as_ref()
+    }
+
+    /// Required signatures per input for every supported source shape. This
+    /// is display information; PSBT finalization still verifies each input.
+    pub fn signing_threshold(&self) -> usize {
+        match &self.external {
+            Descriptor::Pkh(_) | Descriptor::Wpkh(_) | Descriptor::Sh(_) => 1,
+            Descriptor::Wsh(wsh) => match wsh.as_inner() {
+                WshInner::SortedMulti(multi) => multi.k(),
+                WshInner::Ms(ms) => match ms.as_inner() {
+                    Terminal::Multi(multi) => multi.k(),
+                    _ => unreachable!("SplitSource::new checks the descriptor shape"),
+                },
+            },
+            Descriptor::Bare(_) | Descriptor::Tr(_) => {
+                unreachable!("SplitSource::new checks the descriptor shape")
+            }
+        }
     }
 
     /// The source identity (owner decision D9): SHA-256 over the domain tag
@@ -1159,6 +1190,18 @@ mod step2;
 pub use step2::{
     create_split_step2, finalize_split_step2, reconstruct_split_step2,
     verify_split_step2_transaction, SplitStep2, SplitStep2Inputs, VerifiedSplitStep2,
+};
+
+mod ancestry;
+pub use ancestry::{
+    combine_ancestry_split_pair, create_ancestry_split_step1, create_ancestry_split_step2,
+    estimate_ancestry_signed_vbytes, finalize_ancestry_split_pair, finalize_ancestry_split_step1,
+    finalize_ancestry_split_step2, reconstruct_ancestry_split_step1,
+    reconstruct_ancestry_split_step2, validate_ancestry_split_pair_signing,
+    verify_ancestry_split_pair_transactions, verify_ancestry_split_step1_transaction,
+    verify_ancestry_split_step2_transaction, AncestrySplitInputs, AncestrySplitStep1,
+    AncestrySplitStep2, AncestrySplitStep2Inputs, CombineAncestrySplitError,
+    CombinedAncestrySplitPair, VerifiedAncestrySplitPair, VerifiedAncestrySplitStep2,
 };
 
 mod unified;

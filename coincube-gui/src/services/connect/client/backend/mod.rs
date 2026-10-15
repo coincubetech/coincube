@@ -8,6 +8,7 @@ use std::{
 use async_trait::async_trait;
 use chrono::Utc;
 use coincube_core::{
+    chain::ChainId,
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{
         address, bip32::ChildNumber, psbt::Psbt, Address, Network, OutPoint, Txid,
@@ -59,6 +60,18 @@ impl From<NotSuccessResponseInfo> for DaemonError {
     fn from(value: NotSuccessResponseInfo) -> Self {
         DaemonError::Http(Some(value.status_code), value.text)
     }
+}
+
+fn authenticated_wallet_chain(
+    chain_id: Option<ChainId>,
+    address_network: Network,
+) -> Result<Option<ChainId>, DaemonError> {
+    if chain_id.is_some_and(|chain| chain.bitcoin_network() != address_network) {
+        return Err(DaemonError::Unexpected(
+            "Connect wallet chain identity disagrees with its address network".into(),
+        ));
+    }
+    Ok(chain_id)
 }
 
 fn request<U: IntoUrl>(
@@ -580,9 +593,13 @@ impl Daemon for BackendWalletClient {
 
     async fn get_info(&self) -> Result<GetInfoResult, DaemonError> {
         let wallet = self.get_wallet().await?;
+        let chain_id = authenticated_wallet_chain(wallet.chain_id, self.inner.network)?;
 
         Ok(GetInfoResult {
             network: self.inner.network,
+            // A missing server field stays unknown; do not infer Bitcoin from
+            // the shared Bitcoin/BTCB2 address encoding.
+            chain_id,
             version: "".to_string(),
             block_height: wallet.tip_height.unwrap_or(0),
             descriptors: GetInfoDescriptors {
@@ -1281,4 +1298,22 @@ fn spend_tx_from_api(
     );
     tx.load_labels(&labels);
     tx
+}
+
+#[cfg(test)]
+mod chain_identity_tests {
+    use super::*;
+
+    #[test]
+    fn remote_wallet_identity_is_positive_or_unknown_never_inferred() {
+        assert_eq!(
+            authenticated_wallet_chain(None, Network::Bitcoin).unwrap(),
+            None
+        );
+        assert_eq!(
+            authenticated_wallet_chain(Some(ChainId::BitcoinBlake2b), Network::Bitcoin).unwrap(),
+            Some(ChainId::BitcoinBlake2b)
+        );
+        assert!(authenticated_wallet_chain(Some(ChainId::Testnet4), Network::Bitcoin).is_err());
+    }
 }

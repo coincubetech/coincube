@@ -1,11 +1,28 @@
 //! Restart-safe intent bookkeeping only. No signing/broadcast/UI entry point.
 mod ancestry;
 pub(crate) use ancestry::RecoveryObservation;
+mod claim_funding;
+pub(crate) use claim_funding::RequalifiedInitialClaim;
 mod journal;
+mod paired_recovery;
+pub(crate) mod paired_signing_permit;
+pub(crate) use paired_recovery::{ChainState as PairedChainState, SideReport as PairedSideReport};
+mod paired_submission;
+pub(crate) use paired_submission::{
+    InitialPairReview, PostBitcoinPairReview, RecordedPostBitcoinPairPlan,
+};
+pub use paired_submission::{InitialPairReviewSnapshot, InitialPairSubmissionOutcome};
 mod recovery;
 mod reorg;
 mod split;
+mod split_funding;
 use super::claim_observation::{CollectedAssessment, Failure, ObservationBundle};
+pub use claim_funding::{
+    load_claim_funding, prepare_claim_deposit_instructions, quote_claim_deposit_minimums,
+    quote_claim_deposit_terms, reserve_claim_change_indices, reserve_claim_funding,
+    CheckedClaimFundingAddresses, ClaimAddressError, ClaimChangeError, ClaimChangeIndices,
+    ClaimFundingDiscoveryError, ClaimFundingReservation, ClaimPairRequalificationError,
+};
 use coincube_core::{
     chain::ChainId,
     claim::{self, Assessment, BlockRef, ClaimPlan, Poison, Policy, TransactionLocation},
@@ -22,6 +39,12 @@ pub(crate) use split::Step2ReturnHold;
 pub use split::{
     peek_split_journal, split_identity, RecordedSplit, SplitJournalSummary, SplitKind,
     Step1Conflict, MAX_SPLIT_STEP2_RESUBMISSIONS, SPLIT_TOMBSTONE,
+};
+pub(crate) use split_funding::RequalifiedInitialSplit;
+pub use split_funding::{
+    load_split_funding, peek_split_funding, release_split_funding, reserve_split_funding,
+    reserve_split_funding_with_target, SplitFundingDiscoveryError, SplitFundingReservation,
+    SplitPairRequalificationError, SplitTargetBinding,
 };
 
 /// Upper bound on how long [`Controller::reopen_settling`] waits out `Busy`.
@@ -85,6 +108,12 @@ struct Intent {
     version: u32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     ancestry: Option<ancestry::StoredAncestry>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    funding_plan: Option<ancestry::StoredFundingPlan>,
+    /// Signed ordinary transactions for a version-10 Claim or version-11
+    /// Split. Reopening this record never restores live proof or permission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_submission: Option<paired_submission::PairedSubmissionRecord>,
     identity: WalletIdentity,
     plan: ClaimPlan,
     unsigned_digest: sha256::Hash,
@@ -182,6 +211,7 @@ fn context_digest(context: &Context) -> sha256::Hash {
     sha256::Hash::hash(&bytes)
 }
 fn validate(intent: &Intent) -> Result<(), Error> {
+    paired_submission::validate(intent)?;
     // A Split intent has its own rules (no Bitcoin Cube, signed scriptSigs,
     // a tracked signed txid). Every Claim check below stays as it was.
     if intent.split.is_some() || split::VERSIONS.contains(&intent.version) {
@@ -200,7 +230,10 @@ fn validate(intent: &Intent) -> Result<(), Error> {
             | (3 | 5 | 6, true, Some(0..=0x7fff_ffff), None)
             | (4..=7, false, None, Some(0..=0x7fff_ffff))
             | (4..=7, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
+            | (10, false, None, Some(0..=0x7fff_ffff))
+            | (10, true, Some(0..=0x7fff_ffff), Some(0..=0x7fff_ffff))
     ) || intent.identity.bitcoin_cube.is_empty()
+        || (intent.version == 10) != intent.funding_plan.is_some()
         || intent.identity.fork_cube.is_empty()
         || intent.identity.bitcoin_cube.len() > 256
         || intent.identity.fork_cube.len() > 256
@@ -243,7 +276,15 @@ fn validate(intent: &Intent) -> Result<(), Error> {
         if intent.phase != Phase::Tracking
             || intent.signed_txid.is_none()
             || inputs.len() != sweep.input.len()
-            || inputs != claimed
+            || if intent.version == 10 {
+                intent.funding_plan.as_ref().is_none_or(|record| {
+                    let mut expected = claimed.clone();
+                    expected.insert(record.fork_selected());
+                    inputs != expected
+                })
+            } else {
+                inputs != claimed
+            }
             || sweep
                 .input
                 .iter()
@@ -278,34 +319,46 @@ impl Controller {
         artifact: &coincube_core::claim_spend::PoisonSelfTransfer,
         context: Context,
     ) -> Result<Self, Error> {
-        let bitcoin_chain = artifact.chain();
-        let fork_chain = match bitcoin_chain {
-            ChainId::Bitcoin => ChainId::BitcoinBlake2b,
-            ChainId::Testnet4 => ChainId::BitcoinBlake2bTestnet4,
-            _ => return Err(Error::InvalidPlan),
-        };
-        let identity = WalletIdentity {
-            bitcoin_cube,
-            fork_cube,
-            descriptor_digest: sha256::Hash::hash(artifact.descriptor().to_string().as_bytes()),
-        };
-        let step1 = artifact.psbt().unsigned_tx.clone();
-        let claimed_prevouts = step1.input.iter().map(|i| i.previous_output).collect();
-        Self::create_intent(
-            directory,
-            identity,
-            ClaimPlan {
-                bitcoin_chain,
-                fork_chain,
-                step1,
-                claimed_prevouts,
-                poison: Poison::OpReturn,
-                previous_confirmation: None,
-                tracked_txid: None,
-            },
-            context,
-            Some(u32::from(artifact.change_index())),
-        )
+        // The OP_RETURN builder is retained for exact reconstruction of old
+        // records and test fixtures. A new production journal must use the
+        // paired ancestry constructor, even if an older caller reaches this
+        // service without passing through the desktop route gate.
+        #[cfg(not(test))]
+        {
+            let _ = (directory, bitcoin_cube, fork_cube, artifact, context);
+            Err(Error::Unchecked)
+        }
+        #[cfg(test)]
+        {
+            let bitcoin_chain = artifact.chain();
+            let fork_chain = match bitcoin_chain {
+                ChainId::Bitcoin => ChainId::BitcoinBlake2b,
+                ChainId::Testnet4 => ChainId::BitcoinBlake2bTestnet4,
+                _ => return Err(Error::InvalidPlan),
+            };
+            let identity = WalletIdentity {
+                bitcoin_cube,
+                fork_cube,
+                descriptor_digest: sha256::Hash::hash(artifact.descriptor().to_string().as_bytes()),
+            };
+            let step1 = artifact.psbt().unsigned_tx.clone();
+            let claimed_prevouts = step1.input.iter().map(|i| i.previous_output).collect();
+            Self::create_intent(
+                directory,
+                identity,
+                ClaimPlan {
+                    bitcoin_chain,
+                    fork_chain,
+                    step1,
+                    claimed_prevouts,
+                    poison: Poison::OpReturn,
+                    previous_confirmation: None,
+                    tracked_txid: None,
+                },
+                context,
+                Some(u32::from(artifact.change_index())),
+            )
+        }
     }
     /// Restart never restores the builder artifact. A caller must reconstruct it
     /// through ownership/prevout checks before recording any new broadcast intent.
@@ -316,6 +369,10 @@ impl Controller {
     ) -> Result<(), Error> {
         self.ensure_context(current)?;
         self.clear_check();
+        if self.intent.version == 10 {
+            self.construction_verified = false;
+            return Err(Error::Unchecked);
+        }
         if self.intent.split.is_some() {
             self.construction_verified = false;
             return Err(Error::WrongIdentity);
@@ -361,6 +418,7 @@ impl Controller {
         &self.intent.identity
     }
 
+    #[cfg(test)]
     fn create_intent(
         directory: &Path,
         identity: WalletIdentity,
@@ -375,6 +433,7 @@ impl Controller {
             context,
             bitcoin_change_index,
             None,
+            None,
         )
     }
     fn create_intent_with_ancestry(
@@ -384,9 +443,12 @@ impl Controller {
         context: Context,
         bitcoin_change_index: Option<u32>,
         ancestry: Option<ancestry::StoredAncestry>,
+        funding_plan: Option<ancestry::StoredFundingPlan>,
     ) -> Result<Self, Error> {
         let intent = Intent {
-            version: if ancestry.is_some() {
+            version: if funding_plan.is_some() {
+                10
+            } else if ancestry.is_some() {
                 7
             } else if bitcoin_change_index.is_some() {
                 4
@@ -394,6 +456,8 @@ impl Controller {
                 1
             },
             ancestry,
+            funding_plan,
+            paired_submission: None,
             identity,
             unsigned_digest: digest(&plan.step1),
             context_digest: context_digest(&context),
@@ -415,11 +479,33 @@ impl Controller {
         if journal.load()?.is_some() {
             return Err(Error::Conflict);
         }
+        if intent.version == 10 {
+            let saved = journal
+                .load_claim_funding_reservation()?
+                .ok_or(Error::InvalidPlan)?;
+            if !saved.matches_pair(
+                &intent.identity,
+                &context,
+                intent.ancestry.as_ref().ok_or(Error::InvalidPlan)?,
+                &intent.funding_plan.as_ref().ok_or(Error::InvalidPlan)?.fork,
+                claim_funding::ClaimChangeIndices {
+                    bitcoin: bitcoin_change_index.ok_or(Error::InvalidPlan)?,
+                    fork: intent
+                        .funding_plan
+                        .as_ref()
+                        .ok_or(Error::InvalidPlan)?
+                        .fork_change_index,
+                },
+            ) {
+                return Err(Error::WrongIdentity);
+            }
+        }
         journal.store(&intent)?;
+        let construction_verified = !matches!(intent.version, 10 | split::ANCESTRY_VERSION);
         Ok(Self {
             id: controller_id()?,
             revoked: false,
-            construction_verified: true,
+            construction_verified,
             journal,
             intent,
             context,
@@ -440,6 +526,31 @@ impl Controller {
         validate(&intent)?;
         if &intent.identity != identity || intent.context_digest != context_digest(&context) {
             return Err(Error::WrongIdentity);
+        }
+        if intent.version == 10 {
+            let saved = journal
+                .load_claim_funding_reservation()?
+                .ok_or(Error::InvalidJournal)?;
+            if !saved.matches_pair(
+                &intent.identity,
+                &context,
+                intent.ancestry.as_ref().ok_or(Error::InvalidJournal)?,
+                &intent
+                    .funding_plan
+                    .as_ref()
+                    .ok_or(Error::InvalidJournal)?
+                    .fork,
+                claim_funding::ClaimChangeIndices {
+                    bitcoin: intent.bitcoin_change_index.ok_or(Error::InvalidJournal)?,
+                    fork: intent
+                        .funding_plan
+                        .as_ref()
+                        .ok_or(Error::InvalidJournal)?
+                        .fork_change_index,
+                },
+            ) {
+                return Err(Error::WrongIdentity);
+            }
         }
         Ok(Self {
             id: controller_id()?,
@@ -518,12 +629,17 @@ impl Controller {
             other => other,
         }
     }
-    /// Claim-only operations take Claim artifacts; a Split intent refuses them
-    /// before any check could compare a Claim artifact with a Split record.
+    /// Legacy Claim operations cannot advance a paired-funding intent: its
+    /// Bitcoin and fork constructions must be revalidated together.
     fn claim_only(&mut self) -> Result<(), Error> {
         if self.intent.split.is_some() {
             self.clear_check();
             return Err(Error::WrongIdentity);
+        }
+        if self.intent.version == 10 {
+            self.clear_check();
+            self.construction_verified = false;
+            return Err(Error::Unchecked);
         }
         Ok(())
     }
@@ -555,6 +671,16 @@ impl Controller {
     }
     pub fn phase(&self) -> Phase {
         self.intent.phase
+    }
+    /// A paired Claim must be reopened through the read-only two-chain path.
+    /// Legacy construction and submission admission cannot represent it.
+    pub(crate) fn is_paired_ancestry_claim(&self) -> bool {
+        self.intent.version == 10 && self.intent.split.is_none()
+    }
+    /// A version-11 Split has two ordinary signed transactions and must not
+    /// reopen through the legacy step-one or step-two resend coordinators.
+    pub(crate) fn is_paired_ancestry_split(&self) -> bool {
+        self.intent.version == 11 && self.intent.split.is_some()
     }
     pub fn plan(&self) -> ClaimPlan {
         self.intent.plan.clone()
@@ -872,3 +998,5 @@ impl Controller {
 }
 #[cfg(all(test, any(unix, windows)))]
 mod tests;
+#[cfg(test)]
+pub(crate) use tests::WSH_DESC as TEST_WSH_DESC;

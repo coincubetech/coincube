@@ -1,4 +1,5 @@
-//! Dormant, observation-only Claim prerequisite. No UI caller is installed. A complete assessment is never spend permission.
+//! Fresh Claim and Split observations. A complete assessment alone is never
+//! signer or broadcast permission.
 pub mod http;
 
 use async_trait::async_trait;
@@ -81,6 +82,9 @@ pub struct FreshRead<T> {
     observed_at: i64,
 }
 impl<T> FreshRead<T> {
+    pub fn chain(&self) -> ChainId {
+        self.chain
+    }
     /// The value read, once the fresh-read contract has been acknowledged.
     pub fn value(&self) -> &T {
         &self.value
@@ -161,6 +165,10 @@ pub struct CollectionContext {
     pub generation: watch::Receiver<u64>,
 }
 
+pub(crate) fn session_current(generation: &watch::Receiver<u64>, expected: u64) -> bool {
+    *generation.borrow() == expected && matches!(generation.has_changed(), Ok(false))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ObservationBundle {
     /// Preserve absence separately from mempool presence. The core eligibility
@@ -222,7 +230,6 @@ fn validate_plan_shape(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Re
         || plan.step1.input.iter().any(|i| i.previous_output.is_null())
         || plan.step1.output.is_empty()
         || policy.max_observation_age_seconds <= 0
-        || policy.expiry_margin_seconds <= 0
         || budget.is_zero()
         || budget > MAX_COLLECTION_TIME
     {
@@ -232,6 +239,9 @@ fn validate_plan_shape(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Re
 }
 fn validate_plan(plan: &ClaimPlan, policy: Policy, budget: Duration) -> Result<(), Failure> {
     validate_plan_shape(plan, policy, budget)?;
+    if policy.expiry_margin_seconds <= 0 {
+        return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
+    }
     if plan.poison == Poison::InputAncestry {
         return Err(failure(Stage::Plan, FailureKind::UnsupportedPoison));
     }
@@ -285,11 +295,72 @@ pub fn project_anchor(
         },
     ))
 }
+
+fn project_ancestry_anchor(
+    status: NetworkAnchorStatus,
+    chain: ChainId,
+    txid: Txid,
+    presence: ForkTransactionPresence,
+    policy: Policy,
+    now: i64,
+) -> Result<(ForkObservation, DeploymentObservation), Failure> {
+    let anchor = checked_ancestry_anchor(status, chain, policy, now)?;
+    let state = match anchor.observation.rdts {
+        RdtsStatus::Absent => DeploymentState::RdtsAbsent,
+        RdtsStatus::Unsupported => DeploymentState::RdtsUnsupported,
+        RdtsStatus::Flagday { flagday } => DeploymentState::Flagday {
+            height: flagday.height,
+            expiry_time: flagday.expiry_time,
+            active: flagday.active,
+        },
+    };
+    let tip = BlockRef {
+        height: anchor.tip_height,
+        hash: anchor.tip_hash,
+    };
+    Ok((
+        ForkObservation {
+            chain,
+            step1_txid: txid,
+            step1_presence: presence,
+            tip,
+            median_time_past: anchor.tip_median_time_past,
+            observed_at: anchor.observed_at,
+        },
+        DeploymentObservation {
+            chain,
+            tip,
+            state,
+            observed_at: anchor.observed_at,
+        },
+    ))
+}
 fn checked_anchor(
     status: NetworkAnchorStatus,
     chain: ChainId,
     policy: Policy,
     now: i64,
+) -> Result<NetworkAnchor, Failure> {
+    checked_anchor_with_rdts(status, chain, policy, now, true)
+}
+
+/// Input ancestry depends on the active fork and coherent tip, not on the
+/// temporary RDTS window used by the retired OP_RETURN construction.
+fn checked_ancestry_anchor(
+    status: NetworkAnchorStatus,
+    chain: ChainId,
+    policy: Policy,
+    now: i64,
+) -> Result<NetworkAnchor, Failure> {
+    checked_anchor_with_rdts(status, chain, policy, now, false)
+}
+
+fn checked_anchor_with_rdts(
+    status: NetworkAnchorStatus,
+    chain: ChainId,
+    policy: Policy,
+    now: i64,
+    require_rdts: bool,
 ) -> Result<NetworkAnchor, Failure> {
     let bad = |kind| failure(Stage::ForkAnchor, kind);
     if !chain.is_blake2b() || status.network != chain {
@@ -310,7 +381,8 @@ fn checked_anchor(
             .fork
             .as_ref()
             .is_some_and(|f| f.active && a.tip_height >= f.height)
-        || !matches!(&a.observation.rdts, RdtsStatus::Flagday { flagday } if flagday.expiry_time > 0)
+        || (require_rdts
+            && !matches!(&a.observation.rdts, RdtsStatus::Flagday { flagday } if flagday.expiry_time > 0))
     {
         return Err(bad(FailureKind::Malformed));
     }
@@ -333,17 +405,11 @@ pub async fn collect(
 ) -> Result<CollectedAssessment, Failure> {
     validate_plan(plan, policy, budget)?;
     let expected = context.expected_generation;
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     let cancelled = async {
-        loop {
-            if context.generation.changed().await.is_err()
-                || *context.generation.borrow_and_update() != expected
-            {
-                break;
-            }
-        }
+        let _ = context.generation.changed().await;
     };
     let result = tokio::select! {
         biased;
@@ -352,7 +418,7 @@ pub async fn collect(
             result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?
         }
     };
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     result
@@ -393,17 +459,11 @@ pub async fn collect_sweep(
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
     let expected = context.expected_generation;
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     let cancelled = async {
-        loop {
-            if context.generation.changed().await.is_err()
-                || *context.generation.borrow_and_update() != expected
-            {
-                break;
-            }
-        }
+        let _ = context.generation.changed().await;
     };
     let work = async {
         let first = collect_inner(source, plan, policy, expected).await?;
@@ -454,7 +514,7 @@ pub async fn collect_sweep(
         _ = cancelled => Err(failure(Stage::Context, FailureKind::Cancelled)),
         result = tokio::time::timeout(budget, work) => result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?,
     };
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     result
@@ -462,8 +522,8 @@ pub async fn collect_sweep(
 
 /// The fork chain's checked network anchor as one fork-only read (#568
 /// B4b-3a): its tip, the fork's activation height, the deployment and the
-/// stamp of the read. Freshness, an active fork at or below the tip and a
-/// well-formed RDTS window are checked as for every collection.
+/// stamp of the read. Freshness and an active fork at or below the tip are
+/// checked. RDTS is retained as optional metadata for historical records.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ForkAnchorView {
     pub tip: BlockRef,
@@ -482,7 +542,7 @@ pub async fn fork_anchor(
     fork: ChainId,
     policy: Policy,
 ) -> Result<ForkAnchorView, Failure> {
-    let anchor = checked_anchor(
+    let anchor = checked_ancestry_anchor(
         source
             .anchor(fork)
             .await
@@ -491,8 +551,14 @@ pub async fn fork_anchor(
         policy,
         source.now(),
     )?;
-    let RdtsStatus::Flagday { flagday } = anchor.observation.rdts else {
-        return Err(failure(Stage::ForkAnchor, FailureKind::Malformed));
+    let deployment = match anchor.observation.rdts {
+        RdtsStatus::Flagday { flagday } => DeploymentState::Flagday {
+            height: flagday.height,
+            expiry_time: flagday.expiry_time,
+            active: flagday.active,
+        },
+        RdtsStatus::Absent => DeploymentState::RdtsAbsent,
+        RdtsStatus::Unsupported => DeploymentState::RdtsUnsupported,
     };
     let fork_height = anchor
         .observation
@@ -507,11 +573,7 @@ pub async fn fork_anchor(
         },
         median_time_past: anchor.tip_median_time_past,
         fork_height,
-        deployment: DeploymentState::Flagday {
-            height: flagday.height,
-            expiry_time: flagday.expiry_time,
-            active: flagday.active,
-        },
+        deployment,
         observed_at: anchor.observed_at,
     })
 }
@@ -558,25 +620,15 @@ pub async fn collect_fork_sweep(
     if !fork.is_blake2b() {
         return Err(failure(Stage::Plan, FailureKind::WrongChain));
     }
-    if policy.max_observation_age_seconds <= 0
-        || policy.expiry_margin_seconds <= 0
-        || budget.is_zero()
-        || budget > MAX_COLLECTION_TIME
-    {
+    if policy.max_observation_age_seconds <= 0 || budget.is_zero() || budget > MAX_COLLECTION_TIME {
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
     let expected = context.expected_generation;
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     let cancelled = async {
-        loop {
-            if context.generation.changed().await.is_err()
-                || *context.generation.borrow_and_update() != expected
-            {
-                break;
-            }
-        }
+        let _ = context.generation.changed().await;
     };
     let work = async {
         let first = fork_anchor(source, fork, policy).await?;
@@ -624,7 +676,7 @@ pub async fn collect_fork_sweep(
         _ = cancelled => Err(failure(Stage::Context, FailureKind::Cancelled)),
         result = tokio::time::timeout(budget, work) => result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?,
     };
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     result
@@ -715,7 +767,12 @@ async fn collect_inner_with_anchor(
         policy,
         Stage::BitcoinTip,
     )?;
-    let first = checked_anchor(
+    let check_anchor = if plan.poison == Poison::InputAncestry {
+        checked_ancestry_anchor
+    } else {
+        checked_anchor
+    };
+    let first = check_anchor(
         source
             .anchor(fork)
             .await
@@ -830,7 +887,7 @@ async fn collect_inner_with_anchor(
         Stage::BitcoinTip,
     )?;
     btc_stamp = btc_stamp.min(stamp);
-    let last = checked_anchor(
+    let last = check_anchor(
         source
             .anchor(fork)
             .await
@@ -847,7 +904,12 @@ async fn collect_inner_with_anchor(
     {
         return Err(failure(Stage::Preflight, FailureKind::Changed));
     }
-    let (mut fork_observation, deployment) = project_anchor(
+    let projector = if plan.poison == Poison::InputAncestry {
+        project_ancestry_anchor
+    } else {
+        project_anchor
+    };
+    let (mut fork_observation, deployment) = projector(
         NetworkAnchorStatus {
             network: fork,
             state: AnchorState::Available,

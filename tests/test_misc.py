@@ -394,14 +394,15 @@ def test_retry_on_workqueue_exceeded(coincubed, bitcoind):
         armed.set()
         with pytest.raises(RpcError, match="Insane timestamp"):
             coincubed.rpc.startrescan(0)
-        coincubed.wait_for_logs([
-            "Transient error when sending request to bitcoind.*(status: 503, body: Work queue depth exceeded)",
-            "Retrying RPC request to bitcoind",
-        ], timeout=TIMEOUT)
+        # The proxy records the retry itself. The JSON-RPC id may change on
+        # retry; the method and arguments must still name the same read.
         with lock:
             assert not errors, errors
             assert len(requests) == 2, requests
-            assert requests[0] == requests[1], requests
+            assert [(r["method"], r["params"]) for r in requests] == [
+                ("getblockhash", [0]),
+                ("getblockhash", [0]),
+            ], requests
             assert len(forwarded) == 1, forwarded
             assert forwarded[0][1] == 200, forwarded
             assert forwarded[0][2]["result"] == bitcoind.rpc.getblockhash(0)

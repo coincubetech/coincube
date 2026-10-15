@@ -848,6 +848,26 @@ fn split_b1a_services_have_no_new_gui_callers() {
                 .contains(&ident))
             || (file == "src/services/foreign_psbt.rs"
                 && ["ConnectBtcb2Fees", "split_fees"].contains(&ident))
+            // The paired ancestry migration reads the same inventory and fee
+            // services from its Claim and Split proof/requalification layers.
+            // Keep this list exact so a new desktop route is still detected.
+            || (file == "src/services/claim_inventory.rs" && ident == "splittable_coins")
+            || (file == "src/services/claim_observation/http/discovery/funding.rs"
+                && ident == "splittable_coins")
+            || (file == "src/services/claim_workflow/split/tests.rs"
+                && ident == "split_psbt_file")
+            || (file == "src/services/claim_workflow/split_funding.rs"
+                && ["split_psbt_file", "splittable_coins"].contains(&ident))
+            || (file == "src/services/claim_workflow/claim_funding.rs"
+                && [
+                    "split_evidence",
+                    "ConnectEsplora",
+                    "split_fees",
+                    "bitcoin_step1_feerate",
+                    "btcb2_fee_source",
+                    "ConnectBitcoinFees",
+                ]
+                .contains(&ident))
             || (file == "src/app/mod.rs" && ["split_fees", "btcb2_fee_source"].contains(&ident))
             // B1b: the Split step-1 panel, whose only production constructor
             // is the resume of an existing journal

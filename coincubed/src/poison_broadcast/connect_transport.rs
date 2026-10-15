@@ -1,4 +1,5 @@
-//! Fixed Bitcoin Connect endpoint with no automatic retry or fallback.
+//! Fixed mainnet Connect endpoints with no automatic retry or fallback.
+use coincube_core::chain::ChainId;
 use miniscript::bitcoin::{consensus::encode::serialize_hex, Transaction, Txid};
 use std::{io::Read, str::FromStr, time::Duration};
 
@@ -9,6 +10,10 @@ pub(super) struct PreparedConnect {
 }
 impl PreparedConnect {
     pub(super) fn new(origin: &str, tx: &Transaction) -> Result<Self, ()> {
+        Self::for_chain(origin, ChainId::Bitcoin, tx)
+    }
+
+    pub(super) fn for_chain(origin: &str, chain: ChainId, tx: &Transaction) -> Result<Self, ()> {
         let origin = reqwest::Url::parse(origin).map_err(|_| ())?;
         if !matches!(origin.scheme(), "https" | "http")
             || origin.host_str().is_none()
@@ -20,9 +25,12 @@ impl PreparedConnect {
         {
             return Err(());
         }
-        let endpoint = origin
-            .join("api/v1/esplora/bitcoin/mainnet/tx")
-            .map_err(|_| ())?;
+        let route = match chain {
+            ChainId::Bitcoin => "api/v1/esplora/bitcoin/mainnet/tx",
+            ChainId::BitcoinBlake2b => "api/v1/esplora/bitcoin-blake2b/mainnet/tx",
+            _ => return Err(()),
+        };
+        let endpoint = origin.join(route).map_err(|_| ())?;
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())

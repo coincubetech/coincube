@@ -1,10 +1,15 @@
-# Owned Bitcoin poison finalization
+# Legacy poison finalization and ordinary ancestry pairs
 
 `claim_finalize::finalize_poison_transfer` accepts the opaque
 `PoisonSelfTransfer` from the owned native-P2WSH builder and a signed PSBT. It
 returns `VerifiedPoisonTransfer`, with private fields and read-only transaction,
 construction txid, chain label, descriptor, fee, final vsize and retained signature
 counts. It has no broadcast, Claim authorization or deserialization entry point.
+It remains for existing OP_RETURN records; new Claim transactions use
+`finalize_ancestry_claim_pair`, and foreign Split uses
+`foreign_split::finalize_ancestry_split_pair`. Both pair finalizers require
+ordinary outputs, the same shared inputs plus one different chain-specific
+funding input per chain, and valid standard signatures on both exact PSBTs.
 
 This boundary deliberately accepts only partial-signature PSBTs. Signers may
 add standard Bitcoin `SIGHASH_ALL` partial signatures and optionally request
@@ -27,15 +32,19 @@ prevouts. Every actual signature constraint must be owned-key ECDSA SIGHASH_ALL;
 empty, malformed, tampered and unified witnesses fail. No new script interpreter
 is implemented here.
 
-The result proves cryptographic construction/final-witness integrity only. The
+The legacy result proves cryptographic construction/final-witness integrity only. The
 chain field is the bound construction's requested Bitcoin/mainnet or testnet4
 identity, not independent chain inclusion evidence. Timelocks are checked against
-transaction fields by Miniscript, not against live coin maturity. The 90-byte
-poison still requires current authenticated RDTS activity and dynamic expiry,
-pre-broadcast/mempool acceptance and correct-chain routing. Bitcoin confirmation
-depth and reorg checks remain mandatory before step2. A missing other-chain
-transaction or post-fork timestamp is never proof of exclusivity. No runtime/UI
-route is exposed and no production configuration changes.
+transaction fields by Miniscript, not against live coin maturity. When the
+legacy route was active, its 90-byte poison also required authenticated RDTS
+activity, expiry margin, mempool acceptance and correct-chain routing before
+broadcast. Historical attempts are now reconciled by their exact transaction
+identity and fresh chain reads. Bitcoin confirmation depth and reorg checks
+remain mandatory before a recorded step 2. A missing other-chain
+transaction or post-fork timestamp is never proof of exclusivity. The new
+ordinary pair must instead pass fresh, bounded two-chain ancestry and current
+UTXO checks, wallet reservations, paired policy preflight, explicit review and
+durable attempt journaling. Production signing remains gated.
 
 Synthetic full-core tests cover primary and recovery satisfactions on both
 Bitcoin chain labels, exact construction/metadata mutations, missing quorum,

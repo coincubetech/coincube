@@ -4,14 +4,18 @@
 //! split" (#568 B5c-2), and step 2 is reachable only from a journal whose
 //! step 1 has six confirmations.
 
-use coincube_core::claim::MIN_CONFIRMATIONS;
+use coincube_core::{
+    chain::ChainId,
+    claim::MIN_CONFIRMATIONS,
+    miniscript::bitcoin::{Address, Network},
+};
 use coincube_ui::{
     component::{button, card, text::*},
     theme,
-    widget::Element,
+    widget::{ColumnExt, Element},
 };
 use iced::{
-    widget::{Column, Container, Row, Space},
+    widget::{scrollable, Column, Container, Row, Space},
     Alignment, Length,
 };
 
@@ -21,10 +25,10 @@ use crate::{
             device::{self, DeviceMessage, DeviceStep},
             step1::{self, describe_route},
             step2,
-            unified::{self, Route, SeedText, UnifiedMessage, UnifiedStage},
+            unified::{self, SeedText, UnifiedMessage, UnifiedStage},
             SplitMessage, SplitPanel, Stage, Step2Stage, Work,
         },
-        view::Message,
+        view::{vault::ancestry_coins::coin_input_row, Message},
     },
     services::{claim_coordinator::Outcome, claim_workflow::Phase, split_psbt_file::Encoding},
 };
@@ -41,8 +45,56 @@ fn primary(label: &'static str, message: SplitMessage) -> Element<'static, Messa
         .into()
 }
 
+fn funding_address_row(address: String, notice: &'static str) -> Element<'static, Message> {
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(
+            Container::new(
+                scrollable(p2_regular(address.clone()).style(theme::text::secondary))
+                    .width(Length::Fill)
+                    .direction(scrollable::Direction::Horizontal(
+                        scrollable::Scrollbar::new().width(2).scroller_width(2),
+                    )),
+            )
+            .width(Length::Fill)
+            .max_width(750.0),
+        )
+        .push(
+            button::secondary_compact(None, "Copy address")
+                .on_press(Message::CopyWithToast(address, notice.to_string())),
+        )
+        .into()
+}
+
+fn signed_pair_destination(psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt) -> String {
+    psbt.unsigned_tx
+        .output
+        .first()
+        .and_then(|output| Address::from_script(&output.script_pubkey, Network::Bitcoin).ok())
+        .map(|address| address.to_string())
+        .unwrap_or_else(|| "Unavailable; inspect the PSBT output on your signer".into())
+}
+
+fn signed_pair_amount(psbt: &coincube_core::miniscript::bitcoin::psbt::Psbt) -> String {
+    psbt.unsigned_tx
+        .output
+        .first()
+        .map(|output| format!("{} sats", output.value.to_sat()))
+        .unwrap_or_else(|| "Unavailable; inspect the PSBT output on your signer".into())
+}
+
 fn working(work: Work) -> &'static str {
     match work {
+        Work::ReservingFunding => "Saving fresh deposit addresses and checking both chains for prior use…",
+        Work::CheckingFunding => "Scanning both chains and checking deposit ancestry…",
+        Work::PreparingPairedSign => "Rechecking both chains and saving the exact signing intent…",
+        Work::CheckingPairedSignatures => "Checking both chains and the returned signatures…",
+        Work::RecordingPairedSignatures => "Recording both signed transactions on this device…",
+        Work::ReviewingPairedBitcoin => "Rechecking both chains for Bitcoin broadcast review…",
+        Work::SubmittingPairedBitcoin => "Rechecking both chains before Bitcoin broadcast…",
+        Work::ReviewingPairedFork => "Rechecking the Bitcoin confirmation and BTCB2 inputs…",
+        Work::SubmittingPairedFork => "Rechecking both chains before BTCB2 broadcast…",
         Work::Checking => "Checking the fork, fees and the fresh address…",
         Work::Building => "Building step 1…",
         Work::Exporting => "Saving the PSBT file…",
@@ -136,6 +188,15 @@ fn unified_body<'a>(
     coincube_ui::widget::Row<'a, Message>,
 ) {
     let state = panel.unified();
+    if !panel.can_sign_or_submit() {
+        body = body.push(p1_regular(
+            "This recorded split remains available for inspection.",
+        ));
+        if matches!(stage, UnifiedStage::Submitted | UnifiedStage::Reconcile) {
+            actions = actions.push(unified_action("Refresh", UnifiedMessage::Reconcile));
+        }
+        return (body, actions);
+    }
     match stage {
         UnifiedStage::EnterSeeds => {
             body = body
@@ -252,6 +313,20 @@ fn device_section<'a>(
             "Close device list",
             SplitMessage::Device(DeviceMessage::Cancel),
         ));
+    } else if panel.can_open_paired_device(step) {
+        let chain = if step == DeviceStep::PairedBitcoin {
+            ChainId::Bitcoin
+        } else {
+            ChainId::BitcoinBlake2b
+        };
+        actions = actions.push(action(
+            if chain == ChainId::Bitcoin {
+                "Sign Bitcoin on device"
+            } else {
+                "Sign BTCB2 on device"
+            },
+            SplitMessage::Device(DeviceMessage::OpenPaired(chain)),
+        ));
     } else if panel.can_open_device() {
         actions = actions.push(action(
             "Sign with connected device",
@@ -283,6 +358,17 @@ fn step2_body<'a>(
     coincube_ui::widget::Column<'a, Message>,
     coincube_ui::widget::Row<'a, Message>,
 ) {
+    if !panel.can_sign_or_submit()
+        && matches!(
+            stage,
+            Step2Stage::Ready | Step2Stage::Sign | Step2Stage::Signed | Step2Stage::Review
+        )
+    {
+        body = body.push(p1_regular(
+            "This recorded split can be inspected, but no new transaction can be signed or sent from it.",
+        ));
+        return (body, actions);
+    }
     if let Some(label) = panel.replay_label() {
         body = body.push(p1_bold(label).style(theme::text::success));
     }
@@ -377,7 +463,10 @@ fn step2_body<'a>(
             }
             // P3-3: a resend of exactly the recorded step 2, only from a
             // live review.
-            if let Some(resend) = panel.step2_resend_review() {
+            if let Some(resend) = panel
+                .step2_resend_review()
+                .filter(|_| panel.can_sign_or_submit())
+            {
                 body = body
                     .push(p1_bold(format!("Send step 2 ({}) again", resend.txid)))
                     .push(p1_regular(format!(
@@ -394,7 +483,7 @@ fn step2_body<'a>(
                 actions = actions
                     .push(primary("Send again", SplitMessage::Step2ConfirmResend))
                     .push(action("Review again", SplitMessage::Step2ReviewResend));
-            } else if panel.can_review_resend() {
+            } else if panel.can_sign_or_submit() && panel.can_review_resend() {
                 actions = actions.push(action("Review resend", SplitMessage::Step2ReviewResend));
             }
             // #568 S4b, O1: step 1 re-mined in another Bitcoin block; a live
@@ -470,7 +559,14 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
         || panel.unified().record().is_some();
     let mut body = Column::new().spacing(10).max_width(640);
-    body = if single {
+    body = if matches!(
+        panel.stage(),
+        Stage::PairedRecovery | Stage::PairedBitcoinReview | Stage::PairedForkReview
+    ) {
+        body.push(h3("Recorded two-chain split"))
+    } else if matches!(panel.stage(), Stage::PairedSign) {
+        body.push(h3("Split: sign both transactions"))
+    } else if single {
         body.push(h3("Split")).push(
             p1_regular(
                 "Split moves the foreign wallet's pre-fork coins on Bitcoin Blake2b into this Vault so they can't be replayed on Bitcoin.",
@@ -480,7 +576,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     } else {
         body.push(h3("Split: step 1 on Bitcoin")).push(
             p1_regular(
-                "Step 1 moves the foreign wallet's pre-fork coins to a fresh address of the same wallet on Bitcoin, with an output Bitcoin Blake2b refuses. Nothing here holds keys; signatures come back in PSBT files.",
+                "A recorded step 1 can be checked here. New splits require confirmed funding coins specific to each chain before signing.",
             )
             .style(theme::text::secondary),
         )
@@ -488,21 +584,309 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
     let mut actions = Row::new().spacing(10).align_y(Alignment::Center);
 
     match panel.stage() {
-        Stage::ChooseRoute => {
-            body = body.push(p1_regular(unified::ROUTE_TWO_STEP));
-            actions = actions.push(primary(
-                "Two steps",
-                SplitMessage::Unified(UnifiedMessage::Choose(Route::TwoStep)),
-            ));
-            if panel.seed_route_offered() {
-                body = body.push(p1_regular(unified::ROUTE_SEEDS));
+        Stage::PairedRecovery => {
+            body = body.push(p1_regular("This device has a two-chain split record. Each possible broadcast is checked against its own chain. Checking status does not send either transaction."));
+            if let Some(recovery) = panel.paired_recovery() {
+                body = body
+                    .push(p1_bold("Bitcoin transaction"))
+                    .push_maybe(recovery.bitcoin_txid.map(|id| caption(id.to_string())))
+                    .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
+                        caption(format!(
+                            "Recorded Bitcoin output: {} sats",
+                            output.amount_sats
+                        ))
+                    }))
+                    .push_maybe(
+                        recovery
+                            .bitcoin_output
+                            .as_ref()
+                            .map(|output| caption(output.destination.clone())),
+                    )
+                    .push(p1_regular(recovery.bitcoin_status.clone()))
+                    .push(p1_bold("Bitcoin Blake2b transaction"))
+                    .push_maybe(recovery.fork_txid.map(|id| caption(id.to_string())))
+                    .push_maybe(recovery.fork_output.as_ref().map(|output| {
+                        caption(format!(
+                            "Recorded BTCB2 output: {} sats",
+                            output.amount_sats
+                        ))
+                    }))
+                    .push_maybe(
+                        recovery
+                            .fork_output
+                            .as_ref()
+                            .map(|output| caption(output.destination.clone())),
+                    )
+                    .push(p1_regular(recovery.fork_status.clone()));
+            }
+            actions = actions.push(action("Check again", SplitMessage::CheckPaired));
+            if crate::services::claim_ancestry_gate::authorization().is_some()
+                && panel
+                    .paired_recovery()
+                    .is_some_and(|recovery| recovery.bitcoin_unattempted)
+            {
                 actions = actions.push(action(
-                    "One step with recovery phrases",
-                    SplitMessage::Unified(UnifiedMessage::Choose(Route::Seeds)),
+                    "Review Bitcoin broadcast",
+                    SplitMessage::ReviewPairedBitcoin,
                 ));
             }
-            // P1: the single step is never offered for a hardware wallet.
-            body = body.push(caption(unified::P1_HARDWARE).style(theme::text::secondary));
+            if crate::services::claim_ancestry_gate::authorization().is_some()
+                && panel
+                    .paired_recovery()
+                    .is_some_and(|recovery| recovery.fork_ready_for_review)
+            {
+                actions = actions.push(action(
+                    "Review BTCB2 broadcast",
+                    SplitMessage::ReviewPairedFork,
+                ));
+            }
+        }
+        Stage::PairedBitcoinReview => {
+            if let Some(review) = panel.paired_bitcoin_review() {
+                let outputs =
+                    crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(
+                        &review.bitcoin,
+                        &review.fork,
+                    );
+                body = body
+                    .push(p1_regular("Review these exact signed transactions. Only the Bitcoin transaction will be broadcast now; BTCB2 requires a separate review after Bitcoin confirmation."))
+                    .push(p1_bold("Bitcoin — broadcast now"))
+                    .push(caption(format!("Txid: {}", review.bitcoin.compute_txid())))
+                    .push(caption(format!("Fee: {} sats", review.bitcoin_fee_sats)))
+                    .push_maybe(outputs.as_ref().map(|(output, _)| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }))
+                    .push(p1_bold("Bitcoin Blake2b — recorded, not sent now"))
+                    .push(caption(format!("Txid: {}", review.fork.compute_txid())))
+                    .push(caption(format!("Fee: {} sats", review.fork_fee_sats)))
+                    .push_maybe(outputs.as_ref().map(|(_, output)| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }))
+                    .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())));
+                actions = actions.push(action("Back", SplitMessage::CheckPaired));
+                if outputs.is_some() {
+                    actions = actions.push(action(
+                        "Broadcast Transaction",
+                        SplitMessage::ConfirmPairedBitcoin,
+                    ));
+                }
+            }
+        }
+        Stage::PairedForkReview => {
+            if let Some(review) = panel.paired_fork_review() {
+                let outputs =
+                    crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(
+                        &review.bitcoin,
+                        &review.fork,
+                    );
+                body = body
+                    .push(p1_regular("Bitcoin has six current confirmations. Review the exact signed BTCB2 destination and fee before this separate broadcast."))
+                    .push(p1_bold("Bitcoin — already recorded"))
+                    .push(caption(format!("Txid: {}", review.bitcoin.compute_txid())))
+                    .push_maybe(outputs.as_ref().map(|(output, _)| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }))
+                    .push(p1_bold("Bitcoin Blake2b — broadcast now"))
+                    .push(caption(format!("Txid: {}", review.fork.compute_txid())))
+                    .push(caption(format!("Fee: {} sats", review.fork_fee_sats)))
+                    .push_maybe(outputs.as_ref().map(|(_, output)| {
+                        caption(format!("{} sats to {}", output.amount_sats, output.destination))
+                    }))
+                    .push_maybe(outputs.is_none().then(|| card::warning("Cannot display both signed destinations. Review again before broadcasting.".to_string())));
+                actions = actions.push(action("Back", SplitMessage::CheckPaired));
+                if outputs.is_some() {
+                    actions = actions.push(action(
+                        "Broadcast Transaction",
+                        SplitMessage::ConfirmPairedFork,
+                    ));
+                }
+            }
+        }
+        Stage::FundingDeposits => {
+            if let Some(addresses) = panel.funding_addresses() {
+                body = body
+                    .push(p1_bold("Fund the source wallet on each chain"))
+                    .push(p1_regular(format!(
+                        "Send at least {} sats of Bitcoin to this Bitcoin address of the wallet being split (fee estimate when prepared: {} sat/vB):",
+                        addresses.fee_quote.bitcoin_minimum_sats,
+                        addresses.fee_quote.bitcoin_rate_sat_vb,
+                    )))
+                    .push(funding_address_row(
+                        addresses.bitcoin_deposit.clone(),
+                        "Copied Bitcoin deposit address to clipboard",
+                    ))
+                    .push(p1_regular(format!(
+                        "Send at least {} sats of Bitcoin Blake2b to this BTCB2 address of the same wallet (fee estimate when prepared: {} sat/vB):",
+                        addresses.fee_quote.btcb2_minimum_sats,
+                        addresses.fee_quote.btcb2_rate_sat_vb,
+                    )))
+                    .push(funding_address_row(
+                        addresses.btcb2_deposit.clone(),
+                        "Copied BTCB2 deposit address to clipboard",
+                    ))
+                    .push(p1_regular("Send only the named coin to each address and wait for confirmation. These minimums reflect current fees; if fees rise before signing, you may need to add funds. The deposits are fee inputs, not the split itself. Both coins must pass independent ancestry, ownership, confirmation and unspent checks before signing."))
+                    .push(caption("The Bitcoin return address is reserved separately and is not a deposit destination."));
+                if let Some(progress) = panel.funding_progress() {
+                    let candidate = |seen| {
+                        if seen {
+                            "post-fork coin found; checking paired proof"
+                        } else {
+                            "no confirmed post-fork coin found at the reserved address"
+                        }
+                    };
+                    body = body
+                        .push(caption(format!(
+                            "Bitcoin deposit: {}",
+                            candidate(progress.bitcoin_candidate)
+                        )))
+                        .push(caption(format!(
+                            "Bitcoin Blake2b deposit: {}",
+                            candidate(progress.btcb2_candidate)
+                        )));
+                    if let Some(review) = &progress.review {
+                        let address = |output: &coincube_core::miniscript::bitcoin::TxOut| {
+                            Address::from_script(&output.script_pubkey, Network::Bitcoin)
+                                .map(|address| address.to_string())
+                                .unwrap_or_else(|_| {
+                                    format!(
+                                        "script {}",
+                                        hex::encode(output.script_pubkey.as_bytes())
+                                    )
+                                })
+                        };
+                        body = body
+                            .push(p1_bold("Paired transaction preview — read only"))
+                            .push(
+                                Row::new()
+                                    .spacing(20)
+                                    .push(
+                                        p1_regular(format!(
+                                            "{} shared pre-fork coins · present on both chains",
+                                            review.bitcoin.shared.len(),
+                                        ))
+                                        .width(Length::Fill),
+                                    )
+                                    .push(p1_bold(format!(
+                                        "{} sats",
+                                        review.bitcoin.shared_total.to_sat()
+                                    ))),
+                            );
+                        if let Some(threshold) = panel.funding_signing_threshold() {
+                            body = body.push(caption(format!(
+                                "Signing threshold: {threshold} signature{} per input",
+                                if threshold == 1 { "" } else { "s" }
+                            )));
+                        }
+                        for row in &review.bitcoin.shared {
+                            body =
+                                body.push(coin_input_row(row, "Before fork · both chains", None));
+                        }
+                        body = body
+                            .push(p1_bold("Bitcoin transaction"))
+                            .push(coin_input_row(&review.bitcoin.funding, "Bitcoin-only", Some(review.bitcoin_confirmations)))
+                            .push(caption(format!("Return to this source wallet: {} · {} sats", address(&review.bitcoin.destination), review.bitcoin.destination.value.to_sat())))
+                            .push(caption(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
+                            .push(p1_bold("Bitcoin Blake2b transaction"))
+                            .push(coin_input_row(&review.fork.funding, "BTCB2-only", Some(review.fork_confirmations)))
+                            .push(caption(format!("Send to your paired BTCB2 Cube: {} · {} sats", address(&review.fork.destination), review.fork.destination.value.to_sat())))
+                            .push(caption(format!("Fee: {} sats", review.fork.fee.to_sat())))
+                            .push(p1_regular("Each transaction spends every shared coin together with its own verified chain-specific funding coin. This preview is not a signing or broadcast request; both proofs, wallet state and fees must be checked again before either transaction can be signed."));
+                    } else if progress.bitcoin_candidate && progress.btcb2_candidate {
+                        body = body.push(p1_regular("Both deposits are visible, but their paired chain-specific ancestry has not been established. No transaction can be signed."));
+                    }
+                }
+                if crate::services::claim_ancestry_gate::authorization().is_some()
+                    && panel
+                        .funding_progress()
+                        .is_some_and(|progress| progress.both_verified && progress.review.is_some())
+                {
+                    actions = actions.push(primary(
+                        "Review and sign both transactions",
+                        SplitMessage::BeginPairedSigning,
+                    ));
+                }
+                actions = actions.push(action("Check deposits", SplitMessage::CheckDeposits));
+            }
+        }
+        Stage::PairedSign => {
+            body = body.push(p1_regular("Both ordinary transactions are bound to the same source coins and separately verified chain-specific deposits. Recheck the full destination and fee on each signing device. Nothing has been sent."));
+            if let Some((bitcoin, fork, bitcoin_files, fork_files)) = panel.paired_signing_view() {
+                let shared_count = bitcoin.claimed_prevouts().len();
+                body = body.push(p1_regular(format!(
+                    "Bitcoin: {shared_count} shared coin{} + 1 Bitcoin-only coin → the source wallet. Bitcoin Blake2b: {shared_count} shared coin{} + 1 BTCB2-only coin → the paired Cube. The inputs on each chain must be spent together.",
+                    if shared_count == 1 { "" } else { "s" },
+                    if shared_count == 1 { "" } else { "s" },
+                )));
+                if let Some(threshold) = panel.funding_signing_threshold() {
+                    body = body.push(caption(format!(
+                        "Signing threshold: {threshold} signature{} for each input on both chains",
+                        if threshold == 1 { "" } else { "s" }
+                    )));
+                }
+                body = body
+                    .push(p1_bold("Bitcoin transaction"))
+                    .push(caption(format!(
+                        "Unsigned txid {} · Bitcoin-only input {} · fee {} sats · {} signer return(s)",
+                        bitcoin.psbt().unsigned_tx.compute_txid(),
+                        bitcoin.funding_prevout(),
+                        bitcoin.fee().to_sat(),
+                        bitcoin_files,
+                    )))
+                    .push(caption(format!(
+                        "Return to source wallet: {} · {}",
+                        signed_pair_destination(bitcoin.psbt()),
+                        signed_pair_amount(bitcoin.psbt())
+                    )))
+                    .push(p1_bold("Bitcoin Blake2b transaction"))
+                    .push(caption(format!(
+                        "Unsigned txid {} · BTCB2-only input {} · fee {} sats · {} signer return(s)",
+                        fork.psbt().unsigned_tx.compute_txid(),
+                        fork.funding_prevout(),
+                        fork.fee().to_sat(),
+                        fork_files,
+                    )))
+                    .push(caption(format!(
+                        "Target BTCB2 Cube: {} · {}",
+                        signed_pair_destination(fork.psbt()),
+                        signed_pair_amount(fork.psbt())
+                    )));
+                for coin in bitcoin.claimed_prevouts() {
+                    body = body.push(caption(format!("Shared input: {coin}")));
+                }
+            }
+            body = body
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(action(
+                            "Save Bitcoin PSBT",
+                            SplitMessage::ExportPairedUnsigned(ChainId::Bitcoin, Encoding::Binary),
+                        ))
+                        .push(action(
+                            "Import Bitcoin signatures",
+                            SplitMessage::ImportPairedSigned(ChainId::Bitcoin),
+                        )),
+                )
+                .push(
+                    Row::new()
+                        .spacing(10)
+                        .push(action(
+                            "Save BTCB2 PSBT",
+                            SplitMessage::ExportPairedUnsigned(
+                                ChainId::BitcoinBlake2b,
+                                Encoding::Binary,
+                            ),
+                        ))
+                        .push(action(
+                            "Import BTCB2 signatures",
+                            SplitMessage::ImportPairedSigned(ChainId::BitcoinBlake2b),
+                        )),
+                );
+            (body, actions) = device_section(panel, DeviceStep::PairedBitcoin, body, actions);
+            (body, actions) = device_section(panel, DeviceStep::PairedFork, body, actions);
+        }
+        Stage::ChooseRoute => {
+            body = body.push(p1_regular(step1::RETIRED_MARKER).style(theme::text::warning));
         }
         Stage::Unified(stage) => {
             (body, actions) = unified_body(panel, *stage, body, actions);
@@ -517,49 +901,61 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             body = body.push(p1_bold(working(*work)));
         }
         Stage::Sign => {
-            if let Some(construction) = panel.construction() {
-                body = body
-                    .push(p1_regular(format!(
-                        "{} input(s) · fee {} sats · at most {} vB",
-                        construction.claimed_prevouts().len(),
-                        construction.fee().to_sat(),
-                        construction.maximum_signed_vbytes()
-                    )))
-                    .push(caption(format!("Unsigned txid {}", construction.txid())));
-            }
-            if let Some(prepared) = panel.prepared() {
-                body = body.push(caption(format!(
-                    "Fresh destination (receive index {}): {}",
-                    prepared.destination, prepared.address
-                )));
-            }
-            body = body.push(p1_regular(match panel.exported() {
+            if !panel.can_sign_or_submit() {
+                body = body.push(p1_regular(
+                    "This recorded split remains available for inspection.",
+                ));
+            } else {
+                if let Some(construction) = panel.construction() {
+                    body = body
+                        .push(p1_regular(format!(
+                            "{} input(s) · fee {} sats · at most {} vB",
+                            construction.claimed_prevouts().len(),
+                            construction.fee().to_sat(),
+                            construction.maximum_signed_vbytes()
+                        )))
+                        .push(caption(format!("Unsigned txid {}", construction.txid())));
+                }
+                if let Some(prepared) = panel.prepared() {
+                    body = body.push(caption(format!(
+                        "Fresh destination (receive index {}): {}",
+                        prepared.destination, prepared.address
+                    )));
+                }
+                body = body.push(p1_regular(match panel.exported() {
                 Some(path) => format!(
                     "Saved to {}. Sign it in the wallet that holds the keys (SIGHASH_ALL, without finalizing), then import the signed file(s).",
                     path.display()
                 ),
                 None => "Save the unsigned PSBT, sign it in the wallet that holds the keys, then import the signed file(s).".to_string(),
             }));
-            if panel.files() > 0 {
-                body = body.push(caption(format!("{} signed file(s) loaded", panel.files())));
+                if panel.files() > 0 {
+                    body = body.push(caption(format!("{} signed file(s) loaded", panel.files())));
+                }
+                actions = actions
+                    .push(action(
+                        "Save PSBT",
+                        SplitMessage::ExportUnsigned(Encoding::Binary),
+                    ))
+                    .push(action(
+                        "Save as text",
+                        SplitMessage::ExportUnsigned(Encoding::Base64),
+                    ))
+                    .push(primary("Import signed", SplitMessage::ImportSigned));
+                (body, actions) = device_section(panel, DeviceStep::Step1, body, actions);
             }
-            actions = actions
-                .push(action(
-                    "Save PSBT",
-                    SplitMessage::ExportUnsigned(Encoding::Binary),
-                ))
-                .push(action(
-                    "Save as text",
-                    SplitMessage::ExportUnsigned(Encoding::Base64),
-                ))
-                .push(primary("Import signed", SplitMessage::ImportSigned));
-            (body, actions) = device_section(panel, DeviceStep::Step1, body, actions);
         }
         Stage::Ready => {
-            body = body.push(p1_regular(
+            if panel.can_sign_or_submit() {
+                body = body.push(p1_regular(
                 "Step 1 is signed and recorded on this device. Nothing has been sent. Review it to submit through Connect.",
             ));
-            actions = actions.push(primary("Review", SplitMessage::Review));
+                actions = actions.push(primary("Review", SplitMessage::Review));
+            } else {
+                body = body.push(p1_regular(
+                    "This signed split remains recorded on this device.",
+                ));
+            }
         }
         Stage::Review => {
             if let Some(review) = panel.review() {
@@ -582,9 +978,11 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                     )));
                 }
             }
-            actions = actions
-                .push(primary("Submit", SplitMessage::Confirm))
-                .push(action("Review again", SplitMessage::Review));
+            if panel.can_sign_or_submit() {
+                actions = actions
+                    .push(primary("Submit", SplitMessage::Confirm))
+                    .push(action("Review again", SplitMessage::Review));
+            }
         }
         Stage::Tracking => {
             body = body.push(p1_regular(match (panel.phase(), panel.outcome()) {
@@ -650,7 +1048,7 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
             if let Some(review) = panel.review() {
                 body = body
                     .push(p1_regular(format!(
-                        "Send exactly the same signed step 1 again ({}): fee {} sats · {} vB · route {}. A fresh preflight accepted it.",
+                        "Recorded step 1 ({}): fee {} sats · {} vB · route {}.",
                         review.txid,
                         review.fee_sats,
                         review.vsize,
@@ -661,9 +1059,10 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         review.bitcoin_tip, review.fork_tip
                     )));
             }
-            actions = actions
-                .push(primary("Send again", SplitMessage::ConfirmResend))
-                .push(action("Refresh", SplitMessage::Reconcile));
+            if panel.can_sign_or_submit() {
+                actions = actions.push(primary("Send again", SplitMessage::ConfirmResend));
+            }
+            actions = actions.push(action("Refresh", SplitMessage::Reconcile));
         }
         Stage::Refused(refusal) => {
             body = body.push(p1_regular(refusal.reason.clone()).style(theme::text::warning));
@@ -695,7 +1094,8 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
         body = body.push(p1_regular(line).style(theme::text::warning));
     }
     // A completed split offers only Refresh and Close.
-    if panel.signed().is_some()
+    if panel.can_sign_or_submit()
+        && panel.signed().is_some()
         && !matches!(
             panel.stage(),
             Stage::Working(_) | Stage::Step2(Step2Stage::Completed)

@@ -1,10 +1,9 @@
-//! Final production gate for Bitcoin-only-input Claim ancestry.
+//! Reserved production gate for the paired BTCB2 ancestry migration.
 //!
-//! The proof, signing preparation, reorg handling and two-chain harness remain
-//! compiled and testable while this gate is closed. Opening it authorizes both
-//! GUI signer dispatch and creation of new durable completion metadata; those
-//! two capabilities must move together so a signed ancestry Claim cannot finish
-//! without restart-safe completion tracking.
+//! The old one-sided Claim signer and completion route stay closed regardless
+//! of this switch. The paired signer and durable two-chain submission paths
+//! are staged behind this gate. Keep them unavailable until the live wizard
+//! and device acceptance checks pass; unit coverage alone is insufficient.
 //!
 //! Keep this closed until issue #547 records owner acceptance of the live
 //! two-chain flow and its independent final review. `InputProofUnsupported` in
@@ -13,24 +12,52 @@
 
 /// User-facing refusal retained while production ancestry is awaiting approval.
 pub(crate) const CLOSED_MESSAGE: &str = "Bitcoin-only input signing is not available yet.";
+/// No new claim may use the old 90-byte OP_RETURN construction. The replacement
+/// needs independently verified Bitcoin-only and BTCB2-only funding coins.
+pub(crate) const NEW_CLAIM_MESSAGE: &str = "Claim will require confirmed Bitcoin-only and Bitcoin Blake2b-only funding coins in this Vault. This transaction cannot be signed until both funding coins can be verified.";
 
-// This is the only production switch for ancestry signer dispatch and durable
-// completion. Changing it requires the acceptance evidence documented above.
+// Paired signer entry and both paired submission reviews consume this token.
+// Changing it requires the acceptance evidence documented above.
 const ENABLED: bool = false;
 
-/// An unforgeable authorization token for production ancestry side effects.
-pub(crate) struct Authorization(());
+// The disposable regtest child is a separate test-binary process. It may
+// exercise the whole paired signing route without making a production build
+// or an ordinary unit-test run capable of opening the launch gate.
+#[cfg(all(test, feature = "regtest-harness"))]
+static REGTEST_ACCEPTANCE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
-pub(crate) fn authorization() -> Option<Authorization> {
-    ENABLED.then_some(Authorization(()))
+#[cfg(all(test, feature = "regtest-harness"))]
+pub(crate) fn enable_disposable_regtest_acceptance() {
+    assert_eq!(
+        std::env::var("CLAIM_GUI_REGTEST_CHILD").as_deref(),
+        Ok("1"),
+        "only the disposable two-chain child may open the test gate"
+    );
+    REGTEST_ACCEPTANCE.store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
-/// Whether a Claim build may search for a Bitcoin-only input (#547).
+/// An unforgeable authorization token for production ancestry side effects.
+#[allow(dead_code)] // Paired signer and submission remain gated in production.
+pub(crate) struct Authorization(());
+
+#[allow(dead_code)] // Paired signer and submission remain gated in production.
+pub(crate) fn authorization() -> Option<Authorization> {
+    if ENABLED {
+        return Some(Authorization(()));
+    }
+    #[cfg(all(test, feature = "regtest-harness"))]
+    if REGTEST_ACCEPTANCE.load(std::sync::atomic::Ordering::SeqCst) {
+        return Some(Authorization(()));
+    }
+    None
+}
+
+/// Historical one-sided discovery is test-only. The paired deposit check uses
+/// its own two-chain collector and cannot be opened by this switch.
 ///
-/// A construction found while the gate is closed could never be signed, so a
-/// closed gate means no ancestry discovery at all: the build uses OP_RETURN,
-/// whose timing refusals then apply unchanged. Tests may open discovery on a
-/// specific client; that never grants [`authorization`].
+/// Tests may open discovery on a specific client; that never grants
+/// [`authorization`].
 pub(crate) fn discovery_open(client: &crate::services::coincube::CoincubeClient) -> bool {
     #[cfg(test)]
     if client.ancestry_discovery_opened_for_test() {
@@ -38,7 +65,7 @@ pub(crate) fn discovery_open(client: &crate::services::coincube::CoincubeClient)
     }
     #[cfg(not(test))]
     let _ = client;
-    authorization().is_some()
+    false
 }
 
 #[cfg(test)]

@@ -1452,6 +1452,10 @@ fn step2_panel_layer_is_reached_only_through_the_split_panel() {
             let allowed = allowed
                 || (file == "src/services/claim_coordinator/fork/split/tests/step2/reorg.rs"
                     && ["reconciler_driver", "RECONFIRMATION_AGAIN"].contains(&ident));
+            // The journal tests may discuss restart without entering the
+            // retired step-2 GUI route.
+            let allowed = allowed
+                || (file == "src/services/claim_workflow/split/tests.rs" && ident == "restart");
             // `restart`/`Restart` are common words elsewhere: only a path
             // into the step-2 module counts for them.
             let generic = ["restart", "Restart"].contains(&ident)

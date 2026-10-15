@@ -4,6 +4,7 @@ pub mod export;
 pub mod keychain_sign;
 pub mod label;
 pub mod overview;
+pub mod paired_summary;
 pub mod psbt;
 pub mod psbts;
 pub mod receive;

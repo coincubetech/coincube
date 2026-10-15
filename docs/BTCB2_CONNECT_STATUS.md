@@ -31,9 +31,12 @@ missing fork is malformed. Unknown additional fields are ignored.
 
 **This is an observation, not chain authentication or permission to spend.**
 The configured server/node can claim a schedule without proving the chain.
-Claim/Split must still verify chain consistency, positive poison evidence,
-RDTS enforcement and expiry margin, confirmations and reorg safety. This
-client does not activate those flows or lift feature/signer gates.
+The retired OP_RETURN Claim/Split path required positive poison evidence,
+RDTS enforcement and an expiry margin. New Claim/Split pairs instead require
+authenticated, chain-specific input ancestry and current spendability on
+both chains, exact wallet ownership and transactions, confirmations and reorg
+rechecks. They do not use the RDTS expiry rule. This status client does not
+activate either path or lift feature/signer gates.
 
 ## Developer verification and deployment boundary
 

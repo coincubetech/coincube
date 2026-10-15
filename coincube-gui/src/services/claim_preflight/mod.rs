@@ -12,6 +12,7 @@ use reqwest::{
     StatusCode,
 };
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeSet;
 use std::convert::TryFrom;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::watch;
@@ -46,6 +47,10 @@ pub enum Error {
         connect: String,
     },
     UnsupportedChain,
+    PairedPolicyRejected {
+        chain: ChainId,
+        reason: String,
+    },
     InvalidRequest,
     BackendChanged,
     InvalidResponse,
@@ -104,6 +109,99 @@ impl Evidence {
     pub fn node_policy(&self) -> &NodePolicy {
         &self.policy
     }
+
+    /// Recheck one exact signed witness against a fresh operator-node policy
+    /// read. A confirmation or wallet proof is a separate requirement.
+    pub(crate) fn accepted_for(
+        &self,
+        chain: ChainId,
+        transaction: &Transaction,
+        generation: u64,
+        policy: FreshnessPolicy,
+        now: i64,
+    ) -> bool {
+        self.chain == chain
+            && self.txid == transaction.compute_txid()
+            && self.wtxid == transaction.compute_wtxid()
+            && self.generation == generation
+            && matches!(self.policy, NodePolicy::Accepted)
+            && policy.fresh(self.observed_at, now)
+    }
+}
+/// Two independently accepted mempool-policy reads for one ordinary ancestry
+/// pair. This is still only short-lived review evidence: wallet ownership,
+/// ancestry and finalized signatures are checked by their own components.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairEvidence {
+    bitcoin: Evidence,
+    fork: Evidence,
+}
+
+impl PairEvidence {
+    pub fn bitcoin(&self) -> &Evidence {
+        &self.bitcoin
+    }
+    pub fn fork(&self) -> &Evidence {
+        &self.fork
+    }
+
+    /// Recheck the short-lived policy observations at the point a possible
+    /// submission is journaled. This binds the exact two witnesses and the
+    /// current account generation; it does not establish live ancestry or
+    /// grant permission to broadcast.
+    pub(crate) fn accepted_for(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        generation: u64,
+        policy: FreshnessPolicy,
+        now: i64,
+    ) -> bool {
+        self.bitcoin
+            .accepted_for(ChainId::Bitcoin, bitcoin, generation, policy, now)
+            && self
+                .fork
+                .accepted_for(ChainId::BitcoinBlake2b, fork, generation, policy, now)
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn accepted_pair_for_test(
+    bitcoin: &Transaction,
+    fork: &Transaction,
+    tip: BlockHash,
+    generation: u64,
+    observed_at: i64,
+) -> PairEvidence {
+    let evidence = |chain, transaction: &Transaction| Evidence {
+        chain,
+        txid: transaction.compute_txid(),
+        wtxid: transaction.compute_wtxid(),
+        tip,
+        observed_at,
+        generation,
+        policy: NodePolicy::Accepted,
+    };
+    PairEvidence {
+        bitcoin: evidence(ChainId::Bitcoin, bitcoin),
+        fork: evidence(ChainId::BitcoinBlake2b, fork),
+    }
+}
+
+fn paired_input_shape(bitcoin: &Transaction, fork: &Transaction) -> bool {
+    let bitcoin_inputs: BTreeSet<_> = bitcoin.input.iter().map(|i| i.previous_output).collect();
+    let fork_inputs: BTreeSet<_> = fork.input.iter().map(|i| i.previous_output).collect();
+    bitcoin.input.len() >= 2
+        && fork.input.len() >= 2
+        && bitcoin_inputs.len() == bitcoin.input.len()
+        && fork_inputs.len() == fork.input.len()
+        && bitcoin_inputs.intersection(&fork_inputs).count() >= 1
+        && bitcoin_inputs.difference(&fork_inputs).count() == 1
+        && fork_inputs.difference(&bitcoin_inputs).count() == 1
+        && bitcoin.output.len() == 1
+        && fork.output.len() == 1
+        && !bitcoin.output[0].script_pubkey.is_op_return()
+        && !fork.output[0].script_pubkey.is_op_return()
 }
 /// Separate anonymous transport: never accepts an authenticated client/token,
 /// never installs default account/device headers, never redirects or retries.
@@ -181,6 +279,24 @@ fn retry_after(headers: &HeaderMap) -> Option<u64> {
     value.parse().ok()
 }
 impl PreflightClient {
+    /// The signed-pair coordinator must send to the same fixed Connect origin
+    /// whose anonymous policy endpoints it just checked. The provider string
+    /// is the stable identity used by the authenticated two-chain collector.
+    #[allow(dead_code)] // Used by the staged paired submission review.
+    pub(crate) fn matches_provider(&self, provider: &str) -> bool {
+        provider == format!("bitcoin|{}/api/v1/esplora/bitcoin/mainnet", self.origin)
+    }
+
+    #[allow(dead_code)] // Used by the staged paired submission review.
+    pub(crate) fn submission_origin(&self) -> &str {
+        &self.origin
+    }
+
+    #[allow(dead_code)] // Used by the staged paired submission review.
+    pub(crate) fn session_generation(&self) -> watch::Receiver<u64> {
+        self.generation.clone()
+    }
+
     pub fn new(origin: &str, context: CollectionContext) -> Result<Self, Error> {
         let url = reqwest::Url::parse(origin).map_err(|_| Error::InvalidRequest)?;
         if !matches!(url.scheme(), "https" | "http")
@@ -223,21 +339,17 @@ impl PreflightClient {
             return Err(Error::InvalidRequest);
         }
         let mut generation = self.generation.clone();
-        if *generation.borrow() != self.expected || generation.has_changed().is_err() {
+        if *generation.borrow() != self.expected || !matches!(generation.has_changed(), Ok(false)) {
             return Err(Error::Cancelled);
         }
         let request = Request {
             transaction: consensus::encode::serialize_hex(transaction),
             tip_hash: expected_tip,
         };
+        // Any notification replaces this session, even if a refreshed
+        // sender happens to publish the same numeric generation.
         let cancelled = async {
-            loop {
-                if generation.changed().await.is_err()
-                    || *generation.borrow_and_update() != self.expected
-                {
-                    break;
-                }
-            }
+            let _ = generation.changed().await;
         };
         let operation = async {
             let mut response = self
@@ -285,10 +397,163 @@ impl PreflightClient {
             _=cancelled=>Err(Error::Cancelled),
             result=tokio::time::timeout(DEADLINE,operation)=>result.map_err(|_|Error::Deadline)?,
         };
-        if *generation.borrow() != self.expected || generation.has_changed().is_err() {
+        if *generation.borrow() != self.expected || !matches!(generation.has_changed(), Ok(false)) {
             return Err(Error::Cancelled);
         }
         result
+    }
+
+    /// Require positive policy acceptance for both exact signed transactions
+    /// under this one Connect generation. A one-sided acceptance cannot be
+    /// promoted to paired evidence. No transaction is broadcast here.
+    async fn observe_ancestry_pair(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        bitcoin_tip: BlockHash,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<PairEvidence, Error> {
+        if !paired_input_shape(bitcoin, fork) {
+            return Err(Error::InvalidRequest);
+        }
+        let (bitcoin, fork) = tokio::try_join!(
+            self.observe(ChainId::Bitcoin, bitcoin, bitcoin_tip, policy),
+            self.observe(ChainId::BitcoinBlake2b, fork, fork_tip, policy),
+        )?;
+        if bitcoin.generation != fork.generation || bitcoin.generation != self.expected {
+            return Err(Error::Cancelled);
+        }
+        for evidence in [&bitcoin, &fork] {
+            if let NodePolicy::Rejected { reason } = evidence.node_policy() {
+                return Err(Error::PairedPolicyRejected {
+                    chain: evidence.chain(),
+                    reason: reason.clone(),
+                });
+            }
+        }
+        Ok(PairEvidence { bitcoin, fork })
+    }
+
+    /// A mined Bitcoin half cannot be preflighted as a mempool transaction.
+    /// Refresh only the exact fork witness and require positive node policy;
+    /// Bitcoin confirmation and current ancestry are separate checks.
+    async fn observe_ancestry_fork(
+        &self,
+        bitcoin: &Transaction,
+        fork: &Transaction,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<Evidence, Error> {
+        if !paired_input_shape(bitcoin, fork) {
+            return Err(Error::InvalidRequest);
+        }
+        let evidence = self
+            .observe(ChainId::BitcoinBlake2b, fork, fork_tip, policy)
+            .await?;
+        if let NodePolicy::Rejected { reason } = evidence.node_policy() {
+            return Err(Error::PairedPolicyRejected {
+                chain: ChainId::BitcoinBlake2b,
+                reason: reason.clone(),
+            });
+        }
+        Ok(evidence)
+    }
+
+    /// Preflight the exact signed Claim pair after the journal and fresh
+    /// ancestry checks have admitted it. A typed pair prevents callers from
+    /// supplying two unrelated raw transactions. This remains observation
+    /// only and grants no signer or broadcast authority.
+    pub async fn observe_verified_claim_pair(
+        &self,
+        pair: &coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+        bitcoin_tip: BlockHash,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<PairEvidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_pair(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            bitcoin_tip,
+            fork_tip,
+            policy,
+        )
+        .await
+    }
+
+    /// Preflight the exact signed foreign Split pair on both Connect routes.
+    /// The source and target reservations still require separate fresh checks.
+    pub async fn observe_verified_split_pair(
+        &self,
+        pair: &coincube_core::foreign_split::VerifiedAncestrySplitPair,
+        bitcoin_tip: BlockHash,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<PairEvidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_pair(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            bitcoin_tip,
+            fork_tip,
+            policy,
+        )
+        .await
+    }
+
+    /// After the Bitcoin half is mined, recheck only the exact finalized
+    /// BTCB2 Claim witness against the current BTCB2 operator node. The
+    /// coordinator must independently recheck Bitcoin confirmations and
+    /// current two-chain ancestry before using this policy observation.
+    pub async fn observe_verified_claim_fork(
+        &self,
+        pair: &coincube_core::claim_finalize::VerifiedAncestryClaimPair,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<Evidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_fork(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            fork_tip,
+            policy,
+        )
+        .await
+    }
+
+    /// Same single-chain refresh for a verified foreign Split pair. This is
+    /// node policy evidence only, never a replay-safety or send token.
+    pub async fn observe_verified_split_fork(
+        &self,
+        pair: &coincube_core::foreign_split::VerifiedAncestrySplitPair,
+        fork_tip: BlockHash,
+        policy: FreshnessPolicy,
+    ) -> Result<Evidence, Error> {
+        if pair.bitcoin().chain() != ChainId::Bitcoin
+            || pair.fork().chain() != ChainId::BitcoinBlake2b
+        {
+            return Err(Error::InvalidRequest);
+        }
+        self.observe_ancestry_fork(
+            pair.bitcoin().transaction(),
+            pair.fork().transaction(),
+            fork_tip,
+            policy,
+        )
+        .await
     }
 }
 #[allow(clippy::too_many_arguments)]

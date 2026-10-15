@@ -1,15 +1,21 @@
-# Dormant Claim observation collector
+# Claim observation boundaries
 
 `services::claim_observation` collects supplied chain observations and invokes
-`coincube_core::claim::assess`. It includes an opt-in HTTP adapter but has no application caller, and performs no wallet writes, signing, broadcast, import or UI exposure.
+`coincube_core::claim::assess` for legacy intent evaluation. Its HTTP adapter
+also powers the production two-deposit status checks and separate typed
+Bitcoin/BTCB2 ancestry collectors. These reads perform no wallet writes,
+signing or broadcast.
 `ObservationsEligibleForPreflight` remains an observation assessment, never
 spend permission or a persistent Split label.
 
 The caller supplies an actual `ClaimPlan`, positive maximum-age/expiry-margin
 policy and a collection budget up to 30 seconds. Exact mainnet/mainnet or
 testnet4/testnet4 pairs and transaction/claimed-prevout structure are validated
-before I/O. Input ancestry remains unsupported. A post-fork timestamp or missing
-transaction is never a proof of chain exclusivity.
+before I/O for the generic legacy assessment. Input ancestry uses separate
+typed collectors and validators: each funding input must trace through a
+bounded, confirmed path to a canonical coinbase that differs between the two
+chains at the dependency root. A post-fork timestamp or missing transaction
+is never a proof of chain exclusivity.
 
 The source is one immutable API/provider/account context. Its authenticated
 anchor must come from the typed `CoincubeClient::network_anchor` endpoint. That
@@ -27,7 +33,7 @@ explorer data. Transaction lookups remain anonymous: no JWT or device headers.
 Clearing a CoincubeClient token alone does not remove its device headers. The response-aware `HttpObservationSource` requires the reviewed API fresh
 contract; ordinary cached Esplora methods are not fresh evidence.
 
-Collection reads Bitcoin tip and a fork anchor, checks indexer agreement at the
+The legacy OP_RETURN collection reads Bitcoin tip and a fork anchor, checks indexer agreement at the
 fork anchor height, and reads both transaction states plus Bitcoin inclusion
 hash. It repeats indexer/transaction/inclusion checks, then re-reads Bitcoin tip
 and authenticated fork anchor. Any change discards the collection rather than
@@ -37,7 +43,7 @@ prior-inclusion reorgs, actual OP_RETURN poison and dynamic expiry policy.
 
 A successful fresh 404 may be represented as `Absent`; 503/transport/malformed
 responses must remain errors. Even explicit absence is only an extra check for
-the OP_RETURN route. The source trait is an observation trust boundary, not a
+the legacy OP_RETURN route. The source trait is an observation trust boundary, not a
 cryptographic proof constructor: fabricated source values can defeat any local
 observation evaluator. Full consensus, self-transfer ownership, fee/UTXO policy,
 final-witness replay validation and pre-broadcast acceptance remain separate.
@@ -54,12 +60,21 @@ The returned generation must also match when the caller consumes the result;
 delivery itself can race revocation. The source must release I/O when its future
 is dropped. No automatic retry loop or cache of eligibility is installed.
 
+The paired ancestry collector additionally authenticates every shared
+pre-fork outpoint as the same canonical transaction output on both chains and
+requires both funding and shared inputs unspent before the first send. Once
+Bitcoin confirms, a distinct post-Bitcoin collector checks the exact signed
+Bitcoin witness in a canonical block at six confirmations, requires its inputs
+spent on Bitcoin, and requires the BTCB2 funding and shared inputs still
+unspent on BTCB2. Each collector brackets stable two-chain tips and the
+account generation; neither grants signer or broadcast access on its own.
+
 Fixture tests cover chain isolation, wrong hashes/txids, absence versus 503,
 5/6 confirmation depth, inclusion/tip/presence races, prior-confirmation reorg,
 stale/future timestamps, dynamic RDTS states, malformed anchors, deadline and
-account-generation cancellation. Local validation is compile/fmt/clippy only;
-full GUI runtime tests belong in ephemeral repository-pinned CI. These fixtures
-are not live infrastructure acceptance or a completed Claim/Split workflow.
+account-generation cancellation. Local unit tests and pinned two-chain regtest
+also cover portions of the new ancestry path. They are not production signing
+acceptance or a completed Claim/Split workflow.
 
 The current API exposes Bitcoin mainnet and legacy Bitcoin testnet, not Bitcoin
 testnet4. The trait fixtures cover the exact testnet4 pair, but a future concrete
@@ -88,8 +103,8 @@ reused. The adapter additionally bounds that call to five seconds and cancels
 all reads on generation revocation. Anchor auth remains separate from anonymous
 transaction lookups. No cache, retries or background collector is installed.
 
-Local HTTP fixture tests are compiled locally, executed only in ephemeral CI;
-no live endpoint or production flag is exercised.
+Local HTTP fixture tests use isolated mock servers. They exercise the reader
+contract without opening a production signer gate.
 
 Device identity headers are captured once when CoincubeClient is constructed and
 reused across token replacement, clearing and bounded anchor requests. Anchor

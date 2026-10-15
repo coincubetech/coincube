@@ -52,6 +52,9 @@ jobs:
       USE_TAPROOT: ${{ matrix.USE_TAPROOT }}
       BITCOIN_BACKEND_TYPE: ${{ matrix.BITCOIN_BACKEND_TYPE }}
       USE_KNOTS: ${{ matrix.USE_KNOTS }}
+      # Cargo's libgit2 fetch intermittently fails TLS negotiation with a
+      # pinned public Git dependency before any functional test can run.
+      CARGO_NET_GIT_FETCH_WITH_CLI: true
       # The framework leaves a failing test's datadirs behind (see the `directory`
       # fixture in tests/fixtures.py). Default is /tmp, which upload-artifact cannot
       # reach; put it in the workspace so a failure can actually be diagnosed.

@@ -629,7 +629,7 @@ async fn reopen_settling_blocking_does_not_stall_other_tasks() {
 }
 
 // Public synthetic descriptor fixture shared with core claim_spend tests.
-const WSH_DESC: &str = "wsh(or_d(multi(1,[573fb35b/48'/1'/0'/2']tpubDFKp9T7WAYDcENSjoifkrpq1gMDF47KGJcJrpxzX23Qor8wuGbrEVs9utNq1MDS8E2WXJSBk1qoPQLpwyokW7DiUNPwFuxQkL7owNkLAb9W/<0;1>/*,[573fb35c/48'/1'/1'/2']tpubDFGezyzuHJPhdP3jHGW7v7Hwes4Hihqv5W2yyCmRY9VZJCRchETvxrMC8uECeJZdxQ14V4iD4DecoArkUSDwj8ogYE9WEv4MNZr12thNHCs/<0;1>/*),and_v(v:multi(2,[573fb35b/48'/1'/2'/2']tpubDDwxQauiaU964vPzt5Vd7jnDHEUtp2Vc34PaWpEXg5TQ3bRccxnc1MKKh88Hi7xiMeZo9Tm6fBcq4UGXqnDtGUniJLjqAD8SjQ8Eci3aSR7/<0;1>/*,[573fb35c/48'/1'/3'/2']tpubDE37XAVB5CQ1x85md3BQ5uHCoMwT5fgT8X13zzCUQ3x5o2jskYxKjj7Qcxt1Jpj4QB8tqspn2dooPCekRuQDYrDHov7J1ueUNu2wcvgRDxr/<0;1>/*),older(1000))))#fccaqlhh";
+pub(crate) const WSH_DESC: &str = "wsh(or_d(multi(1,[573fb35b/48'/1'/0'/2']tpubDFKp9T7WAYDcENSjoifkrpq1gMDF47KGJcJrpxzX23Qor8wuGbrEVs9utNq1MDS8E2WXJSBk1qoPQLpwyokW7DiUNPwFuxQkL7owNkLAb9W/<0;1>/*,[573fb35c/48'/1'/1'/2']tpubDFGezyzuHJPhdP3jHGW7v7Hwes4Hihqv5W2yyCmRY9VZJCRchETvxrMC8uECeJZdxQ14V4iD4DecoArkUSDwj8ogYE9WEv4MNZr12thNHCs/<0;1>/*),and_v(v:multi(2,[573fb35b/48'/1'/2'/2']tpubDDwxQauiaU964vPzt5Vd7jnDHEUtp2Vc34PaWpEXg5TQ3bRccxnc1MKKh88Hi7xiMeZo9Tm6fBcq4UGXqnDtGUniJLjqAD8SjQ8Eci3aSR7/<0;1>/*,[573fb35c/48'/1'/3'/2']tpubDE37XAVB5CQ1x85md3BQ5uHCoMwT5fgT8X13zzCUQ3x5o2jskYxKjj7Qcxt1Jpj4QB8tqspn2dooPCekRuQDYrDHov7J1ueUNu2wcvgRDxr/<0;1>/*),older(1000))))#fccaqlhh";
 
 fn artifact(index: u32) -> coincube_core::claim_spend::PoisonSelfTransfer {
     use coincube_core::{
@@ -1555,19 +1555,20 @@ fn claim_only_operations_refuse_a_split_intent_at_their_guard() {
 
     let temp = Temp::new();
     let mut c = super::split::tests::created_split(&temp.0);
+    let split_context = c.context.clone();
     assert!(c.construction_verified && c.fresh.is_none());
     assert_eq!(c.phase(), Phase::Intent);
     let before = fs::read(temp.0.join("intent.json")).unwrap();
     assert!(matches!(
-        c.bind_recovered_bitcoin_transaction(&context(), &verified),
+        c.bind_recovered_bitcoin_transaction(&split_context, &verified),
         Err(Error::WrongIdentity)
     ));
     assert!(matches!(
-        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        c.prepare_fork_sweep(&split_context, &sweep, policy(), 10000),
         Err(Error::WrongIdentity)
     ));
     assert!(matches!(
-        c.record_fork_broadcast_intent(&context(), &signed_sweep, policy(), 10000),
+        c.record_fork_broadcast_intent(&split_context, &signed_sweep, policy(), 10000),
         Err(Error::WrongIdentity)
     ));
     // Make every field revalidate_construction compares match the Claim
@@ -1578,7 +1579,7 @@ fn claim_only_operations_refuse_a_split_intent_at_their_guard() {
         sha256::Hash::hash(source.descriptor().to_string().as_bytes());
     c.intent.bitcoin_change_index = Some(u32::from(source.change_index()));
     assert!(matches!(
-        c.revalidate_construction(&context(), &source),
+        c.revalidate_construction(&split_context, &source),
         Err(Error::WrongIdentity)
     ));
     assert!(!c.construction_verified);

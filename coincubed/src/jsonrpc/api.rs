@@ -12,6 +12,32 @@ use std::{
 
 use miniscript::bitcoin::{self, psbt::Psbt, Txid};
 
+/// Reserve a change index only for the exact chain and descriptor named by the
+/// caller. Bitcoin and BTCB2 share address encoding, so an address or Network
+/// value cannot establish which wallet owns the reservation.
+fn reserve_claim_change(
+    control: &DaemonControl,
+    params: Params,
+) -> Result<serde_json::Value, Error> {
+    let chain = params
+        .get(0, "chain_id")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| coincube_core::chain::ChainId::from_str(value).ok())
+        .ok_or_else(|| Error::invalid_params("Invalid 'chain_id' parameter."))?;
+    let descriptor = params
+        .get(1, "descriptor")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|value| coincube_core::descriptors::CoincubeDescriptor::from_str(value).ok())
+        .ok_or_else(|| Error::invalid_params("Invalid 'descriptor' parameter."))?;
+    if control.config.bitcoin_config.chain != chain || control.config.main_descriptor != descriptor
+    {
+        return Err(Error::invalid_params(
+            "Claim wallet identity does not match this daemon.",
+        ));
+    }
+    Ok(serde_json::json!(control.reserve_change()?.index()))
+}
+
 fn create_spend(control: &DaemonControl, params: Params) -> Result<serde_json::Value, Error> {
     let destinations = params
         .get(0, "destinations")
@@ -530,6 +556,12 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
             serde_json::json!({})
         }
         "getnewaddress" => serde_json::json!(&control.get_new_address()),
+        "reserveclaimchange" => {
+            let params = req.params.ok_or_else(|| {
+                Error::invalid_params("Missing 'chain_id' and 'descriptor' parameters.")
+            })?;
+            reserve_claim_change(control, params)?
+        }
         "updatederivationindexes" => {
             let params = req.params.ok_or_else(|| {
                 Error::invalid_params("Missing 'receive' or 'change' parameters.")
@@ -606,4 +638,38 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
     };
 
     Ok(Response::success(req.id, result))
+}
+
+#[cfg(test)]
+mod claim_change_tests {
+    use super::*;
+    use crate::{
+        jsonrpc::rpc::Params,
+        testutils::{DummyBitcoind, DummyCoincube, DummyDatabase},
+    };
+
+    #[test]
+    fn reservation_requires_exact_chain_and_descriptor_before_advancing() {
+        let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let control = daemon.control();
+        let chain = control.config.bitcoin_config.chain;
+        let descriptor = control.config.main_descriptor.to_string();
+        let request = |chain: &str, descriptor: &str| {
+            Params::Array(vec![
+                serde_json::json!(chain),
+                serde_json::json!(descriptor),
+            ])
+        };
+        assert!(reserve_claim_change(control, request("bitcoin-blake2b", &descriptor)).is_err());
+        assert!(reserve_claim_change(control, request(&chain.to_string(), "invalid")).is_err());
+        assert_eq!(
+            reserve_claim_change(control, request(&chain.to_string(), &descriptor)).unwrap(),
+            serde_json::json!(miniscript::bitcoin::bip32::ChildNumber::Normal { index: 1 })
+        );
+        assert_eq!(
+            reserve_claim_change(control, request(&chain.to_string(), &descriptor)).unwrap(),
+            serde_json::json!(miniscript::bitcoin::bip32::ChildNumber::Normal { index: 2 })
+        );
+        daemon.shutdown();
+    }
 }

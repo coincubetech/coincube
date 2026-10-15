@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::str::FromStr;
 
 use coincube_core::{
+    chain::ChainId,
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{self, bip32, consensus, hashes::hex::FromHex, Amount, OutPoint, Txid},
 };
@@ -94,6 +95,11 @@ pub struct RecoveryPath {
 #[derive(Debug, Clone, Deserialize)]
 pub struct Wallet {
     pub id: String,
+    /// An authenticated chain identity supplied by Connect's wallet record.
+    /// Older responses omit it; mainnet encoding alone cannot distinguish
+    /// Bitcoin from Bitcoin Blake2b.
+    #[serde(default)]
+    pub chain_id: Option<ChainId>,
     pub name: String,
     #[serde(deserialize_with = "deser_fromstr")]
     pub descriptor: CoincubeDescriptor,

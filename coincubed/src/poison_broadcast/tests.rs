@@ -27,6 +27,17 @@ use std::{
     sync::{mpsc, Arc, Mutex},
     time::Duration,
 };
+
+#[test]
+fn retired_transport_refuses_outside_unit_fixtures() {
+    assert_eq!(
+        legacy_submission_allowed(false),
+        Err(SubmissionError::RetiredRoute)
+    );
+    assert_eq!(legacy_submission_allowed(true), Ok(()));
+    assert_eq!(legacy_submission_fixture_only(), Ok(()));
+}
+
 fn signer(byte: u8) -> MasterSigner {
     MasterSigner::from_mnemonic(
         bitcoin::Network::Bitcoin,

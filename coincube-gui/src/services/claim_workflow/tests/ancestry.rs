@@ -1,7 +1,9 @@
 use super::*;
 use coincube_core::{
     claim_ancestry::{retained::RetainedPath, search::OwnedLink},
-    claim_spend::{create_ancestry_self_transfer, AncestrySelfTransfer},
+    claim_spend::{
+        create_ancestry_fork_sweep_with_marker, create_ancestry_self_transfer, AncestrySelfTransfer,
+    },
     descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{bip32::ChildNumber, consensus::serialize, secp256k1},
     spend::{CandidateCoin, TxGetter},
@@ -139,6 +141,341 @@ fn create(temp: &Temp, built: &AncestrySelfTransfer, path: &RetainedPath) -> Con
         context(),
     )
     .unwrap()
+}
+
+#[test]
+fn version_ten_claim_intent_binds_both_structural_paths_and_exact_input_sets() {
+    use super::super::ancestry::{StoredAncestry, StoredDerivation, StoredFundingPlan};
+
+    let temp = Temp::new();
+    let (built, bitcoin_path) = fixture(10, false);
+    let mut controller = create(&temp, &built, &bitcoin_path);
+    let mut fork_transaction: Transaction =
+        coincube_core::miniscript::bitcoin::consensus::deserialize(
+            &bitcoin_path.links()[0].transaction,
+        )
+        .unwrap();
+    fork_transaction.lock_time = absolute::LockTime::from_consensus(1);
+    let fork_selected = OutPoint::new(fork_transaction.compute_txid(), 0);
+    let fork_path = RetainedPath::new(
+        fork_selected,
+        vec![OwnedLink {
+            transaction: serialize(&fork_transaction),
+            parent_input: None,
+        }],
+    )
+    .unwrap();
+    let mut inputs: Vec<TxIn> = built
+        .claimed_prevouts()
+        .iter()
+        .copied()
+        .chain(std::iter::once(fork_selected))
+        .map(|previous_output| TxIn {
+            previous_output,
+            ..TxIn::default()
+        })
+        .collect();
+    inputs.sort_by_key(|input| input.previous_output);
+    let step2 = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: inputs,
+        output: built.psbt().unsigned_tx.output.clone(),
+    };
+    controller.intent.version = 10;
+    controller.intent.funding_plan = Some(StoredFundingPlan {
+        fork: StoredAncestry {
+            selected: fork_selected,
+            raw: hex::encode(fork_path.encode()),
+            derivation: Some(StoredDerivation {
+                index: 2,
+                is_change: false,
+            }),
+        },
+        step2_unsigned: step2,
+        bitcoin_feerate_vb: 5,
+        fork_feerate_vb: 5,
+        fork_change_index: 11,
+    });
+    assert!(validate(&controller.intent).is_ok());
+    let json = serde_json::to_vec(&controller.intent).unwrap();
+    let restored: Intent = serde_json::from_slice(&json).unwrap();
+    assert!(validate(&restored).is_ok());
+    let mut changed = restored.clone();
+    changed.funding_plan.as_mut().unwrap().fork.selected = bitcoin_path.selected();
+    assert!(validate(&changed).is_err());
+    changed = restored.clone();
+    changed
+        .funding_plan
+        .as_mut()
+        .unwrap()
+        .step2_unsigned
+        .input
+        .pop();
+    assert!(validate(&changed).is_err());
+    changed = restored.clone();
+    changed.funding_plan.as_mut().unwrap().fork_feerate_vb = 0;
+    assert!(validate(&changed).is_err());
+    changed = restored.clone();
+    changed.plan.bitcoin_chain = ChainId::Testnet4;
+    changed.plan.fork_chain = ChainId::BitcoinBlake2bTestnet4;
+    assert!(validate(&changed).is_ok());
+    changed = restored;
+    changed.version = 7;
+    assert!(validate(&changed).is_err());
+}
+
+#[test]
+fn version_ten_pair_creation_reopens_without_live_spend_authority() {
+    let temp = Temp::new();
+    let descriptor = CoincubeDescriptor::from_str(WSH_DESC).unwrap();
+    let (bitcoin, bitcoin_path, mut getter, coins) = material(10, false, descriptor.clone());
+    let index = ChildNumber::from_normal_idx(2).unwrap();
+    let fork_previous = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::from_consensus(1),
+        input: vec![TxIn::default()],
+        output: vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: descriptor
+                .receive_descriptor()
+                .derive(index, &secp256k1::Secp256k1::verification_only())
+                .script_pubkey(),
+        }],
+    };
+    let fork_selected = OutPoint::new(fork_previous.compute_txid(), 0);
+    getter
+        .0
+        .insert(fork_previous.compute_txid(), fork_previous.clone());
+    let fork_path = RetainedPath::new(
+        fork_selected,
+        vec![OwnedLink {
+            transaction: serialize(&fork_previous),
+            parent_input: None,
+        }],
+    )
+    .unwrap();
+    let mut fork_coins = vec![coins[1]];
+    fork_coins.push(CandidateCoin {
+        outpoint: fork_selected,
+        amount: fork_previous.output[0].value,
+        deriv_index: index,
+        is_change: false,
+        must_select: true,
+        sequence: None,
+        ancestor_info: None,
+    });
+    let fork = create_ancestry_fork_sweep_with_marker(
+        &bitcoin,
+        ChainId::BitcoinBlake2b,
+        &secp256k1::Secp256k1::verification_only(),
+        &mut getter,
+        &fork_coins,
+        ChildNumber::from_normal_idx(11).unwrap(),
+        5,
+        absolute::LockTime::ZERO,
+        &fork_path.reverify().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        Controller::create_ancestry_pair(
+            &temp.0,
+            "bitcoin-cube".into(),
+            "fork-cube".into(),
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            (index, false),
+            5,
+            5,
+            context(),
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    let identity = WalletIdentity {
+        bitcoin_cube: "bitcoin-cube".into(),
+        fork_cube: "fork-cube".into(),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+    };
+    let reservation = super::super::claim_funding::ClaimFundingReservation::new(
+        &descriptor,
+        &identity,
+        &context(),
+        crate::services::foreign_split_inventory::FreshDepositAddresses {
+            bitcoin_deposit: 0,
+            btcb2_deposit: 2,
+        },
+    )
+    .unwrap()
+    .released_copy();
+    {
+        let mut journal = Journal::open(&temp.0).unwrap();
+        journal
+            .store_claim_funding_reservation(&reservation)
+            .unwrap();
+        journal
+            .record_claim_change_indices(
+                &reservation,
+                super::super::claim_funding::ClaimChangeIndices {
+                    bitcoin: 10,
+                    fork: 11,
+                },
+            )
+            .unwrap();
+    }
+    for (bitcoin_rate, fork_rate) in [(6, 5), (5, 6)] {
+        assert!(matches!(
+            Controller::create_ancestry_pair(
+                &temp.0,
+                "bitcoin-cube".into(),
+                "fork-cube".into(),
+                &bitcoin,
+                &bitcoin_path,
+                &fork,
+                &fork_path,
+                (index, false),
+                bitcoin_rate,
+                fork_rate,
+                context(),
+            ),
+            Err(Error::WrongIdentity)
+        ));
+    }
+    let controller = Controller::create_ancestry_pair(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        (index, false),
+        5,
+        5,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(controller.intent.version, 10);
+    assert!(controller.is_paired_ancestry_claim());
+    assert_eq!(controller.status(), Status::Unchecked);
+    assert!(!controller.construction_verified);
+    let identity = controller.identity().clone();
+    drop(controller);
+    let reopened_same = Controller::create_or_reopen_ancestry_pair(
+        &temp.0,
+        "bitcoin-cube".into(),
+        "fork-cube".into(),
+        &bitcoin,
+        &bitcoin_path,
+        &fork,
+        &fork_path,
+        (index, false),
+        5,
+        5,
+        context(),
+    )
+    .unwrap();
+    assert_eq!(reopened_same.status(), Status::Unchecked);
+    assert!(!reopened_same.construction_verified);
+    drop(reopened_same);
+    assert!(matches!(
+        Controller::create_or_reopen_ancestry_pair(
+            &temp.0,
+            "bitcoin-cube".into(),
+            "fork-cube".into(),
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            (index, false),
+            6,
+            5,
+            context(),
+        ),
+        Err(Error::WrongIdentity)
+    ));
+    let mut restored = reopen_settled(&temp.0, &identity, context()).unwrap();
+    assert!(restored.is_paired_ancestry_claim());
+    assert_eq!(restored.status(), Status::Unchecked);
+    assert!(!restored.construction_verified);
+    assert_eq!(restored.intent.version, 10);
+    assert_eq!(
+        restored
+            .intent
+            .funding_plan
+            .as_ref()
+            .unwrap()
+            .fork_selected(),
+        fork_selected
+    );
+    assert_eq!(
+        restored
+            .intent
+            .funding_plan
+            .as_ref()
+            .unwrap()
+            .step2_unsigned,
+        fork.psbt().unsigned_tx
+    );
+    assert!(matches!(
+        restored.revalidate_ancestry_construction(&context(), &bitcoin),
+        Err(Error::Unchecked)
+    ));
+    assert!(!restored.construction_verified);
+    assert!(matches!(restored.claim_only(), Err(Error::Unchecked)));
+    let (rebuilt_bitcoin, rebuilt_fork) = restored
+        .restore_ancestry_pair(
+            &context(),
+            &descriptor,
+            &mut Getter(getter.0.clone()),
+            &coins,
+            &mut Getter(getter.0.clone()),
+            &fork_coins,
+        )
+        .unwrap();
+    assert_eq!(
+        rebuilt_bitcoin.psbt().unsigned_tx,
+        bitcoin.psbt().unsigned_tx
+    );
+    assert_eq!(rebuilt_fork.psbt().unsigned_tx, fork.psbt().unsigned_tx);
+    assert!(!restored.construction_verified);
+    let mut wrong_fork_coins = fork_coins.clone();
+    wrong_fork_coins[1].amount = Amount::from_sat(99_999);
+    assert!(matches!(
+        restored.restore_ancestry_pair(
+            &context(),
+            &descriptor,
+            &mut Getter(getter.0.clone()),
+            &coins,
+            &mut Getter(getter.0.clone()),
+            &wrong_fork_coins,
+        ),
+        Err(Error::InvalidPlan)
+    ));
+    assert!(!restored.construction_verified);
+    restored
+        .intent
+        .funding_plan
+        .as_mut()
+        .unwrap()
+        .fork
+        .derivation
+        .as_mut()
+        .unwrap()
+        .index = 3;
+    assert!(matches!(
+        restored.restore_ancestry_pair(
+            &context(),
+            &descriptor,
+            &mut Getter(getter.0.clone()),
+            &coins,
+            &mut Getter(getter.0.clone()),
+            &fork_coins,
+        ),
+        Err(Error::InvalidJournal)
+    ));
+    assert!(!restored.construction_verified);
 }
 
 #[test]

@@ -373,7 +373,8 @@ impl SplitPanel {
     /// Step 2 may be entered: step 1 tracked at six confirmations, the
     /// step-1 driver bound, a step-2 port and a Connect session.
     pub fn can_enter_step2(&self) -> bool {
-        self.stage == Stage::Tracking
+        self.legacy_flow_fixture()
+            && self.stage == Stage::Tracking
             && self.confirmations() == Some(MIN_CONFIRMATIONS)
             && !self.reorged()
             && self.driver.is_some()
@@ -470,6 +471,25 @@ impl SplitPanel {
     }
 
     pub(super) fn update_step2(&mut self, message: SplitMessage) -> Task<Message> {
+        if !self.can_sign_or_submit()
+            && matches!(
+                &message,
+                SplitMessage::EnterStep2
+                    | SplitMessage::Step2Check
+                    | SplitMessage::Step2Reserve
+                    | SplitMessage::Step2Build
+                    | SplitMessage::Step2Export(_)
+                    | SplitMessage::Step2Import
+                    | SplitMessage::Step2RetryHandoff
+                    | SplitMessage::Step2Review
+                    | SplitMessage::Step2Confirm
+                    | SplitMessage::Step2ReviewResend
+                    | SplitMessage::Step2ConfirmResend
+            )
+        {
+            self.notice = Some(super::step1::RETIRED_MARKER.to_string());
+            return Task::none();
+        }
         let seq = self.seq;
         match message {
             SplitMessage::EnterStep2 if self.can_enter_step2() => {
@@ -1143,6 +1163,25 @@ impl SplitPanel {
 
     pub(super) fn apply_step2(&mut self, event: SplitEvent) -> Task<Message> {
         match event {
+            SplitEvent::Restarted(_, Ok(Restarted::PairedFunding(source, addresses))) => {
+                self.funding_source = Some(source);
+                self.funding_addresses = Some(addresses);
+                self.funding_journal = self.journal.clone();
+                self.funding_progress = None;
+                self.paired_recovery = None;
+                self.notice = Some(
+                    "The recorded Split pair is unsigned. Check both deposits again before signing."
+                        .into(),
+                );
+                self.stage = Stage::FundingDeposits;
+                Task::none()
+            }
+            SplitEvent::Restarted(_, Ok(Restarted::PairedRecovery(recovery))) => {
+                self.paired_recovery = Some(recovery);
+                self.notice = None;
+                self.stage = Stage::PairedRecovery;
+                Task::none()
+            }
             SplitEvent::Restarted(_, Ok(Restarted::Step1)) => match self.connect.clone() {
                 Some(connect) => self.resume_journal(connect),
                 None => {
@@ -1208,6 +1247,11 @@ impl SplitPanel {
                 Task::none()
             }
             SplitEvent::Restarted(_, Err(reason)) => {
+                if self.paired_recovery.is_some() {
+                    self.notice = Some(reason.reason);
+                    self.stage = Stage::PairedRecovery;
+                    return Task::none();
+                }
                 self.stage = Stage::Refused(refusal(reason));
                 Task::none()
             }

@@ -1,14 +1,11 @@
-//! Prefer positively qualified ancestry; provider failures never select fallback.
-//!
-//! While the production ancestry gate is closed no ancestry construction could
-//! be signed, so the build makes no discovery request and uses OP_RETURN, with
-//! its RDTS timing refusals (#547).
+//! Prefer positively qualified ancestry; never create an OP_RETURN fallback.
 use super::*;
 use crate::services::claim_ancestry_gate;
 use crate::services::claim_observation::http::{AncestryContext, MAX_ANCESTRY_CANDIDATES};
 use coincube_core::claim::PreflightTips;
 use coincube_core::{
-    claim_spend::create_ancestry_self_transfer, miniscript::bitcoin::consensus::deserialize,
+    claim_spend::create_ancestry_self_transfer,
+    miniscript::bitcoin::{absolute::LockTime, consensus::deserialize},
 };
 use std::collections::BTreeSet;
 
@@ -24,7 +21,7 @@ pub(super) async fn build_preferred(
     generation: watch::Receiver<u64>,
 ) -> Result<Box<Construction>, String> {
     let current = || {
-        if generation.has_changed().is_err() || *generation.borrow() != expected {
+        if !crate::services::claim_observation::session_current(&generation, expected) {
             Err(SESSION_ENDED.to_string())
         } else {
             Ok(())
@@ -50,12 +47,7 @@ pub(super) async fn build_preferred(
     let context = production.context().clone();
     drop(production);
     if !claim_ancestry_gate::discovery_open(&connect.client) {
-        return tokio::time::timeout(
-            CHECK_POLICY.collection_budget,
-            op_return(daemon, wallet, coins, feerate_vb, &window, &current),
-        )
-        .await
-        .map_err(|_| "The Claim input search timed out. Read the Vault again.".to_string())?;
+        return Err(claim_ancestry_gate::NEW_CLAIM_MESSAGE.into());
     }
     let source = HttpObservationSource::new(
         connect.client,
@@ -88,8 +80,7 @@ pub(super) async fn build_preferred(
             if truncated {
                 return Err("No input qualified within the 32-candidate ancestry search limit; remaining inputs were not checked.".into());
             }
-            // An absent qualifying input is not permission to ignore RDTS.
-            return op_return(daemon, wallet, coins, feerate_vb, &window, &current).await;
+            return Err("No confirmed Bitcoin-only funding coin could be proven for this Claim. No transaction was built.".into());
         };
         let path = proof
             .retained_path()
@@ -225,21 +216,4 @@ pub(super) async fn build_preferred(
     })
     .await
     .map_err(|_| "The Claim input search timed out. Read the Vault again.".to_string())?
-}
-
-/// The OP_RETURN construction, refused while RDTS disallows it.
-async fn op_return(
-    daemon: Arc<dyn Daemon + Send + Sync>,
-    wallet: Arc<Wallet>,
-    coins: CoinSet,
-    feerate_vb: u64,
-    window: &ForkWindow,
-    current: &impl Fn() -> Result<(), String>,
-) -> Result<Box<Construction>, String> {
-    if let Err(assessment) = window.rdts {
-        return Err(rdts_refusal(assessment, window));
-    }
-    let result = build(daemon, wallet, coins, feerate_vb, window.fork_hash).await;
-    current()?;
-    result
 }

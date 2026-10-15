@@ -1,4 +1,12 @@
-# Dormant exact-byte poison submission
+# Retired exact-byte poison submission
+
+This document describes a historical transport and its safety tests. The
+90-byte OP_RETURN Claim/Split route has no production signer or submission
+caller. New transactions use the paired input-ancestry path described in
+`BTCB2_ANCESTRY_SPLIT_MIGRATION.md`; this transport must not be reconnected to
+it. Production calls return `RetiredRoute` before any backend access or gate
+consumption. Existing uncertain records still require exact-transaction
+reconciliation.
 
 `DaemonControl::submit_verified_poison` accepts only the opaque core
 `VerifiedPoisonTransfer`. It requires Bitcoin mainnet and the daemon's exact
@@ -19,13 +27,13 @@ not confirmation or inclusion. Any backend error returns `Uncertain` with the
 same txid/wtxid, without leaking raw backend diagnostics. It may already have
 submitted the transaction; reconciliation must use these exact identities.
 
-This is a transport, NOT Claim authorization. Before calling, future orchestration
-must bind current account/Cube/provider context, reserved owned destination,
-fresh RDTS/expiry/MTP and UTXO observations, exact-transaction preflight, explicit
-user confirmation and durable uncertain-intent journaling. Signature integrity
-does not prove maturity, current unspentness, replay exclusivity or permission.
-Six-confirmation/reorg checks remain separate before step2. No production flags
-are enabled; no live broadcasts are part of this change.
+This transport never granted Claim authorization. Its old design required
+account/Cube/provider binding, a reserved owned destination, fresh RDTS and
+UTXO observations, exact-transaction preflight, explicit confirmation and
+durable uncertain-intent journaling. Those conditions do not make it an
+approved fallback for new transactions. Signature integrity alone does not
+prove maturity, current unspentness or replay exclusivity. No production
+caller is enabled.
 
 Synthetic daemon tests construct/sign/finalize realistic native P2WSH fixtures,
 record exact submitted bytes, refuse wrong chains/descriptors before calls and

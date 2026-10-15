@@ -1,5 +1,5 @@
-"""Split steps 1 and 2 (#568 B6a, B6b) and the single-step unified fallback
-(B4b-1a, B6-d) against both pinned nodes.
+"""Ordinary ancestry Split, recorded OP_RETURN Split, and unified fallback
+against both pinned nodes.
 
 Five foreign (non-Cube) wallets, one per supported source shape, are funded
 before the fork, so every coin is shared history on both chains. For each, the
@@ -20,6 +20,10 @@ proprietary records the production finalizer reads. Owner decision P1
 The offline tests need no node. They fabricate the previous transactions and
 run the same bridge and signer, so the signing and finalization paths for all
 five shapes are exercised wherever the bridge is built.
+
+The ancestry vectors use a separate set of shared coins for each shape and
+distinct post-fork coinbases mined directly to each foreign source. Their
+ordinary S+B and S+F signatures are checked against both nodes.
 
 The replay test pins, at node level, the window the post-submission reorg
 design (#568, Section 2) must close: once step 1 leaves Bitcoin's active
@@ -451,6 +455,85 @@ def offline_request(wallet):
     }
 
 
+def fake_coinbase(script, amount_sat):
+    """A distinct direct coinbase ancestor for structural offline vectors."""
+    tx = CTransaction()
+    tx.nVersion = 2
+    tx.vin = [CTxIn(COutPoint(0, 0xFFFFFFFF), b"\x02" + os.urandom(2), 0xFFFFFFFF)]
+    tx.vout = [CTxOut(amount_sat, script)]
+    return tx.serialize_without_witness().hex()
+
+
+def ancestry_pair_offline_request(wallet):
+    request = offline_request(wallet)
+    request.pop("fork_marker")
+    before = request["coins"][0]["bitcoin_block"]
+    a_raw = fake_coinbase(wallet.script_pubkey(0, 1), 1_000_000)
+    b_raw = fake_coinbase(wallet.script_pubkey(1, 1), 1_000_000)
+    after_a = {"height": 210, "hash": os.urandom(32).hex()}
+    after_b = {"height": 211, "hash": os.urandom(32).hex()}
+    request["ancestry_pair"] = {
+        "bitcoin_funding": {
+            "previous": a_raw, "vout": 0, "branch": "external", "index": 1,
+            "bitcoin_block": after_a, "btcb2_block": None,
+        },
+        "btcb2_funding": {
+            "previous": b_raw, "vout": 0, "branch": "internal", "index": 1,
+            "bitcoin_block": None, "btcb2_block": after_b,
+        },
+        "bitcoin_path": [{"transaction": a_raw, "parent_input": None}],
+        "btcb2_path": [{"transaction": b_raw, "parent_input": None}],
+        "target": target_script(TARGET_KIND.get(wallet.shape, "p2wsh")).hex(),
+        "btcb2_tip_height": 150,
+    }
+    assert before["height"] < request["fork_height"] < after_a["height"]
+    return request
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_ancestry_pair_bridge_offline(shape):
+    """Each supported foreign shape signs two ordinary, exclusive input sets."""
+    tool = split_tool()
+    wallet = ForeignWallet(shape)
+    request = ancestry_pair_offline_request(wallet)
+    pair = request["ancestry_pair"]
+    built = run_bridge(tool, request)
+    shared = {outpoint_str(txid_of(c["previous"]), c["vout"]) for c in request["coins"]}
+    assert set(built["shared_prevouts"]) == shared
+    assert built["bitcoin_funding_prevout"] != built["btcb2_funding_prevout"]
+    for chain, funding, destination in (
+        ("bitcoin", built["bitcoin_funding_prevout"], wallet.script_pubkey(0, DESTINATION_INDEX)),
+        ("btcb2", built["btcb2_funding_prevout"], bytes.fromhex(pair["target"])),
+    ):
+        psbt = built[f"{chain}_psbt"]
+        unsigned = from_binary(CTransaction, bytes.fromhex(unsigned_tx_hex(psbt)))
+        spent = {f"{i.prevout.hash:064x}:{i.prevout.n}" for i in unsigned.vin}
+        assert spent == shared | {funding}
+        assert len(unsigned.vout) == 1
+        assert unsigned.vout[0].scriptPubKey == destination
+        assert built[f"{chain}_fee"] == built[f"{chain}_maximum_signed_vbytes"] * FEERATE_VB
+        pair[f"signed_{chain}"] = wallet.sign(psbt, explicit_all=True)
+    signed = run_bridge(tool, request)
+    count = 2 if shape.startswith("wsh_") else 1
+    assert signed["bitcoin_signatures_per_input"] == [count] * 3
+    assert signed["btcb2_signatures_per_input"] == [count] * 3
+    assert signed["bitcoin_raw"] != signed["btcb2_raw"]
+
+    # A funding candidate cannot be promoted by a block label alone: its
+    # dependency must terminate in the exact selected coinbase transaction.
+    invalid = copy.deepcopy(request)
+    invalid["ancestry_pair"]["bitcoin_path"] = []
+    bridge_refuses(tool, invalid, "Bitcoin dependency")
+    invalid = copy.deepcopy(request)
+    invalid["ancestry_pair"]["btcb2_funding"]["bitcoin_block"] = {
+        "height": 211, "hash": os.urandom(32).hex()}
+    bridge_refuses(tool, invalid, "InvalidFunding")
+    invalid = copy.deepcopy(request)
+    invalid["ancestry_pair"]["bitcoin_funding"]["previous"] = fake_previous(
+        wallet.script_pubkey(0, 1), 1_000_000)
+    bridge_refuses(tool, invalid, "Bitcoin dependency")
+
+
 @pytest.mark.parametrize("shape", SHAPES)
 def test_split_step1_bridge_offline(shape):
     """No node: fabricated prevouts, the real bridge and the real signer."""
@@ -880,6 +963,10 @@ def split_two_chain_class():
             # their coins stay unspent on both chains until the sweep.
             self.unified_wallets = {shape: ForeignWallet(shape) for shape in SHAPES}
             self.unified_funded = {}
+            # Independent shared coins for the ordinary ancestry route.
+            self.ancestry_wallets = {shape: ForeignWallet(shape) for shape in SHAPES}
+            self.ancestry_funded = {}
+            self.ancestry_markers = {}
             # shape -> the confirmed step 1 (txid, block, claimed prevouts, raw).
             self.step1 = {}
             # shape -> the step 2 mined on BTCB2 (raw, txid, block).
@@ -893,6 +980,13 @@ def split_two_chain_class():
             self.legacy.generate_block(self.post_fork_blocks_blake2b)
             assert self.legacy.rpc.getblockhash(self.activation_height) != \
                 self.blake2b.rpc.getblockhash(self.activation_height)
+            for shape, wallet in self.ancestry_wallets.items():
+                self.ancestry_markers[shape] = (
+                    mine_ancestry_funding(self.legacy, wallet, 0),
+                    mine_ancestry_funding(self.blake2b, wallet, 1),
+                )
+            self.legacy.generate_block(100)
+            self.blake2b.generate_block(100)
 
         def _start_legacy_and_fund(self):
             # The base class lands on its activation height - 1. Stop it at
@@ -909,6 +1003,7 @@ def split_two_chain_class():
             sets = (
                 (self.wallets, self.funded),
                 (self.unified_wallets, self.unified_funded),
+                (self.ancestry_wallets, self.ancestry_funded),
             )
             funding = [
                 (shape, wallet, funded)
@@ -949,9 +1044,16 @@ def split_two_chain_class():
 
 @pytest.fixture(scope="module")
 def split_chains(request, test_base_dir):
-    from test_framework.btcb2 import missing_binaries
+    from test_framework.btcb2 import KNOTS_LEGACY_PATH, KNOTS_BLAKE2B_PATH
 
-    missing = missing_binaries()
+    # SplitTwoChain starts only the two nodes. Requiring electrs here prevents
+    # running the consensus vectors even though no indexer is constructed.
+    missing = [
+        name for name, path in (
+            ("KNOTS_LEGACY_PATH", KNOTS_LEGACY_PATH),
+            ("KNOTS_BLAKE2B_PATH", KNOTS_BLAKE2B_PATH),
+        ) if not (path and os.access(path, os.X_OK))
+    ]
     if missing:
         msg = f"BTCB2 harness binaries unset or not executable: {', '.join(missing)}"
         if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
@@ -1023,6 +1125,125 @@ def level(node, height):
     if count < height:
         node.generate_block(height - count)
     assert node.rpc.getblockcount() >= height
+
+
+def mine_ancestry_funding(node, wallet, branch):
+    """Mine a distinct direct post-fork coinbase to this foreign source."""
+    rpc = node.rpc
+    descriptor = rpc.getdescriptorinfo(wallet.descriptor(branch))["descriptor"]
+    address = rpc.deriveaddresses(descriptor, [1, 1])[0]
+    block = rpc.generatetoaddress(1, address)[0]
+    txid = rpc.getblock(block)["tx"][0]
+    decoded = rpc.getrawtransaction(txid, True, block)
+    script = wallet.script_pubkey(branch, 1).hex()
+    vout = next(
+        out["n"] for out in decoded["vout"]
+        if out["scriptPubKey"]["hex"] == script
+    )
+    return {
+        "previous": decoded["hex"],
+        "vout": vout,
+        "branch": ("external", "internal")[branch],
+        "index": 1,
+        "block": block,
+        "txid": txid,
+    }
+
+
+@pytest.mark.parametrize("shape", SHAPES)
+def test_split_ancestry_pair_consensus(split_chains, shape, record_property):
+    """Each ordinary S+B/S+F signature is valid only on its intended chain."""
+    tool = split_tool()
+    a, b = split_chains.legacy, split_chains.blake2b
+    wallet = split_chains.ancestry_wallets[shape]
+    bitcoin_marker, btcb2_marker = split_chains.ancestry_markers[shape]
+    assert bitcoin_marker["txid"] != btcb2_marker["txid"]
+    assert a.rpc.gettxout(bitcoin_marker["txid"], bitcoin_marker["vout"])["confirmations"] > 100
+    assert b.rpc.gettxout(btcb2_marker["txid"], btcb2_marker["vout"])["confirmations"] > 100
+    assert a.rpc.gettxout(btcb2_marker["txid"], btcb2_marker["vout"]) is None
+    assert b.rpc.gettxout(bitcoin_marker["txid"], bitcoin_marker["vout"]) is None
+
+    def funding(marker, own, other):
+        return {
+            key: marker[key] for key in ("previous", "vout", "branch", "index")
+        } | {
+            f"{own}_block": observe(
+                a if own == "bitcoin" else b, marker["txid"], marker["block"]),
+            f"{other}_block": None,
+        }
+
+    tip_a, tip_b = a.rpc.getblockcount(), b.rpc.getblockcount()
+    request = {
+        "external": wallet.descriptor(0),
+        "internal": wallet.descriptor(1),
+        "coins": observed_coins(split_chains, shape, split_chains.ancestry_funded),
+        "fork_height": split_chains.activation_height,
+        "destination": DESTINATION_INDEX,
+        "feerate_vb": FEERATE_VB,
+        "locktime": min(tip_a, tip_b),
+        "bitcoin_tip_height": tip_a,
+        "ancestry_pair": {
+            "bitcoin_funding": funding(bitcoin_marker, "bitcoin", "btcb2"),
+            "btcb2_funding": funding(btcb2_marker, "btcb2", "bitcoin"),
+            "bitcoin_path": [{"transaction": bitcoin_marker["previous"], "parent_input": None}],
+            "btcb2_path": [{"transaction": btcb2_marker["previous"], "parent_input": None}],
+            "target": target_script(TARGET_KIND.get(shape, "p2wsh")).hex(),
+            "btcb2_tip_height": tip_b,
+        },
+    }
+    built = run_bridge(tool, request)
+    pair = request["ancestry_pair"]
+    pair["signed_bitcoin"] = wallet.sign(built["bitcoin_psbt"])
+    pair["signed_btcb2"] = wallet.sign(built["btcb2_psbt"])
+    signed = run_bridge(tool, request)
+    shared = set(built["shared_prevouts"])
+    assert len(shared) == 2
+    for chain, marker, own, other in (
+        ("bitcoin", bitcoin_marker, a, b),
+        ("btcb2", btcb2_marker, b, a),
+    ):
+        raw = signed[f"{chain}_raw"]
+        decoded = own.rpc.decoderawtransaction(raw)
+        spent = {f"{item['txid']}:{item['vout']}" for item in decoded["vin"]}
+        assert spent == shared | {f"{marker['txid']}:{marker['vout']}"}
+        assert len(decoded["vout"]) == 1
+        assert decoded["vout"][0]["scriptPubKey"]["type"] != "nulldata"
+        allowed = own.rpc.testmempoolaccept([raw])[0]
+        rejected = other.rpc.testmempoolaccept([raw])[0]
+        assert allowed["allowed"], allowed
+        assert not rejected["allowed"], rejected
+        assert rejected["reject-reason"] == "missing-inputs", rejected
+        record_property(f"{shape}_{chain}_txid", signed[f"{chain}_txid"])
+    # Ordering cannot make either transaction replayable. Confirm BTCB2 first.
+    assert b.rpc.sendrawtransaction(signed["btcb2_raw"]) == signed["btcb2_txid"]
+    b.generate_block(1, wait_for_mempool=signed["btcb2_txid"])
+    assert a.rpc.sendrawtransaction(signed["bitcoin_raw"]) == signed["bitcoin_txid"]
+    a.generate_block(1, wait_for_mempool=signed["bitcoin_txid"])
+    if shape == "wpkh":
+        # Bitcoin losing its confirmation must not make the already-confirmed
+        # BTCB2 transaction replayable: F is still absent on Bitcoin.
+        block = a.rpc.getbestblockhash()
+        a.rpc.invalidateblock(block)
+        assert a.rpc.gettxout(bitcoin_marker["txid"], bitcoin_marker["vout"], False)
+        rejected = a.rpc.testmempoolaccept([signed["btcb2_raw"]])[0]
+        assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+        a.rpc.reconsiderblock(block)
+        assert a.rpc.getbestblockhash() == block
+    # A six-block reorg on either side cannot make the exact other-chain
+    # bytes valid for any supported source shape, even with shared coins
+    # unspent again on the reorganized chain.
+    for own, other_raw in (
+        (a, signed["btcb2_raw"]),
+        (b, signed["bitcoin_raw"]),
+    ):
+        own.generate_block(5)
+        tip = own.rpc.getbestblockhash()
+        first_confirmation = own.rpc.getblockhash(own.rpc.getblockcount() - 5)
+        own.rpc.invalidateblock(first_confirmation)
+        rejected = own.rpc.testmempoolaccept([other_raw])[0]
+        assert not rejected["allowed"] and rejected["reject-reason"] == "missing-inputs", rejected
+        own.rpc.reconsiderblock(first_confirmation)
+        assert own.rpc.getbestblockhash() == tip
 
 
 def confirmed_step1(split_chains, shape):

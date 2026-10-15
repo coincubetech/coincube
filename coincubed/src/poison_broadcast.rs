@@ -1,4 +1,7 @@
 //! Exact-byte transport only. This module grants no Claim/broadcast authorization.
+//! Historical OP_RETURN and one-sided Claim/Split submissions are fixture-only;
+//! production methods refuse them before backend access. Paired ancestry
+//! transports use separate typed entry points.
 mod binding;
 mod connect_transport;
 mod node_transport;
@@ -8,9 +11,15 @@ use crate::DaemonControl;
 pub use binding::ClaimBackendBinding;
 use coincube_core::{
     chain::ChainId,
-    claim_finalize::{VerifiedAncestryTransfer, VerifiedClaimForkSweep, VerifiedPoisonTransfer},
+    claim_finalize::{
+        VerifiedAncestryClaimPair, VerifiedAncestryTransfer, VerifiedClaimForkSweep,
+        VerifiedPoisonTransfer,
+    },
     descriptors::CoincubeDescriptor,
-    foreign_split::{VerifiedSplitStep1, VerifiedSplitStep2, VerifiedUnifiedSweep},
+    foreign_split::{
+        VerifiedAncestrySplitPair, VerifiedAncestrySplitStep2, VerifiedSplitStep1,
+        VerifiedSplitStep2, VerifiedUnifiedSweep,
+    },
 };
 use miniscript::bitcoin::{bip32::ChildNumber, Transaction, Txid, Wtxid};
 use std::sync::{
@@ -21,6 +30,8 @@ use std::sync::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionError {
     UnsupportedChain,
+    /// A historical one-sided Claim/Split transport is retained for fixtures only.
+    RetiredRoute,
     DescriptorMismatch,
     BackendUnavailable,
     GateMismatch,
@@ -44,6 +55,9 @@ impl std::fmt::Display for SubmissionError {
             Self::UnsupportedChain => {
                 f.write_str("Claim submission chain is unsupported or mismatched")
             }
+            Self::RetiredRoute => {
+                f.write_str("The retired Claim or Split route cannot submit a transaction")
+            }
             Self::BackendUnavailable => {
                 f.write_str("Chain backend is unavailable before submission")
             }
@@ -64,6 +78,20 @@ impl std::fmt::Display for SubmissionError {
     }
 }
 impl std::error::Error for SubmissionError {}
+
+/// The historical transports remain executable only in this crate's unit
+/// fixtures. Production callers must use a verified ordinary ancestry pair.
+fn legacy_submission_fixture_only() -> Result<(), SubmissionError> {
+    legacy_submission_allowed(cfg!(test))
+}
+
+fn legacy_submission_allowed(fixture: bool) -> Result<(), SubmissionError> {
+    if fixture {
+        Ok(())
+    } else {
+        Err(SubmissionError::RetiredRoute)
+    }
+}
 
 /// Upstream acknowledgement only, not confirmation, exclusivity or Claim permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -119,6 +147,47 @@ impl SubmissionGate {
     ) -> (Self, SubmissionRevoker) {
         Self::for_transaction(verified.chain(), verified.transaction(), not_after)
     }
+    /// Exact ordinary Bitcoin Claim witness. Only the coordinator may issue
+    /// this after fresh paired proof, preflight, approval and a durable
+    /// possible-attempt record. A gate cannot authorize the BTCB2 side.
+    pub fn for_ancestry_claim_bitcoin(
+        pair: &VerifiedAncestryClaimPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(
+            pair.bitcoin().chain(),
+            pair.bitcoin().transaction(),
+            not_after,
+        )
+    }
+    /// Exact ordinary BTCB2 Claim witness. This needs its own fresh proof,
+    /// preflight, approval and durable possible-attempt record.
+    pub fn for_ancestry_claim_fork(
+        pair: &VerifiedAncestryClaimPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(pair.fork().chain(), pair.fork().transaction(), not_after)
+    }
+    /// Exact ordinary Bitcoin Split witness. The matched BTCB2 witness in
+    /// the pair does not gain transport authority from this gate.
+    pub fn for_ancestry_split_bitcoin(
+        pair: &VerifiedAncestrySplitPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(
+            pair.bitcoin().chain(),
+            pair.bitcoin().transaction(),
+            not_after,
+        )
+    }
+    /// Exact ordinary BTCB2 Split witness, admitted independently after the
+    /// Bitcoin side is observed and a new possible-attempt record is saved.
+    pub fn for_ancestry_split_fork(
+        pair: &VerifiedAncestrySplitPair,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(pair.fork().chain(), pair.fork().transaction(), not_after)
+    }
     /// Fork transport gate only. Fresh split evidence, approval and durable
     /// submission intent remain the coordinator's responsibility.
     pub fn for_claim_fork(
@@ -132,6 +201,14 @@ impl SubmissionGate {
     /// coordinator's responsibility; verified signatures are not permission.
     pub fn for_split_step1(
         verified: &VerifiedSplitStep1,
+        not_after: std::time::Instant,
+    ) -> (Self, SubmissionRevoker) {
+        Self::for_transaction(verified.chain(), verified.transaction(), not_after)
+    }
+    /// Ordinary BTCB2 Split transaction transport only. Paired live proof,
+    /// consent, and durable intent belong to the coordinator.
+    pub fn for_ancestry_split_step2(
+        verified: &VerifiedAncestrySplitStep2,
         not_after: std::time::Instant,
     ) -> (Self, SubmissionRevoker) {
         Self::for_transaction(verified.chain(), verified.transaction(), not_after)
@@ -227,6 +304,7 @@ pub fn submit_verified_split_step1_to_connect(
     gate: &SubmissionGate,
     origin: &str,
 ) -> Result<SubmissionOutcome, SubmissionError> {
+    legacy_submission_fixture_only()?;
     // Bitcoin mainnet only: the Connect route is fixed to it, and Testnet4
     // stays refused until a route for it is verified.
     if verified.chain() != ChainId::Bitcoin {
@@ -257,6 +335,96 @@ pub fn submit_verified_split_step1_to_connect(
     Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
 }
 
+/// Transport one exact signed transaction from a verified ordinary Claim or
+/// Split pair through its fixed Connect mainnet route. The pair authenticates
+/// signatures and matched inputs, but is **not** live chain qualification or
+/// approval. The coordinator must persist a separate uncertain intent for
+/// each side before calling this transport; an accepted first side and an
+/// uncertain second side can never be treated as an atomic broadcast.
+fn submit_exact_ancestry_pair_side_to_connect(
+    chain: ChainId,
+    transaction: &Transaction,
+    gate: &SubmissionGate,
+    origin: &str,
+) -> Result<SubmissionOutcome, SubmissionError> {
+    if !matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
+        return Err(SubmissionError::UnsupportedChain);
+    }
+    let txid = transaction.compute_txid();
+    let wtxid = transaction.compute_wtxid();
+    if gate.chain != chain || gate.txid != txid || gate.wtxid != wtxid {
+        return Err(SubmissionError::GateMismatch);
+    }
+    let request = connect_transport::PreparedConnect::for_chain(origin, chain, transaction)
+        .map_err(|_| SubmissionError::BackendUnavailable)?;
+    gate.enter()?;
+    request
+        .send()
+        .map_err(|_| SubmissionError::Uncertain { txid, wtxid })?;
+    Ok(SubmissionOutcome::UpstreamAccepted { txid, wtxid })
+}
+
+/// Exact Bitcoin `S+B` Claim witness. Caller owns fresh pair admission and
+/// durable submission intent; this function does no wallet or chain reads.
+pub fn submit_ancestry_claim_bitcoin_to_connect(
+    pair: &VerifiedAncestryClaimPair,
+    gate: &SubmissionGate,
+    origin: &str,
+) -> Result<SubmissionOutcome, SubmissionError> {
+    submit_exact_ancestry_pair_side_to_connect(
+        pair.bitcoin().chain(),
+        pair.bitcoin().transaction(),
+        gate,
+        origin,
+    )
+}
+
+/// Exact BTCB2 `S+F` Claim witness. The Bitcoin side's result does not
+/// authorize this side: the coordinator must refresh both chains and record
+/// this transaction's own uncertain intent before entering its gate.
+pub fn submit_ancestry_claim_fork_to_connect(
+    pair: &VerifiedAncestryClaimPair,
+    gate: &SubmissionGate,
+    origin: &str,
+) -> Result<SubmissionOutcome, SubmissionError> {
+    submit_exact_ancestry_pair_side_to_connect(
+        pair.fork().chain(),
+        pair.fork().transaction(),
+        gate,
+        origin,
+    )
+}
+
+/// Exact Bitcoin `S+B` foreign Split witness; requires a separate journaled
+/// user-approved submission attempt before this transport is called.
+pub fn submit_ancestry_split_bitcoin_to_connect(
+    pair: &VerifiedAncestrySplitPair,
+    gate: &SubmissionGate,
+    origin: &str,
+) -> Result<SubmissionOutcome, SubmissionError> {
+    submit_exact_ancestry_pair_side_to_connect(
+        pair.bitcoin().chain(),
+        pair.bitcoin().transaction(),
+        gate,
+        origin,
+    )
+}
+
+/// Exact BTCB2 `S+F` foreign Split witness. Its output was authenticated by
+/// the pair finalizer; current target reservation is the coordinator's check.
+pub fn submit_ancestry_split_fork_to_connect(
+    pair: &VerifiedAncestrySplitPair,
+    gate: &SubmissionGate,
+    origin: &str,
+) -> Result<SubmissionOutcome, SubmissionError> {
+    submit_exact_ancestry_pair_side_to_connect(
+        pair.fork().chain(),
+        pair.fork().transaction(),
+        gate,
+        origin,
+    )
+}
+
 impl DaemonControl {
     /// Dormant embedded transport. Caller must first join fresh RDTS/chain and
     /// UTXO observations, exact-witness preflight, explicit user approval and
@@ -271,6 +439,7 @@ impl DaemonControl {
         verified: &VerifiedPoisonTransfer,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         if self.config.bitcoin_config.chain != ChainId::Bitcoin
             || verified.chain() != ChainId::Bitcoin
         {
@@ -292,6 +461,7 @@ impl DaemonControl {
         verified: &VerifiedAncestryTransfer,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         if self.config.bitcoin_config.chain != ChainId::Bitcoin
             || verified.chain() != ChainId::Bitcoin
         {
@@ -322,6 +492,7 @@ impl DaemonControl {
         verified: &VerifiedClaimForkSweep,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         if self.config.bitcoin_config.chain != ChainId::BitcoinBlake2b
             || verified.chain() != ChainId::BitcoinBlake2b
         {
@@ -344,6 +515,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -361,6 +533,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -380,6 +553,7 @@ impl DaemonControl {
         gate: &SubmissionGate,
         origin: &str,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -399,6 +573,7 @@ impl DaemonControl {
         gate: &SubmissionGate,
         origin: &str,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -430,6 +605,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target(verified.transaction(), binding, gate)
     }
@@ -446,6 +622,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target_to_node(verified.transaction(), binding, gate)
     }
@@ -466,6 +643,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target(verified.transaction(), binding, gate)
     }
@@ -481,6 +659,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target_to_node(verified.transaction(), binding, gate)
     }

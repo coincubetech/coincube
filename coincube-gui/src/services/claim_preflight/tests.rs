@@ -24,6 +24,19 @@ fn tx() -> Transaction {
         }],
     }
 }
+fn paired_tx(marker: u8) -> Transaction {
+    let mut transaction = tx();
+    transaction.input.push(TxIn {
+        previous_output: OutPoint {
+            txid: Txid::from_byte_array([marker; 32]),
+            vout: 0,
+        },
+        script_sig: ScriptBuf::new(),
+        sequence: Sequence::MAX,
+        witness: Witness::from_slice(&[vec![marker]]),
+    });
+    transaction
+}
 fn tip() -> BlockHash {
     BlockHash::from_byte_array([2; 32])
 }
@@ -40,6 +53,140 @@ fn headers() -> HeaderMap {
 }
 fn response(chain: ChainId, stamp: i64) -> Value {
     json!({"success":true,"error":null,"data":{"network":chain.api_str(),"state":"available","result":{"txid":tx().compute_txid(),"wtxid":tx().compute_wtxid(),"tip_hash":tip(),"observed_at":stamp,"allowed":true}}})
+}
+fn pair_response(chain: ChainId, transaction: &Transaction, allowed: bool) -> Value {
+    let mut body = response(chain, now());
+    body["data"]["result"]["txid"] = json!(transaction.compute_txid());
+    body["data"]["result"]["wtxid"] = json!(transaction.compute_wtxid());
+    body["data"]["result"]["allowed"] = json!(allowed);
+    if !allowed {
+        body["data"]["result"]["reject_reason"] = json!("policy_rejected");
+    }
+    body
+}
+
+#[test]
+fn paired_attempt_rechecks_both_exact_witnesses_and_observation_age() {
+    let bitcoin = paired_tx(3);
+    let fork = paired_tx(4);
+    let pair = accepted_pair_for_test(&bitcoin, &fork, tip(), 9, 100);
+    assert!(pair.accepted_for(&bitcoin, &fork, 9, policy(), 100));
+    assert!(!pair.accepted_for(&bitcoin, &fork, 10, policy(), 100));
+    assert!(!pair.accepted_for(&bitcoin, &fork, 9, policy(), 161));
+    let mut changed_witness = fork.clone();
+    changed_witness.input[0].witness = Witness::from_slice(&[vec![9]]);
+    assert_eq!(changed_witness.compute_txid(), fork.compute_txid());
+    assert_ne!(changed_witness.compute_wtxid(), fork.compute_wtxid());
+    assert!(!pair.accepted_for(&bitcoin, &changed_witness, 9, policy(), 100));
+    let mut rejected = pair;
+    rejected.fork.policy = NodePolicy::Rejected {
+        reason: "rejected".into(),
+    };
+    assert!(!rejected.accepted_for(&bitcoin, &fork, 9, policy(), 100));
+}
+
+#[tokio::test]
+async fn paired_preflight_requires_distinct_markers_and_both_policy_acceptances() {
+    let bitcoin = paired_tx(3);
+    let fork = paired_tx(4);
+    assert!(paired_input_shape(&bitcoin, &fork));
+    assert!(!paired_input_shape(&bitcoin, &bitcoin));
+    let mut missing_shared = fork.clone();
+    missing_shared.input[0].previous_output.txid = Txid::from_byte_array([5; 32]);
+    assert!(!paired_input_shape(&bitcoin, &missing_shared));
+    let mut duplicate = fork.clone();
+    duplicate.input[1].previous_output = duplicate.input[0].previous_output;
+    assert!(!paired_input_shape(&bitcoin, &duplicate));
+
+    for fork_allowed in [true, false] {
+        let server = MockServer::start();
+        let (client, _sender) = client(&server);
+        let bitcoin_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+            then.status(200)
+                .header("Cache-Control", "no-store")
+                .json_body(pair_response(ChainId::Bitcoin, &bitcoin, true));
+        });
+        let fork_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight");
+            then.status(200)
+                .header("Cache-Control", "no-store")
+                .json_body(pair_response(ChainId::BitcoinBlake2b, &fork, fork_allowed));
+        });
+        let observed = client
+            .observe_ancestry_pair(&bitcoin, &fork, tip(), tip(), policy())
+            .await;
+        if fork_allowed {
+            let observed = observed.unwrap();
+            assert_eq!(observed.bitcoin().txid(), bitcoin.compute_txid());
+            assert_eq!(observed.fork().wtxid(), fork.compute_wtxid());
+        } else {
+            assert_eq!(
+                observed,
+                Err(Error::PairedPolicyRejected {
+                    chain: ChainId::BitcoinBlake2b,
+                    reason: "policy_rejected".into(),
+                })
+            );
+        }
+        bitcoin_mock.assert_hits(1);
+        fork_mock.assert_hits(1);
+    }
+}
+
+#[tokio::test]
+async fn post_bitcoin_preflight_reads_only_the_exact_fork_witness() {
+    let bitcoin = paired_tx(3);
+    let fork = paired_tx(4);
+    for allowed in [true, false] {
+        let server = MockServer::start();
+        let (client, _sender) = client(&server);
+        let bitcoin_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin/mainnet/tx/preflight");
+            then.status(500);
+        });
+        let fork_mock = server.mock(|when, then| {
+            when.method(POST)
+                .path("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/preflight")
+                .json_body(json!({
+                    "transaction": consensus::encode::serialize_hex(&fork),
+                    "tip_hash": tip(),
+                }));
+            then.status(200)
+                .header("Cache-Control", "no-store")
+                .json_body(pair_response(ChainId::BitcoinBlake2b, &fork, allowed));
+        });
+        let observed = client
+            .observe_ancestry_fork(&bitcoin, &fork, tip(), policy())
+            .await;
+        if allowed {
+            let evidence = observed.unwrap();
+            assert_eq!(evidence.wtxid(), fork.compute_wtxid());
+            assert_eq!(evidence.chain(), ChainId::BitcoinBlake2b);
+        } else {
+            assert_eq!(
+                observed,
+                Err(Error::PairedPolicyRejected {
+                    chain: ChainId::BitcoinBlake2b,
+                    reason: "policy_rejected".into(),
+                })
+            );
+        }
+        fork_mock.assert_hits(1);
+        bitcoin_mock.assert_hits(0);
+    }
+
+    let server = MockServer::start();
+    let (client, _sender) = client(&server);
+    assert_eq!(
+        client
+            .observe_ancestry_fork(&bitcoin, &bitcoin, tip(), policy())
+            .await,
+        Err(Error::InvalidRequest)
+    );
 }
 fn parse_value(status: StatusCode, body: Value) -> Result<Evidence, Error> {
     parse(
@@ -67,6 +214,23 @@ fn client(server: &MockServer) -> (PreflightClient, watch::Sender<u64>) {
         .unwrap(),
         sender,
     )
+}
+#[test]
+fn paired_submission_uses_the_same_connect_origin_as_its_proof_provider() {
+    let server = MockServer::start();
+    let (client, _sender) = client(&server);
+    assert!(client.matches_provider(&format!(
+        "bitcoin|{}/api/v1/esplora/bitcoin/mainnet",
+        server.base_url()
+    )));
+    assert!(!client.matches_provider(&format!(
+        "bitcoin|{}/api/v1/esplora/bitcoin-blake2b/mainnet",
+        server.base_url()
+    )));
+    assert!(
+        !client.matches_provider("bitcoin|https://another.example/api/v1/esplora/bitcoin/mainnet")
+    );
+    assert_eq!(client.submission_origin(), server.base_url());
 }
 #[test]
 fn exact_bindings_and_explicit_clock_bounds_are_required() {
@@ -297,6 +461,15 @@ async fn unsupported_invalid_and_revoked_requests_perform_no_io() {
             .await,
         Err(Error::Cancelled)
     );
+    let (same_client, sender) = self::client(&server);
+    sender.send(7).unwrap();
+    assert_eq!(
+        same_client
+            .observe(ChainId::Bitcoin, &tx(), tip(), policy())
+            .await,
+        Err(Error::Cancelled),
+        "a same-value session refresh also revokes preflight"
+    );
     any.assert_hits(0);
 }
 #[tokio::test]
@@ -376,7 +549,7 @@ async fn generation_cancellation_discards_inflight_response() {
     let transaction = tx();
     let revoke = async {
         tokio::time::sleep(Duration::from_millis(30)).await;
-        sender.send(8).unwrap();
+        sender.send(7).unwrap();
     };
     let (result, ()) = tokio::join!(
         client.observe(ChainId::Bitcoin, &transaction, tip(), policy()),

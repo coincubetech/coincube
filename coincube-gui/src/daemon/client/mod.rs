@@ -126,6 +126,17 @@ impl<C: Client + Send + Sync + Debug> Daemon for Coincubed<C> {
         self.call("updatederivationindexes", Some(vec![receive, change]))
     }
 
+    async fn reserve_claim_change(
+        &self,
+        chain: coincube_core::chain::ChainId,
+        descriptor: &coincube_core::descriptors::CoincubeDescriptor,
+    ) -> Result<ChildNumber, DaemonError> {
+        self.call(
+            "reserveclaimchange",
+            Some(vec![json!(chain), json!(descriptor.to_string())]),
+        )
+    }
+
     async fn list_coins(
         &self,
         statuses: &[CoinStatus],

@@ -120,6 +120,18 @@ fn wallet(shape: Shape) -> Wallet {
     }
 }
 
+#[test]
+fn review_threshold_matches_supported_source_shapes() {
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        assert_eq!(
+            wallet.source.signing_threshold(),
+            wallet.threshold,
+            "{shape:?}"
+        );
+    }
+}
+
 fn block(height: u64) -> BlockRef {
     BlockRef {
         height,
@@ -206,6 +218,712 @@ fn unsigned(tx: &Transaction) -> Transaction {
 
 fn finalize(step: &SplitStep1, signed: &Psbt) -> Result<VerifiedSplitStep1, FinalizeError> {
     finalize_split_step1(step, signed, &secp256k1::Secp256k1::verification_only())
+}
+
+fn ancestry_funding(
+    source: &SplitSource,
+) -> (SplitCoin, crate::claim_ancestry::CoinbaseDependency) {
+    ancestry_funding_with_nonce(source, 1)
+}
+
+fn ancestry_funding_with_nonce(
+    source: &SplitSource,
+    nonce: u8,
+) -> (SplitCoin, crate::claim_ancestry::CoinbaseDependency) {
+    use crate::claim_ancestry::{self, Link};
+    use bitcoin::consensus::serialize;
+
+    let root = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: LockTime::ZERO,
+        input: vec![TxIn {
+            previous_output: OutPoint::null(),
+            script_sig: ScriptBuf::from_bytes(vec![2, 1, nonce]),
+            ..TxIn::default()
+        }],
+        output: vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: ScriptBuf::new(),
+        }],
+    };
+    let mut funding = coin(source, SplitBranch::External, 6 + u32::from(nonce), 30_000);
+    funding.previous.input[0].previous_output = OutPoint::new(root.compute_txid(), 0);
+    funding.outpoint = OutPoint::new(funding.previous.compute_txid(), 1);
+    funding.bitcoin_block = Some(block(FORK + 20));
+    funding.btcb2_block = None;
+    let raw_funding = serialize(&funding.previous);
+    let raw_root = serialize(&root);
+    let dependency = claim_ancestry::verify(
+        funding.outpoint,
+        &[
+            Link {
+                transaction: &raw_funding,
+                parent_input: Some(0),
+            },
+            Link {
+                transaction: &raw_root,
+                parent_input: None,
+            },
+        ],
+    )
+    .unwrap();
+    (funding, dependency)
+}
+
+#[test]
+fn ancestry_step1_builds_exact_shared_plus_funding_and_signs_every_shape() {
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        let shared = coins(&wallet.source);
+        let (funding, dependency) = ancestry_funding(&wallet.source);
+        let inputs = AncestrySplitInputs {
+            chain: ChainId::Bitcoin,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &funding,
+            dependency: &dependency,
+            fork_height: FORK,
+            destination: 9,
+        };
+        let step = create_ancestry_split_step1(&inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
+        let tx = &step.psbt().unsigned_tx;
+        assert_eq!(
+            estimate_ancestry_signed_vbytes(
+                &wallet.source,
+                &shared,
+                FORK,
+                funding.index,
+                tx.output[0].script_pubkey.as_script(),
+            )
+            .unwrap(),
+            step.maximum_signed_vbytes(),
+            "{shape:?}"
+        );
+        let mut expected: Vec<_> = shared.iter().map(|coin| coin.outpoint).collect();
+        expected.sort();
+        assert_eq!(step.claimed_prevouts(), expected, "{shape:?}");
+        expected.push(funding.outpoint);
+        expected.sort();
+        assert_eq!(
+            tx.input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(tx.output.len(), 1);
+        assert!(!tx.output[0].script_pubkey.is_op_return());
+        assert_eq!(
+            tx.output[0].script_pubkey,
+            wallet
+                .source
+                .derive(SplitBranch::External, 9)
+                .unwrap()
+                .script_pubkey()
+        );
+        assert_eq!(step.funding_prevout(), funding.outpoint);
+        assert_eq!(
+            step.funding_derivation(),
+            Some((funding.branch, funding.index))
+        );
+        assert_eq!(step.fee().to_sat(), step.maximum_signed_vbytes() * FEERATE);
+        assert_eq!(step.psbt().inputs.len(), 3);
+        assert!(!step.psbt().outputs[0].bip32_derivation.is_empty());
+        assert_eq!(
+            reconstruct_ancestry_split_step1(&inputs, tx, FEERATE, TIP)
+                .unwrap()
+                .psbt(),
+            step.psbt()
+        );
+
+        let signed = sign(step.psbt(), &wallet.signers);
+        let verified = finalize_ancestry_split_step1(
+            &step,
+            &inputs,
+            &signed,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap();
+        assert_eq!(&unsigned(verified.transaction()), tx);
+        assert_eq!(
+            verified.signatures_per_input(),
+            &[wallet.threshold, wallet.threshold, wallet.threshold]
+        );
+        assert!(verified.vsize() as u64 <= step.maximum_signed_vbytes());
+        assert_eq!(
+            verify_ancestry_split_step1_transaction(
+                &step,
+                &inputs,
+                verified.transaction(),
+                &secp256k1::Secp256k1::verification_only(),
+            )
+            .unwrap()
+            .fee(),
+            step.fee()
+        );
+    }
+}
+
+#[test]
+fn ancestry_step1_refuses_missing_duplicate_and_changed_funding() {
+    let wallet = wallet(Shape::Wpkh);
+    let shared = coins(&wallet.source);
+    let (funding, dependency) = ancestry_funding(&wallet.source);
+    let inputs = AncestrySplitInputs {
+        chain: ChainId::Bitcoin,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &funding,
+        dependency: &dependency,
+        fork_height: FORK,
+        destination: 9,
+    };
+    let create = |inputs: &AncestrySplitInputs<'_>| {
+        create_ancestry_split_step1(inputs, FEERATE, LockTime::ZERO, TIP)
+    };
+    let step = create(&inputs).unwrap();
+    let funding_amount = funding.previous.output[funding.outpoint.vout as usize]
+        .value
+        .to_sat();
+    let fee_from_shared = funding_amount / step.maximum_signed_vbytes() + 1;
+    assert!(matches!(
+        create_ancestry_split_step1(&inputs, fee_from_shared, LockTime::ZERO, TIP),
+        Err(Error::FundingBelowFee(ChainId::Bitcoin))
+    ));
+    let mut altered = step.psbt().unsigned_tx.clone();
+    altered.output[0].value = Amount::from_sat(altered.output[0].value.to_sat() - 1);
+    assert!(matches!(
+        reconstruct_ancestry_split_step1(&inputs, &altered, FEERATE, TIP),
+        Err(Error::Recorded(_))
+    ));
+    let mut signed = sign(step.psbt(), &wallet.signers);
+    signed.unsigned_tx.output[0].value = Amount::from_sat(1_000);
+    assert_eq!(
+        finalize_ancestry_split_step1(
+            &step,
+            &inputs,
+            &signed,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap_err(),
+        FinalizeError::ConstructionChanged
+    );
+
+    let with_funding = |funding| AncestrySplitInputs { funding, ..inputs };
+    let mut missing = funding.clone();
+    missing.bitcoin_block = None;
+    assert!(matches!(
+        create(&with_funding(&missing)),
+        Err(Error::InvalidFunding(_))
+    ));
+    let mut both = funding.clone();
+    both.btcb2_block = Some(block(FORK + 20));
+    assert!(matches!(
+        create(&with_funding(&both)),
+        Err(Error::InvalidFunding(_))
+    ));
+    let mut duplicate = funding.clone();
+    duplicate.outpoint = shared[0].outpoint;
+    assert!(matches!(
+        create(&with_funding(&duplicate)),
+        Err(Error::DuplicateInput(_))
+    ));
+    let mut wrong_source = funding.clone();
+    wrong_source.index = 8;
+    assert!(matches!(
+        create(&with_funding(&wrong_source)),
+        Err(Error::ScriptMismatch(_))
+    ));
+    let other_wallet = self::wallet(Shape::Pkh);
+    let (_, other_dependency) = ancestry_funding(&other_wallet.source);
+    assert!(matches!(
+        create(&AncestrySplitInputs {
+            dependency: &other_dependency,
+            ..inputs
+        }),
+        Err(Error::InvalidFunding(_))
+    ));
+    let signed = sign(step.psbt(), &wallet.signers);
+    assert_eq!(
+        finalize_ancestry_split_step1(
+            &step,
+            &with_funding(&wrong_source),
+            &signed,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap_err(),
+        FinalizeError::CoinsChanged
+    );
+}
+
+#[test]
+fn ancestry_step2_builds_exact_shared_plus_funding_and_signs_every_shape() {
+    let target = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([42; 32]));
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        let shared = coins(&wallet.source);
+        let (mut funding, dependency) = ancestry_funding(&wallet.source);
+        funding.bitcoin_block = None;
+        funding.btcb2_block = Some(block(FORK + 20));
+        let claimed: Vec<_> = shared.iter().map(|coin| coin.outpoint).collect();
+        let inputs = AncestrySplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &funding,
+            dependency: &dependency,
+            fork_height: FORK,
+            claimed: &claimed,
+            target: target.as_script(),
+        };
+        let step = create_ancestry_split_step2(&inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
+        let tx = &step.psbt().unsigned_tx;
+        assert_eq!(
+            estimate_ancestry_signed_vbytes(
+                &wallet.source,
+                &shared,
+                FORK,
+                funding.index,
+                target.as_script(),
+            )
+            .unwrap(),
+            step.maximum_signed_vbytes(),
+            "{shape:?}"
+        );
+        let mut expected = claimed.clone();
+        expected.sort();
+        assert_eq!(step.claimed_prevouts(), expected, "{shape:?}");
+        expected.push(funding.outpoint);
+        expected.sort();
+        assert_eq!(
+            tx.input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<Vec<_>>(),
+            expected
+        );
+        assert_eq!(tx.output.len(), 1);
+        assert_eq!(tx.output[0].script_pubkey, target);
+        assert_eq!(step.funding_prevout(), funding.outpoint);
+        assert_eq!(
+            step.funding_derivation(),
+            Some((funding.branch, funding.index))
+        );
+        assert_eq!(step.fee().to_sat(), step.maximum_signed_vbytes() * FEERATE);
+        assert_eq!(step.psbt().inputs.len(), 3);
+        assert_eq!(
+            reconstruct_ancestry_split_step2(&inputs, tx, FEERATE, TIP)
+                .unwrap()
+                .psbt(),
+            step.psbt()
+        );
+        let signed = sign(step.psbt(), &wallet.signers);
+        let verified = finalize_ancestry_split_step2(
+            &step,
+            &inputs,
+            &signed,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap();
+        assert_eq!(&unsigned(verified.transaction()), tx);
+        assert_eq!(
+            verified.signatures_per_input(),
+            &[wallet.threshold, wallet.threshold, wallet.threshold]
+        );
+        assert!(verified.vsize() as u64 <= step.maximum_signed_vbytes());
+        assert_eq!(
+            verify_ancestry_split_step2_transaction(
+                &step,
+                &inputs,
+                verified.transaction(),
+                &secp256k1::Secp256k1::verification_only(),
+            )
+            .unwrap()
+            .fee(),
+            step.fee()
+        );
+    }
+}
+
+#[test]
+fn ancestry_pair_finalizes_only_matching_signed_transactions() {
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        let shared = coins(&wallet.source);
+        let (bitcoin_funding, bitcoin_dependency) = ancestry_funding_with_nonce(&wallet.source, 1);
+        let (mut fork_funding, fork_dependency) = ancestry_funding_with_nonce(&wallet.source, 2);
+        fork_funding.bitcoin_block = None;
+        fork_funding.btcb2_block = Some(block(FORK + 21));
+        let bitcoin_inputs = AncestrySplitInputs {
+            chain: ChainId::Bitcoin,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &bitcoin_funding,
+            dependency: &bitcoin_dependency,
+            fork_height: FORK,
+            destination: 9,
+        };
+        let bitcoin =
+            create_ancestry_split_step1(&bitcoin_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
+        let target = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([42; 32]));
+        let fork_inputs = AncestrySplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &fork_funding,
+            dependency: &fork_dependency,
+            fork_height: FORK,
+            claimed: bitcoin.claimed_prevouts(),
+            target: target.as_script(),
+        };
+        let fork = create_ancestry_split_step2(&fork_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
+        let bitcoin_signed = sign(bitcoin.psbt(), &wallet.signers);
+        let fork_signed = sign(fork.psbt(), &wallet.signers);
+        let bitcoin_returns: Vec<_> = wallet
+            .signers
+            .iter()
+            .map(|signer| sign(bitcoin.psbt(), std::slice::from_ref(signer)))
+            .collect();
+        let fork_returns: Vec<_> = wallet
+            .signers
+            .iter()
+            .map(|signer| sign(fork.psbt(), std::slice::from_ref(signer)))
+            .collect();
+        let secp = secp256k1::Secp256k1::verification_only();
+        let one_sided = combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_returns,
+            &fork,
+            &fork_inputs,
+            &[],
+            &secp,
+        )
+        .unwrap();
+        assert!(!one_sided.complete, "{:?}", shape);
+        let combined = combine_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_returns,
+            &fork,
+            &fork_inputs,
+            &fork_returns,
+            &secp,
+        )
+        .unwrap();
+        assert!(combined.complete, "{:?}", shape);
+        assert!(finalize_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &combined.bitcoin,
+            &fork,
+            &fork_inputs,
+            &combined.fork,
+            &secp,
+        )
+        .is_ok());
+        if shape == Shape::Wpkh {
+            // ECDSA permits more than one valid nonce for the same key and
+            // message. Both files authenticate, but their disagreement must
+            // not be resolved by whichever file happened to load first.
+            let first = bitcoin_returns[0].clone();
+            let mut alternate = first.clone();
+            let funding_index = alternate
+                .unsigned_tx
+                .input
+                .iter()
+                .position(|input| input.previous_output == bitcoin_funding.outpoint)
+                .unwrap();
+            let (public_key, original) = alternate.inputs[funding_index]
+                .partial_sigs
+                .iter()
+                .next()
+                .map(|(key, signature)| (*key, *signature))
+                .unwrap();
+            let derivation = &alternate.inputs[funding_index]
+                .bip32_derivation
+                .get(&public_key.inner)
+                .unwrap()
+                .1;
+            let signing = secp256k1::Secp256k1::new();
+            let secret = wallet.signers[0].derive_priv(&signing, derivation).unwrap();
+            let output = &bitcoin_funding.previous.output[bitcoin_funding.outpoint.vout as usize];
+            let definite = wallet
+                .source
+                .derive(bitcoin_funding.branch, bitcoin_funding.index)
+                .unwrap();
+            let digest = sighash_all(
+                &mut SighashCache::new(&alternate.unsigned_tx),
+                funding_index,
+                &definite,
+                &alternate.inputs[funding_index],
+                output,
+            )
+            .unwrap();
+            let message = secp256k1::Message::from_digest(digest);
+            let different_signature =
+                signing.sign_ecdsa_with_noncedata(&message, &secret.private_key, &[7; 32]);
+            assert_ne!(different_signature, original.signature);
+            let mut replacement = original;
+            replacement.signature = different_signature;
+            alternate.inputs[funding_index]
+                .partial_sigs
+                .insert(public_key, replacement);
+            assert!(
+                finalize_ancestry_split_step1(&bitcoin, &bitcoin_inputs, &alternate, &secp).is_ok()
+            );
+            assert!(matches!(
+                combine_ancestry_split_pair(
+                    &bitcoin,
+                    &bitcoin_inputs,
+                    &[first, alternate],
+                    &fork,
+                    &fork_inputs,
+                    &[],
+                    &secp,
+                ),
+                Err(CombineAncestrySplitError::ConflictingSignature {
+                    chain: ChainId::Bitcoin,
+                    input,
+                }) if input == funding_index
+            ));
+        }
+        let mut altered_return = fork_returns[0].clone();
+        altered_return.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert!(matches!(
+            combine_ancestry_split_pair(
+                &bitcoin,
+                &bitcoin_inputs,
+                &bitcoin_returns,
+                &fork,
+                &fork_inputs,
+                &[altered_return],
+                &secp,
+            ),
+            Err(CombineAncestrySplitError::Invalid(
+                FinalizeError::ConstructionChanged
+            ))
+        ));
+        assert!(validate_ancestry_split_pair_signing(
+            &bitcoin,
+            &bitcoin_inputs,
+            bitcoin.psbt(),
+            &fork,
+            &fork_inputs,
+            fork.psbt(),
+        )
+        .is_ok());
+        assert!(validate_ancestry_split_pair_signing(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_signed,
+            &fork,
+            &fork_inputs,
+            &fork_signed,
+        )
+        .is_ok());
+        let mut changed_bitcoin = bitcoin_signed.clone();
+        changed_bitcoin.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert_eq!(
+            validate_ancestry_split_pair_signing(
+                &bitcoin,
+                &bitcoin_inputs,
+                &changed_bitcoin,
+                &fork,
+                &fork_inputs,
+                &fork_signed,
+            )
+            .unwrap_err(),
+            FinalizeError::ConstructionChanged
+        );
+        let verified = finalize_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_signed,
+            &fork,
+            &fork_inputs,
+            &fork_signed,
+            &secp,
+        )
+        .unwrap();
+        assert_eq!(
+            verified.bitcoin().transaction().input.len(),
+            shared.len() + 1
+        );
+        assert_eq!(verified.fork().transaction().input.len(), shared.len() + 1);
+        let restored = verify_ancestry_split_pair_transactions(
+            &bitcoin,
+            &bitcoin_inputs,
+            verified.bitcoin().transaction(),
+            &fork,
+            &fork_inputs,
+            verified.fork().transaction(),
+            &secp,
+        )
+        .unwrap();
+        assert_eq!(
+            restored.bitcoin().transaction(),
+            verified.bitcoin().transaction()
+        );
+        assert_eq!(restored.fork().transaction(), verified.fork().transaction());
+        let mut altered_fork = verified.fork().transaction().clone();
+        altered_fork.input[0].witness.clear();
+        altered_fork.input[0].script_sig = ScriptBuf::new();
+        assert!(verify_ancestry_split_pair_transactions(
+            &bitcoin,
+            &bitcoin_inputs,
+            verified.bitcoin().transaction(),
+            &fork,
+            &fork_inputs,
+            &altered_fork,
+            &secp,
+        )
+        .is_err());
+
+        let partial = sign(fork.psbt(), &wallet.signers[..wallet.threshold - 1]);
+        assert!(finalize_ancestry_split_pair(
+            &bitcoin,
+            &bitcoin_inputs,
+            &bitcoin_signed,
+            &fork,
+            &fork_inputs,
+            &partial,
+            &secp,
+        )
+        .is_err());
+        let mut changed = fork_signed;
+        changed.unsigned_tx.output[0].value = Amount::from_sat(1);
+        assert_eq!(
+            validate_ancestry_split_pair_signing(
+                &bitcoin,
+                &bitcoin_inputs,
+                &bitcoin_signed,
+                &fork,
+                &fork_inputs,
+                &changed,
+            )
+            .unwrap_err(),
+            FinalizeError::ConstructionChanged
+        );
+        assert_eq!(
+            finalize_ancestry_split_pair(
+                &bitcoin,
+                &bitcoin_inputs,
+                &bitcoin_signed,
+                &fork,
+                &fork_inputs,
+                &changed,
+                &secp,
+            )
+            .unwrap_err(),
+            FinalizeError::ConstructionChanged
+        );
+    }
+}
+
+#[test]
+fn ancestry_step2_refuses_wrong_claimed_or_funding_and_changed_fee() {
+    let wallet = wallet(Shape::Wpkh);
+    let shared = coins(&wallet.source);
+    let (mut funding, dependency) = ancestry_funding(&wallet.source);
+    funding.bitcoin_block = None;
+    funding.btcb2_block = Some(block(FORK + 20));
+    let claimed: Vec<_> = shared.iter().map(|coin| coin.outpoint).collect();
+    let target = ScriptBuf::new_p2wsh(&bitcoin::WScriptHash::from_byte_array([42; 32]));
+    let inputs = AncestrySplitStep2Inputs {
+        chain: ChainId::BitcoinBlake2b,
+        source: &wallet.source,
+        shared: &shared,
+        funding: &funding,
+        dependency: &dependency,
+        fork_height: FORK,
+        claimed: &claimed,
+        target: target.as_script(),
+    };
+    let create = |inputs: &AncestrySplitStep2Inputs<'_>| {
+        create_ancestry_split_step2(inputs, FEERATE, LockTime::ZERO, TIP)
+    };
+    let step = create(&inputs).unwrap();
+    let funding_amount = funding.previous.output[funding.outpoint.vout as usize]
+        .value
+        .to_sat();
+    let fee_from_shared = funding_amount / step.maximum_signed_vbytes() + 1;
+    assert!(matches!(
+        create_ancestry_split_step2(&inputs, fee_from_shared, LockTime::ZERO, TIP),
+        Err(Error::FundingBelowFee(ChainId::BitcoinBlake2b))
+    ));
+    let mut altered = step.psbt().unsigned_tx.clone();
+    altered.output[0].value = Amount::from_sat(altered.output[0].value.to_sat() - 1);
+    assert!(matches!(
+        reconstruct_ancestry_split_step2(&inputs, &altered, FEERATE, TIP),
+        Err(Error::Recorded(_))
+    ));
+    let wrong_claimed = [claimed[0]];
+    assert!(matches!(
+        create(&AncestrySplitStep2Inputs {
+            claimed: &wrong_claimed,
+            ..inputs
+        }),
+        Err(Error::ClaimedMismatch)
+    ));
+    let mut missing = funding.clone();
+    missing.btcb2_block = None;
+    assert!(matches!(
+        create(&AncestrySplitStep2Inputs {
+            funding: &missing,
+            ..inputs
+        }),
+        Err(Error::InvalidFunding(_))
+    ));
+    let mut both = funding.clone();
+    both.bitcoin_block = Some(block(FORK + 20));
+    assert!(matches!(
+        create(&AncestrySplitStep2Inputs {
+            funding: &both,
+            ..inputs
+        }),
+        Err(Error::InvalidFunding(_))
+    ));
+    let mut duplicate = funding.clone();
+    duplicate.outpoint = claimed[0];
+    assert!(matches!(
+        create(&AncestrySplitStep2Inputs {
+            funding: &duplicate,
+            ..inputs
+        }),
+        Err(Error::DuplicateInput(_))
+    ));
+    let invalid_target = ScriptBuf::new();
+    assert!(matches!(
+        create(&AncestrySplitStep2Inputs {
+            target: invalid_target.as_script(),
+            ..inputs
+        }),
+        Err(Error::InvalidTarget)
+    ));
+    let other_wallet = self::wallet(Shape::Pkh);
+    let (_, other_dependency) = ancestry_funding(&other_wallet.source);
+    assert!(matches!(
+        create(&AncestrySplitStep2Inputs {
+            dependency: &other_dependency,
+            ..inputs
+        }),
+        Err(Error::InvalidFunding(_))
+    ));
+    let signed = sign(step.psbt(), &wallet.signers);
+    assert_eq!(
+        finalize_ancestry_split_step2(
+            &step,
+            &AncestrySplitStep2Inputs {
+                funding: &both,
+                ..inputs
+            },
+            &signed,
+            &secp256k1::Secp256k1::verification_only(),
+        )
+        .unwrap_err(),
+        FinalizeError::CoinsChanged
+    );
 }
 
 #[test]
