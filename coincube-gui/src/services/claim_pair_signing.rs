@@ -126,7 +126,7 @@ pub(crate) fn combine_ancestry_claim_pair(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use coincube_core::{
         bip39::Mnemonic,
@@ -158,7 +158,7 @@ mod tests {
         }
     }
 
-    fn fixture() -> (AncestrySelfTransfer, ClaimForkSweep, Vec<MasterSigner>) {
+    pub(crate) fn fixture() -> (AncestrySelfTransfer, ClaimForkSweep, Vec<MasterSigner>) {
         let secp = secp256k1::Secp256k1::new();
         let verify = secp256k1::Secp256k1::verification_only();
         let signers: Vec<_> = (40..44)

@@ -346,10 +346,16 @@ fn check_paired_signer_return(
             bitcoin_returns.push(returned.clone());
         }
         ChainId::BitcoinBlake2b => {
-            if signed(current) {
-                fork_returns.push(UnifiedPsbt::from_psbt(current.clone()).map_err(|_| {
+            let current = UnifiedPsbt::from_psbt(current.clone()).map_err(|_| {
+                "The current BTCB2 signing state is invalid. Reopen this Claim.".to_string()
+            })?;
+            let has_unified = !coincube_core::psbt_unified::unified_signatures(&current)
+                .map_err(|_| {
                     "The current BTCB2 signing state is invalid. Reopen this Claim.".to_string()
-                })?);
+                })?
+                .is_empty();
+            if signed(current.psbt()) || has_unified {
+                fork_returns.push(current);
             }
             fork_returns.push(
                 UnifiedPsbt::from_psbt(returned.clone())

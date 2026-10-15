@@ -110,6 +110,57 @@ fn paired_recovery_cannot_sign_broadcast_or_survive_session_revocation() {
     assert!(matches!(panel.stage, Stage::Preconditions));
 }
 
+#[test]
+fn paired_claim_rechecks_collected_unified_signatures_before_accepting_next_return() {
+    use coincube_core::{
+        psbt_unified::unified_signatures, unified_signing::sign_p2wsh_all_unified,
+    };
+
+    let (bitcoin, fork, signers) = crate::services::claim_pair_signing::tests::fixture();
+    let pair = PreparedClaimPair {
+        bitcoin,
+        fork,
+        bitcoin_funding: OutPoint::null(),
+        fork_funding: OutPoint::null(),
+        bitcoin_rate_vb: 5,
+        fork_rate_vb: 5,
+    };
+    let secp = secp256k1::Secp256k1::new();
+    let unsigned = UnifiedPsbt::from_psbt(pair.fork.psbt().clone()).unwrap();
+    let first = sign_p2wsh_all_unified(&signers[0], &unsigned, &secp).unwrap();
+    let second = sign_p2wsh_all_unified(&signers[1], &unsigned, &secp).unwrap();
+    assert!(first
+        .psbt()
+        .inputs
+        .iter()
+        .all(|input| input.partial_sigs.is_empty()));
+    assert!(!unified_signatures(&first).unwrap().is_empty());
+    assert!(check_paired_signer_return(
+        &pair,
+        ChainId::BitcoinBlake2b,
+        first.psbt(),
+        second.psbt(),
+    )
+    .is_ok());
+
+    // A previous BTCB2 signer lives in the proprietary unified records.
+    // It must not be skipped just because there are no legacy partial_sigs.
+    let mut corrupted = first.psbt().clone();
+    let stored_signature = corrupted
+        .inputs
+        .iter_mut()
+        .flat_map(|input| input.proprietary.values_mut())
+        .next()
+        .unwrap();
+    let scalar_byte = stored_signature.len() - 2; // before ALL|UNIFIED
+    stored_signature[scalar_byte] ^= 1;
+    assert!(UnifiedPsbt::from_psbt(corrupted.clone()).is_ok());
+    assert!(
+        check_paired_signer_return(&pair, ChainId::BitcoinBlake2b, &corrupted, second.psbt(),)
+            .is_err()
+    );
+}
+
 fn coin(height: Option<i32>, spent: bool, immature: bool, n: u32) -> Coin {
     Coin {
         amount: Amount::from_sat(10_000 + u64::from(n)),
