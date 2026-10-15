@@ -29,7 +29,7 @@ use crate::{
             dashboard,
             message::*,
             vault::{
-                ancestry_coins::{CoinReview, VerifiedCoinPairReview},
+                ancestry_coins::{coin_input_row, CoinReview, VerifiedCoinPairReview},
                 psbt,
             },
         },
@@ -272,29 +272,34 @@ fn funding_review_view(
     let mut rows = Column::new()
         .spacing(12)
         .push(p1_bold("Paired transaction preview — read only"))
-        .push(p1_regular(format!(
-            "{} shared pre-fork coins · {} sats on each chain",
-            review.bitcoin.shared.len(),
-            review.bitcoin.shared_total.to_sat()
-        )))
+        .push(
+            Row::new()
+                .spacing(20)
+                .push(
+                    p1_regular(format!(
+                        "{} shared pre-fork coins · present on both chains",
+                        review.bitcoin.shared.len(),
+                    ))
+                    .width(Length::Fill),
+                )
+                .push(p1_bold(format!(
+                    "{} sats",
+                    review.bitcoin.shared_total.to_sat()
+                ))),
+        )
         .push(p2_regular(format!(
             "Signing threshold: {threshold} signature{} per input",
             if threshold == 1 { "" } else { "s" }
         )));
     for coin in &review.bitcoin.shared {
-        rows = rows.push(p2_regular(format!(
-            "Before fork · present on both chains: {} · {} sats",
-            coin.outpoint,
-            coin.amount.to_sat()
-        )));
+        rows = rows.push(coin_input_row(coin, "Before fork", None));
     }
     rows.push(p1_bold("Bitcoin transaction"))
-        .push(p2_regular(format!(
-            "Bitcoin-only · verified ({} confirmations): {} · {} sats",
-            review.bitcoin_confirmations,
-            review.bitcoin.funding.outpoint,
-            review.bitcoin.funding.amount.to_sat()
-        )))
+        .push(coin_input_row(
+            &review.bitcoin.funding,
+            "Bitcoin-only funding coin",
+            Some(review.bitcoin_confirmations),
+        ))
         .push(p2_regular(format!(
             "Back to this Vault: {} · {} sats",
             address(&review.bitcoin.destination),
@@ -302,12 +307,11 @@ fn funding_review_view(
         )))
         .push(p2_regular(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
         .push(p1_bold("Bitcoin Blake2b transaction"))
-        .push(p2_regular(format!(
-            "BTCB2-only · verified ({} confirmations): {} · {} sats",
-            review.fork_confirmations,
-            review.fork.funding.outpoint,
-            review.fork.funding.amount.to_sat()
-        )))
+        .push(coin_input_row(
+            &review.fork.funding,
+            "BTCB2-only funding coin",
+            Some(review.fork_confirmations),
+        ))
         .push(p2_regular(format!(
             "Back to the paired BTCB2 Vault: {} · {} sats",
             address(&review.fork.destination),

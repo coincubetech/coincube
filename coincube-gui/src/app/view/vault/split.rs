@@ -28,7 +28,7 @@ use crate::{
             unified::{self, SeedText, UnifiedMessage, UnifiedStage},
             SplitMessage, SplitPanel, Stage, Step2Stage, Work,
         },
-        view::Message,
+        view::{vault::ancestry_coins::coin_input_row, Message},
     },
     services::{claim_coordinator::Outcome, claim_workflow::Phase, split_psbt_file::Encoding},
 };
@@ -740,11 +740,21 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                         };
                         body = body
                             .push(p1_bold("Paired transaction preview — read only"))
-                            .push(p1_regular(format!(
-                                "{} shared pre-fork coins · {} sats on each chain",
-                                review.bitcoin.shared.len(),
-                                review.bitcoin.shared_total.to_sat()
-                            )));
+                            .push(
+                                Row::new()
+                                    .spacing(20)
+                                    .push(
+                                        p1_regular(format!(
+                                            "{} shared pre-fork coins · present on both chains",
+                                            review.bitcoin.shared.len(),
+                                        ))
+                                        .width(Length::Fill),
+                                    )
+                                    .push(p1_bold(format!(
+                                        "{} sats",
+                                        review.bitcoin.shared_total.to_sat()
+                                    ))),
+                            );
                         if let Some(threshold) = panel.funding_signing_threshold() {
                             body = body.push(caption(format!(
                                 "Signing threshold: {threshold} signature{} per input",
@@ -752,19 +762,16 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                             )));
                         }
                         for row in &review.bitcoin.shared {
-                            body = body.push(caption(format!(
-                                "Before fork · present on both chains: {} · {} sats",
-                                row.outpoint,
-                                row.amount.to_sat()
-                            )));
+                            body =
+                                body.push(coin_input_row(row, "Before fork · both chains", None));
                         }
                         body = body
                             .push(p1_bold("Bitcoin transaction"))
-                            .push(caption(format!("Bitcoin-only · verified ({} confirmations): {} · {} sats", review.bitcoin_confirmations, review.bitcoin.funding.outpoint, review.bitcoin.funding.amount.to_sat())))
+                            .push(coin_input_row(&review.bitcoin.funding, "Bitcoin-only", Some(review.bitcoin_confirmations)))
                             .push(caption(format!("Return to this source wallet: {} · {} sats", address(&review.bitcoin.destination), review.bitcoin.destination.value.to_sat())))
                             .push(caption(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
                             .push(p1_bold("Bitcoin Blake2b transaction"))
-                            .push(caption(format!("BTCB2-only · verified ({} confirmations): {} · {} sats", review.fork_confirmations, review.fork.funding.outpoint, review.fork.funding.amount.to_sat())))
+                            .push(coin_input_row(&review.fork.funding, "BTCB2-only", Some(review.fork_confirmations)))
                             .push(caption(format!("Send to your paired BTCB2 Cube: {} · {} sats", address(&review.fork.destination), review.fork.destination.value.to_sat())))
                             .push(caption(format!("Fee: {} sats", review.fork.fee.to_sat())))
                             .push(p1_regular("Each transaction spends every shared coin together with its own verified chain-specific funding coin. This preview is not a signing or broadcast request; both proofs, wallet state and fees must be checked again before either transaction can be signed."));

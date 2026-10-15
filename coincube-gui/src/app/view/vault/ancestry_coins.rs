@@ -5,7 +5,18 @@ use coincube_core::{
     claim::BlockRef,
     miniscript::bitcoin::{psbt::Psbt, Amount, OutPoint, TxOut},
 };
+use coincube_ui::{
+    component::text::{p1_bold, p2_regular},
+    theme,
+    widget::Element,
+};
+use iced::{
+    widget::{scrollable, Column, Container, Row},
+    Alignment, Length,
+};
 use std::{collections::BTreeSet, ops::Deref};
+
+use crate::app::view::Message;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CoinRow {
@@ -14,6 +25,47 @@ pub struct CoinRow {
     /// Retained so a paired review cannot call two different outputs the
     /// same shared coin merely because their values happen to match.
     pub output: TxOut,
+}
+
+/// The Send coin-row hierarchy without a selector: the exact PSBT input is
+/// always visible and its amount remains aligned with the other inputs.
+pub fn coin_input_row(
+    coin: &CoinRow,
+    label: &'static str,
+    verified_depth: Option<u64>,
+) -> Element<'static, Message> {
+    let title = Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(p1_bold(label))
+        .push(verified_depth.map(|depth| {
+            Container::new(p2_regular(format!("Verified · {depth} confirmations")))
+                .padding(6)
+                .style(theme::pill::success)
+        }));
+    Row::new()
+        .spacing(20)
+        .align_y(Alignment::Center)
+        .push(
+            Column::new()
+                .spacing(4)
+                .push(title)
+                .push(
+                    Container::new(
+                        scrollable(
+                            p2_regular(coin.outpoint.to_string()).style(theme::text::secondary),
+                        )
+                        .width(Length::Fill)
+                        .direction(scrollable::Direction::Horizontal(
+                            scrollable::Scrollbar::new().width(2).scroller_width(2),
+                        )),
+                    )
+                    .width(Length::Fill),
+                )
+                .width(Length::Fill),
+        )
+        .push(p1_bold(format!("{} sats", coin.amount.to_sat())))
+        .into()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

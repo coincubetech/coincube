@@ -485,7 +485,9 @@ review uses its Bitcoin side and labels the marker as an unverified candidate.
 The Split and Claim deposit stages now consume the paired model only after fresh
 two-chain proof, source ownership, bound reservations and construction of
 both ordinary PSBTs. The model alone
-cannot enable signing.
+cannot enable signing. Both deposit previews now render the same read-only coin
+rows with full scrollable outpoints, right-aligned amounts and a confirmation
+badge for each verified chain-specific input; no selection control is shown.
 
 Build this as a reusable *read-only* coin summary for Claim and foreign Split,
 using the existing amount formatting and badge components. Keep the normal
@@ -780,8 +782,8 @@ The Split-only fixture needs the two pinned Knots binaries, not electrs.
 Coordinator restart, stale observation and marker spend cases remain.
 The pinned BLAKE2b-aware electrs currently panics on the disposable harness's
 100-block coinbase reorg on either Bitcoin or BTCB2. The harness can rebuild
-its disposable index to verify
-that the desktop collector then refuses the obsolete funding proof, but this
+its disposable index to verify that the desktop collector then refuses the
+obsolete funding proof, but this
 does not establish that the deployed indexer recovers from a deep reorg. Keep
 the mainnet gate closed until indexer recovery is fixed and exercised against
 the pinned node and indexer builds.
