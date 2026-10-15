@@ -8,7 +8,6 @@ import os
 import queue
 import re
 import base58
-import shutil
 import threading
 import time
 import subprocess
@@ -396,6 +395,7 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-paired-wizard-", dir=os.environ["TEST_DIR"]))
     child = Child(tool, tmp_path / "gui-home")
     harness = bridge = None
+    first_transcript = []
     try:
         descriptor = child.receive()
         assert descriptor["event"] == "descriptor"
@@ -504,9 +504,26 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         child.proc.stdin.write('{"action":"quit"}\n')
         child.proc.stdin.flush()
         assert child.proc.wait(timeout=10) == 0
+        first_transcript = child.transcript[:]
+        child.close()
+        child = Child(tool, tmp_path / "reopen-home")
+        assert child.receive() == descriptor
+        reopened = child.send({
+            **initial,
+            "mode": "paired-wizard-reopen",
+            "resume": True,
+            "tip_height": node.rpc.getblockcount(),
+            "fork_tip_height": harness.blake2b.rpc.getblockcount(),
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert reopened["event"] == "paired-signed-pair-reopened", reopened
+        assert reopened["bitcoin_unattempted"], reopened
+        assert not bridge.submissions and not bridge.errors
+        assert child.proc.wait(timeout=10) == 0
     finally:
         child.close()
-        (tmp_path / "log").write_text("".join(child.transcript))
+        (tmp_path / "log").write_text("".join(first_transcript + child.transcript))
         try:
             if bridge:
                 bridge.close()
@@ -682,14 +699,14 @@ def test_live_paired_funding_proof_expires_after_marker_change(tmp_path, mutatio
             assert changed_node.rpc.getbestblockhash() != previous_tip
             assert changed_node.rpc.getblockhash(marker_height) != changed_marker["block"]
             if mutation.endswith("reorg"):
-                # The pinned indexer cannot roll back a 100-block coinbase
-                # reorg on either chain; it panics instead. Rebuild only the
-                # disposable test index against the new canonical chain so
-                # the collector's reorg rejection is still exercised.
+                # The pinned indexer may panic while the node tip moves during
+                # a deep reorg. Reopen the same database after the new tip has
+                # settled: losing its index is not an acceptable recovery path
+                # for a deployed service.
                 old = (harness.electrs_legacy if mutation == "bitcoin-reorg"
                        else harness.electrs_blake2b)
                 old.stop()
-                shutil.rmtree(old.db_dir)
+                assert any(Path(old.db_dir).iterdir())
                 replacement = EsploraElectrs(
                     electrs_dir=old.electrs_dir,
                     bitcoind_dir=(harness.legacy_dir if mutation == "bitcoin-reorg"

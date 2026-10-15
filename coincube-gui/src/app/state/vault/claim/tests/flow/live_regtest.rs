@@ -398,6 +398,29 @@ async fn claim_gui_regtest_driver() {
     };
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
+    if init["mode"].as_str() == Some("paired-wizard-reopen") {
+        assert!(resume, "a signed pair must reopen from its saved journal");
+        let Stage::PairedRecovery(recovery) = &panel.stage else {
+            panic!("signed pair did not reopen: {:?}", panel.restart_error);
+        };
+        assert_eq!(
+            recovery.bitcoin_txid.unwrap().to_string(),
+            init["bitcoin_txid"].as_str().unwrap()
+        );
+        assert_eq!(
+            recovery.fork_txid.unwrap().to_string(),
+            init["btcb2_txid"].as_str().unwrap()
+        );
+        assert!(panel.restart_error.is_none());
+        assert!(!panel.can_sign_or_submit());
+        emit(json!({
+            "event":"paired-signed-pair-reopened",
+            "bitcoin_unattempted":recovery.bitcoin_unattempted,
+            "bitcoin_status":recovery.bitcoin_status,
+            "btcb2_status":recovery.fork_status,
+        }));
+        return;
+    }
     if init["mode"].as_str() == Some("paired-wizard-deposits") {
         // The fixture supplies a checked precondition so this test targets
         // the real two-chain reservation and address-preparation transition.
