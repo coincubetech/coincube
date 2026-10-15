@@ -4,6 +4,18 @@ Status: migration in progress. New Claim and two-step Split transactions using
 the 90-byte OP_RETURN are disabled. Existing records remain readable for
 reconciliation. The replacement input-ancestry flow is not yet live.
 
+Current acceptance checkpoint (`38ef5e59`): the pinned disposable two-chain
+harness passed 106 tests with one intentionally deselected, including the
+paired Claim and Split wizards, signed-pair recovery, staged submissions and
+headless rendering checks of the actual wizard elements. This establishes
+software fixture behavior only. The production signing gate remains closed.
+Deployed same-database indexer recovery, a realistic authenticated Connect
+scan within the 30-second and 256-request bounds, visual and accessibility
+review, physical BitBox and Ledger PSBT approval, and independent review are
+still required before enabling signing. The implementation notes below record
+incremental work; statements about a next step describe the state at that
+point, while the acceptance checks at the end govern release readiness.
+
 ## Decision and safety invariant
 
 Replace the 90-byte OP_RETURN with ordinary Bitcoin and BTCB2 inputs whose
@@ -781,7 +793,8 @@ that the BTCB2 transaction cannot replay on Bitcoin after a Bitcoin
 confirmation is reorganized out. All five supported source shapes also reject
 the opposite transaction after a six-block reorg of either chain.
 The Split-only fixture needs the two pinned Knots binaries, not electrs.
-Coordinator restart, stale observation and marker spend cases remain.
+The later paired GUI fixture covers signed-pair restart, stale observations
+and spent funding inputs in the disposable two-chain environment.
 The pinned BLAKE2b-aware electrs can panic while the disposable harness moves
 the node tip across a 100-block coinbase reorg. The harness now stops it and
 reopens the **same** index database after the new tip settles. Both chain cases
@@ -794,9 +807,9 @@ against the deployed node and indexer builds.
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device
   will display and approve the PSBT.
-  The existing headless Claim fixture now asserts that both retired one-sided
-  routes refuse before construction;
-  it does not count as an end-to-end test of the new paired Claim wizard.
+  The headless Claim fixture asserts that both retired one-sided routes refuse
+  before construction and drives the new paired Claim wizard through deposit
+  checking, signing, recovery and separate two-chain submission reviews.
   Its disposable Connect bridge now routes preflight and submission to the
   selected Bitcoin or BTCB2 node, with a local routing test for each chain.
   The paired funding fixture also asks the live collector to refuse a
@@ -837,8 +850,13 @@ against the deployed node and indexer builds.
   deselected overall), including separate process restarts, six canonical
   Bitcoin confirmations, exact-byte submission to each node and the matching
   per-chain attempt records.
-  Rendered UI, deployed recovery, realistic Connect scan latency and physical
-  device round trips remain outstanding.
+  The `38ef5e59` pinned harness passed 106 tests with one intentionally
+  deselected, including headless rendered-element assertions for both wizards:
+  exact deposit addresses, reviewed input outpoints and amounts, return
+  destinations, fees, recorded transaction IDs and broadcast labels. These
+  assertions do not replace visual and accessibility review. Deployed
+  recovery, realistic Connect scan latency, physical device round trips and
+  independent review remain outstanding.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for
