@@ -115,12 +115,14 @@ class Child:
 def reorg_bitcoin_confirmation(harness, txid):
     """Replace a six-confirmation block and reopen the same electrs database."""
     node = harness.legacy
-    confirmed_block = node.rpc.getrawtransaction(txid, True)["blockhash"]
+    confirmed_block = node.rpc.getblockhash(node.rpc.getblockcount() - 5)
+    assert txid in node.rpc.getblock(confirmed_block)["tx"]
     old_indexer = harness.electrs_legacy
     old_indexer.stop()
     node.rpc.invalidateblock(confirmed_block)
     node.generate_block(1, wait_for_mempool=txid)
-    assert node.rpc.getrawtransaction(txid, True)["confirmations"] == 1
+    replacement_block = node.rpc.getbestblockhash()
+    assert node.rpc.getrawtransaction(txid, True, replacement_block)["confirmations"] == 1
     replacement = EsploraElectrs(
         electrs_dir=old_indexer.electrs_dir,
         bitcoind_dir=harness.legacy_dir,
@@ -657,8 +659,9 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         first_transcript.extend(child.transcript)
         child.close()
         node.generate_block(5)
+        confirmation_block = node.rpc.getblockhash(node.rpc.getblockcount() - 5)
         assert node.rpc.getrawtransaction(
-            recorded["bitcoin_txid"], True
+            recorded["bitcoin_txid"], True, confirmation_block
         )["confirmations"] == 6
         replacement.wait_for_tip(node.rpc.getbestblockhash(), timeout=90)
         child = Child(tool, tmp_path / "btcb2-broadcast-home")
@@ -871,8 +874,11 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         first_transcript.extend(child.transcript)
         child.close()
         harness.legacy.generate_block(5)
+        confirmation_block = harness.legacy.rpc.getblockhash(
+            harness.legacy.rpc.getblockcount() - 5
+        )
         assert harness.legacy.rpc.getrawtransaction(
-            recorded["bitcoin_txid"], True
+            recorded["bitcoin_txid"], True, confirmation_block
         )["confirmations"] == 6
         replacement.wait_for_tip(harness.legacy.rpc.getbestblockhash(), timeout=90)
         child = Child(tool, tmp_path / "btcb2-broadcast-home", driver="split_gui_regtest_driver")
