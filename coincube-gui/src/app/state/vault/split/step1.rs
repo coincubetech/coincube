@@ -640,11 +640,11 @@ impl PreparedSplitPair {
 
 impl SplitDepositProgress {
     pub(super) fn exact_review_retained(&self) -> bool {
-        self.review.as_ref().is_none_or(|review| {
-            self.prepared
-                .as_ref()
-                .is_some_and(|pair| pair.matches_review(review))
-        })
+        match (&self.review, &self.prepared) {
+            (None, None) => !self.both_verified,
+            (Some(review), Some(pair)) => self.both_verified && pair.matches_review(review),
+            _ => false,
+        }
     }
 }
 

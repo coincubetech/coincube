@@ -789,6 +789,54 @@ fn old_split_proof_expiry_cannot_clear_a_newer_deposit_check() {
     assert!(panel.notice().unwrap().contains("expired"));
 }
 
+#[test]
+fn verified_split_progress_without_exact_review_is_refused() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.stage = Stage::FundingDeposits;
+    panel.seq = 1;
+
+    drop(panel.apply(SplitEvent::FundingChecked(
+        1,
+        Ok(step1::SplitDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: true,
+            both_verified: true,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    assert!(panel.funding_progress().is_none());
+    assert!(panel.notice().unwrap().contains("preview changed"));
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
+}
+
+#[test]
+fn candidate_only_split_progress_stays_visible_without_signing_review() {
+    let scan = Scan::new(Shape::Wpkh);
+    let temp = Temp::new();
+    let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.stage = Stage::FundingDeposits;
+    panel.seq = 1;
+
+    drop(panel.apply(SplitEvent::FundingChecked(
+        1,
+        Ok(step1::SplitDepositProgress {
+            bitcoin_candidate: true,
+            btcb2_candidate: false,
+            both_verified: false,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    let progress = panel.funding_progress().expect("candidate status remains visible");
+    assert!(progress.bitcoin_candidate);
+    assert!(!progress.btcb2_candidate);
+    assert!(!progress.both_verified);
+    assert!(panel.notice().is_none());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn funding_only_split_reopens_same_addresses_after_restart() {
     let scan = Scan::new(Shape::Wpkh);
