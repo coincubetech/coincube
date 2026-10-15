@@ -756,6 +756,9 @@ Coordinator restart, stale observation and marker spend cases remain.
   round trips. Include BitBox and Ledger integration smoke checks on real
   devices before a mainnet release; software-only tests cannot prove a device
   will display and approve the PSBT.
+  The existing headless Claim fixture now asserts that both retired one-sided
+  routes refuse before construction;
+  it does not count as an end-to-end test of the new paired Claim wizard.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for

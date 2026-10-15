@@ -291,6 +291,16 @@ async fn claim_gui_regtest_driver() {
     };
     let task = panel.reload(Some(dyn_daemon.clone()), Some(wallet));
     drive(&mut panel, &dyn_daemon, &cache, task).await;
+    if !resume {
+        assert!(
+            panel.refusal().is_some(),
+            "retired one-sided claim routes must refuse"
+        );
+        assert!(!panel.can_build());
+        assert!(!daemon.hits().contains(&"submit_verified_poison"));
+        emit(json!({"event":"legacy-claim-refused"}));
+        return;
+    }
     if resume {
         let restart_state = match &panel.stage {
             Stage::Track {
@@ -308,6 +318,7 @@ async fn claim_gui_regtest_driver() {
             Stage::CheckingSign(_) => "checking-sign".into(),
             Stage::Sign { .. } => "sign".into(),
             Stage::Review { .. } => "review".into(),
+            _ => format!("unexpected({:?})", std::mem::discriminant(&panel.stage)),
         };
         assert!(
             matches!(
@@ -338,33 +349,6 @@ async fn claim_gui_regtest_driver() {
         let message = match action {
             "build" => Message::View(view::Message::Claim(view::ClaimMessage::Build)),
             "sign" => Message::View(view::Message::Claim(view::ClaimMessage::Sign)),
-            "sign_checked_ancestry" => {
-                let Stage::Plan { built } = &panel.stage else {
-                    panic!("checked ancestry signing must start at Plan")
-                };
-                let connect = panel.connect.clone().expect("live Connect session");
-                let expected = *panel.generation.borrow();
-                let checked = signing::check_inputs(
-                    built,
-                    dyn_daemon.clone(),
-                    panel.wallet.clone(),
-                    connect.clone(),
-                    expected,
-                    panel.generation.clone(),
-                )
-                .await
-                .unwrap();
-                let coins = checked
-                    .consume(built, &panel.wallet, Some(&connect), expected)
-                    .unwrap();
-                let Stage::Plan { built } =
-                    std::mem::replace(&mut panel.stage, Stage::Preconditions)
-                else {
-                    unreachable!()
-                };
-                panel.install_signing(built, coins);
-                Message::Tick
-            }
             "open_signer" => Message::View(view::Message::Spend(view::SpendTxMessage::Sign)),
             "hot_sign" => Message::View(view::Message::Spend(
                 view::SpendTxMessage::SelectMasterSigner,
