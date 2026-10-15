@@ -2380,6 +2380,26 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
 /// read on Connect's allowlisted path of each chain, and `open` records and
 /// resumes through the real Split coordinator (`Coordinator::create_split` /
 /// `resume_split`) without any network call.
+#[test]
+fn split_production_connect_revokes_on_any_session_notification() {
+    let mut client = CoincubeClient::new();
+    client.base_url = "https://api.coincube.io/".into();
+    client.set_token("synthetic-test-token");
+    let (sender, generation) = tokio::sync::watch::channel(7u64);
+    let connect = step1::ProductionConnect::new(
+        crate::app::state::vault::claim::ConnectSession {
+            client,
+            account: "synthetic-account".into(),
+        },
+        generation,
+    )
+    .unwrap();
+
+    assert!(connect.session_current());
+    sender.send(7).unwrap();
+    assert!(!connect.session_current());
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn split_production_connect_reads_freshness_and_opens_the_real_coordinator() {
     use crate::services::split_test_connect::{serve_fresh, strict};

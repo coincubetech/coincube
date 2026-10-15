@@ -382,6 +382,9 @@ a replayable spend.
    reopens read-only recovery. This route does not yet have paired preflight,
    a submission coordinator or broadcast, and device support still needs
    independent hardware smoke tests.
+   The production Split session check now rejects an unread Connect session
+   notification even if it carries the same numeric generation; signer and
+   reservation calls cannot continue under that replaced session.
    The production Split and Claim signer entries and their buttons are now
    closed by the shared ancestry acceptance gate; a verified deposit preview
    alone cannot expose spendable PSBTs. Both staged paired submission methods

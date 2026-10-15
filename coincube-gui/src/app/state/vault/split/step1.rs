@@ -1273,7 +1273,8 @@ impl SplitConnect for ProductionConnect {
         Some(&self.observation)
     }
     fn session_current(&self) -> bool {
-        self.generation.has_changed().is_ok() && *self.generation.borrow() == self.expected
+        matches!(self.generation.has_changed(), Ok(false))
+            && *self.generation.borrow() == self.expected
     }
     fn evidence(&self) -> &dyn SplitEvidenceSource {
         &self.evidence
