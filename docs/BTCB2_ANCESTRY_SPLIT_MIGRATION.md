@@ -452,8 +452,10 @@ a replayable spend.
    replacement goes live. The old one-sided Claim signer, Bitcoin handoff and
    completion path are now test-fixture-only or permanently denied in
    production, independent of the paired ancestry gate. New OP_RETURN Claim
-   and Split journal creation are also refused by the production workflow
-   service, even if a caller bypasses the desktop route. Enabling the paired gate later
+   and Split journal creation, along with the old seed-signed one-chain Split
+   fallback, are refused by the production workflow service even if a caller
+   bypasses the desktop route. Existing records retain their recovery readers.
+   Enabling the paired gate later
    cannot turn the old path back on. Managed Bitcoin node setup and startup no
    longer add the old claim's 100-byte `datacarriersize` relay override;
    operator-specified values in existing configurations still round-trip.

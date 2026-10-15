@@ -1341,8 +1341,9 @@ impl Controller {
         Self::admit_split(directory, intent, context)
     }
 
-    /// Record the unified fallback (B4b, `kind: Unified`): one BTCB2-only
-    /// sweep of the splittable coins into the target Vault, with no step 1.
+    /// Test-only creation of the retired unified fallback (B4b,
+    /// `kind: Unified`): one BTCB2-only sweep of the splittable coins into the
+    /// target Vault, with no step 1.
     /// `sweep` is core's opaque unified construction, built from freshly
     /// authenticated coins (B4b-1a), and `target_index` the target Vault's
     /// receive index its one output pays (B4b-3a, Reviewer-650 F2: no
@@ -1351,8 +1352,9 @@ impl Controller {
     /// its shape, and reserves the target from creation. Creates a version-9
     /// intent with the public descriptors (P2) that is Tracking from
     /// creation, since nothing is ever tracked on Bitcoin, and refuses an
-    /// existing intent or a tombstone in `directory`. The result is not
-    /// submission authority: the caller's gate (C2) holds the fresh
+    /// existing intent or a tombstone in `directory`. Production may reopen
+    /// and reconcile an existing record but cannot create another. The result
+    /// is not submission authority: the caller's gate (C2) holds the fresh
     /// evidence, and the signed bytes are recorded only with their
     /// submission intent ([`Self::record_unified_broadcast_intent`]).
     pub fn create_unified_split(
@@ -1362,6 +1364,13 @@ impl Controller {
         target_index: u32,
         context: Context,
     ) -> Result<Self, Error> {
+        // The seed-signed one-chain fallback is retained only for recorded
+        // legacy intents and disposable fixtures. A new production Split
+        // must use the paired Bitcoin/BTCB2 input-ancestry constructor.
+        if !cfg!(test) {
+            let _ = (&directory, &target_cube, &sweep, &target_index, &context);
+            return Err(Error::Unchecked);
+        }
         let fork_chain = sweep.chain();
         let bitcoin_chain = bitcoin_chain(fork_chain).ok_or(Error::InvalidPlan)?;
         let unsigned = &sweep.psbt().unsigned_tx;
