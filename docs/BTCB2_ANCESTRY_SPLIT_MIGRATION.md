@@ -455,6 +455,9 @@ a replayable spend.
    and Split journal creation, along with the old seed-signed one-chain Split
    fallback, are refused by the production workflow service even if a caller
    bypasses the desktop route. Existing records retain their recovery readers.
+   Reopening an unsubmitted legacy one-chain Split draft now refuses its seed
+   signer and directs the user to start the two-deposit flow; a possibly sent
+   record still enters read-only reconciliation.
    Enabling the paired gate later
    cannot turn the old path back on. Managed Bitcoin node setup and startup no
    longer add the old claim's 100-byte `datacarriersize` relay override;

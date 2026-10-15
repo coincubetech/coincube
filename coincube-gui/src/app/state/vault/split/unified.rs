@@ -112,6 +112,8 @@ pub const SEEDS_NOT_OFFERED: &str = "This wallet's recovery phrases can't be mat
 pub const UNIFIED_NEEDS_VAULT: &str = "The single-step sweep needs this Vault's wallet engine running on a route the sweep can be sent through: Connect's Bitcoin Blake2b server or this Vault's own Bitcoin Blake2b node. Nothing was built.";
 /// A recorded fork-only submission with no reconciler under the session.
 pub const UNIFIED_RECONCILE_UNAVAILABLE: &str = "This split's single-step sweep was already sent or may have been. Its status can't be checked with Connect right now, so nothing was rebuilt or sent. Try again.";
+pub const UNIFIED_UNSENT_RETIRED: &str =
+    "This old split draft cannot be signed. Close this draft, then start a new split with a deposit on each chain.";
 /// #654 F2: no D4 fee at the review.
 pub const FEE_UNAVAILABLE_AT_REVIEW: &str = "Connect has no Bitcoin Blake2b fee estimate right now, so the signed sweep's fee can't be checked. Nothing was recorded or sent; review it again shortly.";
 /// #654 F2: the signed rate is below the fresh D4 estimate.
@@ -1236,6 +1238,13 @@ impl SplitPanel {
         };
         let submitted = record.sweep.is_some();
         self.unified.record = Some(record);
+        // An unsubmitted one-chain draft has no transaction to reconcile and
+        // must not reopen its retired seed signer. A possibly sent sweep still
+        // needs its historical read-only reconciliation path below.
+        if !submitted && !self.legacy_flow_fixture() {
+            self.stage = Stage::Refused(Refusal::final_(UNIFIED_UNSENT_RETIRED));
+            return Task::none();
+        }
         let Some(port) = self.unified.port.clone() else {
             self.stage = Stage::Refused(Refusal::retry(if submitted {
                 UNIFIED_RECONCILE_UNAVAILABLE

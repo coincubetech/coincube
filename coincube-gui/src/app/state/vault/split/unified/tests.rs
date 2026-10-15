@@ -660,7 +660,30 @@ fn fork_only_journal(
 }
 
 fn resumed(digest: sha256::Hash, directory: PathBuf, temp: &Temp) -> SplitPanel {
-    SplitPanel::resume(TARGET.into(), temp.root(), digest, directory)
+    let mut panel = SplitPanel::resume(TARGET.into(), temp.root(), digest, directory);
+    panel.legacy_flow_fixture = true;
+    panel
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retired_unsent_unified_draft_cannot_reopen_signing() {
+    let scan = seed_scan();
+    let connect = FakeConnect::new(&scan.coins);
+    let temp = Temp::new();
+    let (digest, directory, _) = fork_only_journal(&scan, &connect, &temp, false);
+    let mut panel = SplitPanel::resume(TARGET.into(), temp.root(), digest, directory);
+    panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
+    let port = FakePort::new(connect.context(), 1);
+    panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
+
+    let task = panel.begin();
+    drive(&mut panel, task).await;
+
+    assert!(matches!(panel.stage(), Stage::Refused(refusal)
+        if !refusal.retry && refusal.reason == UNIFIED_UNSENT_RETIRED));
+    assert!(panel.can_confirm_unified_close());
+    assert!(port.calls.opens.lock().unwrap().is_empty());
+    assert_eq!(port.calls.recon_opens.load(Ordering::SeqCst), 0);
 }
 
 /// Restart by kind: a fork-only record never reaches step 1's restore or
