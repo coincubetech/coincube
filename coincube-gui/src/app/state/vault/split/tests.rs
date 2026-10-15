@@ -830,7 +830,9 @@ fn candidate_only_split_progress_stays_visible_without_signing_review() {
             prepared: None,
         }),
     )));
-    let progress = panel.funding_progress().expect("candidate status remains visible");
+    let progress = panel
+        .funding_progress()
+        .expect("candidate status remains visible");
     assert!(progress.bitcoin_candidate);
     assert!(!progress.btcb2_candidate);
     assert!(!progress.both_verified);
