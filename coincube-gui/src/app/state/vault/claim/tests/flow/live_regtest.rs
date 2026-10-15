@@ -302,6 +302,15 @@ async fn claim_gui_regtest_driver() {
         extra_coins: Mutex::new(shared_extra),
         indices: Mutex::new((1, 0)),
     });
+    for (source, field) in [
+        (&daemon, "bitcoin_funding"),
+        (&fork_daemon, "btcb2_funding"),
+    ] {
+        if init[field].is_object() {
+            let (coin, previous) = received_coin(&wallet.main_descriptor, &init[field]);
+            source.extra_coins.lock().unwrap().push((coin, previous));
+        }
+    }
     let fork_dyn: Arc<dyn Daemon + Send + Sync> = fork_daemon.clone();
     let fork_cache = Cache {
         network: Network::Bitcoin,
@@ -421,11 +430,141 @@ async fn claim_gui_regtest_driver() {
         );
         assert!(panel.restart_error.is_none());
         assert!(!panel.can_sign_or_submit());
+        let recovery = recovery.clone();
+        use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
+        let context = ClaimStep1Panel::funding_context(
+            panel.connect.as_ref().unwrap(),
+            1,
+            panel.generation.clone(),
+        )
+        .unwrap();
+        let identity = claim_workflow::WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "fork-cube".into(),
+            descriptor_digest: sha256::Hash::hash(
+                panel.wallet.main_descriptor.to_string().as_bytes(),
+            ),
+        };
+        let directory = journal_directory(&datadir, &panel.wallet);
+        let recorded = claim_workflow::Controller::reopen_settling(&directory, &identity, context)
+            .await
+            .unwrap();
+        let pair = recorded.recorded_signed_ancestry_pair().unwrap();
+        let bitcoin_raw =
+            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.bitcoin());
+        let btcb2_raw =
+            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.fork());
+        drop(recorded);
+        if init["broadcast_bitcoin"].as_bool().unwrap_or(false)
+            || init["broadcast_btcb2"].as_bool().unwrap_or(false)
+        {
+            crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+            panel.bind_fork_daemon(Some(ClaimForkBinding::new(
+                &fork_dyn,
+                &fork_wallet,
+                _sender.subscribe(),
+            )));
+            if init["broadcast_bitcoin"].as_bool().unwrap_or(false) {
+                let task = panel.update(
+                    Some(dyn_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Claim(
+                        view::ClaimMessage::ReviewPairedBitcoin,
+                    )),
+                );
+                drive(&mut panel, &dyn_daemon, &cache, task).await;
+                assert!(
+                    matches!(panel.stage, Stage::PairedBitcoinReview(..)),
+                    "{:?}",
+                    panel.restart_error
+                );
+                let task = panel.update(
+                    Some(dyn_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Claim(
+                        view::ClaimMessage::ConfirmPairedBitcoin,
+                    )),
+                );
+                drive(&mut panel, &dyn_daemon, &cache, task).await;
+                assert!(
+                    matches!(panel.stage, Stage::PairedRecovery(..)),
+                    "{:?}",
+                    panel.restart_error
+                );
+                let recorded = claim_workflow::Controller::reopen_settling(
+                    &directory,
+                    &identity,
+                    ClaimStep1Panel::funding_context(
+                        panel.connect.as_ref().unwrap(),
+                        1,
+                        panel.generation.clone(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
+                assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
+                assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_none());
+                emit(json!({
+                    "event":"claim-bitcoin-broadcast-recorded",
+                    "bitcoin_txid":recovery.bitcoin_txid,
+                    "notice":panel.restart_error,
+                }));
+                return;
+            }
+            assert!(recovery.fork_ready_for_review, "{:?}", recovery);
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Claim(view::ClaimMessage::ReviewPairedFork)),
+            );
+            drive(&mut panel, &dyn_daemon, &cache, task).await;
+            assert!(
+                matches!(panel.stage, Stage::PairedForkReview(..)),
+                "{:?}",
+                panel.restart_error
+            );
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Claim(view::ClaimMessage::ConfirmPairedFork)),
+            );
+            drive(&mut panel, &dyn_daemon, &cache, task).await;
+            assert!(
+                matches!(panel.stage, Stage::PairedRecovery(..)),
+                "{:?}",
+                panel.restart_error
+            );
+            let recorded = claim_workflow::Controller::reopen_settling(
+                &directory,
+                &identity,
+                ClaimStep1Panel::funding_context(
+                    panel.connect.as_ref().unwrap(),
+                    1,
+                    panel.generation.clone(),
+                )
+                .unwrap(),
+            )
+            .await
+            .unwrap();
+            let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
+            assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
+            assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_some());
+            emit(json!({
+                "event":"claim-btcb2-broadcast-recorded",
+                "btcb2_txid":recovery.fork_txid,
+                "notice":panel.restart_error,
+            }));
+            return;
+        }
         emit(json!({
             "event":"paired-signed-pair-reopened",
             "bitcoin_unattempted":recovery.bitcoin_unattempted,
             "bitcoin_status":recovery.bitcoin_status,
             "btcb2_status":recovery.fork_status,
+            "bitcoin_raw":bitcoin_raw,
+            "btcb2_raw":btcb2_raw,
         }));
         return;
     }

@@ -397,7 +397,7 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
 
 
 def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
-    """Drive paired signing, reject changed reads, then reopen the saved pair."""
+    """Drive paired signing, reject changed reads, then broadcast each side."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -487,6 +487,8 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         fork_funding = fund(
             harness.blake2b, result["btcb2"], result["btcb2_index"]
         )
+        initial["bitcoin_funding"] = bitcoin_funding
+        initial["btcb2_funding"] = fork_funding
         for chain_node, indexer in (
             (node, harness.electrs_legacy),
             (harness.blake2b, harness.electrs_blake2b),
@@ -554,6 +556,66 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         assert reopened["event"] == "paired-signed-pair-reopened", reopened
         assert reopened["bitcoin_unattempted"], reopened
         assert not bridge.submissions and not bridge.errors
+        for own, other, raw_name in (
+            (harness.legacy, harness.blake2b, "bitcoin_raw"),
+            (harness.blake2b, harness.legacy, "btcb2_raw"),
+        ):
+            raw = reopened[raw_name]
+            assert own.rpc.testmempoolaccept([raw])[0]["allowed"], raw_name
+            assert not other.rpc.testmempoolaccept([raw])[0]["allowed"], raw_name
+        assert child.proc.wait(timeout=10) == 0
+        first_transcript.extend(child.transcript)
+        child.close()
+        child = Child(tool, tmp_path / "bitcoin-broadcast-home")
+        assert child.receive() == descriptor
+        first_broadcast = child.send({
+            **initial, "mode": "paired-wizard-reopen", "resume": True,
+            "broadcast_bitcoin": True,
+            "tip_height": node.rpc.getblockcount(),
+            "fork_tip_height": harness.blake2b.rpc.getblockcount(),
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert first_broadcast["event"] == "claim-bitcoin-broadcast-recorded", first_broadcast
+        assert first_broadcast["bitcoin_txid"] == recorded["bitcoin_txid"]
+        assert len(bridge.submissions) == 1 and not bridge.errors
+        assert bridge.submissions[0] == {
+            "network": "mainnet", "raw": reopened["bitcoin_raw"],
+            "txid": recorded["bitcoin_txid"],
+        }
+        assert child.proc.wait(timeout=10) == 0
+        first_transcript.extend(child.transcript)
+        child.close()
+        harness.legacy.generate_block(6, wait_for_mempool=recorded["bitcoin_txid"])
+        bitcoin_tip = harness.legacy.rpc.getbestblockhash()
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                with urlopen(harness.electrs_legacy.url + "/blocks/tip/hash", timeout=3) as response:
+                    if response.read().decode() == bitcoin_tip:
+                        break
+            except Exception:
+                pass
+            time.sleep(0.25)
+        else:
+            pytest.fail(f"Bitcoin indexer did not reach {bitcoin_tip}")
+        child = Child(tool, tmp_path / "btcb2-broadcast-home")
+        assert child.receive() == descriptor
+        second_broadcast = child.send({
+            **initial, "mode": "paired-wizard-reopen", "resume": True,
+            "broadcast_btcb2": True,
+            "tip_height": node.rpc.getblockcount(),
+            "fork_tip_height": harness.blake2b.rpc.getblockcount(),
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert second_broadcast["event"] == "claim-btcb2-broadcast-recorded", second_broadcast
+        assert second_broadcast["btcb2_txid"] == recorded["btcb2_txid"]
+        assert len(bridge.submissions) == 2 and not bridge.errors
+        assert bridge.submissions[1] == {
+            "network": "bitcoin-blake2b", "raw": reopened["btcb2_raw"],
+            "txid": recorded["btcb2_txid"],
+        }
         assert child.proc.wait(timeout=10) == 0
     finally:
         child.close()
