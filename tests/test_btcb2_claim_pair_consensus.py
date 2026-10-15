@@ -144,8 +144,9 @@ def test_claim_pair_uses_distinct_chain_specific_inputs(two_chain, record_proper
     record_property("ordinary_claim_fork_txid", signed["fork_txid"])
 
 
-def test_spent_bitcoin_funding_coin_refuses_the_saved_pair(two_chain):
-    """A valid marker proof cannot authorize a pair after that marker is spent."""
+@pytest.mark.parametrize("spent_chain", ["bitcoin", "btcb2"])
+def test_spent_funding_coin_refuses_the_saved_pair(two_chain, spent_chain):
+    """A saved pair is unusable when either chain-specific input is spent."""
     tool = os.getenv("CLAIM_REGTEST_TOOL_PATH")
     if not tool or not os.access(tool, os.X_OK):
         if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
@@ -201,27 +202,41 @@ def test_spent_bitcoin_funding_coin_refuses_the_saved_pair(two_chain):
     assert bitcoin.rpc.testmempoolaccept([pair["step1_raw"]])[0]["allowed"]
     assert fork.rpc.testmempoolaccept([pair["fork_raw"]])[0]["allowed"]
 
-    # Spend only B to the same Vault script, leaving the shared inputs intact.
+    if spent_chain == "bitcoin":
+        side, other = bitcoin, fork
+        unsigned_key, raw_key, marker_key = (
+            "step1_psbt", "step1_raw", "coinbase_input"
+        )
+        marker_id, marker_vout = bitcoin_id, bitcoin_vout
+    else:
+        side, other = fork, bitcoin
+        unsigned_key, raw_key, marker_key = (
+            "fork_psbt", "fork_raw", "fork_coinbase_input"
+        )
+        marker_id, marker_vout = fork_id, fork_vout
+
+    # Spend only B or F to the same Vault script, leaving shared inputs intact.
     # Reuse the builder's exact marker metadata so the disposable test signer
     # signs an ordinary PSBT rather than granting the node the Vault keys.
-    marker_only = PSBT.from_base64(unsigned["step1_psbt"])
+    marker_only = PSBT.from_base64(unsigned[unsigned_key])
     marker_index = next(
         index for index, txin in enumerate(marker_only.tx.vin)
-        if f"{txin.prevout.hash:064x}:{txin.prevout.n}" == request["coinbase_input"]
+        if f"{txin.prevout.hash:064x}:{txin.prevout.n}" == request[marker_key]
     )
     marker_only.tx.vin = [marker_only.tx.vin[marker_index]]
     marker_only.i = [marker_only.i[marker_index]]
-    value = bitcoin.rpc.gettxout(bitcoin_id, bitcoin_vout)["value"]
+    value = side.rpc.gettxout(marker_id, marker_vout)["value"]
     marker_only.tx.vout[0].nValue = int(Decimal(str(value)) * 100_000_000) - 1_000
     marker_only.g.map[0] = marker_only.tx.serialize_without_witness()
     signed_marker = two_chain.signer.sign_psbt(marker_only, [0, 1])
-    finalized = bitcoin.rpc.finalizepsbt(signed_marker.to_base64())
+    finalized = side.rpc.finalizepsbt(signed_marker.to_base64())
     assert finalized["complete"], finalized
-    marker_spend_id = bitcoin.rpc.sendrawtransaction(finalized["hex"])
-    bitcoin.generate_block(1, wait_for_mempool=marker_spend_id)
+    marker_spend_id = side.rpc.sendrawtransaction(finalized["hex"])
+    side.generate_block(1, wait_for_mempool=marker_spend_id)
 
-    assert bitcoin.rpc.gettxout(bitcoin_id, bitcoin_vout) is None
-    assert not bitcoin.rpc.testmempoolaccept([pair["step1_raw"]])[0]["allowed"]
-    # The independent BTCB2 marker is still live. This does not authorize
-    # broadcasting it alone: the application requires the current pair.
-    assert fork.rpc.testmempoolaccept([pair["fork_raw"]])[0]["allowed"]
+    assert side.rpc.gettxout(marker_id, marker_vout) is None
+    assert not side.rpc.testmempoolaccept([pair[raw_key]])[0]["allowed"]
+    # The opposite chain's funding input remains live. That does not
+    # authorize broadcasting its side alone: the application requires both.
+    other_raw_key = "fork_raw" if spent_chain == "bitcoin" else "step1_raw"
+    assert other.rpc.testmempoolaccept([pair[other_raw_key]])[0]["allowed"]

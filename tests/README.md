@@ -110,9 +110,9 @@ The paired ancestry case adds independent post-fork coinbase inputs on Bitcoin
 and BTCB2, builds ordinary `S+B` and `S+F` PSBTs from the production core,
 signs both with disposable keys, checks each signed transaction is accepted
 only on its intended node, and broadcasts BTCB2 first to exercise the reverse
-step order. A separate case spends only the Bitcoin funding input after the
-pair is signed and checks that the saved Bitcoin transaction is then rejected
-without consuming the independent BTCB2 funding input. These consensus cases
+step order. Separate cases spend only one chain's funding input after the
+pair is signed and check that the saved transaction on that chain is then
+rejected without consuming the opposite chain's funding input. These cases
 still do not validate GUI admission or physical hardware approval.
 
 The ordinary foreign Split pair has a separate `test_split_ancestry_pair_*`
