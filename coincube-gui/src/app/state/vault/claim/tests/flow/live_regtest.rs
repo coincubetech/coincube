@@ -273,6 +273,50 @@ async fn claim_gui_regtest_driver() {
         );
     }
     let (_sender, generation) = watch::channel(1);
+    if init["mode"].as_str() == Some("paired-funding-proof") {
+        use coincube_core::{
+            claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+            miniscript::bitcoin::consensus::encode::{deserialize_hex, serialize},
+        };
+        let source = HttpObservationSource::new(
+            client.clone(),
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: 1,
+                generation: generation.clone(),
+            },
+        )
+        .unwrap();
+        emit(json!({"event":"paired-funding-ready"}));
+        for _ in 0..3 {
+            let command = read(&mut input);
+            let path = |name: &str| {
+                let transaction: Transaction =
+                    deserialize_hex(command[name]["previous"].as_str().unwrap()).unwrap();
+                let vout = u32::try_from(command[name]["vout"].as_u64().unwrap()).unwrap();
+                RetainedPath::new(
+                    OutPoint::new(transaction.compute_txid(), vout),
+                    vec![OwnedLink {
+                        transaction: serialize(&transaction),
+                        parent_input: None,
+                    }],
+                )
+                .unwrap()
+            };
+            let bitcoin_path = path("bitcoin");
+            let fork_path = path("btcb2");
+            let checked = source
+                .collect_funding_pair(&bitcoin_path, &fork_path, CHECK_POLICY.observations)
+                .await;
+            emit(json!({
+                "event":"paired-funding-proof",
+                "valid":checked.is_ok(),
+                "failure":checked.err().map(|error| format!("{error:?}")),
+            }));
+        }
+        return;
+    }
     let mut panel = ClaimStep1Panel::new(
         wallet.clone(),
         datadir.clone(),

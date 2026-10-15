@@ -499,8 +499,11 @@ reorgs of either confirmation. Two more vectors spend only the Bitcoin or
 BTCB2 funding input after pair signing and confirm that the saved transaction
 on that chain is rejected while the other chain's input remains unspent. A
 collector regression also refuses a fresh paired proof when that Bitcoin
-funding output has become spent. Coordinator restart, stale observation and
-full wizard-level marker-spend admission cases remain.
+funding output has become spent. The disposable two-chain Claim harness now
+checks either spent funding output through the live authenticated Connect/Esplora
+bridge after both indexers observe the spend, and refuses a stale outspend
+response. Coordinator restart and full wizard-level marker-spend admission
+cases remain.
    The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
    pair from distinct coinbase dependencies. All five supported foreign source
    shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.

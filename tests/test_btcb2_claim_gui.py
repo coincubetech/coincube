@@ -1,4 +1,4 @@
-"""Check that retired one-sided Claim routes refuse on disposable real nodes.
+"""Exercise retired Claim refusal and paired funding proof on disposable nodes.
 
 This does not exercise the paired Claim wizard, rendered UI or hardware signing.
 """
@@ -11,6 +11,7 @@ import threading
 import time
 import subprocess
 import tempfile
+from decimal import Decimal
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.request import urlopen
@@ -79,6 +80,7 @@ class Bridge:
         self.submissions = []
         self.policy_node = None
         self.withhold_submission_reply = False
+        self.stale_outspend = False
         self.errors = []
         owner = self
 
@@ -86,14 +88,14 @@ class Bridge:
             def log_message(self, *_):
                 pass
 
-            def reply(self, status, body, content_type="application/json"):
+            def reply(self, status, body, content_type="application/json", observation="fresh"):
                 if not isinstance(body, bytes):
                     body = json.dumps(body).encode()
                 self.send_response(status)
                 self.send_header("Content-Type", content_type)
                 self.send_header("Content-Length", str(len(body)))
                 self.send_header("Cache-Control", "no-store")
-                self.send_header("X-Coincube-Observation", "fresh")
+                self.send_header("X-Coincube-Observation", observation)
                 self.send_header("X-Cache", "BYPASS")
                 self.end_headers()
                 self.wfile.write(body)
@@ -134,7 +136,11 @@ class Bridge:
                     _, indexer, suffix, _ = self.route()
                     try:
                         with urlopen(indexer.url + "/" + suffix, timeout=4) as response:
-                            self.reply(response.status, response.read(262145), response.headers.get("Content-Type", "application/json"))
+                            self.reply(
+                                response.status, response.read(262145),
+                                response.headers.get("Content-Type", "application/json"),
+                                "stale" if owner.stale_outspend and "/outspend/" in suffix else "fresh",
+                            )
                     except HTTPError as error:
                         self.reply(error.code, error.read(262145))
                 except Exception as error:
@@ -255,6 +261,163 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
         assert not bridge.preflights and not bridge.submissions
         assert not bridge.errors
         assert set(node.rpc.getrawmempool()) == initial_legacy_mempool
+        assert child.proc.wait(timeout=10) == 0
+    finally:
+        child.close()
+        (tmp_path / "log").write_text("".join(child.transcript))
+        try:
+            if bridge:
+                bridge.close()
+        finally:
+            if harness:
+                harness.cleanup()
+
+
+@pytest.mark.parametrize("spent_chain", ["bitcoin", "btcb2"])
+def test_live_paired_funding_proof_expires_after_marker_spend(tmp_path, spent_chain):
+    """The real two-chain collector must reject either spent funding coin."""
+    tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
+    missing = missing_binaries()
+    if not tool or not os.access(tool, os.X_OK) or missing:
+        message = "Build GUI lib tests with regtest-harness and set CLAIM_GUI_REGTEST_TEST_PATH plus pinned node/indexer paths"
+        if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    if os.getenv("TEST_DIR"):
+        Path(os.environ["TEST_DIR"]).mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-paired-proof-", dir=os.environ["TEST_DIR"]))
+    child = Child(tool, tmp_path / "gui-home")
+    harness = bridge = None
+    try:
+        descriptor = child.receive()
+        assert descriptor["event"] == "descriptor"
+
+        def testnet_public_key(match):
+            payload = base58.b58decode_check(match.group())
+            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
+
+        public_descriptor = re.sub(
+            r"xpub[1-9A-HJ-NP-Za-km-z]+", testnet_public_key,
+            descriptor["descriptor"].split("#")[0],
+        )
+        harness = TwoChainRegtest(str(tmp_path / "nodes"), public_descriptor=public_descriptor)
+        harness.setup()
+        bitcoin, fork = harness.legacy, harness.blake2b
+
+        def marker(node):
+            address = node.rpc.getnewaddress()
+            block = node.rpc.generatetoaddress(1, address)[0]
+            txid = node.rpc.getblock(block)["tx"][0]
+            transaction = node.rpc.getrawtransaction(txid, True, block)
+            vout = next(
+                out["n"] for out in transaction["vout"]
+                if out["scriptPubKey"].get("address") == address
+            )
+            node.generate_block(99)
+            assert node.rpc.gettxout(txid, vout)["confirmations"] == 100
+            return {"previous": transaction["hex"], "vout": vout, "txid": txid}
+
+        bitcoin_marker = marker(bitcoin)
+        # The fork cloned Bitcoin's wallet before divergence. Advance its
+        # address once so same-height coinbases cannot accidentally have the
+        # same txid merely because both miners used the same payout script.
+        fork.rpc.getnewaddress()
+        fork_marker = marker(fork)
+        assert bitcoin_marker["txid"] != fork_marker["txid"]
+        assert bitcoin.rpc.gettxout(fork_marker["txid"], fork_marker["vout"]) is None
+        assert fork.rpc.gettxout(bitcoin_marker["txid"], bitcoin_marker["vout"]) is None
+
+        def wait_for_indexers():
+            deadline = time.monotonic() + 90
+            for node, indexer in (
+                (bitcoin, harness.electrs_legacy),
+                (fork, harness.electrs_blake2b),
+            ):
+                target = node.rpc.getblockcount()
+                while time.monotonic() < deadline:
+                    try:
+                        with urlopen(indexer.url + "/blocks/tip/height", timeout=3) as response:
+                            if int(response.read()) >= target:
+                                break
+                    except Exception:
+                        pass
+                    time.sleep(0.25)
+                else:
+                    pytest.fail(f"{indexer.url} did not index height {target}")
+
+        wait_for_indexers()
+        bridge = Bridge(harness)
+        root = tmp_path / "gui"
+        root.mkdir()
+        shared_id, shared_vout, _ = harness.prefork_outpoints[0]
+        shared_block = harness.prefork_block_hashes[shared_id]
+        ancestry_id, ancestry_vout, _ = harness.poison_outpoint
+        initial = {
+            "mode": "paired-funding-proof",
+            "root": str(root),
+            "bridge": bridge.url,
+            "backend": "esplora",
+            "rpc": f"127.0.0.1:{bitcoin.rpcport}",
+            "cookie": Path(bitcoin.node_rpc.cookie_path).read_text().strip(),
+            "fork_rpc": f"127.0.0.1:{fork.rpcport}",
+            "fork_cookie": Path(fork.node_rpc.cookie_path).read_text().strip(),
+            "fork_tip_height": fork.rpc.getblockcount(),
+            "previous": bitcoin.rpc.getrawtransaction(shared_id, False, shared_block),
+            "vout": shared_vout,
+            "coin_height": bitcoin.rpc.getblockheader(shared_block)["height"],
+            "tip_height": bitcoin.rpc.getblockcount(),
+            "ancestry_previous": bitcoin.rpc.getrawtransaction(
+                ancestry_id, False, harness.poison_block_hash
+            ),
+            "ancestry_vout": ancestry_vout,
+            "ancestry_height": bitcoin.rpc.getblockheader(
+                harness.poison_block_hash
+            )["height"],
+            "ancestry_derivation_index": 3,
+            "ancestry_first_fork_height": harness.activation_height,
+            "ancestry_historical_limit": bitcoin.rpc.getblockcount() + 1,
+            "ancestry_shared_history_height": harness.activation_height - 1,
+            "ancestry_shared_history_hash": harness.fork_parent_hash,
+        }
+        assert child.send(initial) == {"event": "paired-funding-ready"}
+        command = {"bitcoin": bitcoin_marker, "btcb2": fork_marker}
+        first = child.send(command)
+        assert first == {"event": "paired-funding-proof", "valid": True, "failure": None}, first
+
+        bridge.stale_outspend = True
+        stale = child.send(command)
+        assert stale == {
+            "event": "paired-funding-proof", "valid": False,
+            "failure": "FreshnessUnverified",
+        }, stale
+        bridge.stale_outspend = False
+
+        spent_node, spent_marker = (
+            (bitcoin, bitcoin_marker) if spent_chain == "bitcoin" else (fork, fork_marker)
+        )
+        other_node, other_marker = (
+            (fork, fork_marker) if spent_chain == "bitcoin" else (bitcoin, bitcoin_marker)
+        )
+        value = Decimal(str(spent_node.rpc.gettxout(
+            spent_marker["txid"], spent_marker["vout"]
+        )["value"]))
+        raw = spent_node.rpc.createrawtransaction(
+            [{"txid": spent_marker["txid"], "vout": spent_marker["vout"]}],
+            {spent_node.rpc.getnewaddress(): value - Decimal("0.0001")},
+        )
+        signed = spent_node.rpc.signrawtransactionwithwallet(raw)
+        assert signed["complete"], signed
+        spent_id = spent_node.rpc.sendrawtransaction(signed["hex"])
+        spent_node.generate_block(1, wait_for_mempool=spent_id)
+        wait_for_indexers()
+        assert spent_node.rpc.gettxout(spent_marker["txid"], spent_marker["vout"]) is None
+        assert other_node.rpc.gettxout(other_marker["txid"], other_marker["vout"]) is not None
+        after_spend = child.send(command)
+        assert after_spend == {
+            "event": "paired-funding-proof", "valid": False, "failure": "Changed"
+        }, after_spend
+        assert not bridge.errors
         assert child.proc.wait(timeout=10) == 0
     finally:
         child.close()

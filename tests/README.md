@@ -115,6 +115,13 @@ pair is signed and check that the saved transaction on that chain is then
 rejected without consuming the opposite chain's funding input. These cases
 still do not validate GUI admission or physical hardware approval.
 
+The Claim GUI harness also calls the actual paired HTTP funding collector
+through the disposable Connect/Esplora bridge. It proves separate mature
+post-fork coinbases on both chains, refuses a stale outspend response, then
+spends either chain's funding output and requires a fresh paired collection
+to refuse after both indexers catch up.
+The driver does not open the signing UI or authorize a broadcast.
+
 The ordinary foreign Split pair has a separate `test_split_ancestry_pair_*`
 path in `test_btcb2_split_consensus.py`. Its offline vectors cover all five
 supported source descriptors; its pinned two-node case signs `S+B` and `S+F`,
