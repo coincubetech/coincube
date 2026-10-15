@@ -1,8 +1,9 @@
 //! Reserved production gate for the paired BTCB2 ancestry migration.
 //!
 //! The old one-sided Claim signer and completion route stay closed regardless
-//! of this switch. The new paired signer and durable completion coordinator
-//! must be wired together before this authorization is consumed in production.
+//! of this switch. The paired signer and durable two-chain submission paths
+//! are staged behind this gate. Keep them unavailable until the live wizard
+//! and device acceptance checks pass; unit coverage alone is insufficient.
 //!
 //! Keep this closed until issue #547 records owner acceptance of the live
 //! two-chain flow and its independent final review. `InputProofUnsupported` in
@@ -16,15 +17,14 @@ pub(crate) const CLOSED_MESSAGE: &str = "Bitcoin-only input signing is not avail
 pub(crate) const NEW_CLAIM_MESSAGE: &str = "Claim will require confirmed Bitcoin-only and Bitcoin Blake2b-only funding coins in this Vault. This transaction cannot be signed until both funding coins can be verified.";
 
 // Paired signer entry and both paired submission reviews consume this token.
-// Changing it requires the acceptance evidence documented above and a
-// complete paired coordinator.
+// Changing it requires the acceptance evidence documented above.
 const ENABLED: bool = false;
 
 /// An unforgeable authorization token for production ancestry side effects.
-#[allow(dead_code)] // Paired signer and completion coordinator are not wired yet.
+#[allow(dead_code)] // Paired signer and submission remain gated in production.
 pub(crate) struct Authorization(());
 
-#[allow(dead_code)] // Paired signer and completion coordinator are not wired yet.
+#[allow(dead_code)] // Paired signer and submission remain gated in production.
 pub(crate) fn authorization() -> Option<Authorization> {
     ENABLED.then_some(Authorization(()))
 }

@@ -4863,7 +4863,7 @@ async fn reconstruct_recorded_claim(
         index
     } else {
         loop {
-            if !crate::services::claim_observation::session_current(&generation, expected) {
+            if !crate::services::claim_observation::session_current(generation, expected) {
                 return Err(SESSION_ENDED.into());
             }
             let page = daemon
@@ -4890,7 +4890,7 @@ async fn reconstruct_recorded_claim(
             }
         }
     };
-    if !crate::services::claim_observation::session_current(&generation, expected) {
+    if !crate::services::claim_observation::session_current(generation, expected) {
         return Err(SESSION_ENDED.into());
     }
     reconstruct_poison_self_transfer(
