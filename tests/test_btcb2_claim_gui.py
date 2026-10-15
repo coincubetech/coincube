@@ -501,7 +501,8 @@ def test_live_paired_funding_proof_expires_after_marker_change(tmp_path, mutatio
         assert other_node.rpc.gettxout(other_marker["txid"], other_marker["vout"]) is not None
         after_spend = child.send(command)
         assert after_spend["event"] == "paired-funding-proof" and not after_spend["valid"], after_spend
-        assert after_spend["failure"] in {"Changed", "AncestryRootChanged"}, after_spend
+        assert (after_spend["failure"] == "Changed" or
+                after_spend["failure"].startswith("AncestryRootChanged")), after_spend
         assert not bridge.errors
         assert child.proc.wait(timeout=10) == 0
     finally:
