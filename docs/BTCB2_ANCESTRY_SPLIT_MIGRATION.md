@@ -803,7 +803,13 @@ the pinned node and indexer builds.
   mines mature chain-specific funding coins to both addresses, checks both
   deposits through the actual panel, and imports both software-signed PSBTs
   through its signer dispatch before durably recording the exact pair. Its
-  acceptance gate opens only inside the disposable test-binary child; the
+  disposable bridge supplies separate fresh six-block fee quotes because a
+  quiet regtest mempool cannot estimate a mainnet fee; production continues to
+  refuse deposit preparation when either chain has no usable quote. The
+  fixture also asks the broadcast review to reject a reported spent Bitcoin
+  funding output, asserts the exact outpoint was read, and reopens a signed
+  pair in a new panel process without restoring submission authority. The
+  test acceptance gate opens only inside the disposable test-binary child; the
   production gate remains closed. This pinned test still needs CI validation.
   The rendered UI, paired Split GUI signing, coordinator restart and physical
   device round trips remain outstanding.
