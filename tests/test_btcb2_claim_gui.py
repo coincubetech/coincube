@@ -112,6 +112,29 @@ class Child:
         self.proc.stdout.close()
 
 
+def reorg_bitcoin_confirmation(harness, txid):
+    """Replace a six-confirmation block and reopen the same electrs database."""
+    node = harness.legacy
+    confirmed_block = node.rpc.getrawtransaction(txid, True)["blockhash"]
+    old_indexer = harness.electrs_legacy
+    old_indexer.stop()
+    node.rpc.invalidateblock(confirmed_block)
+    node.generate_block(1, wait_for_mempool=txid)
+    assert node.rpc.getrawtransaction(txid, True)["confirmations"] == 1
+    replacement = EsploraElectrs(
+        electrs_dir=old_indexer.electrs_dir,
+        bitcoind_dir=harness.legacy_dir,
+        bitcoind_rpcport=node.rpcport,
+        electrs_path=harness.electrs_path,
+        http_port=old_indexer.http_port,
+    )
+    replacement.env.update(old_indexer.env)
+    harness.electrs_legacy = replacement
+    replacement.startup()
+    replacement.wait_for_tip(node.rpc.getbestblockhash(), timeout=90)
+    return replacement
+
+
 class Bridge:
     def __init__(self, harness):
         self.harness = harness
@@ -611,6 +634,33 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
             time.sleep(0.25)
         else:
             pytest.fail(f"Bitcoin indexer did not reach {bitcoin_tip}")
+        # A canonical Bitcoin confirmation can disappear after the BTCB2
+        # approval screen opens. Confirmation must recollect it before writing
+        # any BTCB2 possible-send record or touching the BTCB2 node.
+        child = Child(tool, tmp_path / "btcb2-reorg-home")
+        assert child.receive() == descriptor
+        reviewed = child.send({
+            **initial, "mode": "paired-wizard-reopen", "resume": True,
+            "broadcast_btcb2": True, "pause_before_fork_confirm": True,
+            "tip_height": node.rpc.getblockcount(),
+            "fork_tip_height": harness.blake2b.rpc.getblockcount(),
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert reviewed["event"] == "claim-btcb2-reviewed", reviewed
+        assert len(bridge.submissions) == 1
+        replacement = reorg_bitcoin_confirmation(harness, recorded["bitcoin_txid"])
+        refused = child.send({"action": "confirm_after_reorg"}, timeout=180)
+        assert refused["event"] == "claim-btcb2-reorg-refused", refused
+        assert refused["reason"] and len(bridge.submissions) == 1
+        assert child.proc.wait(timeout=10) == 0
+        first_transcript.extend(child.transcript)
+        child.close()
+        node.generate_block(5)
+        assert node.rpc.getrawtransaction(
+            recorded["bitcoin_txid"], True
+        )["confirmations"] == 6
+        replacement.wait_for_tip(node.rpc.getbestblockhash(), timeout=90)
         child = Child(tool, tmp_path / "btcb2-broadcast-home")
         assert child.receive() == descriptor
         second_broadcast = child.send({
@@ -803,6 +853,28 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
             time.sleep(0.25)
         else:
             pytest.fail(f"Bitcoin indexer did not reach {bitcoin_tip}")
+        child = Child(tool, tmp_path / "btcb2-reorg-home", driver="split_gui_regtest_driver")
+        assert child.receive() == descriptor
+        reviewed = child.send({
+            **initial, "resume": True, "broadcast_btcb2": True,
+            "pause_before_fork_confirm": True,
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert reviewed["event"] == "split-btcb2-reviewed", reviewed
+        assert len(bridge.submissions) == 1
+        replacement = reorg_bitcoin_confirmation(harness, recorded["bitcoin_txid"])
+        refused = child.send({"action": "confirm_after_reorg"}, timeout=180)
+        assert refused["event"] == "split-btcb2-reorg-refused", refused
+        assert refused["reason"] and len(bridge.submissions) == 1
+        assert child.proc.wait(timeout=10) == 0
+        first_transcript.extend(child.transcript)
+        child.close()
+        harness.legacy.generate_block(5)
+        assert harness.legacy.rpc.getrawtransaction(
+            recorded["bitcoin_txid"], True
+        )["confirmations"] == 6
+        replacement.wait_for_tip(harness.legacy.rpc.getbestblockhash(), timeout=90)
         child = Child(tool, tmp_path / "btcb2-broadcast-home", driver="split_gui_regtest_driver")
         assert child.receive() == descriptor
         second_broadcast = child.send({

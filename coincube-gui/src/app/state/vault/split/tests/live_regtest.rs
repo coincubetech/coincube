@@ -206,6 +206,31 @@ async fn split_gui_regtest_driver() {
                 panel.notice()
             );
             assert!(panel.paired_fork_review().is_some());
+            if init["pause_before_fork_confirm"].as_bool().unwrap_or(false) {
+                emit(json!({"event":"split-btcb2-reviewed"}));
+                assert_eq!(read(&mut input)["action"], "confirm_after_reorg");
+                let task = panel.update(SplitMessage::ConfirmPairedFork);
+                drive_panel(&mut panel, task, false).await;
+                assert_eq!(panel.stage(), &Stage::PairedRecovery);
+                assert!(panel.notice().is_some());
+                let recorded = Controller::reopen_settling(
+                    &step1::journal_directory(&root.join("split"), digest),
+                    &identity,
+                    connect.context(),
+                )
+                .await
+                .unwrap();
+                assert!(recorded
+                    .recorded_signed_ancestry_pair()
+                    .unwrap()
+                    .possible_attempt(ChainId::BitcoinBlake2b)
+                    .is_none());
+                emit(json!({
+                    "event":"split-btcb2-reorg-refused",
+                    "reason":panel.notice(),
+                }));
+                return;
+            }
             let task = panel.update(SplitMessage::ConfirmPairedFork);
             drive_panel(&mut panel, task, false).await;
             let recorded = Controller::reopen_settling(

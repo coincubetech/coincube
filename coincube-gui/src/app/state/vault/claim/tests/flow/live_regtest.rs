@@ -525,6 +525,40 @@ async fn claim_gui_regtest_driver() {
                 "{:?}",
                 panel.restart_error
             );
+            if init["pause_before_fork_confirm"].as_bool().unwrap_or(false) {
+                emit(json!({"event":"claim-btcb2-reviewed"}));
+                assert_eq!(read(&mut input)["action"], "confirm_after_reorg");
+                let task = panel.update(
+                    Some(dyn_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Claim(view::ClaimMessage::ConfirmPairedFork)),
+                );
+                drive(&mut panel, &dyn_daemon, &cache, task).await;
+                assert!(matches!(panel.stage, Stage::PairedRecovery(..)));
+                assert!(panel.restart_error.is_some());
+                let recorded = claim_workflow::Controller::reopen_settling(
+                    &directory,
+                    &identity,
+                    ClaimStep1Panel::funding_context(
+                        panel.connect.as_ref().unwrap(),
+                        1,
+                        panel.generation.clone(),
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+                assert!(recorded
+                    .recorded_signed_ancestry_pair()
+                    .unwrap()
+                    .possible_attempt(ChainId::BitcoinBlake2b)
+                    .is_none());
+                emit(json!({
+                    "event":"claim-btcb2-reorg-refused",
+                    "reason":panel.restart_error,
+                }));
+                return;
+            }
             let task = panel.update(
                 Some(dyn_daemon.clone()),
                 &cache,
