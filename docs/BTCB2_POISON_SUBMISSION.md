@@ -4,7 +4,9 @@ This document describes a historical transport and its safety tests. The
 90-byte OP_RETURN Claim/Split route has no production signer or submission
 caller. New transactions use the paired input-ancestry path described in
 `BTCB2_ANCESTRY_SPLIT_MIGRATION.md`; this transport must not be reconnected to
-it. Existing uncertain records still require exact-transaction reconciliation.
+it. Production calls return `RetiredRoute` before any backend access or gate
+consumption. Existing uncertain records still require exact-transaction
+reconciliation.
 
 `DaemonControl::submit_verified_poison` accepts only the opaque core
 `VerifiedPoisonTransfer`. It requires Bitcoin mainnet and the daemon's exact

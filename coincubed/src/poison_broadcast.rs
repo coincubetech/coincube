@@ -1,4 +1,7 @@
 //! Exact-byte transport only. This module grants no Claim/broadcast authorization.
+//! Historical OP_RETURN and one-chain Split submissions are fixture-only;
+//! production methods refuse them before backend access. Paired ancestry
+//! transports use separate typed entry points.
 mod binding;
 mod connect_transport;
 mod node_transport;
@@ -27,6 +30,8 @@ use std::sync::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SubmissionError {
     UnsupportedChain,
+    /// A historical Claim/Split transport is retained for fixtures only.
+    RetiredRoute,
     DescriptorMismatch,
     BackendUnavailable,
     GateMismatch,
@@ -50,6 +55,9 @@ impl std::fmt::Display for SubmissionError {
             Self::UnsupportedChain => {
                 f.write_str("Claim submission chain is unsupported or mismatched")
             }
+            Self::RetiredRoute => {
+                f.write_str("The retired split route cannot submit a transaction")
+            }
             Self::BackendUnavailable => {
                 f.write_str("Chain backend is unavailable before submission")
             }
@@ -70,6 +78,20 @@ impl std::fmt::Display for SubmissionError {
     }
 }
 impl std::error::Error for SubmissionError {}
+
+/// The historical transports remain executable only in this crate's unit
+/// fixtures. Production callers must use a verified ordinary ancestry pair.
+fn legacy_submission_fixture_only() -> Result<(), SubmissionError> {
+    legacy_submission_allowed(cfg!(test))
+}
+
+fn legacy_submission_allowed(fixture: bool) -> Result<(), SubmissionError> {
+    if fixture {
+        Ok(())
+    } else {
+        Err(SubmissionError::RetiredRoute)
+    }
+}
 
 /// Upstream acknowledgement only, not confirmation, exclusivity or Claim permission.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -282,6 +304,7 @@ pub fn submit_verified_split_step1_to_connect(
     gate: &SubmissionGate,
     origin: &str,
 ) -> Result<SubmissionOutcome, SubmissionError> {
+    legacy_submission_fixture_only()?;
     // Bitcoin mainnet only: the Connect route is fixed to it, and Testnet4
     // stays refused until a route for it is verified.
     if verified.chain() != ChainId::Bitcoin {
@@ -416,6 +439,7 @@ impl DaemonControl {
         verified: &VerifiedPoisonTransfer,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         if self.config.bitcoin_config.chain != ChainId::Bitcoin
             || verified.chain() != ChainId::Bitcoin
         {
@@ -467,6 +491,7 @@ impl DaemonControl {
         verified: &VerifiedClaimForkSweep,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         if self.config.bitcoin_config.chain != ChainId::BitcoinBlake2b
             || verified.chain() != ChainId::BitcoinBlake2b
         {
@@ -489,6 +514,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -525,6 +551,7 @@ impl DaemonControl {
         gate: &SubmissionGate,
         origin: &str,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.submit_exact_bound_claim(
             verified.chain(),
             verified.descriptor(),
@@ -575,6 +602,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target(verified.transaction(), binding, gate)
     }
@@ -591,6 +619,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target_to_node(verified.transaction(), binding, gate)
     }
@@ -611,6 +640,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target(verified.transaction(), binding, gate)
     }
@@ -626,6 +656,7 @@ impl DaemonControl {
         binding: &ClaimBackendBinding,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
+        legacy_submission_fixture_only()?;
         self.check_split_target(verified.chain(), verified.transaction(), target_index, gate)?;
         self.submit_split_target_to_node(verified.transaction(), binding, gate)
     }

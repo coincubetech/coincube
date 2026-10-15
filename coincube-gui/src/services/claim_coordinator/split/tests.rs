@@ -774,11 +774,10 @@ async fn split_production_admits_only_the_bitcoin_connect_origin() {
     assert_eq!(production.context().account, "synthetic-account");
 }
 
-/// (c)(e) Through `SplitProduction`, the Split artifact goes to Connect once
-/// with its exact bytes, via the blocking worker; a node route and a gate of
-/// another transaction are refused before any HTTP request.
+/// The retired Split production transport refuses Connect before consuming a
+/// gate or making an HTTP request; the unsupported node route also refuses.
 #[tokio::test]
-async fn split_production_submits_once_to_connect_and_refuses_a_node_route() {
+async fn split_production_refuses_retired_transport_and_a_node_route() {
     let server = MockServer::start_async().await;
     let (_sender, generation) = watch::channel(7u64);
     let production = production(&server, generation);
@@ -827,35 +826,23 @@ async fn split_production_submits_once_to_connect_and_refuses_a_node_route() {
                 foreign.clone()
             )
             .await,
-        Err(DaemonError::PoisonSubmission(SubmissionError::GateMismatch))
+        Err(DaemonError::PoisonSubmission(SubmissionError::RetiredRoute))
     ));
     assert_eq!(foreign.state(), SubmissionState::Pending);
     endpoint.assert_hits_async(0).await;
 
-    assert_eq!(
+    assert!(matches!(
         production
             .submit_route(
                 SubmissionRoute::Connect,
                 VerifiedStep1::Split(verified.clone()),
                 gate.clone()
             )
-            .await
-            .unwrap(),
-        SubmissionOutcome::UpstreamAccepted {
-            txid: tx.compute_txid(),
-            wtxid: tx.compute_wtxid()
-        }
-    );
-    assert_eq!(gate.state(), SubmissionState::Started);
-    assert!(matches!(
-        production
-            .submit(VerifiedStep1::Split(verified.clone()), gate.clone())
             .await,
-        Err(DaemonError::PoisonSubmission(
-            SubmissionError::AlreadyStarted
-        ))
+        Err(DaemonError::PoisonSubmission(SubmissionError::RetiredRoute))
     ));
-    endpoint.assert_hits_async(1).await;
+    assert_eq!(gate.state(), SubmissionState::Pending);
+    endpoint.assert_hits_async(0).await;
 }
 
 /// (c) End to end through `create_split` / `resume_split` with the real

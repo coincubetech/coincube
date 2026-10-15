@@ -458,6 +458,10 @@ a replayable spend.
    Reopening an unsubmitted legacy one-chain Split draft now refuses its seed
    signer and directs the user to start the two-deposit flow; a possibly sent
    record still enters read-only reconciliation.
+   The daemon's old exact-byte Claim, Split and unified-sweep transport
+   methods now return `RetiredRoute` in production before acquiring a backend
+   or consuming a one-use gate. Their unit fixtures remain executable; the
+   ordinary paired ancestry transport is separate.
    Enabling the paired gate later
    cannot turn the old path back on. Managed Bitcoin node setup and startup no
    longer add the old claim's 100-byte `datacarriersize` relay override;
