@@ -832,7 +832,11 @@ against the deployed node and indexer builds.
   passed in that pinned run. Test-only Claim and Split fixtures now drive
   separate Bitcoin and BTCB2 broadcast reviews across process restarts,
   including six Bitcoin confirmations, exact-byte node submission and
-  per-chain attempt journaling; those additions still need a pinned live run.
+  per-chain attempt journaling. The pinned two-chain CI run on `2ecc15e9`
+  passed both staged-broadcast fixtures (106 passed, 1 intentionally
+  deselected overall), including separate process restarts, six canonical
+  Bitcoin confirmations, exact-byte submission to each node and the matching
+  per-chain attempt records.
   Rendered UI, deployed recovery, realistic Connect scan latency and physical
   device round trips remain outstanding.
 - Keep the production gate closed until these checks and an independent review
