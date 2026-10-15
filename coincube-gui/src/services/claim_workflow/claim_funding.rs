@@ -1473,8 +1473,7 @@ async fn check_reserved_claim_addresses(
     generation: watch::Receiver<u64>,
 ) -> Result<CheckedClaimAddresses, ClaimAddressError> {
     if !current(&generation, context.generation)
-        || client.token().is_none_or(str::is_empty)
-        || client.base_url.trim_end_matches('/') != context.provider.trim_end_matches('/')
+        || !claim_provider_matches(&client, &context, &generation)
     {
         return Err(ClaimAddressError::ChangedSession);
     }
@@ -1503,6 +1502,26 @@ async fn check_reserved_claim_addresses(
     checked_history(&esplora, addresses, &generation, expected, true).await
 }
 
+/// The journal binds the canonical Bitcoin observation provider, not the bare
+/// Connect base URL. Apply the same admission and identity calculation used
+/// when the reservation was created before trusting it on a later screen.
+fn claim_provider_matches(
+    client: &CoincubeClient,
+    context: &Context,
+    generation: &watch::Receiver<u64>,
+) -> bool {
+    HttpObservationSource::new(
+        client.clone(),
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        CollectionContext {
+            expected_generation: context.generation,
+            generation: generation.clone(),
+        },
+    )
+    .is_ok_and(|source| source.provider_identity() == context.provider)
+}
+
 /// Prepare the Bitcoin Vault to notice deposits at both reserved receive
 /// indices, then release the already checked instructions. Revealing an index
 /// does not authorize a spend or assert chain-exclusive ancestry.
@@ -1518,10 +1537,7 @@ pub async fn prepare_claim_deposit_instructions(
     shared_count: usize,
 ) -> Result<CheckedClaimFundingAddresses, ClaimAddressError> {
     let expected = context.generation;
-    if !current(&generation, expected)
-        || client.token().is_none_or(str::is_empty)
-        || client.base_url.trim_end_matches('/') != context.provider.trim_end_matches('/')
-    {
+    if !current(&generation, expected) || !claim_provider_matches(&client, &context, &generation) {
         return Err(ClaimAddressError::ChangedSession);
     }
     let for_load = (
@@ -1665,6 +1681,29 @@ mod tests {
         assert!(current(&generation, 7));
         sender.send(7).unwrap();
         assert!(!current(&generation, 7));
+    }
+
+    #[test]
+    fn deposit_preparation_matches_the_journal_provider_identity() {
+        let (sender, generation) = watch::channel(7);
+        let mut client = CoincubeClient::for_test("https://connect.example/");
+        client.set_token("synthetic-test-token");
+        let context = Context {
+            generation: 7,
+            account: "test-account".into(),
+            provider: "bitcoin|https://connect.example/api/v1/esplora/bitcoin/mainnet".into(),
+        };
+        assert!(claim_provider_matches(&client, &context, &generation));
+        assert!(!claim_provider_matches(
+            &client,
+            &Context {
+                provider: "bitcoin|https://other.example/api/v1/esplora/bitcoin/mainnet".into(),
+                ..context.clone()
+            },
+            &generation,
+        ));
+        sender.send_modify(|_| {});
+        assert!(!current(&generation, context.generation));
     }
 
     #[test]

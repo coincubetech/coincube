@@ -779,7 +779,8 @@ the opposite transaction after a six-block reorg of either chain.
 The Split-only fixture needs the two pinned Knots binaries, not electrs.
 Coordinator restart, stale observation and marker spend cases remain.
 The pinned BLAKE2b-aware electrs currently panics on the disposable harness's
-100-block BTCB2 coinbase reorg. The harness can rebuild its index to verify
+100-block coinbase reorg on either Bitcoin or BTCB2. The harness can rebuild
+its disposable index to verify
 that the desktop collector then refuses the obsolete funding proof, but this
 does not establish that the deployed indexer recovers from a deep reorg. Keep
 the mainnet gate closed until indexer recovery is fixed and exercised against
