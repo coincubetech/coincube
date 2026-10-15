@@ -833,6 +833,39 @@ mod tests {
                             ),
                             Err(FailureKind::Changed)
                         );
+                        // Bitcoin's funding input is already spent by step
+                        // one, but the distinct BTCB2 funding input must
+                        // still be unspent before the second submission.
+                        fork_unspent.delete_async().await;
+                        let spent_fork_funding = fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}/outspend/0",
+                                fork.compute_txid()
+                            ),
+                            json!({"spent":true}).to_string(),
+                        );
+                        assert!(matches!(
+                            source
+                                .collect_post_bitcoin_inputs(
+                                    &root_path,
+                                    &fork_path,
+                                    &[shared],
+                                    &bitcoin_spend,
+                                    policy,
+                                )
+                                .await,
+                            Err(FailureKind::Changed)
+                        ));
+                        spent_fork_funding.delete_async().await;
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}/outspend/0",
+                                fork.compute_txid()
+                            ),
+                            json!({"spent":false}).to_string(),
+                        );
                         shared_outspends.pop().unwrap().delete_async().await;
                         fresh_mock(
                             &server,
