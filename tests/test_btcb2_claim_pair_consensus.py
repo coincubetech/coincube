@@ -7,6 +7,7 @@ not grant GUI signing authority or replace physical BitBox/Ledger approval.
 import json
 import os
 import subprocess
+from decimal import Decimal
 
 import pytest
 
@@ -141,3 +142,86 @@ def test_claim_pair_uses_distinct_chain_specific_inputs(two_chain, record_proper
         assert own.rpc.getbestblockhash() == six_deep_tip
     record_property("ordinary_claim_bitcoin_txid", signed["step1_txid"])
     record_property("ordinary_claim_fork_txid", signed["fork_txid"])
+
+
+def test_spent_bitcoin_funding_coin_refuses_the_saved_pair(two_chain):
+    """A valid marker proof cannot authorize a pair after that marker is spent."""
+    tool = os.getenv("CLAIM_REGTEST_TOOL_PATH")
+    if not tool or not os.access(tool, os.X_OK):
+        if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
+            pytest.fail("CLAIM_REGTEST_TOOL_PATH must name the built Claim test bridge")
+        pytest.skip("Build claim_regtest_vectors and set CLAIM_REGTEST_TOOL_PATH")
+
+    bitcoin, fork = two_chain.legacy, two_chain.blake2b
+    receive, _ = two_chain.desc.singlepath_descriptors()
+    descriptor = bitcoin.rpc.getdescriptorinfo(str(receive))["descriptor"]
+    bitcoin_address, fork_address = bitcoin.rpc.deriveaddresses(descriptor, [4, 5])
+    bitcoin_id, bitcoin_vout, bitcoin_hex = _coinbase_for_vault(
+        bitcoin, bitcoin_address
+    )
+    fork_id, fork_vout, fork_hex = _coinbase_for_vault(fork, fork_address)
+    bitcoin.generate_block(99)
+    fork.generate_block(99)
+    request = {
+        "descriptor": str(two_chain.desc),
+        "fork_marker": two_chain.fork_parent_hash,
+        "coinbase_input": f"{bitcoin_id}:{bitcoin_vout}",
+        "fork_coinbase_input": f"{fork_id}:{fork_vout}",
+        "coins": [
+            {
+                "previous": bitcoin.rpc.getrawtransaction(
+                    txid, False, two_chain.prefork_block_hashes[txid]
+                ),
+                "vout": vout,
+                "index": index,
+            }
+            for index, (txid, vout, _) in enumerate(two_chain.prefork_outpoints)
+        ]
+        + [
+            {"previous": bitcoin_hex, "vout": bitcoin_vout, "index": 4},
+            {"previous": fork_hex, "vout": fork_vout, "index": 5},
+        ],
+    }
+
+    def vectors():
+        completed = subprocess.run(
+            [tool], input=json.dumps(request), text=True,
+            capture_output=True, timeout=30, check=True,
+        )
+        return json.loads(completed.stdout)
+
+    unsigned = vectors()
+    request["signed_step1"] = two_chain.signer.sign_psbt(
+        PSBT.from_base64(unsigned["step1_psbt"]), [0, 1]
+    ).to_base64()
+    request["signed_fork"] = two_chain.signer.sign_psbt(
+        PSBT.from_base64(unsigned["fork_psbt"]), [0, 1]
+    ).to_base64()
+    pair = vectors()
+    assert bitcoin.rpc.testmempoolaccept([pair["step1_raw"]])[0]["allowed"]
+    assert fork.rpc.testmempoolaccept([pair["fork_raw"]])[0]["allowed"]
+
+    # Spend only B to the same Vault script, leaving the shared inputs intact.
+    # Reuse the builder's exact marker metadata so the disposable test signer
+    # signs an ordinary PSBT rather than granting the node the Vault keys.
+    marker_only = PSBT.from_base64(unsigned["step1_psbt"])
+    marker_index = next(
+        index for index, txin in enumerate(marker_only.tx.vin)
+        if f"{txin.prevout.hash:064x}:{txin.prevout.n}" == request["coinbase_input"]
+    )
+    marker_only.tx.vin = [marker_only.tx.vin[marker_index]]
+    marker_only.i = [marker_only.i[marker_index]]
+    value = bitcoin.rpc.gettxout(bitcoin_id, bitcoin_vout)["value"]
+    marker_only.tx.vout[0].nValue = int(Decimal(str(value)) * 100_000_000) - 1_000
+    marker_only.g.map[0] = marker_only.tx.serialize_without_witness()
+    signed_marker = two_chain.signer.sign_psbt(marker_only, [0, 1])
+    finalized = bitcoin.rpc.finalizepsbt(signed_marker.to_base64())
+    assert finalized["complete"], finalized
+    marker_spend_id = bitcoin.rpc.sendrawtransaction(finalized["hex"])
+    bitcoin.generate_block(1, wait_for_mempool=marker_spend_id)
+
+    assert bitcoin.rpc.gettxout(bitcoin_id, bitcoin_vout) is None
+    assert not bitcoin.rpc.testmempoolaccept([pair["step1_raw"]])[0]["allowed"]
+    # The independent BTCB2 marker is still live. This does not authorize
+    # broadcasting it alone: the application requires the current pair.
+    assert fork.rpc.testmempoolaccept([pair["fork_raw"]])[0]["allowed"]

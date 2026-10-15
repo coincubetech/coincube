@@ -495,8 +495,12 @@ survive a rebuilt transaction.
 
 The paired Claim consensus vector passes against the pinned Knots and electrs
 two-chain harness, including BTCB2-first broadcast and one-block and six-block
-reorgs of either confirmation. Coordinator restart, stale observation and
-marker spend cases remain.
+reorgs of either confirmation. A separate vector spends only the Bitcoin
+funding input after pair signing and confirms the saved Bitcoin transaction is
+rejected while the BTCB2 funding input remains unspent. A collector regression
+also refuses a fresh paired proof when that Bitcoin funding output has become
+spent. Coordinator restart, stale observation and full wizard-level
+marker-spend admission cases remain.
    The foreign Split bridge now builds and finalizes an ordinary `S+B`/`S+F`
    pair from distinct coinbase dependencies. All five supported foreign source
    shapes pass the offline signed-PSBT vectors and the pinned two-chain regtest.

@@ -551,7 +551,7 @@ mod tests {
                             }],
                         )
                         .unwrap();
-                        let unspent = fresh_mock(
+                        let mut unspent = fresh_mock(
                             &server,
                             &format!(
                                 "/api/v1/esplora/bitcoin/mainnet/tx/{}/outspend/0",
@@ -602,6 +602,35 @@ mod tests {
                         assert_eq!(pair_funding.fork().selected(), fork_path.selected());
                         assert_eq!(pair_funding.fork().chain(), ChainId::BitcoinBlake2b);
                         assert!(pair_funding.observed_at() <= source.now());
+                        // A previous positive proof is not spend authority.
+                        // Spending only the Bitcoin funding outpoint must
+                        // invalidate a fresh paired collection, even while
+                        // the BTCB2 funding outpoint remains unspent.
+                        unspent.delete_async().await;
+                        let spent_bitcoin_funding = fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/outspend/0",
+                                bitcoin.compute_txid()
+                            ),
+                            json!({"spent": true}).to_string(),
+                        );
+                        assert!(matches!(
+                            source
+                                .collect_funding_pair(&root_path, &fork_path, policy)
+                                .await,
+                            Err(FailureKind::Changed)
+                        ));
+                        spent_bitcoin_funding.assert_hits(1);
+                        spent_bitcoin_funding.delete_async().await;
+                        unspent = fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}/outspend/0",
+                                bitcoin.compute_txid()
+                            ),
+                            json!({"spent": false}).to_string(),
+                        );
                         let bitcoin_candidate = coincube_core::foreign_split::SplitCoin {
                             outpoint: root_path.selected(),
                             branch: coincube_core::foreign_split::SplitBranch::External,
