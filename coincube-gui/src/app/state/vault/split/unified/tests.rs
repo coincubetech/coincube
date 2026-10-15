@@ -308,6 +308,7 @@ async fn at_seed_entry(
     temp: &Temp,
 ) -> (SplitPanel, Arc<FakePort>) {
     let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.legacy_flow_fixture = true;
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
     let port = FakePort::new(connect.context(), 1);
     panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
@@ -509,6 +510,7 @@ async fn hardware_single_step_route_is_blocked() {
     let connect = FakeConnect::new(&scan.coins);
     let temp = Temp::new();
     let mut panel = SplitPanel::start(TARGET.into(), temp.root(), scan.intent());
+    panel.legacy_flow_fixture = true;
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
     let port = FakePort::new(connect.context(), 1);
     panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
@@ -1192,6 +1194,7 @@ async fn unified_preconditions_refuse_with_copy_and_open_nothing() {
         .expect("no seed route");
     assert_eq!(refused.reason, SEEDS_NOT_OFFERED);
     let mut panel = SplitPanel::start(TARGET.into(), temp.root(), intent);
+    panel.legacy_flow_fixture = true;
     panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
     let port = FakePort::new(connect.context(), 1);
     panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));
@@ -1241,6 +1244,7 @@ async fn unified_preconditions_refuse_with_copy_and_open_nothing() {
         }
         let temp = Temp::new();
         let mut panel = SplitPanel::start(TARGET.into(), temp.root(), intent);
+        panel.legacy_flow_fixture = true;
         panel.set_connect(Some(connect.clone() as Arc<dyn SplitConnect>));
         let port = FakePort::new(connect.context(), 1);
         panel.set_unified_port(Some(port.clone() as Arc<dyn UnifiedPort>));

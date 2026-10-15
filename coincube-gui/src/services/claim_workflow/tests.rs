@@ -1555,19 +1555,20 @@ fn claim_only_operations_refuse_a_split_intent_at_their_guard() {
 
     let temp = Temp::new();
     let mut c = super::split::tests::created_split(&temp.0);
+    let split_context = c.context.clone();
     assert!(c.construction_verified && c.fresh.is_none());
     assert_eq!(c.phase(), Phase::Intent);
     let before = fs::read(temp.0.join("intent.json")).unwrap();
     assert!(matches!(
-        c.bind_recovered_bitcoin_transaction(&context(), &verified),
+        c.bind_recovered_bitcoin_transaction(&split_context, &verified),
         Err(Error::WrongIdentity)
     ));
     assert!(matches!(
-        c.prepare_fork_sweep(&context(), &sweep, policy(), 10000),
+        c.prepare_fork_sweep(&split_context, &sweep, policy(), 10000),
         Err(Error::WrongIdentity)
     ));
     assert!(matches!(
-        c.record_fork_broadcast_intent(&context(), &signed_sweep, policy(), 10000),
+        c.record_fork_broadcast_intent(&split_context, &signed_sweep, policy(), 10000),
         Err(Error::WrongIdentity)
     ));
     // Make every field revalidate_construction compares match the Claim
@@ -1578,7 +1579,7 @@ fn claim_only_operations_refuse_a_split_intent_at_their_guard() {
         sha256::Hash::hash(source.descriptor().to_string().as_bytes());
     c.intent.bitcoin_change_index = Some(u32::from(source.change_index()));
     assert!(matches!(
-        c.revalidate_construction(&context(), &source),
+        c.revalidate_construction(&split_context, &source),
         Err(Error::WrongIdentity)
     ));
     assert!(!c.construction_verified);

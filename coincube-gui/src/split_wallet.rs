@@ -962,20 +962,21 @@ mod tests {
         };
         let external = ScanDescriptor::parse(Branch::External, FIXED_DESCRIPTOR).unwrap();
         let coin = |vout: u32, height: Option<u32>, sats: u64| {
+            let output = TxOut {
+                value: Amount::from_sat(sats),
+                script_pubkey: external.script(0).unwrap(),
+            };
             let previous = Transaction {
                 version: transaction::Version::TWO,
                 lock_time: absolute::LockTime::ZERO,
                 input: vec![TxIn::default()],
-                output: vec![TxOut {
-                    value: Amount::from_sat(sats),
-                    script_pubkey: external.script(0).unwrap(),
-                }],
+                output: vec![output.clone(); vout as usize + 1],
             };
             foreign_scan::DiscoveredCoin {
                 branch: Branch::External,
                 index: 0,
                 outpoint: OutPoint::new(previous.compute_txid(), vout),
-                output: previous.output[0].clone(),
+                output,
                 previous,
                 confirmed: true,
                 block_height: height,

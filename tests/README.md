@@ -113,6 +113,14 @@ only on its intended node, and broadcasts BTCB2 first to exercise the reverse
 step order. It still does not validate GUI admission or physical hardware
 approval.
 
+The ordinary foreign Split pair has a separate `test_split_ancestry_pair_*`
+path in `test_btcb2_split_consensus.py`. Its offline vectors cover all five
+supported source descriptors; its pinned two-node case signs `S+B` and `S+F`,
+accepts each only on its own chain and repeats the opposite-chain rejection
+after shallow and six-block reorgs. The older step-one, step-two and unified
+tests below exercise historical or alternative constructions; they do not
+describe the production ancestry split or open its acceptance gate.
+
 Split steps 1 and 2 (#568) have their own test-only bridge:
 
 ```sh

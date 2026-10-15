@@ -538,8 +538,10 @@ marker spend cases remain.
    compares the displayed bytes and fees before paired Connect preflight,
    durable possible-attempt recording and the one-use Bitcoin send. The
    production gate remains closed; this route is not yet available to users.
-   The separate BTCB2 broadcast review after six Bitcoin confirmations is
-   still to be wired.
+   The separate BTCB2 broadcast review is also wired. It requires a fresh
+   six-confirmation Bitcoin observation, repeats the paired scan and signer
+   requalification, and compares the newly verified signed bytes and fees to
+   the displayed review before its one-use BTCB2 submission.
    Gate constructors now accept the finalized Claim or Split pair directly
    and bind separately to its Bitcoin or BTCB2 witness; the coordinator must
    still issue them only after the corresponding durable possible-attempt
