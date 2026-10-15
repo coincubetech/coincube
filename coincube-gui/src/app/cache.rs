@@ -604,6 +604,8 @@ pub async fn coins_to_cache(
 pub struct FiatPrice {
     pub res: Result<GetPriceResult, PriceApiError>, // also store error in case we want to display it to user
     pub request: FiatPriceRequest,
+    /// BTCB2's earliest market or conversion expiry; absent for Bitcoin prices.
+    pub btcb2_valid_until: Option<u64>,
 }
 
 impl FiatPrice {
@@ -654,22 +656,33 @@ impl FiatPriceRequest {
         client: crate::services::coincube::CoincubeClient,
     ) -> FiatPrice {
         use crate::services::fiat::btcb2;
-        let res = if self
+        let (res, btcb2_valid_until) = if self
             .origin
             .is_some_and(|o| o.chain == crate::chain::ChainId::BitcoinBlake2b)
         {
             match client.btcb2_quote(self.currency).await {
-                Ok(quote) => btcb2::unix_now()
-                    .ok_or_else(|| PriceApiError::CannotParseData("Clock unavailable".into()))
-                    .and_then(|now| quote.usable_price(self.currency, now)),
-                Err(error) => Err(btcb2::request_error(error)),
+                Ok(quote) => {
+                    let res = btcb2::unix_now()
+                        .ok_or_else(|| PriceApiError::CannotParseData("Clock unavailable".into()))
+                        .and_then(|now| quote.usable_price(self.currency, now));
+                    let valid_until = res.as_ref().ok().and_then(|_| quote.valid_until());
+                    (res, valid_until)
+                }
+                Err(error) => (Err(btcb2::request_error(error)), None),
             }
         } else {
-            Err(PriceApiError::CannotParseData(
-                "BTCB2 pricing is unavailable for this chain".into(),
-            ))
+            (
+                Err(PriceApiError::CannotParseData(
+                    "BTCB2 pricing is unavailable for this chain".into(),
+                )),
+                None,
+            )
         };
-        FiatPrice { res, request: self }
+        FiatPrice {
+            res,
+            request: self,
+            btcb2_valid_until,
+        }
     }
 
     /// Sends the request using the default client for the given source.
@@ -680,12 +693,14 @@ impl FiatPriceRequest {
                     "Scoped prices require Connect".into(),
                 )),
                 request: self,
+                btcb2_valid_until: None,
             };
         }
         let client = PriceClient::default_from_source(self.source);
         FiatPrice {
             res: client.get_price(self.currency).await,
             request: self,
+            btcb2_valid_until: None,
         }
     }
 }
@@ -1028,6 +1043,7 @@ impl Cache {
                                 .zip(crate::services::fiat::btcb2::unix_now())
                                 .is_some_and(|(at, now)| {
                                     crate::services::fiat::btcb2::timestamp_fresh(at, now)
+                                        && price.btcb2_valid_until.is_some_and(|until| now <= until)
                                 })
                     })
             })
@@ -1090,6 +1106,7 @@ mod btcb2_fiat_tests {
                 value: 102.0,
                 updated_at: Some(at),
             }),
+            btcb2_valid_until: at.checked_add(crate::services::fiat::btcb2::MAX_QUOTE_AGE),
         }
     }
 
@@ -1123,6 +1140,11 @@ mod btcb2_fiat_tests {
         assert!(cache.fiat_price.is_none());
         assert!(!cache.fiat_toggle_allowed());
         assert_eq!(cache.display_mode, DisplayMode::BitcoinNative);
+        let mut market_expired = answer(&mut cache, now);
+        market_expired.btcb2_valid_until = now.checked_sub(1);
+        assert!(cache.accept_btcb2_price(market_expired));
+        assert!(cache.fiat_price.is_none());
+        assert!(!cache.fiat_toggle_allowed());
         let expired = answer(
             &mut cache,
             now - crate::services::fiat::btcb2::MAX_QUOTE_AGE - 1,

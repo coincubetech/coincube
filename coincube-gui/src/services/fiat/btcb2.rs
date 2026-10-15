@@ -11,11 +11,11 @@ use crate::services::{
     http::ResponseExt,
 };
 
-/// Desktop freshness limit in seconds, applied to `updated_at`, every source
-/// `at`, and already-cached quotes. It matches the Connect API's default
-/// `FRESH_FOR` of 5 minutes (coincube-api#298). API policy may be stricter;
-/// its `stale` flag is always authoritative.
-pub const MAX_QUOTE_AGE: u64 = 300;
+/// The oldest market/conversion timestamp in a quote may be 15 minutes old;
+/// each exchange observation must still be no older than 5 minutes.
+/// The API's `stale` flag is always authoritative.
+pub const MAX_QUOTE_AGE: u64 = 900;
+pub const MAX_MARKET_AGE: u64 = 300;
 pub const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
 
 #[derive(Debug, Clone, Deserialize)]
@@ -33,6 +33,7 @@ pub struct PriceObservation {
     pub name: String,
     pub price: f64,
     pub at: u64,
+    pub market_at: u64,
 }
 
 pub fn unix_now() -> Option<u64> {
@@ -46,7 +47,19 @@ pub fn timestamp_fresh(at: u64, now: u64) -> bool {
     at > 0 && at <= now && now - at <= MAX_QUOTE_AGE
 }
 
+fn market_timestamp_fresh(at: u64, now: u64) -> bool {
+    at > 0 && at <= now && now - at <= MAX_MARKET_AGE
+}
+
 impl Btcb2Quote {
+    pub fn valid_until(&self) -> Option<u64> {
+        let market_until = self.sources.iter().map(|source| source.market_at).min()?;
+        Some(std::cmp::min(
+            self.updated_at.checked_add(MAX_QUOTE_AGE)?,
+            market_until.checked_add(MAX_MARKET_AGE)?,
+        ))
+    }
+
     pub fn usable_price(
         &self,
         currency: Currency,
@@ -69,6 +82,8 @@ impl Btcb2Quote {
                 || !source.price.is_finite()
                 || source.price <= 0.0
                 || !timestamp_fresh(source.at, now)
+                || !market_timestamp_fresh(source.market_at, now)
+                || source.at > source.market_at
         }) || self.updated_at
             != self
                 .sources
@@ -155,11 +170,13 @@ mod tests {
                     name: "nonkyc".into(),
                     price: 100.0,
                     at: 1000,
+                    market_at: 1001,
                 },
                 PriceObservation {
                     name: "neoxa".into(),
                     price: 104.0,
                     at: 1001,
+                    market_at: 1001,
                 },
             ],
         }
@@ -171,10 +188,11 @@ mod tests {
             quote().usable_price(Currency::USD, 1300).unwrap().value,
             102.0
         );
-        assert!(quote().usable_price(Currency::USD, 1301).is_err());
+        assert!(quote().usable_price(Currency::USD, 1301).is_ok());
+        assert!(quote().usable_price(Currency::USD, 1302).is_err());
         assert!(quote().usable_price(Currency::EUR, 1001).is_err());
         assert!(quote().usable_price(Currency::USD, 999).is_err());
-        let variants: [fn(&mut Btcb2Quote); 13] = [
+        let variants: [fn(&mut Btcb2Quote); 15] = [
             |q| q.stale = true,
             |q| q.median = false,
             |q| q.price = 100.0,
@@ -187,6 +205,8 @@ mod tests {
             |q| q.sources[0].name = "neoxa".into(),
             |q| q.sources[0].at = 0,
             |q| q.sources[0].at = 1002,
+            |q| q.sources[0].market_at = 0,
+            |q| q.sources[0].market_at = 999,
             |q| q.sources[0].price = -1.0,
             |q| q.updated_at = 1001,
             |q| {
@@ -212,29 +232,52 @@ mod tests {
             q.price = q.sources[0].price;
             q.updated_at = q.sources[0].at;
             assert_eq!(
-                q.usable_price(Currency::USD, q.updated_at).unwrap().value,
+                q.usable_price(Currency::USD, q.updated_at + 1)
+                    .unwrap()
+                    .value,
                 q.price
             );
 
             let mut invalid = q.clone();
             invalid.price += 1.0;
-            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            assert!(invalid
+                .usable_price(Currency::USD, q.updated_at + 1)
+                .is_err());
             let mut invalid = q.clone();
-            invalid.sources[0].at = q.updated_at - 301;
-            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            invalid.sources[0].market_at = q.updated_at;
+            assert!(invalid
+                .usable_price(Currency::USD, q.updated_at + 301)
+                .is_err());
             let mut invalid = q.clone();
             invalid.stale = true;
-            assert!(invalid.usable_price(Currency::USD, q.updated_at).is_err());
+            assert!(invalid
+                .usable_price(Currency::USD, q.updated_at + 1)
+                .is_err());
         }
     }
 
     /// Two fresh markets may disagree; the displayed price is their average.
     #[test]
-    fn freshness_limit_is_five_minutes_and_wide_market_quotes_are_averaged() {
-        assert_eq!(MAX_QUOTE_AGE, 300);
+    fn conversion_allows_fifteen_minutes_but_markets_only_five() {
+        assert_eq!(MAX_QUOTE_AGE, 900);
+        assert_eq!(MAX_MARKET_AGE, 300);
         assert!(timestamp_fresh(1000, 1121));
         assert!(timestamp_fresh(1000, 1300));
-        assert!(!timestamp_fresh(1000, 1301));
+        assert!(timestamp_fresh(1000, 1900));
+        assert!(!timestamp_fresh(1000, 1901));
+        assert!(market_timestamp_fresh(1600, 1900));
+        assert!(!market_timestamp_fresh(1600, 1901));
+        let mut older_conversion = quote();
+        for source in &mut older_conversion.sources {
+            source.at = 1000;
+            source.market_at = 1800;
+        }
+        assert!(older_conversion.usable_price(Currency::USD, 1900).is_ok());
+        assert_eq!(older_conversion.valid_until(), Some(1900));
+        assert!(older_conversion.usable_price(Currency::USD, 1901).is_err());
+        let mut old_market = older_conversion.clone();
+        old_market.sources[0].market_at = 1599;
+        assert!(old_market.usable_price(Currency::USD, 1900).is_err());
         let mut wide = quote();
         wide.sources[0].price = 100.0;
         wide.sources[1].price = 200.0;
@@ -250,7 +293,7 @@ mod tests {
                 .query_param("fiat", "EUR").header("authorization", "Bearer synthetic-price-token");
             then.status(200).json_body(json!({"success": true, "error": null, "data": {
                 "price": 102, "fiat": "EUR", "median": true, "stale": false, "updated_at": 1000,
-                "sources": [{"name":"nonkyc", "price":100, "at":1000}, {"name":"neoxa", "price":104, "at":1000}]
+                "sources": [{"name":"nonkyc", "price":100, "at":1000, "market_at":1000}, {"name":"neoxa", "price":104, "at":1000, "market_at":1000}]
             }}));
         });
         let mut client = CoincubeClient::for_test(server.base_url());
