@@ -1,7 +1,7 @@
-"""Exercise retired Claim refusal and paired funding on disposable nodes.
+"""Exercise Claim and Split paired funding on disposable nodes.
 
-The test driver runs the real Claim deposit and paired signing transitions,
-but does not render the UI or use physical hardware signers.
+The test drivers run the real deposit and paired signing transitions, but do
+not render the UI or use physical hardware signers.
 """
 import json
 import os
@@ -580,6 +580,7 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-split-wizard-", dir=os.environ["TEST_DIR"]))
     child = Child(tool, tmp_path / "gui-home", driver="split_gui_regtest_driver")
     harness = bridge = None
+    first_transcript = []
     try:
         descriptor = child.receive()
         assert descriptor["event"] == "descriptor"
@@ -593,12 +594,15 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
             r"xpub[1-9A-HJ-NP-Za-km-z]+", testnet_public_key,
             descriptor["descriptor"].split("#")[0],
         )
-        harness = TwoChainRegtest(str(tmp_path / "nodes"), public_descriptor=public_descriptor)
+        harness = TwoChainRegtest(
+            str(tmp_path / "nodes"), public_descriptor=public_descriptor,
+            start_daemons=False,
+        )
         harness.setup()
         bridge = Bridge(harness)
         root = tmp_path / "gui"
         root.mkdir()
-        first = child.send({
+        initial = {
             "root": str(root), "bridge": bridge.url,
             "ancestry_first_fork_height": harness.activation_height,
             "ancestry_historical_limit": max(
@@ -606,7 +610,8 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
             ) + 256,
             "ancestry_shared_history_height": harness.activation_height - 1,
             "ancestry_shared_history_hash": harness.fork_parent_hash,
-        }, timeout=180)
+        }
+        first = child.send(initial, timeout=180)
         assert first["event"] == "split-deposit-addresses", first
         assert first["bitcoin"].startswith("bc1q")
         assert first["btcb2"].startswith("bc1q")
@@ -646,9 +651,28 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         assert recorded["bitcoin_unattempted"]
         assert not bridge.submissions and not bridge.errors
         assert child.proc.wait(timeout=10) == 0
+        first_transcript = child.transcript[:]
+        child.close()
+        child = Child(tool, tmp_path / "reopen-home", driver="split_gui_regtest_driver")
+        assert child.receive() == descriptor
+        reopened = child.send({
+            **initial, "resume": True,
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert reopened["event"] == "split-signed-pair-reopened", reopened
+        assert reopened["bitcoin_unattempted"] and not bridge.submissions
+        for own, other, raw_name in (
+            (harness.legacy, harness.blake2b, "bitcoin_raw"),
+            (harness.blake2b, harness.legacy, "btcb2_raw"),
+        ):
+            raw = reopened[raw_name]
+            assert own.rpc.testmempoolaccept([raw])[0]["allowed"], raw_name
+            assert not other.rpc.testmempoolaccept([raw])[0]["allowed"], raw_name
+        assert child.proc.wait(timeout=10) == 0
     finally:
         child.close()
-        (tmp_path / "split-log").write_text("".join(child.transcript))
+        (tmp_path / "split-log").write_text("".join(first_transcript + child.transcript))
         try:
             if bridge:
                 bridge.close()

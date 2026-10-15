@@ -7,7 +7,7 @@ use crate::{
     services::{
         claim_workflow::SplitTargetBinding,
         foreign_scan::{BranchRange, ScanPlan},
-        foreign_split_inventory,
+        foreign_split_inventory, split_source,
     },
 };
 use coincube_core::miniscript::bitcoin::Psbt;
@@ -104,8 +104,67 @@ async fn split_gui_regtest_driver() {
             .unwrap(),
     );
     let (_sender, generation) = watch::channel(1u64);
+    let descriptor =
+        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let wallet_id = WalletId::new(
+        descriptor.to_string().split_once('#').unwrap().1.to_owned(),
+        Some(1),
+    );
+    let binding = SplitTargetBinding::for_test(wallet_id.clone(), &descriptor, 4);
+    let session = crate::app::state::vault::claim::ConnectSession {
+        client: client.clone(),
+        account: "synthetic-regtest-account".into(),
+    };
+    let connect: Arc<dyn SplitConnect> =
+        Arc::new(step1::ProductionConnect::new(session, generation.clone()).unwrap());
+    if init["resume"].as_bool().unwrap_or(false) {
+        let source = split_source::split_source(&wallet.external, Some(&wallet.internal)).unwrap();
+        let digest = source.digest();
+        let mut panel = SplitPanel::resume(
+            TARGET.into(),
+            root.join("split"),
+            digest,
+            step1::journal_directory(&root.join("split"), digest),
+        );
+        panel.bind_target_vault(wallet_id, descriptor);
+        panel.set_connect(Some(connect.clone()));
+        let task = panel.begin();
+        drive_panel(&mut panel, task, false).await;
+        assert!(crate::services::claim_ancestry_gate::authorization().is_none());
+        let denied = panel.update(SplitMessage::ReviewPairedBitcoin);
+        drive_panel(&mut panel, denied, false).await;
+        assert_eq!(panel.stage(), &Stage::PairedRecovery);
+        let recovered = panel.paired_recovery().expect("reopened signed Split pair");
+        assert!(recovered.bitcoin_unattempted);
+        assert_eq!(
+            recovered.bitcoin_txid.unwrap().to_string(),
+            init["bitcoin_txid"].as_str().unwrap()
+        );
+        assert_eq!(
+            recovered.fork_txid.unwrap().to_string(),
+            init["btcb2_txid"].as_str().unwrap()
+        );
+        let identity = crate::services::claim_workflow::split_identity(TARGET.into(), digest);
+        let controller = Controller::reopen_settling(
+            &step1::journal_directory(&root.join("split"), digest),
+            &identity,
+            connect.context(),
+        )
+        .await
+        .unwrap();
+        let pair = controller.recorded_signed_ancestry_pair().unwrap();
+        emit(json!({
+            "event":"split-signed-pair-reopened",
+            "bitcoin_unattempted":recovered.bitcoin_unattempted,
+            "bitcoin_status":recovered.bitcoin_status,
+            "btcb2_status":recovered.fork_status,
+            "bitcoin_raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.bitcoin()),
+            "btcb2_raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.fork()),
+        }));
+        return;
+    }
     let scanned =
-        foreign_split_inventory::scan(client.clone(), source_plan(&wallet), 1, generation.clone())
+        foreign_split_inventory::scan(client.clone(), source_plan(&wallet), 1, generation)
             .await
             .expect("initial live two-chain source scan");
     let intent = SplitIntent::new(
@@ -118,19 +177,6 @@ async fn split_gui_regtest_driver() {
         Some(wallet.internal.clone()),
     )
     .expect("current Split intent");
-    let descriptor =
-        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
-    let wallet_id = WalletId::new(
-        descriptor.to_string().split_once('#').unwrap().1.to_owned(),
-        Some(1),
-    );
-    let binding = SplitTargetBinding::for_test(wallet_id.clone(), &descriptor, 4);
-    let session = crate::app::state::vault::claim::ConnectSession {
-        client,
-        account: "synthetic-regtest-account".into(),
-    };
-    let connect: Arc<dyn SplitConnect> =
-        Arc::new(step1::ProductionConnect::new(session, generation).unwrap());
     let mut panel = SplitPanel::start(TARGET.into(), root.join("split"), intent);
     panel.bind_funding_target(binding);
     panel.bind_target_vault(wallet_id, descriptor);
@@ -158,6 +204,10 @@ async fn split_gui_regtest_driver() {
     let verified = panel
         .funding_progress()
         .is_some_and(|progress| progress.both_verified && progress.review.is_some());
+    assert!(crate::services::claim_ancestry_gate::authorization().is_none());
+    let closed = panel.update(SplitMessage::BeginPairedSigning);
+    drive_panel(&mut panel, closed, false).await;
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
     emit(json!({
         "event":"split-deposits-checked",
         "verified":verified,
@@ -174,6 +224,22 @@ async fn split_gui_regtest_driver() {
     drive_panel(&mut panel, task, false).await;
     assert_eq!(panel.stage(), &Stage::PairedSign, "{:?}", panel.notice());
     let (bitcoin, fork, _, _) = panel.paired_signing_view().unwrap();
+    for psbt in [bitcoin.psbt(), fork.psbt()] {
+        assert_eq!(
+            psbt.unsigned_tx.output.len(),
+            1,
+            "ordinary one-output spend"
+        );
+        assert!(!psbt.unsigned_tx.output[0].script_pubkey.is_op_return());
+    }
+    assert_eq!(
+        bitcoin.psbt().unsigned_tx.input.len(),
+        bitcoin.claimed_prevouts().len() + 1
+    );
+    assert_eq!(
+        fork.psbt().unsigned_tx.input.len(),
+        fork.claimed_prevouts().len() + 1
+    );
     let bitcoin_signed = sign(bitcoin.psbt(), &wallet.signers);
     let fork_signed = sign(fork.psbt(), &wallet.signers);
     for (chain, name, signed) in [
