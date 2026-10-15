@@ -659,12 +659,34 @@ async fn claim_gui_regtest_driver() {
             "status":panel.funding_status,
             "error":panel.funding_error,
         }));
+        assert_eq!(read(&mut input)["action"], "sign_pair_stale");
+        crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::SignPair)),
+        );
+        drive(&mut panel, &dyn_daemon, &cache, task).await;
+        assert!(matches!(panel.stage, Stage::FundingDeposits(_)));
+        assert!(panel.funding_error.is_some());
+        emit(json!({
+            "event":"paired-signing-refused-stale",
+            "error":panel.funding_error,
+        }));
+        assert_eq!(read(&mut input)["action"], "deposited");
+        let task = panel.update(
+            Some(dyn_daemon.clone()),
+            &cache,
+            Message::View(view::Message::Claim(view::ClaimMessage::CheckFunding)),
+        );
+        drive(&mut panel, &dyn_daemon, &cache, task).await;
+        assert!(panel.funding_review().is_some() && panel.prepared_pair.is_some());
+        emit(json!({"event":"paired-deposits-checked-after-stale"}));
         let command = read(&mut input);
         if command["action"] == "quit" {
             return;
         }
         assert_eq!(command["action"], "sign_pair");
-        crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
         let task = panel.update(
             Some(dyn_daemon.clone()),
             &cache,

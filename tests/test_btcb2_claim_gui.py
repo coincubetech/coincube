@@ -120,6 +120,7 @@ class Bridge:
         self.policy_node = None
         self.withhold_submission_reply = False
         self.stale_outspend = False
+        self.stale_outspend_hits = 0
         self.spent_outspend = None
         self.spent_outspend_hits = 0
         self.errors = []
@@ -200,10 +201,13 @@ class Bridge:
                                 assert stats["address"] == regtest_address(requested_address)
                                 stats["address"] = requested_address
                                 body = json.dumps(stats).encode()
+                            stale = owner.stale_outspend and "/outspend/" in suffix
+                            if stale:
+                                owner.stale_outspend_hits += 1
                             self.reply(
                                 response.status, body,
                                 response.headers.get("Content-Type", "application/json"),
-                                "stale" if owner.stale_outspend and "/outspend/" in suffix else "fresh",
+                                "stale" if stale else "fresh",
                             )
                     except HTTPError as error:
                         self.reply(error.code, error.read(262145))
@@ -510,6 +514,14 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
                               "btcb2": fork_funding}, timeout=180)
         assert checked["event"] == "paired-deposits-checked", checked
         assert checked["verified"] and checked["error"] is None, checked
+        bridge.stale_outspend = True
+        refused = child.send({"action": "sign_pair_stale"}, timeout=180)
+        assert refused["event"] == "paired-signing-refused-stale", refused
+        assert refused["error"] and bridge.stale_outspend_hits > 0, refused
+        assert not bridge.submissions and not bridge.errors
+        bridge.stale_outspend = False
+        checked = child.send({"action": "deposited"}, timeout=180)
+        assert checked["event"] == "paired-deposits-checked-after-stale", checked
         ready = child.send({"action": "sign_pair"}, timeout=180)
         assert ready["event"] == "paired-signing-ready", ready
         for side in ("bitcoin", "btcb2"):
@@ -726,6 +738,14 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
         checked = child.send({"action": "deposited"}, timeout=180)
         assert checked["event"] == "split-deposits-checked-again", checked
         assert checked["verified"] and checked["notice"] is None, checked
+        bridge.stale_outspend = True
+        refused = child.send({"action": "sign_pair_stale"}, timeout=180)
+        assert refused["event"] == "split-signing-refused-stale", refused
+        assert refused["notice"] and bridge.stale_outspend_hits > 0, refused
+        assert not bridge.submissions and not bridge.errors
+        bridge.stale_outspend = False
+        checked = child.send({"action": "deposited"}, timeout=180)
+        assert checked["event"] == "split-deposits-checked-after-stale", checked
         recorded = child.send({"action": "sign_pair"}, timeout=180)
         assert recorded["event"] == "split-signed-pair-recorded", recorded
         assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64

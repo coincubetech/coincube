@@ -313,6 +313,26 @@ async fn split_gui_regtest_driver() {
         "notice":panel.notice(),
     }));
     assert!(verified, "live Split funding proof did not recover");
+    assert_eq!(read(&mut input)["action"], "sign_pair_stale");
+    let task = panel.update(SplitMessage::BeginPairedSigning);
+    drive_panel(&mut panel, task, false).await;
+    assert_eq!(panel.stage(), &Stage::FundingDeposits);
+    assert!(panel.paired_signing_view().is_none());
+    emit(json!({
+        "event":"split-signing-refused-stale",
+        "notice":panel.notice(),
+    }));
+    assert_eq!(read(&mut input)["action"], "deposited");
+    let task = panel.update(SplitMessage::CheckDeposits);
+    drive_panel(&mut panel, task, true).await;
+    assert!(
+        panel
+            .funding_progress()
+            .is_some_and(|progress| progress.both_verified && progress.review.is_some()),
+        "live Split funding proof did not recover after a stale read: {:?}",
+        panel.notice()
+    );
+    emit(json!({"event":"split-deposits-checked-after-stale"}));
     assert_eq!(read(&mut input)["action"], "sign_pair");
     let task = panel.update(SplitMessage::BeginPairedSigning);
     drive_panel(&mut panel, task, false).await;
