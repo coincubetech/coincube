@@ -799,9 +799,10 @@ def test_split_observation_reorg_after_step2(tmp_path, record_property):
             == acknowledged["inclusion_history"]
         )
 
-        # Nothing was sent after step 1: one Connect submission, no BTCB2
-        # POST, step 2 never on Bitcoin.
-        assert split.bridge.posts.count(("mainnet", "tx")) == 1
+        # The retired Connect route never submitted the historical step 1.
+        # Its exact recorded bytes were injected into Bitcoin above solely
+        # to exercise recovery, and step 2 was sent only to BTCB2.
+        assert split.bridge.posts.count(("mainnet", "tx")) == 0
         assert all(network == "mainnet" for network, _ in split.bridge.posts)
         assert step2_txid not in a.rpc.getrawmempool()
         assert len(complete["journal"]["bitcoin_attempts"]) == 1
