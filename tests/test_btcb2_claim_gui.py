@@ -61,13 +61,15 @@ def regtest_address(mainnet):
 
 
 class Child:
-    def __init__(self, tool, home, multisig=False):
+    def __init__(self, tool, home, multisig=False, driver="claim_gui_regtest_driver"):
         home.mkdir()
         self.home = home
+        self.marker = "SPLIT_GUI_JSON:" if driver == "split_gui_regtest_driver" else "CLAIM_GUI_JSON:"
         self.proc = subprocess.Popen(
-            [tool, "claim_gui_regtest_driver", "--ignored", "--nocapture", "--test-threads=1"],
+            [tool, driver, "--ignored", "--nocapture", "--test-threads=1"],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, env={**os.environ, "CLAIM_GUI_REGTEST_CHILD": "1",
+                            "SPLIT_GUI_REGTEST_CHILD": "1" if driver == "split_gui_regtest_driver" else "0",
                             "CLAIM_GUI_REGTEST_MULTISIG": "1" if multisig else "0",
                             "HOME": str(home), "XDG_CONFIG_HOME": str(home / ".config"),
                             "XDG_DATA_HOME": str(home / ".local/share"),
@@ -88,9 +90,8 @@ class Child:
             line = self.lines.get(timeout=max(0.01, deadline - time.monotonic()))
             assert line is not None, "GUI child exited:\n" + "".join(self.transcript)
             self.transcript.append(line)
-            marker = "CLAIM_GUI_JSON:"
-            if marker in line:
-                return json.loads(line.split(marker, 1)[1])
+            if self.marker in line:
+                return json.loads(line.split(self.marker, 1)[1])
             assert time.monotonic() < deadline, "GUI child timeout"
 
     def send(self, value, timeout=45):
@@ -557,6 +558,97 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
     finally:
         child.close()
         (tmp_path / "log").write_text("".join(first_transcript + child.transcript))
+        try:
+            if bridge:
+                bridge.close()
+        finally:
+            if harness:
+                harness.cleanup()
+
+
+def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
+    """Drive Split's production Connect adapter and panel against two nodes."""
+    tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
+    missing = missing_binaries()
+    if not tool or not os.access(tool, os.X_OK) or missing:
+        message = "Build GUI lib tests with regtest-harness and set CLAIM_GUI_REGTEST_TEST_PATH plus pinned node/indexer paths"
+        if os.getenv("BTCB2_HARNESS_REQUIRED") == "1":
+            pytest.fail(message)
+        pytest.skip(message)
+    if os.getenv("TEST_DIR"):
+        Path(os.environ["TEST_DIR"]).mkdir(parents=True, exist_ok=True)
+        tmp_path = Path(tempfile.mkdtemp(prefix="btcb2-split-wizard-", dir=os.environ["TEST_DIR"]))
+    child = Child(tool, tmp_path / "gui-home", driver="split_gui_regtest_driver")
+    harness = bridge = None
+    try:
+        descriptor = child.receive()
+        assert descriptor["event"] == "descriptor"
+
+        def testnet_public_key(match):
+            payload = base58.b58decode_check(match.group())
+            assert len(payload) == 78 and payload[:4] == bytes.fromhex("0488b21e")
+            return base58.b58encode_check(bytes.fromhex("043587cf") + payload[4:]).decode()
+
+        public_descriptor = re.sub(
+            r"xpub[1-9A-HJ-NP-Za-km-z]+", testnet_public_key,
+            descriptor["descriptor"].split("#")[0],
+        )
+        harness = TwoChainRegtest(str(tmp_path / "nodes"), public_descriptor=public_descriptor)
+        harness.setup()
+        bridge = Bridge(harness)
+        root = tmp_path / "gui"
+        root.mkdir()
+        first = child.send({
+            "root": str(root), "bridge": bridge.url,
+            "ancestry_first_fork_height": harness.activation_height,
+            "ancestry_historical_limit": max(
+                harness.legacy.rpc.getblockcount(), harness.blake2b.rpc.getblockcount()
+            ) + 256,
+            "ancestry_shared_history_height": harness.activation_height - 1,
+            "ancestry_shared_history_hash": harness.fork_parent_hash,
+        }, timeout=180)
+        assert first["event"] == "split-deposit-addresses", first
+        assert first["bitcoin"].startswith("bc1q")
+        assert first["btcb2"].startswith("bc1q")
+        assert first["bitcoin"] != first["btcb2"]
+        assert first["bitcoin_minimum"] > 0 and first["btcb2_minimum"] > 0
+
+        for node, address in (
+            (harness.legacy, first["bitcoin"]),
+            (harness.blake2b, first["btcb2"]),
+        ):
+            block = node.rpc.generatetoaddress(1, regtest_address(address))[0]
+            node.generate_block(99)
+            assert node.rpc.getblockcount() >= node.rpc.getblockheader(block)["height"] + 99
+        for node, indexer in (
+            (harness.legacy, harness.electrs_legacy),
+            (harness.blake2b, harness.electrs_blake2b),
+        ):
+            tip = node.rpc.getbestblockhash()
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
+                try:
+                    with urlopen(indexer.url + "/blocks/tip/hash", timeout=3) as response:
+                        if response.read().decode() == tip:
+                            break
+                except Exception:
+                    pass
+                time.sleep(0.25)
+            else:
+                pytest.fail(f"{indexer.url} did not index {tip}")
+
+        checked = child.send({"action": "deposited"}, timeout=180)
+        assert checked["event"] == "split-deposits-checked", checked
+        assert checked["verified"] and checked["notice"] is None, checked
+        recorded = child.send({"action": "sign_pair"}, timeout=180)
+        assert recorded["event"] == "split-signed-pair-recorded", recorded
+        assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64
+        assert recorded["bitcoin_unattempted"]
+        assert not bridge.submissions and not bridge.errors
+        assert child.proc.wait(timeout=10) == 0
+    finally:
+        child.close()
+        (tmp_path / "split-log").write_text("".join(child.transcript))
         try:
             if bridge:
                 bridge.close()

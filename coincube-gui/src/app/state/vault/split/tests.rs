@@ -43,6 +43,9 @@ use std::{
 };
 use step1::{Recovery, ReviewView, SplitConnect};
 
+#[cfg(feature = "regtest-harness")]
+mod live_regtest;
+
 pub(super) const TARGET: &str = "btcb2-target-cube";
 
 pub(super) fn now() -> i64 {
