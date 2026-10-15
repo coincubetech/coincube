@@ -405,6 +405,51 @@ async fn split_gui_regtest_driver() {
     assert!(has_label(&preview_labels, "BTCB2-only"));
     assert!(has_label(&preview_labels, "Before fork · both chains"));
     assert!(!has_label(&preview_labels, "OP_RETURN"));
+    let review = panel.funding_progress().unwrap().review.as_ref().unwrap();
+    for row in review
+        .bitcoin
+        .shared
+        .iter()
+        .chain([&review.bitcoin.funding, &review.fork.funding])
+    {
+        assert!(has_label(&preview_labels, &row.outpoint.to_string()));
+        assert!(has_label(
+            &preview_labels,
+            &format!("{} sats", row.amount.to_sat())
+        ));
+    }
+    let destination = |output: &coincube_core::miniscript::bitcoin::TxOut| {
+        coincube_core::miniscript::bitcoin::Address::from_script(
+            &output.script_pubkey,
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+        )
+        .unwrap()
+        .to_string()
+    };
+    assert!(has_label(
+        &preview_labels,
+        &format!(
+            "Return to this source wallet: {} · {} sats",
+            destination(&review.bitcoin.destination),
+            review.bitcoin.destination.value.to_sat()
+        )
+    ));
+    assert!(has_label(
+        &preview_labels,
+        &format!(
+            "Send to your paired BTCB2 Cube: {} · {} sats",
+            destination(&review.fork.destination),
+            review.fork.destination.value.to_sat()
+        )
+    ));
+    assert!(has_label(
+        &preview_labels,
+        &format!("Fee: {} sats", review.bitcoin.fee.to_sat())
+    ));
+    assert!(has_label(
+        &preview_labels,
+        &format!("Fee: {} sats", review.fork.fee.to_sat())
+    ));
     assert_eq!(read(&mut input)["action"], "sign_pair_spent");
     crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
     let task = panel.update(SplitMessage::BeginPairedSigning);
