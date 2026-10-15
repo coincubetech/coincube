@@ -681,6 +681,7 @@ async fn claim_gui_regtest_driver() {
         );
         drive(&mut panel, &dyn_daemon, &cache, task).await;
         assert!(panel.funding_review().is_some() && panel.prepared_pair.is_some());
+        assert!(panel.funding_error.is_none());
         emit(json!({"event":"paired-deposits-checked-after-stale"}));
         let command = read(&mut input);
         if command["action"] == "quit" {

@@ -1659,6 +1659,7 @@ impl ClaimStep1Panel {
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_checking = true;
         self.funding_status = None;
+        self.funding_error = None;
         self.funding_review = None;
         self.prepared_pair = None;
         Task::perform(

@@ -332,6 +332,7 @@ async fn split_gui_regtest_driver() {
         "live Split funding proof did not recover after a stale read: {:?}",
         panel.notice()
     );
+    assert!(panel.notice().is_none());
     emit(json!({"event":"split-deposits-checked-after-stale"}));
     assert_eq!(read(&mut input)["action"], "sign_pair");
     let task = panel.update(SplitMessage::BeginPairedSigning);
