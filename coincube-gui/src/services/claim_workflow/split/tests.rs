@@ -854,23 +854,33 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         ),
         Err(Error::LateObservation)
     ));
-    let moved = temp.0.with_extension("moved");
-    fs::rename(&temp.0, &moved).unwrap();
-    assert!(reopened
-        .record_possible_ancestry_bitcoin_attempt(
-            &context(),
-            &initial_proof,
-            &preflight,
-            freshness,
-            100
-        )
-        .is_err());
-    assert!(reopened
-        .recorded_signed_ancestry_pair()
-        .unwrap()
-        .possible_attempt(ChainId::Bitcoin)
-        .is_none());
-    fs::rename(moved, &temp.0).unwrap();
+    #[cfg(unix)]
+    {
+        // Unix permits moving an open directory. The next journal write must
+        // fail without recording an attempt at the original path.
+        let moved = temp.0.with_extension("moved");
+        fs::rename(&temp.0, &moved).unwrap();
+        assert!(reopened
+            .record_possible_ancestry_bitcoin_attempt(
+                &context(),
+                &initial_proof,
+                &preflight,
+                freshness,
+                100
+            )
+            .is_err());
+        assert!(reopened
+            .recorded_signed_ancestry_pair()
+            .unwrap()
+            .possible_attempt(ChainId::Bitcoin)
+            .is_none());
+        fs::rename(moved, &temp.0).unwrap();
+    }
+    #[cfg(windows)]
+    assert!(
+        fs::rename(&temp.0, temp.0.with_extension("moved")).is_err(),
+        "the pinned Windows journal directory cannot be moved while open"
+    );
     drop(reopened);
     let mut reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
     assert!(matches!(

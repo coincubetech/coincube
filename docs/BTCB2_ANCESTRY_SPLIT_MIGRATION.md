@@ -814,7 +814,10 @@ against the deployed node and indexer builds.
   funding output, asserts the exact outpoint was read, and reopens a signed
   pair in a new panel process without restoring submission authority. The
   test acceptance gate opens only inside the disposable test-binary child; the
-  production gate remains closed. This pinned test still needs CI validation.
+  production gate remains closed. The pinned two-chain CI run passed all 105
+  tests on implementation commit `113ea1e0`, including this Claim wizard
+  path, signed-pair restart, spent-input refusal and same-database indexer
+  recovery after deep reorg.
   The rendered UI, paired Split GUI signing, coordinator restart and physical
   device round trips remain outstanding.
 - Keep the production gate closed until these checks and an independent review
