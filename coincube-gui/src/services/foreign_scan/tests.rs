@@ -37,7 +37,6 @@ fn plan(end: u32) -> ScanPlan {
     }
 }
 struct Fake {
-    stats_calls: AtomicUsize,
     used_first: bool,
     changed: bool,
     tips: AtomicUsize,
@@ -47,7 +46,6 @@ struct Fake {
 impl Fake {
     fn empty() -> Self {
         Self {
-            stats_calls: AtomicUsize::new(0),
             used_first: false,
             changed: false,
             tips: AtomicUsize::new(0),
@@ -70,11 +68,21 @@ impl Source for Fake {
     async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
         Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
     }
-    async fn stats(&self, _: ChainId, _: &str) -> Result<Stats, ScanError> {
-        let n = self.stats_calls.fetch_add(1, Ordering::SeqCst);
+    async fn stats(&self, _: ChainId, address: &str) -> Result<Stats, ScanError> {
+        let first = bitcoin::Address::from_script(
+            &ScanDescriptor::parse(Branch::External, &ranged())
+                .unwrap()
+                .script(0)
+                .unwrap(),
+            bitcoin::Network::Bitcoin,
+        )
+        .unwrap()
+        .to_string();
         Ok(Stats {
             chain_stats: Count {
-                tx_count: u64::from((self.used_first && n < 2) || self.previous.is_some()),
+                tx_count: u64::from(
+                    (self.used_first && address == first) || self.previous.is_some(),
+                ),
             },
             mempool_stats: Count { tx_count: 0 },
         })
@@ -117,6 +125,69 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
         collect(&source, &plan(4), 7).await,
         Err(ScanError::Changed)
     ));
+}
+
+struct OverlappingReads {
+    active: AtomicUsize,
+    peak: AtomicUsize,
+    stats: AtomicUsize,
+    utxos: AtomicUsize,
+}
+
+impl OverlappingReads {
+    async fn wait(&self) {
+        let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+        self.peak.fetch_max(active, Ordering::SeqCst);
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        self.active.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+#[async_trait]
+impl Source for OverlappingReads {
+    async fn tip(&self, _: ChainId) -> Result<BlockHash, ScanError> {
+        Ok(BlockHash::from_byte_array([1; 32]))
+    }
+    async fn tip_height(&self, _: ChainId, _: BlockHash) -> Result<u32, ScanError> {
+        Ok(800_000)
+    }
+    async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
+        Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
+    }
+    async fn stats(&self, _: ChainId, _: &str) -> Result<Stats, ScanError> {
+        self.stats.fetch_add(1, Ordering::SeqCst);
+        self.wait().await;
+        Ok(Stats {
+            chain_stats: Count { tx_count: 0 },
+            mempool_stats: Count { tx_count: 0 },
+        })
+    }
+    async fn utxos(&self, _: ChainId, _: &str) -> Result<Vec<Utxo>, ScanError> {
+        self.utxos.fetch_add(1, Ordering::SeqCst);
+        self.wait().await;
+        Ok(Vec::new())
+    }
+    async fn transaction(&self, _: ChainId, _: Txid) -> Result<Transaction, ScanError> {
+        panic!("an empty address must not fetch a transaction")
+    }
+}
+
+#[tokio::test]
+async fn address_window_overlaps_reads_without_exceeding_gap_or_request_bound() {
+    let source = OverlappingReads {
+        active: AtomicUsize::new(0),
+        peak: AtomicUsize::new(0),
+        stats: AtomicUsize::new(0),
+        utxos: AtomicUsize::new(0),
+    };
+    let mut plan = plan(20);
+    plan.gap = 8;
+    let report = collect(&source, &plan, 7).await.unwrap();
+    assert_eq!(report.addresses_scanned(), 8);
+    assert_eq!(source.stats.load(Ordering::SeqCst), 16);
+    assert_eq!(source.utxos.load(Ordering::SeqCst), 16);
+    assert!(source.peak.load(Ordering::SeqCst) > 2);
+    assert!(source.peak.load(Ordering::SeqCst) <= 2 * ADDRESS_BATCH as usize);
 }
 #[test]
 fn descriptor_capabilities_are_scan_only_and_ambiguous_or_secret_paths_refuse() {

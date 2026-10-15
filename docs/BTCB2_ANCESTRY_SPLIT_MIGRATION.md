@@ -790,11 +790,22 @@ Coordinator restart, stale observation and marker spend cases remain.
   The paired funding fixture also asks the live collector to refuse a
   same-value Connect session notification and to resume only through a fresh
   collector before testing a spent marker on either chain.
-  The paired wizard still needs to drive that bridge through both signed PSBTs.
+  The headless paired Claim wizard now reserves separate deposit addresses,
+  mines mature chain-specific funding coins to both addresses, checks both
+  deposits through the actual panel, and imports both software-signed PSBTs
+  through its signer dispatch before durably recording the exact pair. Its
+  acceptance gate opens only inside the disposable test-binary child; the
+  production gate remains closed. This pinned test still needs CI validation.
+  The rendered UI, paired Split GUI signing, coordinator restart and physical
+  device round trips remain outstanding.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for
-  both chain-specific proof collectors under one account session.
+  both chain-specific proof collectors under one account session. Measure the
+  bounded address scan through the production Connect proxy with a realistic
+  Vault history: it repeats fresh reads within batches of at most eight
+  addresses under a 30-second deadline. A passing loopback regtest is not
+  proof that a remote user's deposit check will finish in time.
 
 This is a wallet migration, not just a copy change. A user's existing shared
 coins should remain untouched until both independent marker proofs are ready.
