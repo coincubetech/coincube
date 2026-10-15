@@ -120,7 +120,7 @@ impl HttpObservationSource {
             .map_err(|_| FailureKind::Malformed)?;
         tokio::time::timeout(MAX_COLLECTION_TIME, async {
             let fork_chain = ChainId::BitcoinBlake2b;
-            let before = super::super::super::checked_anchor(
+            let before = super::super::super::checked_ancestry_anchor(
                 self.anchor(fork_chain).await?,
                 fork_chain,
                 policy,
@@ -178,7 +178,7 @@ impl HttpObservationSource {
                     .min(block.observed_at)
                     .min(tip.observed_at);
             }
-            let after = super::super::super::checked_anchor(
+            let after = super::super::super::checked_ancestry_anchor(
                 self.anchor(fork_chain).await?,
                 fork_chain,
                 policy,
@@ -299,6 +299,8 @@ mod tests {
         for case in [
             "valid",
             "fork-valid",
+            "rdts-absent",
+            "fork-rdts-unsupported",
             "fork-wrong-root",
             "upper",
             "bitcoin-history",
@@ -453,7 +455,9 @@ mod tests {
                 "tip_height":tip_height,"tip_median_time_past":10000,
                 "observed_at":source.now() - if matches!(case, "stale" | "root-stale") {120} else {0},
                 "observation":{"tip_height":tip_height,"fork":{"height":FIRST_FORK_HEIGHT - if case == "activation" {1} else {0},"active":true},
-                    "rdts":{"state":"flagday","flagday":{"height":FIRST_FORK_HEIGHT,"expiry_time":20000,"active":true}}}
+                    "rdts":if case == "rdts-absent" {json!({"state":"absent"})}
+                        else if case == "fork-rdts-unsupported" {json!({"state":"unsupported"})}
+                        else {json!({"state":"flagday","flagday":{"height":FIRST_FORK_HEIGHT,"expiry_time":20000,"active":true}})}}
             }}});
             let mut anchor = server.mock(|when, then| {
                 when.method(GET)
@@ -463,7 +467,7 @@ mod tests {
             });
             let policy = Policy {
                 max_observation_age_seconds: if case == "policy" { 0 } else { 60 },
-                expiry_margin_seconds: 600,
+                expiry_margin_seconds: if case == "rdts-absent" { 0 } else { 600 },
             };
             let root_status = fresh_mock(&server, &format!("/api/v1/esplora/bitcoin/mainnet/tx/{}", bitcoin.compute_txid()),
                 json!({"txid":bitcoin.compute_txid(),"status":{"confirmed":true,"block_height":root_height,"block_hash":bitcoin_block}}).to_string());
@@ -530,12 +534,12 @@ mod tests {
                 collect.await
             };
             match case {
-                "valid" | "upper" | "fork-valid" => {
+                "valid" | "upper" | "fork-valid" | "rdts-absent" | "fork-rdts-unsupported" => {
                     let pair = result.unwrap();
                     assert_eq!(pair.selected(), dependency.selected());
                     assert_eq!(
                         pair.root_chain(),
-                        if case == "fork-valid" {
+                        if case.starts_with("fork-") {
                             ChainId::BitcoinBlake2b
                         } else {
                             ChainId::Bitcoin
@@ -549,7 +553,7 @@ mod tests {
                     );
                     assert_eq!(pair.generation(), 4);
                     assert!(pair.observed_at() <= source.now());
-                    if case == "valid" {
+                    if matches!(case, "valid" | "rdts-absent") {
                         // The funding collector requires a fresh current UTXO
                         // read in addition to the already paired coinbase roots.
                         let root_path = claim_ancestry::retained::RetainedPath::new(
@@ -1071,6 +1075,13 @@ mod tests {
                             checked.sweep().observed_at(),
                             checked.sweep().assessment().observations.fork.observed_at
                         );
+                        if case == "rdts-absent" {
+                            assert_eq!(
+                                checked.sweep().assessment().observations.deployment.state,
+                                coincube_core::claim::DeploymentState::RdtsAbsent
+                            );
+                            continue;
+                        }
                         // Change only RDTS metadata after the first proof pass.
                         // Both separate ancestry collections remain valid, but
                         // they must not be combined across different anchors.

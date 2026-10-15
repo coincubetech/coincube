@@ -28,7 +28,6 @@ impl HttpObservationSource {
             || shared_set.len() != shared.len()
             || shared_set.iter().any(OutPoint::is_null)
             || policy.max_observation_age_seconds <= 0
-            || policy.expiry_margin_seconds <= 0
             || bitcoin_candidates.iter().any(OutPoint::is_null)
             || fork_candidates.iter().any(OutPoint::is_null)
             || bitcoin_candidates.iter().collect::<BTreeSet<_>>().len() != bitcoin_candidates.len()
@@ -109,7 +108,6 @@ impl HttpObservationSource {
             return Err(observation(FailureKind::CollectionLimit));
         }
         if policy.max_observation_age_seconds <= 0
-            || policy.expiry_margin_seconds <= 0
             || candidates.iter().any(OutPoint::is_null)
             || candidates.iter().collect::<BTreeSet<_>>().len() != candidates.len()
         {

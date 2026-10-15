@@ -9,6 +9,9 @@ harness passed 106 tests with one intentionally deselected, including the
 paired Claim and Split wizards, signed-pair recovery, staged submissions and
 headless rendering checks of the actual wizard elements. This establishes
 software fixture behavior only. The production signing gate remains closed.
+Connect's active-fork anchor must also accept RDTS-absent and RDTS-unsupported
+nodes for this ancestry flow; the companion API change is
+[`coincube-api` PR #349](https://github.com/coincubetech/coincube-api/pull/349).
 The journal has a Windows backend that pins directory components, requires
 private owner-only NTFS files, and replaces intents with write-through
 semantics; Windows crash and access-control tests remain in platform CI.
@@ -469,9 +472,11 @@ a replayable spend.
    cannot turn the old path back on. Managed Bitcoin node setup and startup no
    longer add the old claim's 100-byte `datacarriersize` relay override;
    operator-specified values in existing configurations still round-trip.
-   Next remove `split_poison` payload building,
-   `Poison::OpReturn` production selection, the remaining RDTS expiry checks
-   that exist only for the 90-byte output, OP_RETURN review details and the transport path for
+   The active-fork Connect anchor and the desktop ancestry and fork-only
+   collectors no longer require RDTS metadata; historical OP_RETURN record
+   interpretation still retains its own RDTS checks. Next remove `split_poison`
+   payload building, `Poison::OpReturn` production selection, OP_RETURN review
+   details and the transport path for
    newly created claims. Migrate or explicitly refuse any persisted,
    unbroadcast OP_RETURN intent; a possibly broadcast old intent must remain
    recoverable and reconcilable by exact txid. No historical journal is

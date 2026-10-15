@@ -138,8 +138,8 @@ pub struct BitcoinObservation {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Policy {
-    /// Operational values selected by the caller, never an expiry substitute.
-    /// Zero and negative values are refused rather than disabling a guard.
+    /// Observation age is always positive. The expiry margin is positive for
+    /// historical OP_RETURN assessment and unused by input ancestry.
     pub max_observation_age_seconds: i64,
     pub expiry_margin_seconds: i64,
 }
@@ -324,7 +324,7 @@ pub fn assess(
         || plan.step1.input.iter().any(|i| i.previous_output.is_null())
         || plan.step1.output.is_empty()
         || policy.max_observation_age_seconds <= 0
-        || policy.expiry_margin_seconds <= 0
+        || (plan.poison != Poison::InputAncestry && policy.expiry_margin_seconds <= 0)
     {
         return Assessment::InvalidPlan;
     }
@@ -726,6 +726,17 @@ mod tests {
         f.bitcoin.location = TransactionLocation::Unconfirmed;
         f.bitcoin.tip.height = 2_000_000;
         assert_eq!(f.evaluate(), Assessment::InputProofUnsupported);
+    }
+
+    #[test]
+    fn input_ancestry_assessment_does_not_require_rdts_margin() {
+        let mut f = Fixture::new();
+        f.plan.poison = Poison::InputAncestry;
+        f.policy.expiry_margin_seconds = 0;
+        f.deployment.state = DeploymentState::RdtsAbsent;
+        assert_eq!(f.evaluate(), Assessment::InputProofUnsupported);
+        f.plan.poison = Poison::OpReturn;
+        assert_eq!(f.evaluate(), Assessment::InvalidPlan);
     }
 
     #[test]

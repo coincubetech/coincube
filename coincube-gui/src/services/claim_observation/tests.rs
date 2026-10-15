@@ -546,6 +546,36 @@ fn malformed_anchor_projection_cannot_invent_a_coherent_view() {
 }
 
 #[tokio::test]
+async fn fork_only_ancestry_anchor_does_not_require_rdts() {
+    for (rdts, expected) in [
+        (RdtsStatus::Absent, DeploymentState::RdtsAbsent),
+        (RdtsStatus::Unsupported, DeploymentState::RdtsUnsupported),
+    ] {
+        let mut fixture = Fixture::new(Fault::None);
+        fixture.anchor.anchor.as_mut().unwrap().observation.rdts = rdts;
+        let view = fork_anchor(&fixture, ChainId::BitcoinBlake2b, policy())
+            .await
+            .unwrap();
+        assert_eq!(view.fork_height, 90);
+        assert_eq!(view.tip.height, 100);
+        assert_eq!(view.deployment, expected);
+    }
+}
+
+#[test]
+fn ancestry_plan_shape_does_not_require_rdts_expiry_margin() {
+    let policy = Policy {
+        expiry_margin_seconds: 0,
+        ..policy()
+    };
+    assert!(validate_plan_shape(&plan(), policy, Duration::from_secs(1)).is_ok());
+    assert_eq!(
+        validate_plan(&plan(), policy, Duration::from_secs(1)),
+        Err(failure(Stage::Plan, FailureKind::InvalidPlan))
+    );
+}
+
+#[tokio::test]
 async fn revocation_drops_an_in_flight_read_and_closed_context_refuses() {
     let f = Fixture::new(Fault::Hang);
     let sender = f.sender.clone();

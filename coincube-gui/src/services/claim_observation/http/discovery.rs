@@ -178,7 +178,7 @@ impl HttpObservationSource {
         policy: Policy,
         root_chain: ChainId,
     ) -> Result<DiscoveredAncestry, DiscoveryError> {
-        if policy.max_observation_age_seconds <= 0 || policy.expiry_margin_seconds <= 0 {
+        if policy.max_observation_age_seconds <= 0 {
             return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
         }
         let dependency = path.reverify().map_err(DiscoveryError::Structural)?;
@@ -231,7 +231,7 @@ impl HttpObservationSource {
         policy: Policy,
         root_chain: ChainId,
     ) -> Result<Option<DiscoveredAncestry>, DiscoveryError> {
-        if policy.max_observation_age_seconds <= 0 || policy.expiry_margin_seconds <= 0 {
+        if policy.max_observation_age_seconds <= 0 {
             return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
         }
         let mut search = Search::new(selected).map_err(DiscoveryError::Structural)?;

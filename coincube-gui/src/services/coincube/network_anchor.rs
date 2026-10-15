@@ -160,7 +160,6 @@ impl NetworkAnchor {
                 .fork
                 .as_ref()
                 .is_some_and(|fork| fork.active && self.tip_height >= fork.height)
-            && matches!(self.observation.rdts, RdtsStatus::Flagday { .. })
     }
 
     fn trusted(
@@ -537,6 +536,33 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn active_fork_anchor_admits_absent_or_unsupported_rdts() {
+        for rdts in [json!({"state":"absent"}), json!({"state":"unsupported"})] {
+            let server = MockServer::start_async().await;
+            let mut response = body(ChainId::BitcoinBlake2b);
+            response["data"]["anchor"]["observation"]["rdts"] = rdts;
+            let mock = server
+                .mock_async(|when, then| {
+                    when.method(GET);
+                    then.status(200).json_body(response);
+                })
+                .await;
+            let status = client(&server)
+                .network_anchor(ChainId::BitcoinBlake2b)
+                .await
+                .unwrap();
+            let anchor = status.anchor.unwrap();
+            assert!(matches!(
+                anchor.observation.rdts,
+                RdtsStatus::Absent | RdtsStatus::Unsupported
+            ));
+            assert!(anchor
+                .trusted(ChainId::BitcoinBlake2b, SystemTime::now())
+                .is_ok());
+            mock.assert_hits_async(1).await;
+        }
+    }
+    #[tokio::test]
     async fn unavailable_states_remain_distinct_and_never_contain_partial_evidence() {
         for state in [
             "not_configured",
@@ -584,7 +610,6 @@ mod tests {
             ("/data/anchor/observation/fork", Value::Null),
             ("/data/anchor/observation/fork/active", json!(false)),
             ("/data/anchor/observation/fork/height", json!(973030)),
-            ("/data/anchor/observation/rdts", json!({"state":"absent"})),
         ];
         for (path, value) in mutations {
             let server = MockServer::start_async().await;

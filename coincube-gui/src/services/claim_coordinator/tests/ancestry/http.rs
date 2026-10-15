@@ -86,7 +86,7 @@ async fn expired_inactive_rdts_does_not_invalidate_positive_ancestry_observation
 }
 
 #[tokio::test]
-async fn malformed_rdts_metadata_still_refuses_ancestry_collection() {
+async fn zero_rdts_expiry_does_not_block_ancestry_collection() {
     ancestry_protocol_case(false, 0).await;
 }
 
@@ -208,16 +208,6 @@ async fn ancestry_protocol_case(rdts_active: bool, expiry_time: i64) {
             policy().collection_budget,
         )
         .await;
-    if expiry_time == 0 {
-        assert!(matches!(
-            collected,
-            Err(claim_observation::Failure {
-                kind: FailureKind::Malformed,
-                ..
-            })
-        ));
-        return;
-    }
     let collected = collected.unwrap();
     let checked_at = source.now();
     let proof_context = |now| crate::services::claim_observation::http::AncestryContext {

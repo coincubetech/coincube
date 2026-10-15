@@ -31,9 +31,7 @@ impl DiscoveredAncestry {
         if context.provider.trim_end_matches('/') != self.provider {
             return Err(FailureKind::Changed);
         }
-        if context.policy.max_observation_age_seconds <= 0
-            || context.policy.expiry_margin_seconds <= 0
-        {
+        if context.policy.max_observation_age_seconds <= 0 {
             return Err(FailureKind::InvalidPlan);
         }
         if !super::super::super::fresh(
