@@ -135,7 +135,10 @@ async fn split_gui_regtest_driver() {
         drive_panel(&mut panel, denied, false).await;
         assert_eq!(panel.stage(), &Stage::PairedRecovery);
         let recovered = panel.paired_recovery().expect("reopened signed Split pair");
-        assert!(recovered.bitcoin_unattempted);
+        assert_eq!(
+            recovered.bitcoin_unattempted,
+            !init["broadcast_btcb2"].as_bool().unwrap_or(false)
+        );
         assert_eq!(
             recovered.bitcoin_txid.unwrap().to_string(),
             init["bitcoin_txid"].as_str().unwrap()
@@ -144,6 +147,8 @@ async fn split_gui_regtest_driver() {
             recovered.fork_txid.unwrap().to_string(),
             init["btcb2_txid"].as_str().unwrap()
         );
+        let recovered_bitcoin_txid = recovered.bitcoin_txid;
+        let recovered_fork_txid = recovered.fork_txid;
         let identity = crate::services::claim_workflow::split_identity(TARGET.into(), digest);
         let controller = Controller::reopen_settling(
             &step1::journal_directory(&root.join("split"), digest),
@@ -153,13 +158,81 @@ async fn split_gui_regtest_driver() {
         .await
         .unwrap();
         let pair = controller.recorded_signed_ancestry_pair().unwrap();
+        let bitcoin_raw =
+            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.bitcoin());
+        let btcb2_raw =
+            coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.fork());
+        drop(controller);
+        if init["broadcast_bitcoin"].as_bool().unwrap_or(false) {
+            crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+            let task = panel.update(SplitMessage::ReviewPairedBitcoin);
+            drive_panel(&mut panel, task, false).await;
+            assert_eq!(
+                panel.stage(),
+                &Stage::PairedBitcoinReview,
+                "{:?}",
+                panel.notice()
+            );
+            assert!(panel.paired_bitcoin_review().is_some());
+            let task = panel.update(SplitMessage::ConfirmPairedBitcoin);
+            drive_panel(&mut panel, task, false).await;
+            let recorded = Controller::reopen_settling(
+                &step1::journal_directory(&root.join("split"), digest),
+                &identity,
+                connect.context(),
+            )
+            .await
+            .unwrap();
+            let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
+            assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
+            assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_none());
+            emit(json!({
+                "event":"split-bitcoin-broadcast-recorded",
+                "bitcoin_txid":recovered_bitcoin_txid,
+                "stage":format!("{:?}",panel.stage()),
+                "notice":panel.notice(),
+            }));
+            return;
+        }
+        if init["broadcast_btcb2"].as_bool().unwrap_or(false) {
+            assert!(recovered.fork_ready_for_review, "{:?}", recovered);
+            crate::services::claim_ancestry_gate::enable_disposable_regtest_acceptance();
+            let task = panel.update(SplitMessage::ReviewPairedFork);
+            drive_panel(&mut panel, task, false).await;
+            assert_eq!(
+                panel.stage(),
+                &Stage::PairedForkReview,
+                "{:?}",
+                panel.notice()
+            );
+            assert!(panel.paired_fork_review().is_some());
+            let task = panel.update(SplitMessage::ConfirmPairedFork);
+            drive_panel(&mut panel, task, false).await;
+            let recorded = Controller::reopen_settling(
+                &step1::journal_directory(&root.join("split"), digest),
+                &identity,
+                connect.context(),
+            )
+            .await
+            .unwrap();
+            let attempt = recorded.recorded_signed_ancestry_pair().unwrap();
+            assert!(attempt.possible_attempt(ChainId::Bitcoin).is_some());
+            assert!(attempt.possible_attempt(ChainId::BitcoinBlake2b).is_some());
+            emit(json!({
+                "event":"split-btcb2-broadcast-recorded",
+                "btcb2_txid":recovered_fork_txid,
+                "stage":format!("{:?}",panel.stage()),
+                "notice":panel.notice(),
+            }));
+            return;
+        }
         emit(json!({
             "event":"split-signed-pair-reopened",
             "bitcoin_unattempted":recovered.bitcoin_unattempted,
             "bitcoin_status":recovered.bitcoin_status,
             "btcb2_status":recovered.fork_status,
-            "bitcoin_raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.bitcoin()),
-            "btcb2_raw":coincube_core::miniscript::bitcoin::consensus::encode::serialize_hex(pair.fork()),
+            "bitcoin_raw":bitcoin_raw,
+            "btcb2_raw":btcb2_raw,
         }));
         return;
     }

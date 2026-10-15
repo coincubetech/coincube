@@ -567,7 +567,7 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
 
 
 def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
-    """Refuse a newly spent marker, then sign and reopen Split on two nodes."""
+    """Refuse a spent marker, then sign and broadcast Split on both nodes."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -688,6 +688,53 @@ def test_paired_split_wizard_records_ordinary_signed_pair(tmp_path):
             raw = reopened[raw_name]
             assert own.rpc.testmempoolaccept([raw])[0]["allowed"], raw_name
             assert not other.rpc.testmempoolaccept([raw])[0]["allowed"], raw_name
+        assert child.proc.wait(timeout=10) == 0
+        first_transcript.extend(child.transcript)
+        child.close()
+        child = Child(tool, tmp_path / "bitcoin-broadcast-home", driver="split_gui_regtest_driver")
+        assert child.receive() == descriptor
+        first_broadcast = child.send({
+            **initial, "resume": True, "broadcast_bitcoin": True,
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert first_broadcast["event"] == "split-bitcoin-broadcast-recorded", first_broadcast
+        assert first_broadcast["bitcoin_txid"] == recorded["bitcoin_txid"]
+        assert len(bridge.submissions) == 1 and not bridge.errors
+        assert bridge.submissions[0] == {
+            "network": "mainnet", "raw": reopened["bitcoin_raw"],
+            "txid": recorded["bitcoin_txid"],
+        }
+        assert child.proc.wait(timeout=10) == 0
+        first_transcript.extend(child.transcript)
+        child.close()
+        harness.legacy.generate_block(6, wait_for_mempool=recorded["bitcoin_txid"])
+        bitcoin_tip = harness.legacy.rpc.getbestblockhash()
+        deadline = time.monotonic() + 120
+        while time.monotonic() < deadline:
+            try:
+                with urlopen(harness.electrs_legacy.url + "/blocks/tip/hash", timeout=3) as response:
+                    if response.read().decode() == bitcoin_tip:
+                        break
+            except Exception:
+                pass
+            time.sleep(0.25)
+        else:
+            pytest.fail(f"Bitcoin indexer did not reach {bitcoin_tip}")
+        child = Child(tool, tmp_path / "btcb2-broadcast-home", driver="split_gui_regtest_driver")
+        assert child.receive() == descriptor
+        second_broadcast = child.send({
+            **initial, "resume": True, "broadcast_btcb2": True,
+            "bitcoin_txid": recorded["bitcoin_txid"],
+            "btcb2_txid": recorded["btcb2_txid"],
+        }, timeout=180)
+        assert second_broadcast["event"] == "split-btcb2-broadcast-recorded", second_broadcast
+        assert second_broadcast["btcb2_txid"] == recorded["btcb2_txid"]
+        assert len(bridge.submissions) == 2 and not bridge.errors
+        assert bridge.submissions[1] == {
+            "network": "bitcoin-blake2b", "raw": reopened["btcb2_raw"],
+            "txid": recorded["btcb2_txid"],
+        }
         assert child.proc.wait(timeout=10) == 0
     finally:
         child.close()
