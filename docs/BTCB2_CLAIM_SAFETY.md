@@ -53,11 +53,14 @@ An unavailable, changed or malformed read refuses. The ancestry collector
 does not use the legacy RDTS expiry rule; it derives exclusivity from the
 verified input ancestry and current chain state.
 
-Still outstanding: Connect wallet chain identity and atomic change reservation,
-the paired signer/submission coordinator, both production signing screens,
-durable recovery UI and complete end-to-end acceptance. The old route stays
+The paired Claim and Split paths now have chain identity checks, retained
+deposit and destination reservations, exact-pair signer requalification,
+paired submission reviews and durable recovery screens. Their production gate
+remains closed pending full paired GUI and hardware-signer acceptance,
+independent review and Connect endpoint verification. The old route stays
 closed for new transactions; historical uncertain records remain
-reconcilable. Testnet4 infrastructure is deferred.
+reconcilable. Testnet4 infrastructure is deferred. See
+`BTCB2_ANCESTRY_SPLIT_MIGRATION.md` for the remaining acceptance work.
 
 ## Source and validation
 

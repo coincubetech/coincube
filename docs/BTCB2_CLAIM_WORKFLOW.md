@@ -73,15 +73,18 @@ matching node-policy tips. After Bitcoin confirms, a different collector
 checks the exact canonical six-deep Bitcoin witness and that the BTCB2 inputs
 remain unspent. Its result must agree with the independently recovered Bitcoin
 confirmation block. Neither result is restored from the journal. The paired
-coordinator must still connect wallet reservations, fresh review, explicit
-approval and the one-use transport gates before production can send.
+Claim and Split coordinators now join wallet reservations, fresh review,
+explicit approval and one-use transport gates. The production gate stays
+closed until the end-to-end and hardware acceptance in
+`BTCB2_ANCESTRY_SPLIT_MIGRATION.md` is complete.
 
 Synthetic temporary-directory fixtures cover public artifact admission, restart,
 uncertain broadcast, reorg/stale/unavailable observations, account/provider and
 controller-ticket isolation, replacement, conflicting writers and write failure.
 Local unit tests exercise the journal and recovery readers; pinned two-chain
-regtest covers the ordinary signed transactions. Production still needs the
-paired coordinator, wallet reservation backend, UI signing and recovery route,
-fresh preflight, and end-to-end create/sign/confirm/restart acceptance. No
-production signer gate or service configuration has been opened. Never delete
-an uncertain broadcast record automatically.
+regtest covers the ordinary signed transactions. The GUI now has paired
+signing, submission review and recovery routes behind the closed production
+gate. It still needs full paired GUI create/sign/confirm/restart acceptance,
+real hardware-signer smoke tests and independent review. No production signer
+gate or service configuration has been opened. Never delete an uncertain
+broadcast record automatically.
