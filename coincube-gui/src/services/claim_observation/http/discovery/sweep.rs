@@ -91,9 +91,7 @@ impl HttpObservationSource {
             ) {
                 return Err(failure(Stage::ForkTransaction, FailureKind::Stale));
             }
-            if *snapshot.generation.borrow() != snapshot.expected
-                || snapshot.generation.has_changed().is_err()
-            {
+            if !session_current(&snapshot.generation, snapshot.expected) {
                 return Err(failure(Stage::Context, FailureKind::Cancelled));
             }
             let mut assessment = last.assessment();

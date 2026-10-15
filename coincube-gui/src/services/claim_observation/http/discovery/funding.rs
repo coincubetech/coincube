@@ -334,10 +334,8 @@ impl CollectedPostBitcoinInputs {
         if context.provider.trim_end_matches('/') != self.bitcoin.ancestry.provider
             || self.bitcoin.ancestry.provider != self.fork.ancestry.provider
             || context.generation != roots.generation()
-            || *self.bitcoin.ancestry.live_generation.borrow() != context.generation
-            || self.bitcoin.ancestry.live_generation.has_changed().is_err()
-            || *self.fork.ancestry.live_generation.borrow() != context.generation
-            || self.fork.ancestry.live_generation.has_changed().is_err()
+            || !session_current(&self.bitcoin.ancestry.live_generation, context.generation)
+            || !session_current(&self.fork.ancestry.live_generation, context.generation)
         {
             return Err(FailureKind::Cancelled);
         }
@@ -1066,10 +1064,8 @@ impl CollectedFundingPair {
         if context.provider.trim_end_matches('/') != self.bitcoin.ancestry.provider
             || self.bitcoin.ancestry.provider != self.fork.ancestry.provider
             || context.generation != a.generation()
-            || *self.bitcoin.ancestry.live_generation.borrow() != context.generation
-            || self.bitcoin.ancestry.live_generation.has_changed().is_err()
-            || *self.fork.ancestry.live_generation.borrow() != context.generation
-            || self.fork.ancestry.live_generation.has_changed().is_err()
+            || !session_current(&self.bitcoin.ancestry.live_generation, context.generation)
+            || !session_current(&self.fork.ancestry.live_generation, context.generation)
         {
             return Err(FailureKind::Cancelled);
         }

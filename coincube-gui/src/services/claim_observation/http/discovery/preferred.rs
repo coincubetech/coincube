@@ -115,7 +115,7 @@ impl HttpObservationSource {
         {
             return Err(observation(FailureKind::InvalidPlan));
         }
-        if *self.generation.borrow() != self.expected || self.generation.has_changed().is_err() {
+        if !session_current(&self.generation, self.expected) {
             return Err(observation(FailureKind::Cancelled));
         }
         let snapshot = self.discovery_snapshot();
@@ -132,9 +132,7 @@ impl HttpObservationSource {
         })
         .await
         .map_err(|_| observation(FailureKind::Deadline))?;
-        if *snapshot.generation.borrow() != snapshot.expected
-            || snapshot.generation.has_changed().is_err()
-        {
+        if !session_current(&snapshot.generation, snapshot.expected) {
             return Err(observation(FailureKind::Cancelled));
         }
         result

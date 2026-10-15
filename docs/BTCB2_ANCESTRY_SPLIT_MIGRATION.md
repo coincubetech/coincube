@@ -75,6 +75,10 @@ a replayable spend.
    for Bitcoin and BTCB2 candidate ancestry plus the shared-input refresh;
    it returns no one-sided result. For foreign Split, scan-derived funding and
    shared coins are rechecked against the source descriptor before the search.
+   The two-chain observation collector and retained funding proof now treat
+   every Connect session notification as revocation, including one that
+   repeats the same numeric generation. Reads from either side cannot be
+   combined across that boundary.
    Selected coins are matched to live paths and confirmation blocks. A saved
    Split deposit reservation now restricts the search to the two exact
    external receive indices shown to the user. The search reloads and compares

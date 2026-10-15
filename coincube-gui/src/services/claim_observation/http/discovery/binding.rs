@@ -24,8 +24,7 @@ impl DiscoveredAncestry {
         context: AncestryContext<'_>,
     ) -> Result<(), FailureKind> {
         if context.generation != self.generation()
-            || *self.live_generation.borrow() != self.generation()
-            || self.live_generation.has_changed().is_err()
+            || !session_current(&self.live_generation, self.generation())
         {
             return Err(FailureKind::Cancelled);
         }

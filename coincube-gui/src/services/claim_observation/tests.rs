@@ -473,6 +473,20 @@ async fn generation_change_and_timeout_cancel_collection_without_retry() {
         failure(Stage::Context, FailureKind::Deadline)
     );
     assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+
+    let f = Fixture::new(Fault::None);
+    let context = f.context();
+    f.sender.send_replace(7);
+    assert_eq!(
+        collect(&f, &plan(), policy(), Duration::from_secs(1), context)
+            .await
+            .unwrap_err(),
+        failure(Stage::Context, FailureKind::Cancelled),
+        "a same-value session refresh must invalidate a collection"
+    );
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
+
+    let f = Fixture::new(Fault::None);
     let context = f.context();
     f.sender.send_replace(8);
     assert_eq!(
@@ -482,7 +496,7 @@ async fn generation_change_and_timeout_cancel_collection_without_retry() {
             .kind,
         FailureKind::Cancelled
     );
-    assert_eq!(f.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(f.calls.load(Ordering::SeqCst), 0);
 }
 
 #[tokio::test]

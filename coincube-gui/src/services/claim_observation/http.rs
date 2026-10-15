@@ -49,10 +49,7 @@ impl ObservationContextGuard {
         if provider.trim_end_matches('/') != self.provider {
             return Err(FailureKind::Changed);
         }
-        if generation != self.expected
-            || *self.generation.borrow() != self.expected
-            || self.generation.has_changed().is_err()
-        {
+        if generation != self.expected || !session_current(&self.generation, self.expected) {
             return Err(FailureKind::Cancelled);
         }
         Ok(())
@@ -138,23 +135,17 @@ impl HttpObservationSource {
         future: impl Future<Output = Result<T, FailureKind>>,
     ) -> Result<T, FailureKind> {
         let mut generation = self.generation.clone();
-        if *generation.borrow() != self.expected || generation.has_changed().is_err() {
+        if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
         }
         let cancelled = async {
-            loop {
-                if generation.changed().await.is_err()
-                    || *generation.borrow_and_update() != self.expected
-                {
-                    break;
-                }
-            }
+            let _ = generation.changed().await;
         };
         let result = tokio::select! { biased;
             _ = cancelled => Err(FailureKind::Cancelled),
             result = tokio::time::timeout(REQUEST_TIMEOUT, future) => result.map_err(|_| FailureKind::Deadline)?,
         };
-        if *generation.borrow() != self.expected || generation.has_changed().is_err() {
+        if !session_current(&generation, self.expected) {
             return Err(FailureKind::Cancelled);
         }
         result
@@ -304,6 +295,36 @@ impl HttpObservationSource {
             stamp,
             &headers,
         )
+    }
+}
+
+#[cfg(test)]
+mod session_tests {
+    use super::*;
+
+    #[test]
+    fn paired_observation_binding_revokes_on_same_value_refresh() {
+        let (sender, generation) = watch::channel(7);
+        let mut client = CoincubeClient::new();
+        client.base_url = "https://api.coincube.io/".into();
+        client.set_token("synthetic-test-token");
+        let source = HttpObservationSource::new(
+            client,
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: 7,
+                generation,
+            },
+        )
+        .unwrap();
+        let provider = source.provider_identity();
+        assert_eq!(source.validate_context(&provider, 7), Ok(()));
+        sender.send(7).unwrap();
+        assert_eq!(
+            source.validate_context(&provider, 7),
+            Err(FailureKind::Cancelled)
+        );
     }
 }
 #[derive(Deserialize)]
@@ -743,7 +764,7 @@ mod tests {
                 }
             }) => reached_server.expect("request must reach the server"),
         }
-        sender.send(5).unwrap();
+        sender.send(4).unwrap();
         let result = tokio::time::timeout(Duration::from_millis(500), request)
             .await
             .expect("revocation must not wait for the delayed response");

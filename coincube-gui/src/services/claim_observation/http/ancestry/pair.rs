@@ -196,8 +196,7 @@ impl HttpObservationSource {
             if !super::super::super::fresh(oldest, self.now(), policy.max_observation_age_seconds) {
                 return Err(FailureKind::Stale);
             }
-            if *self.generation.borrow() != self.expected || self.generation.has_changed().is_err()
-            {
+            if !session_current(&self.generation, self.expected) {
                 return Err(FailureKind::Cancelled);
             }
             // Classify invalidation only after both histories, height mappings,
@@ -304,6 +303,7 @@ mod tests {
             "upper",
             "bitcoin-history",
             "revoked",
+            "same-generation-revoked",
             "history",
             "root",
             "shared",
@@ -438,6 +438,7 @@ mod tests {
                                 | "bitcoin-reorg"
                                 | "root-bitcoin-reorg"
                                 | "revoked"
+                                | "same-generation-revoked"
                                 | "shared-revoked"
                         ) {
                             200
@@ -482,6 +483,7 @@ mod tests {
                     | "bitcoin-reorg"
                     | "root-bitcoin-reorg"
                     | "revoked"
+                    | "same-generation-revoked"
                     | "shared-revoked"
             ) {
                 let disrupt = async {
@@ -492,8 +494,15 @@ mod tests {
                     })
                     .await
                     .expect("fork collection must begin");
-                    if matches!(case, "revoked" | "shared-revoked") {
-                        sender.send_replace(5);
+                    if matches!(
+                        case,
+                        "revoked" | "shared-revoked" | "same-generation-revoked"
+                    ) {
+                        sender.send_replace(if case == "same-generation-revoked" {
+                            4
+                        } else {
+                            5
+                        });
                     } else if matches!(case, "anchor-change" | "root-anchor-change") {
                         anchor.delete_async().await;
                         let mut changed = body.clone();
@@ -1295,7 +1304,7 @@ mod tests {
                 "history" | "bitcoin-history" | "activation" => {
                     assert_eq!(result.unwrap_err(), FailureKind::WrongChain)
                 }
-                "revoked" | "shared-revoked" => {
+                "revoked" | "shared-revoked" | "same-generation-revoked" => {
                     assert_eq!(result.unwrap_err(), FailureKind::Cancelled)
                 }
                 "root" | "fork-wrong-root" => assert!(matches!(

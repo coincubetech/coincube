@@ -1,4 +1,5 @@
-//! Dormant, observation-only Claim prerequisite. No UI caller is installed. A complete assessment is never spend permission.
+//! Fresh Claim and Split observations. A complete assessment alone is never
+//! signer or broadcast permission.
 pub mod http;
 
 use async_trait::async_trait;
@@ -162,6 +163,10 @@ pub trait ObservationSource: Send + Sync {
 pub struct CollectionContext {
     pub expected_generation: u64,
     pub generation: watch::Receiver<u64>,
+}
+
+pub(crate) fn session_current(generation: &watch::Receiver<u64>, expected: u64) -> bool {
+    *generation.borrow() == expected && matches!(generation.has_changed(), Ok(false))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -336,17 +341,11 @@ pub async fn collect(
 ) -> Result<CollectedAssessment, Failure> {
     validate_plan(plan, policy, budget)?;
     let expected = context.expected_generation;
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     let cancelled = async {
-        loop {
-            if context.generation.changed().await.is_err()
-                || *context.generation.borrow_and_update() != expected
-            {
-                break;
-            }
-        }
+        let _ = context.generation.changed().await;
     };
     let result = tokio::select! {
         biased;
@@ -355,7 +354,7 @@ pub async fn collect(
             result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?
         }
     };
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     result
@@ -396,17 +395,11 @@ pub async fn collect_sweep(
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
     let expected = context.expected_generation;
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     let cancelled = async {
-        loop {
-            if context.generation.changed().await.is_err()
-                || *context.generation.borrow_and_update() != expected
-            {
-                break;
-            }
-        }
+        let _ = context.generation.changed().await;
     };
     let work = async {
         let first = collect_inner(source, plan, policy, expected).await?;
@@ -457,7 +450,7 @@ pub async fn collect_sweep(
         _ = cancelled => Err(failure(Stage::Context, FailureKind::Cancelled)),
         result = tokio::time::timeout(budget, work) => result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?,
     };
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     result
@@ -569,17 +562,11 @@ pub async fn collect_fork_sweep(
         return Err(failure(Stage::Plan, FailureKind::InvalidPlan));
     }
     let expected = context.expected_generation;
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     let cancelled = async {
-        loop {
-            if context.generation.changed().await.is_err()
-                || *context.generation.borrow_and_update() != expected
-            {
-                break;
-            }
-        }
+        let _ = context.generation.changed().await;
     };
     let work = async {
         let first = fork_anchor(source, fork, policy).await?;
@@ -627,7 +614,7 @@ pub async fn collect_fork_sweep(
         _ = cancelled => Err(failure(Stage::Context, FailureKind::Cancelled)),
         result = tokio::time::timeout(budget, work) => result.map_err(|_| failure(Stage::Context, FailureKind::Deadline))?,
     };
-    if *context.generation.borrow() != expected || context.generation.has_changed().is_err() {
+    if !session_current(&context.generation, expected) {
         return Err(failure(Stage::Context, FailureKind::Cancelled));
     }
     result
