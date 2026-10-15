@@ -173,6 +173,11 @@ class Bridge:
                                         k: rdts[k] for k in ("height", "expiry_time", "active")}}}}}})
                         return
                     _, indexer, suffix, network = self.route()
+                    if suffix == "fee-estimates":
+                        # Fresh, chain-scoped test quotes: regtest electrs has
+                        # no meaningful mempool estimate before these deposits.
+                        self.reply(200, {"6": 2.0})
+                        return
                     if owner.spent_outspend == (network, suffix):
                         self.reply(200, {"spent": True, "txid": "00" * 32})
                         return
@@ -290,6 +295,9 @@ def test_bridge_preflight_and_submission_use_the_selected_chain(route, network):
     other = fork if route == "bitcoin" else bitcoin
     prefix = f"{bridge.url}/api/v1/esplora/{route}/mainnet"
     try:
+        with urlopen(prefix + "/fee-estimates", timeout=5) as response:
+            assert json.load(response) == {"6": 2.0}
+            assert response.headers["X-Coincube-Observation"] == "fresh"
         raw = f"{selected.chain}-raw"
         body = json.dumps({"tip_hash": selected.getbestblockhash(), "transaction": raw}).encode()
         with urlopen(Request(prefix + "/tx/preflight", body), timeout=5) as response:
