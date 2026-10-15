@@ -5754,6 +5754,109 @@ mod tests {
             assert!(state.modal.is_none());
         }
 
+        #[tokio::test]
+        async fn paired_claim_picker_consumes_exact_one_use_permit_on_both_chains() {
+            use crate::services::claim_workflow::paired_signing_permit::PairedSigningPermit;
+            use iced::futures::StreamExt;
+            use iced_runtime::{task::into_stream, Action};
+            use tokio::sync::watch;
+
+            let f = fixture();
+            let daemon: Arc<dyn Daemon + Sync + Send> = Arc::new(
+                crate::daemon::client::Coincubed::new(MockDaemon::new(vec![]).run()),
+            );
+            let sign = || {
+                Message::View(view::Message::Spend(
+                    view::SpendTxMessage::SelectMasterSigner,
+                ))
+            };
+            for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+                let mut wallet = Wallet::new(f.descriptor.clone()).with_chain(chain);
+                wallet.signer = Some(Arc::new(crate::signer::Signer::new(signer(21))));
+                let wallet = Arc::new(wallet);
+                let tx = SpendTx::new(
+                    None,
+                    f.psbt.clone(),
+                    Vec::new(),
+                    &f.descriptor,
+                    &secp256k1::Secp256k1::new(),
+                    Network::Bitcoin,
+                );
+                let mut state = PsbtState::new(wallet, tx, false);
+                assert!(state.require_paired_signing_checks());
+                state.modal = Some(PsbtModal::Sign(SignModal::new(
+                    HashSet::new(),
+                    state.wallet.clone(),
+                    CoincubeDirectory::new(PathBuf::new()),
+                    Network::Bitcoin,
+                    true,
+                    None,
+                    None,
+                    false,
+                )));
+                let (sender, receiver) = watch::channel(7);
+                let permit =
+                    PairedSigningPermit::for_test(chain, &state.tx.psbt, receiver.clone(), 7);
+                assert!(state.set_paired_signing_permit(permit));
+
+                let task = state.update(daemon.clone(), &Cache::default(), sign());
+                let mut signed = false;
+                if let Some(mut stream) = into_stream(task) {
+                    while let Some(action) = stream.next().await {
+                        if let Action::Output(Message::Signed(_, Ok(_))) = action {
+                            signed = true;
+                        }
+                    }
+                }
+                assert!(signed, "the exact {:?} permit must reach the signer", chain);
+
+                let task = state.update(daemon.clone(), &Cache::default(), sign());
+                let mut refused = false;
+                if let Some(mut stream) = into_stream(task) {
+                    while let Some(action) = stream.next().await {
+                        if let Action::Output(Message::View(view::Message::ShowError(reason))) =
+                            action
+                        {
+                            refused |= reason.contains("Check both chains again");
+                        }
+                    }
+                }
+                assert!(refused, "the {:?} permit must be one-use", chain);
+
+                let stale = PairedSigningPermit::for_test(chain, &state.tx.psbt, receiver, 7);
+                sender.send(7).unwrap();
+                assert!(!state.set_paired_signing_permit(stale));
+
+                let (_fresh_sender, fresh_receiver) = watch::channel(8);
+                let changed =
+                    PairedSigningPermit::for_test(chain, &state.tx.psbt, fresh_receiver, 8);
+                assert!(state.set_paired_signing_permit(changed));
+                state.tx.psbt.unknown.insert(
+                    coincube_core::miniscript::bitcoin::psbt::raw::Key {
+                        type_value: 0xfc,
+                        key: vec![1],
+                    },
+                    vec![2],
+                );
+                let task = state.update(daemon.clone(), &Cache::default(), sign());
+                let mut refused = false;
+                if let Some(mut stream) = into_stream(task) {
+                    while let Some(action) = stream.next().await {
+                        if let Action::Output(Message::View(view::Message::ShowError(reason))) =
+                            action
+                        {
+                            refused |= reason.contains("Check both chains again");
+                        }
+                    }
+                }
+                assert!(
+                    refused,
+                    "changed {:?} PSBT must not reach the signer",
+                    chain
+                );
+            }
+        }
+
         /// Final Confirm is gated on the **current** cache (`#276` I13): a
         /// positive lookup landing after the Broadcast dialog was created, or
         /// between the gated click and the dialog's creation, or a re-check in

@@ -527,6 +527,10 @@ cases remain.
    returned PSBT with the combiner before merging, requalifies both wallets
    and chains after both sides complete, and atomically records the finalized
    witnesses. Late signer results are scoped to the exact panel session.
+   A focused ordinary-picker test now sends a local request through each
+   chain's exact one-use permit, then refuses a second request, a revoked
+   session and a changed PSBT. It does not prove the full wizard, physical
+   device approval or restart.
    This grants no spend authority or broadcast action.
    Restart of an unsigned version-10 intent now reloads its fixed deposit
    addresses and current fee quote, then requires a new deposit check before

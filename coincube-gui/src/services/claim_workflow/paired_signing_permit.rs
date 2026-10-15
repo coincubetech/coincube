@@ -46,6 +46,16 @@ impl PairedSigningPermit {
         }
     }
 
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        chain: ChainId,
+        psbt: &Psbt,
+        generation: watch::Receiver<u64>,
+        expected: u64,
+    ) -> Self {
+        Self::new(chain, psbt, generation, expected)
+    }
+
     pub(crate) fn matches(&self, chain: ChainId, psbt: &Psbt) -> bool {
         self.chain == chain
             && sha256::Hash::hash(&psbt.serialize()) == self.psbt
