@@ -787,6 +787,9 @@ Coordinator restart, stale observation and marker spend cases remain.
   it does not count as an end-to-end test of the new paired Claim wizard.
   Its disposable Connect bridge now routes preflight and submission to the
   selected Bitcoin or BTCB2 node, with a local routing test for each chain.
+  The paired funding fixture also asks the live collector to refuse a
+  same-value Connect session notification and to resume only through a fresh
+  collector before testing a spent marker on either chain.
   The paired wizard still needs to drive that bridge through both signed PSBTs.
 - Keep the production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm

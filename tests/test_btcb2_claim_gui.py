@@ -450,6 +450,15 @@ def test_live_paired_funding_proof_expires_after_marker_spend(tmp_path, spent_ch
         }, stale
         bridge.stale_outspend = False
 
+        revoked = child.send({**command, "action": "revoke"})
+        assert revoked == {
+            "event": "paired-funding-proof", "valid": False, "failure": "Cancelled"
+        }, revoked
+        restarted = child.send({**command, "action": "restart"})
+        assert restarted == {
+            "event": "paired-funding-proof", "valid": True, "failure": None
+        }, restarted
+
         spent_node, spent_marker = (
             (bitcoin, bitcoin_marker) if spent_chain == "bitcoin" else (fork, fork_marker)
         )

@@ -278,7 +278,7 @@ async fn claim_gui_regtest_driver() {
             claim_ancestry::{retained::RetainedPath, search::OwnedLink},
             miniscript::bitcoin::consensus::encode::{deserialize_hex, serialize},
         };
-        let source = HttpObservationSource::new(
+        let mut source = HttpObservationSource::new(
             client.clone(),
             ChainId::Bitcoin,
             ChainId::BitcoinBlake2b,
@@ -289,8 +289,28 @@ async fn claim_gui_regtest_driver() {
         )
         .unwrap();
         emit(json!({"event":"paired-funding-ready"}));
-        for _ in 0..3 {
+        for _ in 0..5 {
             let command = read(&mut input);
+            if command["action"].as_str() == Some("revoke") {
+                // A same-value notification still invalidates the old
+                // observation session and every retained proof it produced.
+                _sender.send_modify(|_| {});
+            } else if command["action"].as_str() == Some("restart") {
+                // Only a new collector explicitly acknowledging the current
+                // session may start a fresh two-chain read after a restart.
+                let mut current = generation.clone();
+                current.borrow_and_update();
+                source = HttpObservationSource::new(
+                    client.clone(),
+                    ChainId::Bitcoin,
+                    ChainId::BitcoinBlake2b,
+                    CollectionContext {
+                        expected_generation: 1,
+                        generation: current,
+                    },
+                )
+                .unwrap();
+            }
             let path = |name: &str| {
                 let transaction: Transaction =
                     deserialize_hex(command[name]["previous"].as_str().unwrap()).unwrap();
