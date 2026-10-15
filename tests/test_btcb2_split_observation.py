@@ -8,7 +8,9 @@ six-confirmation gate before step 2) and, after step 2, the journal record
 of its submission and the `SplitStep2Reconciler`. Every observation they make
 is a real HTTP read of the nodes' indexers through a local stand-in for
 Connect's Esplora, anchor and preflight routes (the Claim GUI test's bridge
-pattern), and step 1 reaches Bitcoin through Connect's submit route.
+pattern). The retired step-1 submit route records an uncertain attempt without
+sending; the parent then places those historical signed bytes on Bitcoin to
+exercise recovery and reorg handling.
 
 Synthetic: the foreign wallet's keys (a P2PKH wallet funded before the fork,
 so its coins are shared history), the target Vault and its address
@@ -198,7 +200,7 @@ class Child:
 
 class Bridge:
     """Connect's anchor, Esplora and preflight routes over the two nodes'
-    indexers. Records every POST: step 1's submission is the only send."""
+    indexers. Retired Split submission must never reach its transaction route."""
 
     def __init__(self, harness):
         self.posts = []
@@ -500,16 +502,19 @@ class Split:
         )
 
     def submit_and_bury(self, record_property):
-        """Step 1 submitted once through Connect and buried six deep:
+        """Recover a recorded legacy step 1 that was mined six deep:
         WaitingForDepth at one, the gate refusing below six, minting at six.
         Returns step 1's recorded block."""
         a = self.harness.legacy
         submitted = self.child.command("submit")
         assert submitted["route"] == "Connect", submitted
-        assert submitted["outcome"].startswith("Ok(UpstreamAccepted"), submitted
-        assert self.bridge.submissions == [
-            {"raw": self.ready["step1_raw"], "txid": self.step1}
-        ]
+        assert submitted["outcome"].startswith("Ok(Uncertain"), submitted
+        assert self.bridge.submissions == [], submitted
+        assert ("mainnet", "tx") not in self.bridge.posts
+        # The retired transport cannot send new OP_RETURN transactions. Model
+        # a previously recorded attempt that did reach Bitcoin, so the
+        # journal's reorg/recovery behavior remains covered.
+        assert a.rpc.sendrawtransaction(self.ready["step1_raw"]) == self.step1
         assert self.step1 in a.rpc.getrawmempool()
         actual = a.rpc.getrawtransaction(self.step1, True)
         assert actual["hash"] == self.ready["step1_wtxid"]
@@ -652,8 +657,8 @@ def test_split_observation_reorg_before_step2(tmp_path, record_property):
         assert minted["journal"]["plan"]["previous_confirmation"] == moved
         assert minted["journal"]["inclusion_history"] == journal["inclusion_history"]
 
-        # Step 1 was sent once, through Connect; nothing else was sent.
-        assert split.bridge.posts.count(("mainnet", "tx")) == 1
+        # The retired Connect route never submitted the historical step 1.
+        assert split.bridge.posts.count(("mainnet", "tx")) == 0
         assert all(network == "mainnet" for network, _ in split.bridge.posts)
         assert len(minted["journal"]["bitcoin_attempts"]) == 1
         record_property(
