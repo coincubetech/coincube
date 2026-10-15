@@ -80,6 +80,53 @@ fn received_coin(descriptor: &CoincubeDescriptor, entry: &Value) -> (Coin, Trans
         transaction,
     )
 }
+
+/// Inspect the actual Claim wizard element at a desktop-sized viewport. The
+/// two-chain fixture supplies the live addresses, coins and signed records.
+async fn rendered_labels(panel: &ClaimStep1Panel, cache: &Cache) -> Vec<String> {
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+
+    #[derive(Default)]
+    struct Labels(Vec<String>);
+    impl Operation for Labels {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+            self.0.push(value.to_owned());
+        }
+    }
+
+    let renderer = <iced::Renderer as Headless>::new(
+        iced::Font::DEFAULT,
+        iced::Pixels(16.0),
+        Some("tiny-skia"),
+    )
+    .await
+    .expect("software renderer for the paired Claim wizard");
+    let menu = crate::app::menu::Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
+    let mut element = crate::app::view::vault::claim::view(&menu, cache, panel);
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1200.0, 2400.0)),
+    );
+    let mut labels = Labels::default();
+    element
+        .as_widget_mut()
+        .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+    labels.0
+}
+
+fn has_label(labels: &[String], value: &str) -> bool {
+    labels.iter().any(|label| label.contains(value))
+}
 async fn drive(
     p: &mut ClaimStep1Panel,
     daemon: &Arc<dyn Daemon + Send + Sync>,
@@ -420,6 +467,12 @@ async fn claim_gui_regtest_driver() {
         let Stage::PairedRecovery(recovery) = &panel.stage else {
             panic!("signed pair did not reopen: {:?}", panel.restart_error);
         };
+        let recovery_labels = rendered_labels(&panel, &cache).await;
+        assert!(has_label(&recovery_labels, "Recorded two-chain claim"));
+        assert!(has_label(&recovery_labels, "Bitcoin transaction"));
+        assert!(has_label(&recovery_labels, "Bitcoin Blake2b transaction"));
+        assert!(has_label(&recovery_labels, "Check again"));
+        assert!(!has_label(&recovery_labels, "Broadcast Transaction"));
         assert_eq!(
             recovery.bitcoin_txid.unwrap().to_string(),
             init["bitcoin_txid"].as_str().unwrap()
@@ -478,6 +531,17 @@ async fn claim_gui_regtest_driver() {
                     "{:?}",
                     panel.restart_error
                 );
+                let review_labels = rendered_labels(&panel, &cache).await;
+                assert!(has_label(&review_labels, "Bitcoin — broadcast now"));
+                assert!(has_label(
+                    &review_labels,
+                    "Bitcoin Blake2b — recorded, not sent now"
+                ));
+                assert!(has_label(&review_labels, "Broadcast Transaction"));
+                assert!(has_label(
+                    &review_labels,
+                    &recovery.bitcoin_txid.unwrap().to_string()
+                ));
                 let task = panel.update(
                     Some(dyn_daemon.clone()),
                     &cache,
@@ -525,6 +589,17 @@ async fn claim_gui_regtest_driver() {
                 "{:?}",
                 panel.restart_error
             );
+            let review_labels = rendered_labels(&panel, &cache).await;
+            assert!(has_label(&review_labels, "Bitcoin Blake2b — broadcast now"));
+            assert!(has_label(
+                &review_labels,
+                "Bitcoin — recorded and confirmed"
+            ));
+            assert!(has_label(&review_labels, "Broadcast Transaction"));
+            assert!(has_label(
+                &review_labels,
+                &recovery.fork_txid.unwrap().to_string()
+            ));
             if init["pause_before_fork_confirm"].as_bool().unwrap_or(false) {
                 emit(json!({"event":"claim-btcb2-reviewed"}));
                 assert_eq!(read(&mut input)["action"], "confirm_after_reorg");
@@ -630,6 +705,15 @@ async fn claim_gui_regtest_driver() {
         };
         assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
         assert!(!panel.can_sign_or_submit());
+        let deposit_labels = rendered_labels(&panel, &cache).await;
+        assert!(has_label(
+            &deposit_labels,
+            "Prepare Bitcoin and Bitcoin Blake2b deposits"
+        ));
+        assert!(has_label(&deposit_labels, &addresses.bitcoin_deposit));
+        assert!(has_label(&deposit_labels, &addresses.btcb2_deposit));
+        assert!(has_label(&deposit_labels, "Check deposits"));
+        assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
         use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
         let descriptor = panel.wallet.main_descriptor.clone();
         let identity = claim_workflow::WalletIdentity {
@@ -687,6 +771,58 @@ async fn claim_gui_regtest_driver() {
             !panel.can_sign_or_submit(),
             "the production signer gate remains closed"
         );
+        assert!(verified, "paired Claim funding preview was not verified");
+        let preview_labels = rendered_labels(&panel, &cache).await;
+        assert!(has_label(
+            &preview_labels,
+            "Paired transaction preview — read only"
+        ));
+        assert!(has_label(&preview_labels, "Bitcoin-only funding coin"));
+        assert!(has_label(&preview_labels, "BTCB2-only funding coin"));
+        assert!(has_label(&preview_labels, "Before fork"));
+        assert!(!has_label(&preview_labels, "OP_RETURN"));
+        let review = panel.funding_review().unwrap();
+        for row in review
+            .bitcoin
+            .shared
+            .iter()
+            .chain([&review.bitcoin.funding, &review.fork.funding])
+        {
+            assert!(has_label(&preview_labels, &row.outpoint.to_string()));
+            assert!(has_label(
+                &preview_labels,
+                &format!("{} sats", row.amount.to_sat())
+            ));
+        }
+        let destination = |output: &TxOut| {
+            Address::from_script(&output.script_pubkey, Network::Bitcoin)
+                .unwrap()
+                .to_string()
+        };
+        assert!(has_label(
+            &preview_labels,
+            &format!(
+                "Back to this Vault: {} · {} sats",
+                destination(&review.bitcoin.destination),
+                review.bitcoin.destination.value.to_sat()
+            )
+        ));
+        assert!(has_label(
+            &preview_labels,
+            &format!(
+                "Back to the paired BTCB2 Vault: {} · {} sats",
+                destination(&review.fork.destination),
+                review.fork.destination.value.to_sat()
+            )
+        ));
+        assert!(has_label(
+            &preview_labels,
+            &format!("Fee: {} sats", review.bitcoin.fee.to_sat())
+        ));
+        assert!(has_label(
+            &preview_labels,
+            &format!("Fee: {} sats", review.fork.fee.to_sat())
+        ));
         emit(json!({
             "event":"paired-deposits-checked",
             "verified":verified,
@@ -735,6 +871,14 @@ async fn claim_gui_regtest_driver() {
             }
             _ => panic!("paired signer admission failed: {:?}", panel.funding_error),
         };
+        let signing_labels = rendered_labels(&panel, &cache).await;
+        assert!(has_label(
+            &signing_labels,
+            "Sign both ordinary Claim transactions"
+        ));
+        assert!(has_label(&signing_labels, "Bitcoin transaction"));
+        assert!(has_label(&signing_labels, "Bitcoin Blake2b transaction"));
+        assert!(!has_label(&signing_labels, "OP_RETURN"));
         let signed_bitcoin = signer.sign_psbt(bitcoin_psbt.clone()).unwrap();
         let signed_fork = signer.sign_psbt(fork_psbt.clone()).unwrap();
         emit(json!({
