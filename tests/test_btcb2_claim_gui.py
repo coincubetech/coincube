@@ -330,9 +330,12 @@ def test_retired_claim_routes_refuse_before_construction(tmp_path, ancestry):
                 harness.cleanup()
 
 
-@pytest.mark.parametrize("spent_chain", ["bitcoin", "btcb2"])
-def test_live_paired_funding_proof_expires_after_marker_spend(tmp_path, spent_chain):
-    """The real two-chain collector must reject either spent funding coin."""
+@pytest.mark.parametrize(
+    "mutation",
+    ["bitcoin-spend", "btcb2-spend", "bitcoin-reorg", "btcb2-reorg"],
+)
+def test_live_paired_funding_proof_expires_after_marker_change(tmp_path, mutation):
+    """The two-chain collector must reject a spent or reorganized funding coin."""
     tool = os.getenv("CLAIM_GUI_REGTEST_TEST_PATH")
     missing = missing_binaries()
     if not tool or not os.access(tool, os.X_OK) or missing:
@@ -373,7 +376,8 @@ def test_live_paired_funding_proof_expires_after_marker_spend(tmp_path, spent_ch
             )
             node.generate_block(99)
             assert node.rpc.gettxout(txid, vout)["confirmations"] == 100
-            return {"previous": transaction["hex"], "vout": vout, "txid": txid}
+            return {"previous": transaction["hex"], "vout": vout,
+                    "txid": txid, "block": block}
 
         bitcoin_marker = marker(bitcoin)
         # The fork cloned Bitcoin's wallet before divergence. Advance its
@@ -392,16 +396,20 @@ def test_live_paired_funding_proof_expires_after_marker_spend(tmp_path, spent_ch
                 (fork, harness.electrs_blake2b),
             ):
                 target = node.rpc.getblockcount()
+                tip_hash = node.rpc.getbestblockhash()
                 while time.monotonic() < deadline:
                     try:
                         with urlopen(indexer.url + "/blocks/tip/height", timeout=3) as response:
-                            if int(response.read()) >= target:
-                                break
+                            indexed_height = int(response.read())
+                        with urlopen(indexer.url + "/blocks/tip/hash", timeout=3) as response:
+                            indexed_hash = response.read().decode()
+                        if indexed_height == target and indexed_hash == tip_hash:
+                            break
                     except Exception:
                         pass
                     time.sleep(0.25)
                 else:
-                    pytest.fail(f"{indexer.url} did not index height {target}")
+                    pytest.fail(f"{indexer.url} did not index tip {target}: {tip_hash}")
 
         wait_for_indexers()
         bridge = Bridge(harness)
@@ -459,30 +467,41 @@ def test_live_paired_funding_proof_expires_after_marker_spend(tmp_path, spent_ch
             "event": "paired-funding-proof", "valid": True, "failure": None
         }, restarted
 
-        spent_node, spent_marker = (
-            (bitcoin, bitcoin_marker) if spent_chain == "bitcoin" else (fork, fork_marker)
+        changed_node, changed_marker = (
+            (bitcoin, bitcoin_marker) if mutation.startswith("bitcoin") else (fork, fork_marker)
         )
         other_node, other_marker = (
-            (fork, fork_marker) if spent_chain == "bitcoin" else (bitcoin, bitcoin_marker)
+            (fork, fork_marker) if mutation.startswith("bitcoin") else (bitcoin, bitcoin_marker)
         )
-        value = Decimal(str(spent_node.rpc.gettxout(
-            spent_marker["txid"], spent_marker["vout"]
-        )["value"]))
-        raw = spent_node.rpc.createrawtransaction(
-            [{"txid": spent_marker["txid"], "vout": spent_marker["vout"]}],
-            {spent_node.rpc.getnewaddress(): value - Decimal("0.0001")},
-        )
-        signed = spent_node.rpc.signrawtransactionwithwallet(raw)
-        assert signed["complete"], signed
-        spent_id = spent_node.rpc.sendrawtransaction(signed["hex"])
-        spent_node.generate_block(1, wait_for_mempool=spent_id)
+        if mutation.endswith("spend"):
+            value = Decimal(str(changed_node.rpc.gettxout(
+                changed_marker["txid"], changed_marker["vout"]
+            )["value"]))
+            raw = changed_node.rpc.createrawtransaction(
+                [{"txid": changed_marker["txid"], "vout": changed_marker["vout"]}],
+                {changed_node.rpc.getnewaddress(): value - Decimal("0.0001")},
+            )
+            signed = changed_node.rpc.signrawtransactionwithwallet(raw)
+            assert signed["complete"], signed
+            spent_id = changed_node.rpc.sendrawtransaction(signed["hex"])
+            changed_node.generate_block(1, wait_for_mempool=spent_id)
+        else:
+            # Remove the funding coinbase itself. Replacement blocks reach the
+            # same height, so height alone must not pass the indexer waiter.
+            previous_tip = changed_node.rpc.getbestblockhash()
+            previous_height = changed_node.rpc.getblockcount()
+            marker_height = changed_node.rpc.getblockheader(changed_marker["block"])["height"]
+            changed_node.rpc.invalidateblock(changed_marker["block"])
+            changed_node.generate_block(100)
+            assert changed_node.rpc.getblockcount() == previous_height
+            assert changed_node.rpc.getbestblockhash() != previous_tip
+            assert changed_node.rpc.getblockhash(marker_height) != changed_marker["block"]
         wait_for_indexers()
-        assert spent_node.rpc.gettxout(spent_marker["txid"], spent_marker["vout"]) is None
+        assert changed_node.rpc.gettxout(changed_marker["txid"], changed_marker["vout"]) is None
         assert other_node.rpc.gettxout(other_marker["txid"], other_marker["vout"]) is not None
         after_spend = child.send(command)
-        assert after_spend == {
-            "event": "paired-funding-proof", "valid": False, "failure": "Changed"
-        }, after_spend
+        assert after_spend["event"] == "paired-funding-proof" and not after_spend["valid"], after_spend
+        assert after_spend["failure"] in {"Changed", "AncestryRootChanged"}, after_spend
         assert not bridge.errors
         assert child.proc.wait(timeout=10) == 0
     finally:
