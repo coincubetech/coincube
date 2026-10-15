@@ -34,15 +34,32 @@ pub enum ReplayProtection {
     /// Border Wallet key reconstructed for one signature. Unified by
     /// construction on a Bitcoin Blake2b Cube.
     Capable,
-    /// Known to sign `SIGHASH_ALL` only. Every Keychain key reads `Legacy`
-    /// until Lane B3 ships unified signing on the phone and a version
-    /// handshake proves the paired app has it.
+    /// Known to sign `SIGHASH_ALL` only. Keychain keys default to `Legacy`
+    /// until the resolved phone target proves unified signing capability.
     Legacy,
     /// A device signer (hardware wallet, phone signer). Firmware cannot
     /// report the sighash it will use, so this is the user's own mark from
     /// [`crate::app::settings::KeySetting::replay_protected`]; `false` when
     /// unmarked.
     UserMarked(bool),
+}
+
+/// Classify one authenticated Connect target for signer/path selection. This
+/// never describes the transaction itself: post-signing replay status remains
+/// derived only from verified signatures retained in the PSBT.
+pub fn resolved_keychain_replay_protection(
+    chain: crate::chain::ChainId,
+    capabilities: &[String],
+) -> ReplayProtection {
+    let has_chain_identity = capabilities
+        .iter()
+        .any(|value| value == "chain-identity-v1");
+    let has_unified_signing = capabilities.iter().any(|value| value == "btcb2-unified-v1");
+    if chain.is_blake2b() && has_chain_identity && has_unified_signing {
+        ReplayProtection::Capable
+    } else {
+        ReplayProtection::Legacy
+    }
 }
 
 impl ReplayProtection {
@@ -695,6 +712,52 @@ mod tests {
         assert!(ReplayProtection::UserMarked(true).is_capable());
         assert!(!ReplayProtection::UserMarked(false).is_capable());
         assert!(!ReplayProtection::Legacy.is_capable());
+    }
+
+    #[test]
+    fn resolved_keychain_replay_protection_requires_both_btcb2_capabilities() {
+        use crate::chain::ChainId;
+        let cases = [
+            (vec!["chain-identity-v1", "btcb2-unified-v1"], true),
+            (vec!["chain-identity-v1"], false),
+            (vec!["btcb2-unified-v1"], false),
+            (vec![], false),
+            (vec![" chain-identity-v1", "BTCB2-UNIFIED-V1"], false),
+        ];
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            for (capabilities, capable) in &cases {
+                let capabilities = capabilities
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    resolved_keychain_replay_protection(chain, &capabilities),
+                    if *capable {
+                        ReplayProtection::Capable
+                    } else {
+                        ReplayProtection::Legacy
+                    },
+                );
+            }
+        }
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ] {
+            for (capabilities, _) in &cases {
+                let capabilities = capabilities
+                    .iter()
+                    .map(|value| (*value).to_string())
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    resolved_keychain_replay_protection(chain, &capabilities),
+                    ReplayProtection::Legacy,
+                );
+            }
+        }
     }
 
     #[test]

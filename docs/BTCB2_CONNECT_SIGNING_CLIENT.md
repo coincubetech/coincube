@@ -14,11 +14,14 @@ are discarded and cancellation is requested. No returned signature from that
 session is opened, verified, merged or persisted by the desktop. Cancellation
 is best effort; a phone may already have received the session.
 
-BTCB2 targets must advertise chain-identity-v1 before any sealing. Registration
-advertises this desktop capability. This does not advertise btcb2-unified-v1,
-change signer replay classification or enable unsupported signing. Existing
-cryptographic verification under Wallet.chain remains authoritative for replay
-protection. Identity metadata alone is not spend authorization.
+BTCB2 targets must advertise both chain-identity-v1 and btcb2-unified-v1 before
+any PSBT preparation or sealing. Registration still advertises only this
+desktop's chain-identity capability because the desktop is not the signing
+target. A resolved phone carrying both capabilities may classify that exact
+Keychain signer as replay-capable for signer/path selection. Existing
+cryptographic verification under Wallet.chain remains authoritative for the
+transaction's post-signing replay status; capability metadata alone never marks
+a spend replay protected.
 
 LAN now has explicit BTCB2 refusal independent of the global dormant flag:
 pairing Start/Pick refuses, hardware discovery skips phone browsing/dialing,

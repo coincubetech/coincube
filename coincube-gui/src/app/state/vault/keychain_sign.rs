@@ -44,7 +44,8 @@ use crate::{
         message::Message,
         state::vault::psbt::Modal,
         state::vault::signers::{
-            build_keychain_index, classify_signers, KeychainSignerIndex, RequiredSigner,
+            build_keychain_index, classify_signers, resolved_keychain_replay_protection,
+            KeychainSignerIndex, RequiredSigner,
         },
         view::{self, SpendTxMessage},
         wallet::Wallet,
@@ -852,7 +853,7 @@ impl KeychainSignModal {
             self.phase = Phase::AllDone;
             return Task::none();
         }
-        let classified = match self.classified.as_ref() {
+        let classified = match self.classified.as_mut() {
             Some(c) => c,
             None => {
                 self.error = Some(
@@ -888,6 +889,18 @@ impl KeychainSignModal {
             })
             .collect();
 
+        for target in &resp.targets {
+            if let Some(RequiredSigner::Keychain {
+                replay_protection, ..
+            }) = classified.required.iter_mut().find(|required| {
+                required.is_keychain()
+                    && required.fingerprint().to_string() == target.key_fingerprint
+            }) {
+                *replay_protection =
+                    resolved_keychain_replay_protection(self.wallet.chain, &target.capabilities);
+            }
+        }
+
         // For each resolved target, pair it with the matching
         // classified signer so we can populate the label / fingerprint
         // on the pending row. Targets carry `key_fingerprint` so the
@@ -917,24 +930,29 @@ impl KeychainSignModal {
                 );
                 continue;
             };
-            let (fingerprint, key_id, label) = match matched {
+            let (fingerprint, key_id, label, replay_protection) = match matched {
                 RequiredSigner::Keychain {
                     fingerprint,
                     key_id,
                     name,
                     owner_email,
+                    replay_protection,
                     ..
                 } => {
                     let suffix = owner_email
                         .as_deref()
                         .map(|e| format!(" ({})", e))
                         .unwrap_or_else(|| " (you)".to_string());
-                    (*fingerprint, *key_id, format!("{}{}", name, suffix))
+                    (
+                        *fingerprint,
+                        *key_id,
+                        format!("{}{}", name, suffix),
+                        *replay_protection,
+                    )
                 }
                 _ => unreachable!(),
             };
-            let outdated = self.wallet.chain.is_blake2b()
-                && !target.capabilities.iter().any(|c| c == "chain-identity-v1");
+            let outdated = self.wallet.chain.is_blake2b() && !replay_protection.is_capable();
             let error = outdated.then(|| {
                 format!(
                     "{}'s Keychain needs updating before it can sign on Bitcoin Blake2b.",
@@ -977,7 +995,8 @@ impl KeychainSignModal {
             return Task::none();
         };
         if self.wallet.chain.is_blake2b()
-            && !entry.capabilities.iter().any(|c| c == "chain-identity-v1")
+            && !resolved_keychain_replay_protection(self.wallet.chain, &entry.capabilities)
+                .is_capable()
         {
             entry.status = PendingSessionStatus::Failed;
             entry.error = Some(format!(
@@ -2559,88 +2578,184 @@ mod tests {
     }
 
     #[test]
-    fn resolving_old_bitcoin_and_identified_btcb2_preserves_target_eligibility() {
+    fn resolved_capability_matrix_controls_btcb2_eligibility_and_classification() {
         use crate::chain::ChainId;
-        use crate::services::coincube::VaultStatus;
         use crate::services::connect::grpc::connect_v1::SignerTarget;
-        for (chain, network, capable, allowed) in [
-            (ChainId::Bitcoin, "", false, true),
-            (ChainId::Bitcoin, "mainnet", false, true),
-            (ChainId::BitcoinBlake2b, "bitcoin-blake2b", false, false),
-            (ChainId::BitcoinBlake2b, "bitcoin-blake2b", true, true),
-        ] {
-            let mut m = modal();
-            m.wallet = Arc::new(
-                Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap()).with_chain(chain),
-            );
-            m.classified = Some(ClassifiedSigners {
-                vault: ConnectVaultResponse {
-                    id: 1,
-                    cube_id: 42,
-                    timelock_days: 90,
-                    timelock_expires_at: String::new(),
-                    last_reset_at: String::new(),
-                    status: VaultStatus::Active,
-                    members: vec![],
-                    fingerprint: String::new(),
-                    created_at: String::new(),
-                    updated_at: String::new(),
-                },
-                required: vec![RequiredSigner::Keychain {
-                    fingerprint: Fingerprint::from_str("f5acc2fd").unwrap(),
-                    key_id: 7,
-                    owner_user_id: 7,
-                    name: "Fixture".into(),
-                    owner_email: None,
-                    contact_id: None,
-                    replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
-                }],
-                self_user_id: 7,
-            });
-            let task = m.on_signers_resolved(ResolveSignersResponse {
-                network: network.into(),
-                unresolved: vec![],
-                targets: vec![SignerTarget {
-                    key_fingerprint: "f5acc2fd".into(),
-                    key_id: "7".into(),
-                    capabilities: if capable {
-                        vec!["chain-identity-v1".into()]
+        let cases = [
+            ("both", vec!["chain-identity-v1", "btcb2-unified-v1"], true),
+            ("identity-only", vec!["chain-identity-v1"], false),
+            ("unified-only", vec!["btcb2-unified-v1"], false),
+            ("neither", vec![], false),
+            (
+                "malformed-equivalent",
+                vec![" chain-identity-v1", "BTCB2-UNIFIED-V1"],
+                false,
+            ),
+        ];
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            for (name, capabilities, allowed) in &cases {
+                let mut m = modal();
+                m.wallet = Arc::new(
+                    Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                        .with_chain(chain),
+                );
+                m.classified = Some(classified_signers_fixture());
+                let task = m.on_signers_resolved(ResolveSignersResponse {
+                    network: chain.api_str().into(),
+                    unresolved: vec![],
+                    targets: vec![SignerTarget {
+                        key_fingerprint: "f5acc2fd".into(),
+                        key_id: "7".into(),
+                        capabilities: capabilities.iter().map(|value| (*value).into()).collect(),
+                        transport_pubkey: TEST_TARGET_TRANSPORT_PUBKEY.to_vec(),
+                        device_id: "phone".into(),
+                    }],
+                });
+                assert!(iced_runtime::task::into_stream(task).is_none());
+                assert!(m.error.is_none());
+                assert_eq!(m.pending.len(), 1);
+                assert_eq!(
+                    m.pending[0].status.is_idle(),
+                    *allowed,
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+                assert_eq!(
+                    m.pending[0].error.is_none(),
+                    *allowed,
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+                assert_eq!(
+                    m.classified.as_ref().unwrap().required[0].replay_protection(),
+                    if *allowed {
+                        crate::app::state::vault::signers::ReplayProtection::Capable
                     } else {
-                        vec![]
+                        crate::app::state::vault::signers::ReplayProtection::Legacy
                     },
-                    transport_pubkey: TEST_TARGET_TRANSPORT_PUBKEY.to_vec(),
-                    device_id: "phone".into(),
-                }],
-            });
-            assert!(iced_runtime::task::into_stream(task).is_none());
-            assert!(m.error.is_none());
-            assert_eq!(m.pending.len(), 1);
-            assert_eq!(m.pending[0].status.is_idle(), allowed);
-            assert_eq!(m.pending[0].error.is_none(), allowed);
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+                assert_eq!(
+                    m.classified.as_ref().unwrap().required[1].replay_protection(),
+                    crate::app::state::vault::signers::ReplayProtection::Legacy,
+                    "only the exact resolved target may become capable",
+                );
+            }
         }
     }
 
     #[test]
-    fn missing_target_capability_refuses_before_psbt_preparation() {
-        let mut m = modal();
-        m.wallet = Arc::new(
-            Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
-                .with_chain(crate::chain::ChainId::BitcoinBlake2b),
-        );
-        let mut entry = pending(PendingSessionStatus::Idle);
-        // This target is freshly resolved, unlike the existing-session fixture.
-        entry.request_id.clear();
-        entry.session_id.clear();
-        m.pending.push(entry);
-        let task = m.create_session_for(0);
-        assert!(iced_runtime::task::into_stream(task).is_none());
-        assert!(m.pending[0].request_id.is_empty());
-        assert_eq!(m.pending[0].status, PendingSessionStatus::Failed);
-        assert!(m.pending[0]
-            .error
-            .as_ref()
-            .unwrap()
-            .contains("needs updating"));
+    fn create_rechecks_every_btcb2_capability_before_psbt_preparation() {
+        use crate::chain::ChainId;
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            for (name, capabilities) in [
+                ("identity-only", vec!["chain-identity-v1"]),
+                ("unified-only", vec!["btcb2-unified-v1"]),
+                ("neither", vec![]),
+                (
+                    "malformed-equivalent",
+                    vec!["chain-identity-v1 ", "BTcb2-unified-v1"],
+                ),
+            ] {
+                let mut m = modal();
+                m.wallet = Arc::new(
+                    Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                        .with_chain(chain),
+                );
+                let mut entry = pending(PendingSessionStatus::Idle);
+                entry.capabilities = capabilities.into_iter().map(str::to_string).collect();
+                entry.request_id.clear();
+                entry.session_id.clear();
+                m.pending.push(entry);
+                let task = m.create_session_for(0);
+                assert!(
+                    iced_runtime::task::into_stream(task).is_none(),
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+                assert!(m.pending[0].request_id.is_empty(), "{:?}/{}", chain, name,);
+                assert_eq!(
+                    m.pending[0].status,
+                    PendingSessionStatus::Failed,
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+                assert!(
+                    m.pending[0]
+                        .error
+                        .as_ref()
+                        .unwrap()
+                        .contains("needs updating"),
+                    "{:?}/{}: {:?}",
+                    chain,
+                    name,
+                    m.pending[0].error,
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn bitcoin_family_ignores_resolved_capability_matrix() {
+        use crate::chain::ChainId;
+        use crate::services::connect::grpc::connect_v1::SignerTarget;
+        for chain in [
+            ChainId::Bitcoin,
+            ChainId::Testnet,
+            ChainId::Testnet4,
+            ChainId::Signet,
+            ChainId::Regtest,
+        ] {
+            for (name, capabilities) in [
+                ("both", vec!["chain-identity-v1", "btcb2-unified-v1"]),
+                ("identity-only", vec!["chain-identity-v1"]),
+                ("unified-only", vec!["btcb2-unified-v1"]),
+                ("neither", vec![]),
+                (
+                    "malformed-equivalent",
+                    vec!["chain-identity-v1 ", "BTcb2-unified-v1"],
+                ),
+            ] {
+                let mut m = modal();
+                m.wallet = Arc::new(
+                    Wallet::new(CoincubeDescriptor::from_str(RECOVERY_DESC).unwrap())
+                        .with_chain(chain),
+                );
+                m.classified = Some(classified_signers_fixture());
+                let task = m.on_signers_resolved(ResolveSignersResponse {
+                    network: chain.api_str().into(),
+                    unresolved: vec![],
+                    targets: vec![SignerTarget {
+                        key_fingerprint: "f5acc2fd".into(),
+                        key_id: "7".into(),
+                        capabilities: capabilities.into_iter().map(str::to_string).collect(),
+                        transport_pubkey: TEST_TARGET_TRANSPORT_PUBKEY.to_vec(),
+                        device_id: "phone".into(),
+                    }],
+                });
+                assert!(
+                    iced_runtime::task::into_stream(task).is_none(),
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+                assert!(m.error.is_none(), "{:?}/{}", chain, name);
+                assert!(m.pending[0].status.is_idle(), "{:?}/{}", chain, name);
+                assert_eq!(
+                    m.classified.as_ref().unwrap().required[0].replay_protection(),
+                    crate::app::state::vault::signers::ReplayProtection::Legacy,
+                    "{:?}/{}",
+                    chain,
+                    name,
+                );
+            }
+        }
     }
 
     #[test]
@@ -2690,6 +2805,45 @@ mod tests {
     // Primary signer `f5acc2fd`; recovery signer `8a64f2a9` behind a CSV.
     // Same fixture used by the `signers` classification tests.
     const RECOVERY_DESC: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
+
+    fn classified_signers_fixture() -> ClassifiedSigners {
+        use crate::services::coincube::VaultStatus;
+        ClassifiedSigners {
+            vault: ConnectVaultResponse {
+                id: 1,
+                cube_id: 42,
+                timelock_days: 90,
+                timelock_expires_at: String::new(),
+                last_reset_at: String::new(),
+                status: VaultStatus::Active,
+                members: vec![],
+                fingerprint: String::new(),
+                created_at: String::new(),
+                updated_at: String::new(),
+            },
+            required: vec![
+                RequiredSigner::Keychain {
+                    fingerprint: Fingerprint::from_str("f5acc2fd").unwrap(),
+                    key_id: 7,
+                    owner_user_id: 7,
+                    name: "Fixture".into(),
+                    owner_email: None,
+                    contact_id: None,
+                    replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
+                },
+                RequiredSigner::Keychain {
+                    fingerprint: Fingerprint::from_str("8a64f2a9").unwrap(),
+                    key_id: 8,
+                    owner_user_id: 8,
+                    name: "Unresolved fixture".into(),
+                    owner_email: None,
+                    contact_id: None,
+                    replay_protection: crate::app::state::vault::signers::ReplayProtection::Legacy,
+                },
+            ],
+            self_user_id: 7,
+        }
+    }
 
     fn modal() -> KeychainSignModal {
         let wallet = Arc::new(Wallet::new(
