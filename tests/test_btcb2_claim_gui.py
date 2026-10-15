@@ -495,6 +495,12 @@ def test_paired_claim_wizard_checks_deposits_and_records_signed_pair(tmp_path):
         assert recorded["event"] == "paired-signatures-recorded", recorded
         assert len(recorded["bitcoin_txid"]) == len(recorded["btcb2_txid"]) == 64
         assert not bridge.submissions and not bridge.errors
+        bridge.stale_outspend = True
+        stale = child.send({"action": "recheck_stale"}, timeout=180)
+        assert stale["event"] == "paired-review-refused-stale", stale
+        assert stale["reason"], stale
+        assert not bridge.submissions and not bridge.errors
+        bridge.stale_outspend = False
         child.proc.stdin.write('{"action":"quit"}\n')
         child.proc.stdin.flush()
         assert child.proc.wait(timeout=10) == 0

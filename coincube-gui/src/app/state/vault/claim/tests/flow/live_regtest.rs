@@ -549,7 +549,26 @@ async fn claim_gui_regtest_driver() {
             "bitcoin_txid":bitcoin_txid,
             "btcb2_txid":btcb2_txid,
         }));
-        assert_eq!(read(&mut input)["action"], "quit");
+        let command = read(&mut input);
+        if command["action"] == "recheck_stale" {
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Claim(
+                    view::ClaimMessage::ReviewPairedBitcoin,
+                )),
+            );
+            drive(&mut panel, &dyn_daemon, &cache, task).await;
+            assert!(matches!(panel.stage, Stage::PairedRecovery(_)));
+            assert!(panel.restart_error.is_some());
+            emit(json!({
+                "event":"paired-review-refused-stale",
+                "reason":panel.restart_error,
+            }));
+            assert_eq!(read(&mut input)["action"], "quit");
+        } else {
+            assert_eq!(command["action"], "quit");
+        }
         return;
     }
     if !resume {
