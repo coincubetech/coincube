@@ -428,6 +428,9 @@ fn preconditions_view<'a>(
             coins.map(|c| !c.pre_fork.is_empty()),
             match (checked.map(|c| &c.coins), coins) {
                 (None, _) => "Reading this Vault's coins…".to_string(),
+                (Some(Err(_)), _) if checked.is_some_and(|c| c.window.is_err()) => {
+                    "Waiting for Bitcoin Blake2b's fork status to classify coins.".to_string()
+                }
                 (Some(Err(_)), _) => "Couldn't read this Vault's coins.".to_string(),
                 (_, Some(c)) => coins_detail(c, cache),
                 (Some(Ok(_)), None) => String::new(),

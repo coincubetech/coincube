@@ -224,6 +224,18 @@ fn pre_fork_coins_are_those_confirmed_below_the_fork_height() {
 }
 
 #[test]
+fn unknown_fork_height_never_labels_shared_coins_as_newer() {
+    let coins = vec![
+        coin(Some(89), false, false, 1),
+        coin(Some(91), false, false, 2),
+    ];
+    assert!(classify_coins_for_window(coins.clone(), None, 105).is_err());
+    let classified = classify_coins_for_window(coins, Some(90), 105).unwrap();
+    assert_eq!(classified.pre_fork.len(), 1);
+    assert_eq!(classified.post_fork, 1);
+}
+
+#[test]
 fn ancestry_inventory_excludes_spent_immature_unconfirmed_and_impossible_heights() {
     let set = partition_coins(
         vec![
