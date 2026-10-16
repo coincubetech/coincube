@@ -167,8 +167,8 @@ pub enum RequiredSigner {
         /// Backend `contacts.id` when the signer is a contact; `None`
         /// for self-signers.
         contact_id: Option<u64>,
-        /// Always [`ReplayProtection::Legacy`] until Lane B3; carried so the
-        /// picker reads one field for every row.
+        /// Capability-derived for BTCB2 Keychain targets; carried so the picker
+        /// reads one field for every row.
         replay_protection: ReplayProtection,
     },
 }
@@ -694,7 +694,8 @@ mod tests {
             caps(&[hot], &[]).replay_protection(hot, &empty),
             ReplayProtection::Capable
         );
-        // Keychain key: legacy until Lane B3, even if it were marked.
+        // Keychain key: legacy before resolved device capabilities are applied,
+        // even if it were marked.
         assert_eq!(
             caps(&[], &[(recovery_fg(), true)]).replay_protection(recovery_fg(), &keychain),
             ReplayProtection::Legacy
