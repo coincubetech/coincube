@@ -3147,7 +3147,7 @@ impl App {
                 coincubed::connect::AdmissionError::MissingAuth.into(),
             )));
         }
-        Ok(Self::new_inner(
+        let (app, task) = Self::new_inner(
             cache,
             wallet,
             Some(breez_client),
@@ -3158,7 +3158,9 @@ impl App {
             internal_bitcoind,
             cube_settings,
             connect_auth,
-        ))
+        );
+        let provision = app.background_managed_node_task();
+        Ok((app, Task::batch([task, provision])))
     }
 
     /// Build an admitted fork Vault without constructing Liquid or Spark clients.
@@ -3352,7 +3354,63 @@ impl App {
         }
         let split = app.start_pending_split();
         let resume = app.refresh_split_session();
-        Ok((app, Task::batch([task, split, resume])))
+        let provision = app.background_managed_node_task();
+        Ok((app, Task::batch([task, split, resume, provision])))
+    }
+
+    fn background_managed_node_task(&self) -> Task<Message> {
+        let Some(cfg) = self.daemon.as_ref().and_then(|daemon| daemon.config()) else {
+            return Task::none();
+        };
+        let Some(flavor_name) = cfg.pending_managed_node_install.clone() else {
+            return Task::none();
+        };
+        if cfg.pending_bitcoind.is_some()
+            || !matches!(
+                cfg.bitcoin_backend,
+                Some(coincubed::config::BitcoinBackend::Esplora(_))
+            )
+        {
+            return Task::none();
+        }
+        let flavor = match flavor_name.as_str() {
+            "Core" => crate::node::bitcoind::NodeFlavor::Core,
+            "Knots" => crate::node::bitcoind::NodeFlavor::Knots,
+            "KnotsBlake2b" => crate::node::bitcoind::NodeFlavor::KnotsBlake2b,
+            _ => return Task::none(),
+        };
+        let root = self.datadir.clone();
+        let chain = self.cache.chain();
+        let client = self.fork_connect_client.clone();
+        let cube = self.cube_settings.id.clone();
+        let provision = Task::perform(
+            async move {
+                let result = async {
+                    if chain.is_blake2b() {
+                        crate::chain::require_local_feature(chain, client, &root).await?;
+                    }
+                    crate::installer::step::node::bitcoind::provision_managed_node_in_background(
+                        root, chain, flavor,
+                    )
+                    .await
+                }
+                .await;
+                Message::BackgroundManagedNodeReady {
+                    cube,
+                    flavor: flavor_name,
+                    result,
+                }
+            },
+            |message| message,
+        );
+        Task::batch([
+            Task::done(Message::View(view::Message::ShowToast(
+                log::Level::Info,
+                "Your Vault is ready on Connect. The local node is being set up in the background."
+                    .to_string(),
+            ))),
+            provision,
+        ])
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -6722,6 +6780,62 @@ impl App {
             }
             Message::SetInternalBitcoind(bitcoind) => {
                 self.internal_bitcoind = Some(bitcoind);
+            }
+            Message::BackgroundManagedNodeReady {
+                cube,
+                flavor,
+                result,
+            } => {
+                let Some(cfg) = self.daemon.as_ref().and_then(|daemon| daemon.config()) else {
+                    return Task::none();
+                };
+                if cube != self.cube_settings.id
+                    || cfg.pending_managed_node_install.as_deref() != Some(flavor.as_str())
+                    || !matches!(
+                        cfg.bitcoin_backend,
+                        Some(coincubed::config::BitcoinBackend::Esplora(_))
+                    )
+                {
+                    if let Ok((_, node)) = result {
+                        node.stop();
+                    }
+                    return Task::none();
+                }
+                if self.daemon_switch_in_progress {
+                    // The pending-node config must be applied after the other
+                    // switch, or LoadDaemonConfig would discard this request.
+                    return Task::perform(
+                        async move {
+                            tokio::time::sleep(Duration::from_secs(5)).await;
+                            Message::BackgroundManagedNodeReady {
+                                cube,
+                                flavor,
+                                result,
+                            }
+                        },
+                        |message| message,
+                    );
+                }
+                match result {
+                    Ok((node_config, node)) => {
+                        self.internal_bitcoind = Some(node);
+                        let mut updated = cfg.clone();
+                        updated.pending_bitcoind = Some(node_config);
+                        updated.pending_managed_node_install = None;
+                        updated.auto_switch_to_pending = Some(true);
+                        return Task::done(Message::LoadDaemonConfig(Box::new(updated)));
+                    }
+                    Err(error) => {
+                        tracing::warn!("Background managed node setup failed: {error}");
+                        // Leave the request on disk so reopening the Vault retries.
+                        return Task::done(Message::View(view::Message::ShowToast(
+                            log::Level::Warn,
+                            format!(
+                                "Local node setup paused: {error}. Connect remains available; setup will retry when you reopen this Vault."
+                            ),
+                        )));
+                    }
+                }
             }
             Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
                 view::NodeSettingsMessage::SwitchToBitcoind,

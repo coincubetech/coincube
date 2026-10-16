@@ -2063,8 +2063,16 @@ pub fn extract_daemon_config(ctx: &Context, settings: &WalletSettings) -> Result
         coincubed::datadir::DataDirectory::new(data_directory),
     );
     cfg.pending_bitcoind = ctx.pending_bitcoind_config.clone();
-    // The user installed a node alongside Connect: adopt it (auto-switch) once
-    // it's synced, even if it reused a chainstate and never entered IBD.
+    cfg.pending_managed_node_install = ctx.install_node_alongside_connect.then(|| {
+        match ctx.node_flavor {
+            crate::node::bitcoind::NodeFlavor::Core => "Core",
+            crate::node::bitcoind::NodeFlavor::Knots => "Knots",
+            crate::node::bitcoind::NodeFlavor::KnotsBlake2b => "KnotsBlake2b",
+        }
+        .to_string()
+    });
+    // Adopt the requested node once it is installed and synced, even if it
+    // reused a chainstate and never entered IBD.
     cfg.auto_switch_to_pending = Some(ctx.install_node_alongside_connect);
     Ok(cfg)
 }

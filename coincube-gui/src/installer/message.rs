@@ -214,6 +214,7 @@ pub enum SelectBitcoindTypeMsg {
     // Default card
     ContinueWithConnect,
     ToggleInstallNode,
+    SelectFlavor(crate::node::bitcoind::NodeFlavor),
     ToggleAdvanced,
     // Advanced options
     UseExternal(bool),

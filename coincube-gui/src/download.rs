@@ -100,6 +100,23 @@ pub async fn fetch_bytes(url: impl AsRef<str>) -> Result<Vec<u8>, DownloadError>
     Ok(body.to_vec())
 }
 
+/// Background managed-node archives are much larger than the Tor bundle.
+/// Give slow connections time to finish without blocking the Vault UI.
+pub async fn fetch_managed_node_bytes(url: impl AsRef<str>) -> Result<Vec<u8>, DownloadError> {
+    let client = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(15))
+        .timeout(std::time::Duration::from_secs(1800))
+        .build()?;
+    Ok(client
+        .get(url.as_ref())
+        .send()
+        .await?
+        .error_for_status()?
+        .bytes()
+        .await?
+        .to_vec())
+}
+
 /// Fetch a small text file in one shot (e.g. a release `SHA256SUMS` manifest or
 /// its detached `.asc` signature). Unlike [`download`], it reports no progress.
 pub async fn fetch_text(url: impl AsRef<str>) -> Result<String, DownloadError> {

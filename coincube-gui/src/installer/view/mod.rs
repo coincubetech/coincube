@@ -1362,6 +1362,7 @@ where
 fn node_flavor_selector<'a>(
     selected: crate::node::bitcoind::NodeFlavor,
     existing: Option<crate::node::bitcoind::NodeFlavor>,
+    on_select: fn(crate::node::bitcoind::NodeFlavor) -> Message,
 ) -> Element<'a, Message> {
     use crate::node::bitcoind::NodeFlavor;
     if selected == NodeFlavor::KnotsBlake2b {
@@ -1377,10 +1378,7 @@ fn node_flavor_selector<'a>(
         } else {
             button::secondary(None, label)
         };
-        btn.width(Length::Fixed(260.0))
-            .on_press(Message::InternalBitcoind(
-                message::InternalBitcoindMsg::SelectFlavor(flavor),
-            ))
+        btn.width(Length::Fixed(260.0)).on_press(on_select(flavor))
     };
     let blurb = match selected {
         NodeFlavor::Knots => {
@@ -1436,24 +1434,25 @@ pub fn select_bitcoind_type<'a>(
     prune_default_mb: u32,
     connect_authenticated: bool,
     node_flavor: crate::node::bitcoind::NodeFlavor,
+    existing_flavor: Option<crate::node::bitcoind::NodeFlavor>,
     local_available: bool,
 ) -> Element<'a, Message> {
     use crate::chain::ChainIdExt;
     if chain.is_blake2b() {
         let chain_name = chain.label();
         let mut choices = Column::new().spacing(20).max_width(620);
-        if local_available {
-            choices = choices
-            .push(text("Install a local pruned node").bold())
-            .push(text(format!("Run Bitcoin Knots for {chain_name} in an isolated data directory. No Connect account is required. Your node must finish syncing before the Vault can be created.")))
-            .push(button::primary(None, "Use a local node").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
-        }
         if connect_authenticated || !local_available {
             choices = choices
                 .push(text("Use COINCUBE | Connect").bold())
                 .push(text(format!("Use the hosted {chain_name} node while a local node syncs, or use Connect alone.")))
                 .push(checkbox(install_node).label("Also install a pruned node on my device").on_toggle(|_| Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)))
-                .push(button::secondary(None, "Use Connect").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
+                .push(button::primary(None, "Use Connect").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
+        }
+        if local_available {
+            choices = choices
+            .push(text("Install a local pruned node").bold())
+            .push(text(format!("Run Bitcoin Knots for {chain_name} in an isolated data directory. No Connect account is required. Your node must finish syncing before the Vault can be created.")))
+            .push(button::secondary(None, "Use a local node").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
         }
         let content = Container::new(choices).padding(30);
         return layout(
@@ -1671,9 +1670,19 @@ pub fn select_bitcoind_type<'a>(
                         }),
                 );
 
-            // The Core/Knots choice now lives on the dedicated "Start Bitcoin
-            // full node" screen (`start_internal_bitcoind`), so it's offered once
-            // for every install path rather than here.
+            let default_col = if install_node {
+                default_col.push(node_flavor_selector(
+                    node_flavor,
+                    existing_flavor,
+                    |flavor| {
+                        Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::SelectFlavor(
+                            flavor,
+                        ))
+                    },
+                ))
+            } else {
+                default_col
+            };
 
             let default_card = Container::new(default_col.push(text(node_description)).push(
                 button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
@@ -1857,7 +1866,9 @@ pub fn start_internal_bitcoind<'a>(
         };
         let mut col = Column::new()
             .spacing(25)
-            .push(node_flavor_selector(flavor, existing_flavor))
+            .push(node_flavor_selector(flavor, existing_flavor, |flavor| {
+                Message::InternalBitcoind(message::InternalBitcoindMsg::SelectFlavor(flavor))
+            }))
             .push(
                 button::transparent(None, adv_label).on_press(Message::InternalBitcoind(
                     message::InternalBitcoindMsg::ToggleAdvanced,
@@ -3230,6 +3241,7 @@ mod tests {
             15_000,
             true,
             NodeFlavor::Core,
+            None,
             true,
         );
         let _ = select_bitcoind_type(
@@ -3240,6 +3252,7 @@ mod tests {
             15_000,
             true,
             NodeFlavor::Knots,
+            None,
             true,
         );
         let _ = select_bitcoind_type(
@@ -3250,6 +3263,7 @@ mod tests {
             15_000,
             false,
             NodeFlavor::Core,
+            None,
             true,
         );
 
@@ -3413,6 +3427,7 @@ mod node_management_chain_tests {
                 } else {
                     NodeFlavor::Knots
                 },
+                None,
                 true,
             );
             let mut tree = Tree::new(element.as_widget());
@@ -3436,6 +3451,8 @@ mod node_management_chain_tests {
                 assert!(!labels.0.iter().any(|s| s == "I already have a node"));
             } else {
                 assert!(labels.0.iter().any(|s| s == "Install a node only"));
+                assert!(labels.0.iter().any(|s| s == "Bitcoin Knots"));
+                assert!(labels.0.iter().any(|s| s == "Bitcoin Core"));
                 assert!(!labels
                     .0
                     .iter()

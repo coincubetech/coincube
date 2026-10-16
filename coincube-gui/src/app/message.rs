@@ -246,6 +246,13 @@ pub enum Message {
     /// Store the Bitcoind handle produced by configure_and_start_internal_bitcoind so
     /// that its LockFile is kept alive for the lifetime of the App.
     SetInternalBitcoind(Bitcoind),
+    /// Optional node selected during Connect-first Vault creation has finished
+    /// provisioning. Connect remains active until the normal sync promotion.
+    BackgroundManagedNodeReady {
+        cube: String,
+        flavor: String,
+        result: Result<(coincubed::config::BitcoindConfig, Bitcoind), String>,
+    },
     /// Fired by the bitcoind-sync subscription to trigger a progress probe.
     PollBitcoindSync,
     NodeHistory(super::node_history::Action),

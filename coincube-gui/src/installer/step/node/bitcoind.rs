@@ -644,11 +644,12 @@ impl Step for SelectBitcoindTypeStep {
         self.local_available = ctx.fresh_fork_cube;
         if self.chain.is_blake2b() {
             // Do not inspect or inherit the Bitcoin family's global node config.
-            // Connect-only remains the default until managed loader isolation lands.
+            // Connect opens the Vault immediately; the isolated local node is
+            // provisioned by the running app in the background by default.
             if chain_changed {
                 self.use_connect = self.connect_authenticated || !self.local_available;
                 self.use_external = self.use_connect;
-                self.install_node = !self.use_connect;
+                self.install_node = true;
             }
             self.show_advanced = false;
             self.node_flavor = NodeFlavor::KnotsBlake2b;
@@ -707,6 +708,11 @@ impl Step for SelectBitcoindTypeStep {
                 message::SelectBitcoindTypeMsg::ToggleInstallNode => {
                     self.install_node = !self.install_node;
                 }
+                message::SelectBitcoindTypeMsg::SelectFlavor(flavor) => {
+                    if !self.chain.is_blake2b() && flavor.supports_chain(self.chain) {
+                        self.node_flavor = flavor;
+                    }
+                }
                 message::SelectBitcoindTypeMsg::ToggleAdvanced => {
                     self.show_advanced = !self.show_advanced;
                 }
@@ -750,11 +756,11 @@ impl Step for SelectBitcoindTypeStep {
             ctx.use_coincube_connect = true;
             ctx.install_node_alongside_connect = self.install_node;
             ctx.bitcoind_is_external = !self.install_node;
-            if !self.install_node {
-                ctx.internal_bitcoind_config = None;
-                ctx.pending_bitcoind_config = None;
-                ctx.internal_bitcoind = None;
-            }
+            // Connect is usable as soon as the Vault is created. Provisioning
+            // the optional node belongs to the running app, not this wizard.
+            ctx.internal_bitcoind_config = None;
+            ctx.pending_bitcoind_config = None;
+            ctx.internal_bitcoind = None;
             return true;
         }
         // Carry the chosen managed-node flavour to the InternalBitcoindStep.
@@ -765,34 +771,24 @@ impl Step for SelectBitcoindTypeStep {
             ctx.use_coincube_connect = true;
             ctx.install_node_alongside_connect = install_node;
             ctx.bitcoind_is_external = !install_node;
-            if install_node {
-                // Keep any existing internal_bitcoind_config so the step can restart if needed.
-                if ctx.internal_bitcoind_config.is_none() {
-                    ctx.bitcoin_backend = None;
-                }
-            } else {
-                // Connect-only: set Esplora backend now. Mainnet routes
-                // primary traffic through COINCUBE API (keeps addresses off
-                // public providers); every other network keeps a public
-                // Esplora primary so sync traffic distributes across user
-                // IPs, with Connect as the safety-net fallback. See
-                // `connect_esplora_config` for the assembled chain.
-                // `EsploraConfig.token` is a plain `String` (serialized
-                // to disk in `coincubed` config), so we copy the inner
-                // string out of the `Zeroizing<String>` wrapper here.
-                let Some(token) = &ctx.connect_jwt else {
-                    return false;
-                };
-                ctx.bitcoin_backend = Some(BitcoinBackend::Esplora(
-                    crate::installer::connect_esplora_config(
-                        ctx.bitcoin_config.chain,
-                        token.as_str(),
-                    ),
-                ));
-                ctx.internal_bitcoind_config = None;
-                ctx.pending_bitcoind_config = None;
-                ctx.internal_bitcoind = None;
-            }
+            // Connect is the initial backend in either case. Mainnet routes
+            // primary traffic through COINCUBE API (keeps addresses off
+            // public providers); every other network keeps a public
+            // Esplora primary so sync traffic distributes across user
+            // IPs, with Connect as the safety-net fallback. See
+            // `connect_esplora_config` for the assembled chain.
+            // `EsploraConfig.token` is a plain `String` (serialized
+            // to disk in `coincubed` config), so we copy the inner
+            // string out of the `Zeroizing<String>` wrapper here.
+            let Some(token) = &ctx.connect_jwt else {
+                return false;
+            };
+            ctx.bitcoin_backend = Some(BitcoinBackend::Esplora(
+                crate::installer::connect_esplora_config(ctx.bitcoin_config.chain, token.as_str()),
+            ));
+            ctx.internal_bitcoind_config = None;
+            ctx.pending_bitcoind_config = None;
+            ctx.internal_bitcoind = None;
         } else if self.use_external {
             ctx.use_coincube_connect = false;
             ctx.install_node_alongside_connect = false;
@@ -827,6 +823,7 @@ impl Step for SelectBitcoindTypeStep {
             PRUNE_DEFAULT,
             self.connect_authenticated,
             self.node_flavor,
+            self.existing_flavor,
             self.local_available,
         )
     }
@@ -1846,8 +1843,99 @@ impl Step for InternalBitcoindStep {
     fn skip(&self, ctx: &Context) -> bool {
         // No Vault, no chain to watch — see `Context::installs_vault`. Checked
         // first so a seed-only install never downloads or starts a node.
-        !ctx.installs_vault() || ctx.bitcoind_is_external || ctx.remote_backend.is_some()
+        !ctx.installs_vault()
+            || ctx.bitcoind_is_external
+            || ctx.install_node_alongside_connect
+            || ctx.remote_backend.is_some()
     }
+}
+
+/// Finish a Connect-first Vault's optional managed node after the Vault has
+/// opened. The request stays in daemon.toml until the caller records the
+/// returned node as pending, so a failed or interrupted download can retry.
+pub(crate) async fn provision_managed_node_in_background(
+    root: CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    flavor: NodeFlavor,
+) -> Result<(BitcoindConfig, Bitcoind), String> {
+    flavor.check_chain(chain).map_err(|e| e.to_string())?;
+    let family = flavor.chain_family();
+    let executable = bitcoind::internal_bitcoind_exe_path_for(&root, family, flavor.version());
+    let install = if executable.exists() {
+        None
+    } else {
+        let bytes = download::fetch_managed_node_bytes(flavor.download_url())
+            .await
+            .map_err(|e| e.to_string())?;
+        let manifest = download::fetch_release_manifest(flavor)
+            .await
+            .map_err(|e| e.to_string())?;
+        Some((bytes, manifest))
+    };
+
+    // Bitcoin's existing settings path owns the shared-node and Tor rules.
+    if !chain.is_blake2b() {
+        return crate::app::state::vault::settings::bitcoind::ensure_tor_and_start_managed(
+            root,
+            chain.bitcoin_network(),
+            flavor,
+            install,
+            false,
+            None,
+        )
+        .await;
+    }
+
+    // The fork has a separate binary, config, cookie, lock and chainstate.
+    // Its installer path is chain aware; the Bitcoin settings helper above is
+    // deliberately restricted to the Bitcoin family.
+    tokio::task::spawn_blocking(move || {
+        flavor.check_chain(chain).map_err(|e| e.to_string())?;
+        if let Some((bytes, manifest)) = install {
+            let verification = DownloadVerification::for_flavor(flavor, manifest)
+                .ok_or_else(|| "Missing release manifest for node verification".to_string())?;
+            let directory = bitcoind::internal_bitcoind_directory_for(&root, family);
+            install_bitcoind(&directory, &bytes, &verification).map_err(|e| e.to_string())?;
+        }
+        let network = chain.bitcoin_network();
+        let datadir = bitcoind::internal_bitcoind_datadir_for(&root, family);
+        let (config, _) = crate::node::managed_conf::update_managed_conf(&root, family, |txn| {
+            let mut conf = txn
+                .conf
+                .clone()
+                .unwrap_or_else(|| InternalBitcoindConfig::for_flavor(flavor));
+            conf.flavor = flavor;
+            let existing = conf.networks.get(&network).cloned();
+            let (rpc_port, p2p_port) = match &existing {
+                Some(section) => (section.rpc_port, section.p2p_port),
+                None => txn.allocate_ports(&conf, get_available_port)?,
+            };
+            conf.networks
+                .entry(network)
+                .or_insert(InternalBitcoindNetworkConfig {
+                    rpc_port,
+                    p2p_port,
+                    prune: PRUNE_DEFAULT,
+                    rpc_auth: None,
+                });
+            crate::node::revalidate::ManagedNodeState::record_configured(&root, flavor);
+            let config = BitcoindConfig {
+                rpc_auth: BitcoindRpcAuth::CookieFile(internal_bitcoind_cookie_path(
+                    &datadir, &network,
+                )),
+                addr: internal_bitcoind_address(rpc_port),
+            };
+            Ok(((config, conf.clone()), Some(conf)))
+        })
+        .map_err(|e| e.to_string())?
+        .logged("writing the background managed-node config");
+        crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| e.to_string())?;
+        let node = Bitcoind::maybe_start_for_chain(chain, config.clone(), &root)
+            .map_err(|e| e.to_string())?;
+        Ok((config, node))
+    })
+    .await
+    .unwrap_or_else(|e| Err(e.to_string()))
 }
 
 #[cfg(test)]
@@ -2070,16 +2158,19 @@ mod tests {
             assert_eq!(config.token.as_deref(), Some("synthetic-jwt"));
             assert!(config.fallback_addr.is_none());
             assert!(config.secondary_fallback_addr.is_none());
-            assert!(!ctx.install_node_alongside_connect);
+            assert!(ctx.install_node_alongside_connect);
             assert!(ctx.pending_bitcoind_config.is_none());
             assert!(!ctx.coincube_directory.path().exists());
 
-            step.install_node = true;
             assert!(
-                step.apply(&mut ctx),
-                "explicit managed installation is supported"
+                InternalBitcoindStep::new(&ctx.coincube_directory).skip(&ctx),
+                "node provisioning must not delay Connect Vault creation"
             );
-            assert!(ctx.install_node_alongside_connect);
+            step.install_node = false;
+            assert!(step.apply(&mut ctx), "Connect-only remains available");
+            assert!(!ctx.install_node_alongside_connect);
+            step.install_node = true;
+            assert!(step.apply(&mut ctx));
             assert!(!ctx.bitcoind_is_external);
             step.load_context(&ctx);
             assert!(
@@ -2090,6 +2181,60 @@ mod tests {
             step.use_connect = false;
             assert!(!step.apply(&mut ctx), "arbitrary external path refused");
         }
+    }
+
+    #[test]
+    fn bitcoin_connect_and_node_starts_with_connect_without_installer_download() {
+        use crate::{chain::ChainId, installer::context::RemoteBackend};
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("bitcoin-connect-node-{}", uuid::Uuid::new_v4())),
+        );
+        let mut ctx = Context::new_for_chain(
+            ChainId::Bitcoin,
+            root.clone(),
+            RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.use_coincube_connect = true;
+        ctx.connect_jwt = Some(zeroize::Zeroizing::new("synthetic-jwt".to_string()));
+        let mut choice = SelectBitcoindTypeStep::new();
+        choice.load_context(&ctx);
+        assert!(choice.install_node, "local node is selected by default");
+        let mut hws = HardwareWallets::new(root.clone(), Network::Bitcoin);
+        let _ = choice.update(
+            &mut hws,
+            Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::SelectFlavor(
+                NodeFlavor::Core,
+            )),
+        );
+        choice.use_external = false;
+        choice.use_connect = true;
+        assert!(choice.apply(&mut ctx));
+        assert_eq!(ctx.node_flavor, NodeFlavor::Core);
+        assert!(matches!(
+            ctx.bitcoin_backend,
+            Some(BitcoinBackend::Esplora(_))
+        ));
+        assert!(ctx.pending_bitcoind_config.is_none());
+        assert!(InternalBitcoindStep::new(&root).skip(&ctx));
+        assert!(!root.path().exists(), "no node provisioning during setup");
+    }
+
+    #[tokio::test]
+    async fn background_node_refuses_a_provider_from_the_other_chain() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("background-provider-{}", uuid::Uuid::new_v4())),
+        );
+        let error = provision_managed_node_in_background(
+            root.clone(),
+            crate::chain::ChainId::BitcoinBlake2b,
+            NodeFlavor::Knots,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.contains("cannot serve Bitcoin Blake2b"));
+        assert!(!root.path().exists(), "provider check must precede all I/O");
     }
 
     #[test]
