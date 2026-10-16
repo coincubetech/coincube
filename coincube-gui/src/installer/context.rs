@@ -158,9 +158,9 @@ pub struct Context {
     /// downstream step that copies it into `EsploraConfig.token`.
     pub connect_jwt: Option<zeroize::Zeroizing<String>>,
     pub install_node_alongside_connect: bool,
-    /// Managed-node flavour chosen on the node-management step, carried to the
-    /// `InternalBitcoindStep` that actually downloads/configures it. Defaults to
-    /// Knots; the user can switch to Core on that step.
+    /// Managed-node flavour chosen on the node-management step. Connect-first
+    /// installs persist it for background provisioning after the Vault opens;
+    /// local-only installs pass it to `InternalBitcoindStep`.
     ///
     /// Authoritative. An existing on-disk `bitcoin.conf` does **not** override
     /// it: the managed-node directory is shared and survives a Cube delete, so a
@@ -170,8 +170,9 @@ pub struct Context {
     pub node_flavor: NodeFlavor,
     pub internal_bitcoind_config: Option<InternalBitcoindConfig>,
     pub internal_bitcoind: Option<Bitcoind>,
-    /// Set when `install_node_alongside_connect` is true; holds the Bitcoind
-    /// config that will become the primary backend once IBD completes.
+    /// Holds the Bitcoind config that will become the primary backend after
+    /// sync. Connect-first setup leaves this empty until background install
+    /// completes and the running app records the pending node.
     pub pending_bitcoind_config: Option<coincubed::config::BitcoindConfig>,
     pub remote_backend: RemoteBackend,
     pub backup: Option<Backup>,

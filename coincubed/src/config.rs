@@ -371,10 +371,15 @@ pub struct Config {
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub fallback_esplora: Option<EsploraConfig>,
     /// Local Bitcoind config that will become the primary backend once IBD
-    /// completes.  Written by the installer when `install_node_alongside_connect`
-    /// is true (Connect is primary until then); cleared after the switch.
+    /// completes. Written when the background setup finishes (Connect is
+    /// primary until then); cleared after the switch.
     #[serde(skip_serializing_if = "Option::is_none", default)]
     pub pending_bitcoind: Option<BitcoindConfig>,
+    /// Managed node selected during Connect-first Vault creation. The GUI
+    /// provisions it after the Vault opens, then moves it to `pending_bitcoind`.
+    /// Kept on disk so an interrupted download resumes on the next open.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_managed_node_install: Option<String>,
     /// Whether the app should auto-switch to [`Self::pending_bitcoind`] as soon
     /// as it is synced.
     ///
@@ -430,6 +435,7 @@ impl Config {
             data_dir: None,
             fallback_esplora: None,
             pending_bitcoind: None,
+            pending_managed_node_install: None,
             auto_switch_to_pending: None,
         }
     }
@@ -800,17 +806,27 @@ mod tests {
         // A None flag is never serialized, so a clean config stays clean.
         let serialized = toml::to_string_pretty(&parsed).expect("Serializing");
         assert!(!serialized.contains("auto_switch_to_pending"));
+        assert!(!serialized.contains("pending_managed_node_install"));
 
         // The two explicit states are persisted and round-trip.
         let mut adopted = parsed.clone();
         adopted.auto_switch_to_pending = Some(true);
+        adopted.pending_managed_node_install = Some("KnotsBlake2b".to_string());
         let s = toml::to_string_pretty(&adopted).expect("Serializing adopted");
         assert!(s.contains("auto_switch_to_pending = true"));
+        assert!(s.contains("pending_managed_node_install = \"KnotsBlake2b\""));
         assert_eq!(
             toml::from_str::<Config>(&s)
                 .expect("re-parse adopted")
                 .auto_switch_to_pending,
             Some(true)
+        );
+        assert_eq!(
+            toml::from_str::<Config>(&s)
+                .expect("re-parse pending install")
+                .pending_managed_node_install
+                .as_deref(),
+            Some("KnotsBlake2b")
         );
 
         let mut parked = parsed;
