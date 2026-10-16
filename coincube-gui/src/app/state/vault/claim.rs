@@ -4319,6 +4319,17 @@ pub fn partition_coins(coins: Vec<Coin>, fork_height: u64, tip_height: i32) -> C
     set
 }
 
+fn classify_coins_for_window(
+    coins: Vec<Coin>,
+    fork_height: Option<u64>,
+    tip_height: i32,
+) -> Result<CoinSet, String> {
+    let fork_height = fork_height.ok_or_else(|| {
+        "Waiting for Bitcoin Blake2b's fork status to classify coins.".to_string()
+    })?;
+    Ok(partition_coins(coins, fork_height, tip_height))
+}
+
 /// Evaluate the fork's anchor into a [`ForkWindow`]: the same projection and
 /// the same deployment gate the coordinator applies later, run before a
 /// transaction exists. The txid and presence handed to `project_anchor` are
@@ -4446,20 +4457,16 @@ async fn probe(
         Ok((_, info)) if bitcoin_funding_wallet_ready(info, &wallet.main_descriptor) => Ok(()),
         _ => Err("The Bitcoin Vault must identify its chain and be fully synchronized before preparing deposits.".into()),
     });
-    let coins = match (&window, coins) {
-        (Ok(window), Ok((coins, info))) => Ok(partition_coins(
+    // Without the fork height these coins cannot be classified. Reporting
+    // every coin as post-fork makes a transient anchor failure look like
+    // the Vault's pre-fork funds disappeared.
+    let coins = coins.and_then(|(coins, info)| {
+        classify_coins_for_window(
             coins,
-            window.fork_height,
+            window.as_ref().ok().map(|w| w.fork_height),
             info.block_height,
-        )),
-        (Err(_), Ok((coins, info))) => Ok(CoinSet {
-            pre_fork: Vec::new(),
-            post_fork: coins.len(),
-            ancestry_candidates: Vec::new(),
-            tip_height: info.block_height,
-        }),
-        (_, Err(reason)) => Err(reason),
-    };
+        )
+    });
     Checked {
         window,
         coins,
