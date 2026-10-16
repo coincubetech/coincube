@@ -27,8 +27,10 @@ Keychain rails inherit the ambiguity:
   `vault_fingerprint = sha256(descriptor)[..4]` — equal for both twins — so a phone
   paired for a Bitcoin Vault is dialled for its BTCB2 twin.
 
-`ReplayProtection` for Keychain keys stays `Legacy` (`app/state/vault/signers.rs:36-40`)
-until Lane B3.2; this contract supplies the version handshake that lets it flip.
+`ReplayProtection` for Keychain keys defaults to `Legacy`; after Rail 1 resolves
+a target, only a BTCB2 target advertising both capability literals may classify
+that exact signer as `Capable` for signer/path selection. Transaction replay
+status still comes only from cryptographically verified retained signatures.
 
 ## 2. Chain identity, as the desktop states it
 
@@ -42,8 +44,8 @@ returns `None`).
 
 Capability strings (`RegisterDeviceRequest.capabilities`, `PairingComplete.capabilities`):
 `chain-identity-v1` = the peer implements this contract; `btcb2-unified-v1` = the
-peer can sign `ALL|UNIFIED` (B3.2). A Keychain without `chain-identity-v1` is a
-**pre-identity phone**: the desktop must not create or present a BTCB2 session to it.
+peer can sign `ALL|UNIFIED` (B3.2). A Keychain missing either literal is outdated
+for BTCB2 signing: the desktop must not create or present a BTCB2 session to it.
 
 ## 3. Rail 1 — desktop obligations (`keychain_sign.rs`, `coincube-gui/src/services/connect/grpc/`)
 
@@ -58,7 +60,7 @@ Proto additions land in `coincube-api` first and reach this repo via `make sync-
 | device registration (`coincube-gui/src/services/connect/grpc/device.rs:47`) | add `chain-identity-v1` to the capabilities sent (`create_session, cancel_session` today) | — |
 | after `ResolveSigners` (`on_signers_resolved`) | `resp.network` **non-empty** and ≠ `wallet.chain.api_str()` → create **nothing**. The comparison is a literal string compare: Connect canonicalises the Cube's stored value first (a legacy `bitcoin` row is echoed as `mainnet`; canonical §2.1), so the desktop never maps aliases | R1.10: "Connect reports this Vault on a different network than this Cube. Nothing was sent. Reopen the Cube; if this repeats, contact support at coincube.io/support." — rendered as a link to `https://coincube.io/support` |
 | same | `resp.network` **empty** (pre-identity Connect): BTCB2 Vault → create **nothing**; Bitcoin-family Vault → proceed during the compatibility window (canonical §7, Q1), still sending `network` on create | R1.11 on BTCB2: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. Nothing was sent to the signer." |
-| same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` (and, after B3.2, `btcb2-unified-v1`), or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "`<name>`'s Keychain needs updating before it can sign on Bitcoin Blake2b." (`<name>` = the signer's name in the Vault) — no session for that signer |
+| same | on a BTCB2 Vault, a target whose `capabilities` lack `chain-identity-v1` or `btcb2-unified-v1`, or an `unresolved` entry with `signer_app_outdated` | R1.7 row: "`<name>`'s Keychain needs updating before it can sign on Bitcoin Blake2b." (`<name>` = the signer's name in the Vault) — no session for that signer |
 | `create_session_for` | `network: wallet.chain.api_str()` on every `CreateSigningSessionRequest` | — |
 | create response and every fetch | `session.network` must equal `wallet.chain.api_str()`. Empty on a BTCB2 Vault ⇒ pre-identity Connect ⇒ cancel the session (defensive: the session exists and a signer may already have been notified — no "nothing was sent" promise here; that promise belongs to the resolve-time check above) | R1.11 session variant: "Connect needs updating before Keychain can sign on Bitcoin Blake2b. The request was cancelled." Empty on a Bitcoin-family Vault is tolerated during the compatibility window (canonical §7, Q1) |
 | `SIGNATURE_SUBMITTED` merge | unchanged: the signature is verified under `wallet.chain`'s rule by the existing verifier (#392 replay model). That verification is not a substitute for the identity checks above | — |
