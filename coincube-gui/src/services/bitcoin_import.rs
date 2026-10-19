@@ -278,16 +278,19 @@ async fn finish(directory: &NetworkDirectory, journal: &mut Journal) -> Result<W
             .bitcoin_import
             .as_mut()
             .ok_or_else(|| SettingsError::WritingFile("Import intent is missing".into()))?;
+        let newly_attached = intent.active_attachment().is_none();
         if !intent.is_ready() {
             intent.stage = BitcoinImportStage::Syncing {
                 wallet: journal.wallet.clone(),
             };
         }
         intent.last_error = None;
-        // Seed-only creation Kits are still recorded as present, but cannot be
-        // presented as current backups of the newly attached Bitcoin wallet.
-        cube.recovery_kit_last_backed_up_descriptor_fingerprint = None;
-        cube.recovery_kit_last_backed_up_keychain_descriptor_fingerprint = None;
+        // Seed-only creation Kits become stale only on first attachment. A
+        // restart must preserve a Kit updated after the import completed.
+        if newly_attached {
+            cube.recovery_kit_last_backed_up_descriptor_fingerprint = None;
+            cube.recovery_kit_last_backed_up_keychain_descriptor_fingerprint = None;
+        }
         if !settings
             .wallets
             .iter()

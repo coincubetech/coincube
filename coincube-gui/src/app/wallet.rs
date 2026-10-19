@@ -130,6 +130,42 @@ pub struct RecentBroadcast {
     pub network: Network,
 }
 
+/// Public Bitcoin wallet imported into a Cube. Deliberately has no Cube seed
+/// signer or inheritance policy; signing is performed by the original wallet's
+/// devices or external PSBT signers.
+#[derive(Debug, Clone)]
+pub struct ImportedWallet {
+    pub cube_id: String,
+    pub name: String,
+    pub chain: ChainId,
+    pub attachment: settings::ImportedWalletAttachment,
+}
+
+impl ImportedWallet {
+    pub fn from_cube(cube: &settings::CubeSettings) -> Result<Self, String> {
+        if cube.vault_wallet_id.is_some() {
+            return Err("This Cube has conflicting Bitcoin wallet attachments.".into());
+        }
+        let attachment = cube
+            .bitcoin_import
+            .as_ref()
+            .and_then(settings::BitcoinImport::active_attachment)
+            .ok_or("Finish importing this wallet before opening it.")?
+            .clone();
+        attachment.validate(cube.network)?;
+        Ok(Self {
+            cube_id: cube.id.clone(),
+            name: cube.name.clone(),
+            chain: cube.network,
+            attachment,
+        })
+    }
+
+    pub fn wallet_id(&self) -> &WalletId {
+        &self.attachment.wallet_id
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Wallet {
     pub name: String,

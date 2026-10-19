@@ -1417,6 +1417,24 @@ pub(crate) fn duress_cube_inventory(root: &std::path::Path) -> Result<Vec<Duress
     Ok(out)
 }
 
+/// The import capability guard is separate from inventory: disabling existing
+/// Duress Mode must remain possible for an interrupted pending import.
+fn ensure_import_duress_compatibility(inventory: &[DuressCubeDir]) -> Result<(), String> {
+    if inventory
+        .iter()
+        .flat_map(|entry| &entry.settings.cubes)
+        .any(|cube| !cube.supports_duress())
+    {
+        return Err("Duress Mode cannot be enabled while this device holds a pending or imported Bitcoin wallet. Imported wallet recovery is not supported by Duress Mode yet.".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn check_import_duress_compatibility() -> Result<(), String> {
+    let directory = CoincubeDirectory::active().map_err(|e| e.to_string())?;
+    ensure_import_duress_compatibility(&duress_cube_inventory(directory.path())?)
+}
+
 /// User-facing message when the candidate duress PIN equals a Cube's real
 /// unlock PIN. A shared constant so the pre-flight wizard check and
 /// `persist_duress_enrollment` can't drift apart.
@@ -1468,6 +1486,7 @@ pub(crate) fn duress_pin_collision_check_blocking(
     if inventory.is_empty() {
         return Err(DURESS_NO_CUBES_MSG.to_string());
     }
+    ensure_import_duress_compatibility(&inventory)?;
     let mut total_cubes = 0usize;
     for entry in &inventory {
         for cube in &entry.settings.cubes {
@@ -1663,6 +1682,7 @@ pub(crate) async fn persist_duress_enrollment(
     // no Cubes to arm (or the data directory couldn't be read). Fail loud
     // instead of marking duress "enabled" with no duress PIN written anywhere.
     let inventory = duress_cube_inventory(&root)?;
+    ensure_import_duress_compatibility(&inventory)?;
     if inventory.is_empty() {
         return Err(DURESS_NO_CUBES_MSG.to_string());
     }

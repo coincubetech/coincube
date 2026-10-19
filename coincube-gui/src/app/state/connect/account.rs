@@ -3133,6 +3133,10 @@ impl ConnectAccountPanel {
 
             // ── Enrollment wizard (Phases 2 & 8) ──
             DuressMessage::StartEnrollment => {
+                if let Err(error) = crate::app::check_import_duress_compatibility() {
+                    self.error = Some(error);
+                    return iced::Task::none();
+                }
                 // Duress is a paid (Pro/Estate) feature behind a launch
                 // kill-switch. The nav hides the surface and the CTA for anyone
                 // who fails the show-rule (entitlement AND the launch gate);
@@ -3230,6 +3234,10 @@ impl ConnectAccountPanel {
                 }
             }
             DuressMessage::SubmitEnrollment => {
+                if let Err(error) = crate::app::check_import_duress_compatibility() {
+                    self.error = Some(error);
+                    return iced::Task::none();
+                }
                 // Vault gate backstop (PLAN-duress-vault-gate). The gate is
                 // enforced at StartEnrollment, but Cube state can change while
                 // the wizard is open — a mid-session Vault creation calls
