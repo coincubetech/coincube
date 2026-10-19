@@ -36,6 +36,17 @@ struct Journal {
     operation_id: Uuid,
     wallet: ImportedWalletAttachment,
     phase: Phase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_address_state: Option<RestoredAddressState>,
+}
+
+/// Durable high-water marks from a Recovery Kit; these are allocated indices,
+/// not historical scan coverage. They must be restored before publication.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RestoredAddressState {
+    pub receive_index: u32,
+    pub change_index: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -227,7 +238,8 @@ fn owns_directory(path: &Path, journal: &Journal) -> Result<bool, String> {
     };
     Ok(owner.cube_id == journal.cube_id
         && owner.operation_id == journal.operation_id
-        && owner.wallet == journal.wallet)
+        && owner.wallet == journal.wallet
+        && owner.restored_address_state == journal.restored_address_state)
 }
 
 fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(), String> {
@@ -247,6 +259,14 @@ fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(
         || !destination.join("coincubed.sqlite3").is_file()
     {
         return Err("The installed wallet does not match the import journal.".into());
+    }
+    if let Some(required) = journal.restored_address_state {
+        let (receive, change) =
+            coincubed::read_imported_address_state(&config, &DataDirectory::new(destination))
+                .map_err(|e| e.to_string())?;
+        if receive < required.receive_index || change < required.change_index {
+            return Err("The restored wallet is missing its saved address reservations.".into());
+        }
     }
     Ok(())
 }
@@ -347,6 +367,38 @@ pub async fn install(
     wallet: ImportedWalletAttachment,
     config: Config,
 ) -> Result<WalletId, String> {
+    install_inner(directory, cube_id, operation_id, wallet, config, None).await
+}
+
+/// Recovery installation uses the same journal, adding address reservations
+/// before storage becomes visible to the GUI or a running daemon.
+pub async fn install_restored(
+    directory: &NetworkDirectory,
+    cube_id: &str,
+    operation_id: Uuid,
+    wallet: ImportedWalletAttachment,
+    config: Config,
+    address_state: RestoredAddressState,
+) -> Result<WalletId, String> {
+    install_inner(
+        directory,
+        cube_id,
+        operation_id,
+        wallet,
+        config,
+        Some(address_state),
+    )
+    .await
+}
+
+async fn install_inner(
+    directory: &NetworkDirectory,
+    cube_id: &str,
+    operation_id: Uuid,
+    wallet: ImportedWalletAttachment,
+    config: Config,
+    restored_address_state: Option<RestoredAddressState>,
+) -> Result<WalletId, String> {
     directory.init().map_err(|e| e.to_string())?;
     let _lock = tokio::fs::OpenOptions::new()
         .read(true)
@@ -366,6 +418,7 @@ pub async fn install(
         operation_id,
         wallet,
         phase: Phase::Prepared,
+        restored_address_state,
     };
     check_cube(
         directory,
@@ -386,6 +439,8 @@ pub async fn install(
         if prior.cube_id != journal.cube_id
             || prior.operation_id != operation_id
             || prior.wallet != journal.wallet
+            || (journal.restored_address_state.is_some()
+                && prior.restored_address_state != journal.restored_address_state)
         {
             return Err("This import operation already names a different wallet.".into());
         }
@@ -430,10 +485,137 @@ pub async fn install(
         journal.wallet.initial_lookahead,
     )
     .map_err(|e| e.to_string())?;
+    if let Some(state) = journal.restored_address_state {
+        // The initializer writes scan fields into the saved configuration.
+        let saved_config =
+            Config::from_file(Some(stage.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
+        coincubed::restore_imported_address_state(
+            &saved_config,
+            &DataDirectory::new(stage.clone()),
+            state.receive_index,
+            state.change_index,
+        )
+        .map_err(|e| e.to_string())?;
+    }
     sync_directory(&stage)?;
     journal.phase = Phase::StorageReady;
     journal.persist(directory)?;
     finish(directory, &mut journal).await
+}
+
+/// Restore the public-wallet half of an authenticated Recovery Kit into its
+/// exact Cube. The caller restores/unlocks the Cube seed through the normal
+/// installer; it is never supplied to this wallet's spending code.
+pub async fn restore_from_kit(
+    directory: &NetworkDirectory,
+    cube_id: &str,
+    blob: &crate::services::recovery::ImportedDescriptorBlob,
+    backend: coincubed::config::BitcoinBackend,
+) -> Result<settings::CubeSettings, String> {
+    let chain = blob.wallet.descriptor.chain();
+    blob.validate(chain)?;
+    check_directory_chain(directory, chain)?;
+    check_duress(directory)?;
+    if cube_id != blob.cube.uuid {
+        return Err("This imported wallet Recovery Kit belongs to another Cube.".into());
+    }
+    let wallet = ImportedWalletAttachment::new(
+        blob.wallet.descriptor.clone(),
+        chain,
+        blob.wallet.birthday,
+        blob.wallet.initial_lookahead,
+    )?;
+    settings::update_settings_file_checked(directory, |mut settings| {
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|cube| cube.id == cube_id)
+            .ok_or_else(|| {
+                SettingsError::WritingFile("The Cube to restore no longer exists.".into())
+            })?;
+        if cube.network != chain || cube.vault_wallet_id.is_some() {
+            return Err(SettingsError::WritingFile(
+                "This Cube already has a Vault or belongs to another chain.".into(),
+            ));
+        }
+        match &cube.bitcoin_import {
+            Some(intent)
+                if intent
+                    .attachment()
+                    .is_some_and(|present| present != &wallet) =>
+            {
+                return Err(SettingsError::WritingFile(
+                    "This Cube is already importing another Bitcoin wallet.".into(),
+                ));
+            }
+            None => cube.bitcoin_import = Some(settings::BitcoinImport::pending()),
+            _ => (),
+        }
+        Ok(Some(settings))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let operation_id = Settings::from_file(directory)
+        .map_err(|e| e.to_string())?
+        .cubes
+        .into_iter()
+        .find(|cube| cube.id == cube_id)
+        .and_then(|cube| cube.bitcoin_import)
+        .ok_or("The restore operation disappeared.")?
+        .operation_id;
+    let config = Config::new(
+        coincubed::config::BitcoinConfig::new(chain, std::time::Duration::from_secs(10)),
+        Some(backend),
+        log::LevelFilter::Info,
+        WalletDescriptor::Imported(blob.wallet.descriptor.clone()),
+        directory.coincubed_data_directory(&wallet.wallet_id),
+    );
+    install_restored(
+        directory,
+        cube_id,
+        operation_id,
+        wallet.clone(),
+        config,
+        RestoredAddressState {
+            receive_index: blob.wallet.receive_index,
+            change_index: blob.wallet.change_index,
+        },
+    )
+    .await?;
+    let fingerprint = crate::services::recovery::imported_descriptor_blob_fingerprint(blob)
+        .ok_or("Could not fingerprint the restored imported wallet.")?;
+    settings::update_settings_file_checked(directory, |mut settings| {
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|cube| cube.id == cube_id)
+            .ok_or_else(|| SettingsError::WritingFile("The restored Cube disappeared.".into()))?;
+        if !cube.bitcoin_import.as_ref().is_some_and(|intent| {
+            intent.operation_id == operation_id && intent.active_attachment() == Some(&wallet)
+        }) {
+            return Err(SettingsError::WritingFile(
+                "The Cube's imported wallet changed during recovery.".into(),
+            ));
+        }
+        cube.recovery_kit_password_backed_up = true;
+        cube.recovery_kit_last_backed_up_descriptor_fingerprint = Some(fingerprint.clone());
+        if let Some(saved_wallet) = settings
+            .wallets
+            .iter_mut()
+            .find(|entry| entry.wallet_id() == wallet.wallet_id)
+        {
+            saved_wallet.name = blob.wallet.name.clone();
+        }
+        Ok(Some(settings))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    Settings::from_file(directory)
+        .map_err(|e| e.to_string())?
+        .cubes
+        .into_iter()
+        .find(|cube| cube.id == cube_id)
+        .ok_or_else(|| "The restored Cube disappeared.".into())
 }
 
 /// Resume publication/attachment after restart. A Prepared journal needs the
@@ -616,14 +798,16 @@ pub async fn reconcile_sync(
             || wallet.descriptor != *imported
             || status.birthday != wallet.birthday
             || status.initial_lookahead < wallet.initial_lookahead
+            || status.discovery_target < status.initial_lookahead
+            || status.discovery_target > 10_000
         {
             return Err(
                 "This synchronization result belongs to another wallet or setup operation.".into(),
             );
         }
         let stage = if status.history_complete
-            && status.receive_scanned >= status.initial_lookahead
-            && status.change_scanned >= status.initial_lookahead
+            && status.receive_scanned >= status.discovery_target
+            && status.change_scanned >= status.discovery_target
             && info.sync.is_finite()
             && info.sync >= 1.0
             && info.rescan_progress.is_none()

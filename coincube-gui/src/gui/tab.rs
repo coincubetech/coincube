@@ -1400,11 +1400,24 @@ impl Tab {
                         Some(installer::RestoreSource::PasswordKit)
                     );
                     let restore_seed = installer_exit_seed(i);
+                    let imported_restore = i.context.restored_imported_wallet.clone();
+                    // Kit restore uses the authenticated Connect Esplora proxy;
+                    // imported wallets never enter the remote Vault backend.
+                    let imported_backend = i
+                        .context
+                        .connect_jwt
+                        .as_ref()
+                        .map(|jwt| {
+                            coincubed::config::BitcoinBackend::Esplora(
+                                installer::connect_esplora_config(chain, jwt.as_str()),
+                            )
+                        })
+                        .or_else(|| i.context.bitcoin_backend.clone());
 
                     let generation = self.fork_session_generation;
                     let task = Task::perform(
                         async move {
-                            let cube = find_or_create_cube(
+                            let mut cube = find_or_create_cube(
                                 &network_dir,
                                 vault.as_ref(),
                                 &wallet_alias,
@@ -1414,6 +1427,17 @@ impl Tab {
                                 restore_seed.as_ref(),
                             )
                             .await?;
+                            if let Some(blob) = &imported_restore {
+                                let backend = imported_backend.ok_or_else(||
+                                    "Sign in to Connect to restore this imported Bitcoin wallet.".to_string())?;
+                                cube = crate::services::bitcoin_import::restore_from_kit(
+                                    &network_dir,
+                                    &cube.id,
+                                    blob,
+                                    backend,
+                                )
+                                .await?;
+                            }
 
                             // Hand the freshly minted Cube's PIN to the session.
                             //

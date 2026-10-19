@@ -299,6 +299,7 @@ async fn readiness_requires_matching_identity_complete_history_and_actual_covera
             chain_id: ChainId::Regtest,
             birthday: 0,
             initial_lookahead: 200,
+            discovery_target: 200,
             receive_scanned: 200,
             change_scanned: 200,
             history_complete: false,
@@ -431,4 +432,78 @@ async fn journal_file_cannot_redirect_a_different_setup_operation() {
         fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap(),
         before
     );
+}
+
+#[tokio::test]
+async fn imported_seed_only_kit_presence_does_not_claim_complete_backup() {
+    let f = Fixture::new().await;
+    settings::update_settings_file(&f.directory, |mut settings| {
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|cube| cube.id == f.cube.id)
+            .unwrap();
+        cube.recovery_kit_password_backed_up = true;
+        cube.remote_synced = true;
+        Some(settings)
+    })
+    .await
+    .unwrap();
+    assert!(f.stored().has_complete_recovery_kit());
+    f.install().await.unwrap();
+    let mut cube = f.stored();
+    assert!(cube.has_recovery_kit());
+    assert!(!cube.has_complete_recovery_kit());
+    assert_eq!(cube.connect_state(), settings::CubeConnectState::Registered);
+    cube.recovery_kit_last_backed_up_descriptor_fingerprint =
+        Some("authenticated-imported-kit-fingerprint".into());
+    assert!(cube.has_complete_recovery_kit());
+    assert_eq!(cube.connect_state(), settings::CubeConnectState::BackedUp);
+}
+
+#[tokio::test]
+async fn restored_allocations_are_durable_before_publication_and_resume() {
+    let f = Fixture::new().await;
+    let state = RestoredAddressState {
+        receive_index: 37,
+        change_index: 19,
+    };
+    install_restored(
+        &f.directory,
+        &f.cube.id,
+        f.operation(),
+        f.wallet.clone(),
+        f.config.clone(),
+        state,
+    )
+    .await
+    .unwrap();
+    let data = f.directory.coincubed_data_directory(&f.wallet.wallet_id);
+    let config = Config::from_file(Some(data.path().join(CONFIG_FILE))).unwrap();
+    let saved = coincubed::read_imported_address_state(&config, &data).unwrap();
+    assert_eq!(saved, (37, 19));
+    assert!(f.stored().has_imported_bitcoin());
+    assert_eq!(
+        resume(&f.directory, &f.cube.id, f.operation())
+            .await
+            .unwrap(),
+        Some(f.wallet.wallet_id.clone())
+    );
+    // Normal import resume must retain the Kit's staged allocation contract.
+    f.install().await.unwrap();
+    let after = coincubed::read_imported_address_state(&config, &data).unwrap();
+    assert_eq!(after, saved);
+    assert!(install_restored(
+        &f.directory,
+        &f.cube.id,
+        f.operation(),
+        f.wallet.clone(),
+        f.config.clone(),
+        RestoredAddressState {
+            receive_index: 1,
+            change_index: 1
+        }
+    )
+    .await
+    .is_err());
 }

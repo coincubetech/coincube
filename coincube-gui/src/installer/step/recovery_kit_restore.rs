@@ -44,8 +44,8 @@ use crate::{
             RecoveryKitStatus,
         },
         recovery::{
-            restore::{fetch_and_decrypt_kit, DecryptedKit, RestoreError},
-            score_password, DescriptorBlob, PasswordStrength, SeedBlob,
+            restore::{fetch_and_decrypt_wallet_kit, RecoveredKit, RestoreError},
+            score_password, DescriptorBlob, PasswordStrength, RecoveredWalletBlob, SeedBlob,
         },
     },
     signer::Signer,
@@ -96,7 +96,7 @@ pub enum Phase {
     Ready {
         selected: RestoreCubeCandidate,
         seed: Option<SeedBlob>,
-        descriptor: Option<DescriptorBlob>,
+        descriptor: Option<RecoveredWalletBlob>,
     },
     /// Terminal error state. User can either retry (back to Email) or
     /// Skip to proceed without restoration.
@@ -295,9 +295,9 @@ impl RecoveryKitRestoreStep {
                 // variants like `RateLimited` / `Api` / `NotFound` /
                 // `BlobParse`. Stringifying here would collapse them
                 // into an untyped bag and force the wrong UX.
-                fetch_and_decrypt_kit(&client, cube_id, &password)
+                fetch_and_decrypt_wallet_kit(&client, cube_id, &password)
                     .await
-                    .map(|DecryptedKit { seed, descriptor }| (seed, descriptor))
+                    .map(|RecoveredKit { seed, wallet }| (seed, wallet))
             },
             |res| Message::RecoveryKitRestore(RecoveryKitRestoreMsg::DecryptResult(res)),
         )
@@ -346,6 +346,26 @@ fn validate_blobs_match_selected(
         }
     }
     Ok(())
+}
+
+fn validate_wallet_blobs_match_selected(
+    seed: Option<&SeedBlob>,
+    wallet: Option<&RecoveredWalletBlob>,
+    selected: &RestoreCubeCandidate,
+) -> Result<(), String> {
+    match wallet {
+        Some(RecoveredWalletBlob::Vault(descriptor)) => {
+            validate_blobs_match_selected(seed, Some(descriptor), selected)
+        }
+        Some(RecoveredWalletBlob::Imported(imported)) => {
+            validate_blobs_match_selected(seed, None, selected)?;
+            if imported.cube.uuid != selected.uuid || imported.cube.network != selected.network {
+                return Err("This Recovery Kit contains an imported wallet for a different Cube or network.".into());
+            }
+            Ok(())
+        }
+        None => validate_blobs_match_selected(seed, None, selected),
+    }
 }
 
 /// The installer-context material derived from a decrypted kit: the parsed
@@ -427,6 +447,7 @@ impl StagedRestore {
     /// start a multi-hour scan of a chain the new wallet has no history on.
     pub(crate) fn revert_commit(ctx: &mut Context) {
         ctx.descriptor = None;
+        ctx.restored_imported_wallet = None;
         ctx.restore_source = None;
         ctx.restored_wallet_birthday = None;
     }
@@ -800,7 +821,7 @@ impl Step for RecoveryKitRestoreStep {
                         // backend routing bug (wrong kit served for a
                         // cube id) could still ship us the wrong payload;
                         // the defensive identity check costs ~nothing.
-                        if let Err(msg) = validate_blobs_match_selected(
+                        if let Err(msg) = validate_wallet_blobs_match_selected(
                             seed.as_ref(),
                             descriptor.as_ref(),
                             &selected,
@@ -896,11 +917,35 @@ impl Step for RecoveryKitRestoreStep {
         // only) into locals via the shared [`stage_restore`] seam. All-or-
         // nothing: any failure transitions to `Phase::Error` and bails without
         // touching `ctx`, so a partial result never survives into a later step.
+        let (vault_blob, imported_blob) = match descriptor.as_ref() {
+            Some(RecoveredWalletBlob::Vault(vault)) => (Some(vault), None),
+            Some(RecoveredWalletBlob::Imported(imported)) => (None, Some(imported.clone())),
+            None => (None, None),
+        };
+        if let Some(imported) = &imported_blob {
+            if let Err(message) = imported.validate(ctx.bitcoin_config.chain) {
+                self.set_phase(Phase::Error { message });
+                return false;
+            }
+            // Imported keys remain external. A descriptor-only restore must
+            // attach to the same already-open Cube named by the Kit.
+            if imported.wallet.descriptor.chain() != ctx.bitcoin_config.chain
+                || (matches!(self.scope, RestoreScope::DescriptorOnly)
+                    && ctx.cube_id.as_deref() != Some(imported.cube.uuid.as_str()))
+            {
+                self.set_phase(Phase::Error {
+                    message:
+                        "This imported wallet Recovery Kit belongs to a different Cube or chain."
+                            .into(),
+                });
+                return false;
+            }
+        }
         let staged = match stage_restore(
             ctx.bitcoin_config.network,
             self.scope,
             seed.as_ref(),
-            descriptor.as_ref(),
+            vault_blob,
         ) {
             Ok(staged) => staged,
             Err(message) => {
@@ -915,6 +960,13 @@ impl Step for RecoveryKitRestoreStep {
         // here rather than at staging so we don't allocate the refcounted handle
         // for a signer that ultimately gets dropped on the error path.
         staged.commit(ctx, RestoreSource::PasswordKit);
+        ctx.restored_imported_wallet = imported_blob;
+        if let Some(imported) = &ctx.restored_imported_wallet {
+            ctx.descriptor = None;
+            ctx.restore_source = Some(RestoreSource::PasswordKit);
+            ctx.restored_wallet_birthday = Some(imported.wallet.birthday);
+            ctx.wallet_alias = imported.wallet.name.clone();
+        }
 
         // Carry the *original* Cube identity (UUID + name) out of the
         // decrypted kit so the post-install `find_or_create_cube` re-mints
@@ -1540,5 +1592,125 @@ mod tests {
             staged.signer.is_none(),
             "DescriptorOnly must ignore the seed half"
         );
+    }
+
+    fn imported_blob_for_restore(uuid: &str) -> crate::services::recovery::ImportedDescriptorBlob {
+        use coincube_core::{
+            miniscript::bitcoin::{
+                bip32::{DerivationPath, Xpriv, Xpub},
+                secp256k1::Secp256k1,
+            },
+            wallet_descriptor::ImportedWalletDescriptor,
+        };
+        use std::str::FromStr;
+        let secp = Secp256k1::new();
+        let root = Xpriv::new_master(Network::Bitcoin, &[55; 32]).unwrap();
+        let path = DerivationPath::from_str("m/84'/0'/0'").unwrap();
+        let account = root.derive_priv(&secp, &path).unwrap();
+        let key = format!(
+            "[{}/84'/0'/0']{}",
+            root.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .unwrap();
+        crate::services::recovery::ImportedDescriptorBlob::new(
+            uuid.into(),
+            crate::chain::ChainId::Bitcoin,
+            crate::services::recovery::ImportedDescriptorBlobWallet {
+                name: "Existing Bitcoin".into(),
+                descriptor,
+                birthday: 0,
+                initial_lookahead: 200,
+                receive_index: 37,
+                change_index: 19,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn imported_full_restore_stages_original_wallet_and_separate_cube_seed() {
+        let blob = imported_blob_for_restore("restored-cube");
+        let mut seed = seed_blob_with(VALID_MNEMONIC);
+        seed.cube.uuid = blob.cube.uuid.clone();
+        seed.cube.network = "mainnet".into();
+        let mut selected = candidate("Recovered Cube", true);
+        selected.uuid = blob.cube.uuid.clone();
+        selected.network = "mainnet".into();
+        let wallet = RecoveredWalletBlob::Imported(blob.clone());
+        validate_wallet_blobs_match_selected(Some(&seed), Some(&wallet), &selected).unwrap();
+        let mut step = RecoveryKitRestoreStep::new(RestoreScope::Full, "mainnet".into(), None);
+        step.phase = Phase::Ready {
+            selected,
+            seed: Some(seed),
+            descriptor: Some(wallet),
+        };
+        let mut ctx = Context::new(
+            Network::Bitcoin,
+            crate::dir::CoincubeDirectory::new(
+                std::env::temp_dir().join("imported-restore-context-only"),
+            ),
+            crate::installer::context::RemoteBackend::None,
+            None,
+            None,
+        );
+        assert!(step.apply(&mut ctx));
+        assert_eq!(ctx.cube_id.as_deref(), Some("restored-cube"));
+        assert!(ctx.recovered_signer.is_some());
+        assert!(ctx.descriptor.is_none());
+        let restored = ctx.restored_imported_wallet.as_ref().unwrap();
+        assert_eq!(restored.wallet.descriptor, blob.wallet.descriptor);
+        assert_eq!(
+            (restored.wallet.receive_index, restored.wallet.change_index),
+            (37, 19)
+        );
+        assert_eq!(ctx.restore_source, Some(RestoreSource::PasswordKit));
+        step.revert(&mut ctx);
+        assert!(ctx.restored_imported_wallet.is_none());
+        assert!(ctx.recovered_signer.is_none());
+    }
+
+    #[test]
+    fn imported_descriptor_restore_requires_exact_existing_cube_and_ignores_seed() {
+        let blob = imported_blob_for_restore("existing-cube");
+        let mut selected = candidate("Existing Cube", true);
+        selected.uuid = blob.cube.uuid.clone();
+        selected.network = "mainnet".into();
+        let mut ctx = Context::new(
+            Network::Bitcoin,
+            crate::dir::CoincubeDirectory::new(
+                std::env::temp_dir().join("imported-restore-context-only"),
+            ),
+            crate::installer::context::RemoteBackend::None,
+            None,
+            None,
+        );
+        ctx.cube_id = Some("wrong-cube".into());
+        let mut step =
+            RecoveryKitRestoreStep::new(RestoreScope::DescriptorOnly, "mainnet".into(), None);
+        step.phase = Phase::Ready {
+            selected: selected.clone(),
+            seed: Some(seed_blob_with(VALID_MNEMONIC)),
+            descriptor: Some(RecoveredWalletBlob::Imported(blob.clone())),
+        };
+        assert!(!step.apply(&mut ctx));
+        assert!(ctx.restored_imported_wallet.is_none());
+        assert!(ctx.recovered_signer.is_none());
+        ctx.cube_id = Some("existing-cube".into());
+        step.phase = Phase::Ready {
+            selected,
+            seed: Some(seed_blob_with(VALID_MNEMONIC)),
+            descriptor: Some(RecoveredWalletBlob::Imported(blob)),
+        };
+        assert!(step.apply(&mut ctx));
+        assert!(ctx.recovered_signer.is_none());
+        assert!(ctx.descriptor.is_none());
+        assert!(ctx.restored_imported_wallet.is_some());
+        assert_eq!(ctx.cube_id.as_deref(), Some("existing-cube"));
     }
 }

@@ -113,6 +113,9 @@ pub struct Context {
     pub bitcoin_backend: Option<BitcoinBackend>,
     pub descriptor_template: DescriptorTemplate,
     pub descriptor: Option<CoincubeDescriptor>,
+    /// Public imported-wallet metadata recovered from an authenticated Kit.
+    /// The Cube seed is retained separately and never becomes an imported signer.
+    pub restored_imported_wallet: Option<crate::services::recovery::ImportedDescriptorBlob>,
     pub keys: HashMap<bitcoin::bip32::Fingerprint, KeySetting>,
     /// Whether [`Self::keys`] were built by the descriptor editor, which
     /// knows every key's source. Becomes
@@ -401,6 +404,7 @@ impl Context {
             keychain_keys_recorded: false,
             bitcoin_backend: None,
             descriptor: None,
+            restored_imported_wallet: None,
             coincube_directory,
             network,
             hw_is_used: false,

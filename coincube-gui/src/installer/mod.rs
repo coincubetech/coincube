@@ -1058,6 +1058,23 @@ impl Installer {
                             // We must persist the recovered signer so Breez Liquid/Spark
                             // can load it from the datadir on next startup.
                             // Even though there is no vault descriptor, the seed is needed.
+                            if ctx.restored_imported_wallet.is_some()
+                                && ctx.recovered_signer.is_none()
+                            {
+                                // Descriptor-only restore into an already unlocked
+                                // Cube: retain its seed and current credentials.
+                                if ctx.cube_id.is_none() {
+                                    return Err(Error::Unexpected(
+                                        "Imported wallet restore is missing its originating Cube."
+                                            .into(),
+                                    ));
+                                }
+                                return ensure_gui_config(
+                                    &ctx.coincube_directory
+                                        .network_directory(ctx.bitcoin_config.chain),
+                                    false,
+                                );
+                            }
                             let recovered = ctx.recovered_signer.as_ref().ok_or_else(|| {
                                 Error::Unexpected(
                                     "Seed-only install is missing the recovered signer".into(),

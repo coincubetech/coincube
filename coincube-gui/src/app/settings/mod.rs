@@ -1046,13 +1046,29 @@ impl CubeSettings {
                 .is_some()
     }
 
+    /// Whether the cached Kit record includes the current wallet kind.
+    /// A seed-only Kit remains present after import, but is not a complete
+    /// imported-wallet backup until an authenticated update records its public
+    /// descriptor payload. Live address-state drift is checked separately.
+    pub fn has_complete_recovery_kit(&self) -> bool {
+        if self.has_imported_bitcoin() {
+            self.recovery_kit_last_backed_up_descriptor_fingerprint
+                .is_some()
+                || self
+                    .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
+                    .is_some()
+        } else {
+            self.has_recovery_kit()
+        }
+    }
+
     /// Classifies this Cube's relationship to Connect for the card indicator
     /// (Phase 1 of duress mode). Users must be able to tell at a glance whether
     /// a Cube has a recovery kit before they're told what a duress wipe costs.
     pub fn connect_state(&self) -> CubeConnectState {
         if !self.remote_synced {
             CubeConnectState::Sovereign
-        } else if self.has_recovery_kit() {
+        } else if self.has_complete_recovery_kit() {
             CubeConnectState::BackedUp
         } else {
             CubeConnectState::Registered

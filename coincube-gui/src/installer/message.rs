@@ -308,7 +308,7 @@ pub enum RecoveryKitRestoreMsg {
         Result<
             (
                 Option<crate::services::recovery::SeedBlob>,
-                Option<crate::services::recovery::DescriptorBlob>,
+                Option<crate::services::recovery::RecoveredWalletBlob>,
             ),
             crate::services::recovery::restore::RestoreError,
         >,
