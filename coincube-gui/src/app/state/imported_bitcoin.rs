@@ -378,11 +378,23 @@ impl ImportedBitcoinPanel {
             && self.info.as_ref().is_some_and(|info| {
                 info.imported_wallet.as_ref().is_some_and(|status| {
                     status.history_complete
+                        && info.chain_id == Some(ChainId::Bitcoin)
+                        && info.network == Network::Bitcoin
                         && status.chain_id == ChainId::Bitcoin
-                        && status.receive_scanned
-                            >= info.receive_index.saturating_add(status.discovery_target)
-                        && status.change_scanned
-                            >= info.change_index.saturating_add(status.discovery_target)
+                        && status.discovery_target >= status.initial_lookahead
+                        && status.discovery_target <= 10_000
+                        // The daemon attests to the initial/restored/wider full
+                        // scan. A newly reserved address changes allocation,
+                        // not the completed historical discovery target.
+                        && status.receive_scanned >= status.discovery_target
+                        && status.change_scanned >= status.discovery_target
+                        && info.sync.is_finite()
+                        && info.sync >= 1.0
+                        && info.rescan_progress.is_none()
+                        && !info.history_sync.full_scan_in_progress
+                        && info.history_sync.last_failure.is_none()
+                        && !info.chain_divergence
+                        && info.refused_reorg_depth.is_none()
                         && self.import.active_attachment().is_some_and(|wallet| {
                             wallet.wallet_id.descriptor_checksum
                                 == format!("imported-v1-{}", status.wallet_identity)
@@ -2486,7 +2498,95 @@ impl State for ImportedBitcoinPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use coincube_core::miniscript::bitcoin::{absolute::LockTime, transaction, Transaction};
+    use coincube_core::miniscript::bitcoin::{
+        absolute::LockTime,
+        bip32::{DerivationPath, Xpriv, Xpub},
+        secp256k1::Secp256k1,
+        transaction, Transaction,
+    };
+    use coincubed::commands::{GetInfoDescriptors, ImportedWalletSync};
+
+    #[test]
+    fn completed_import_stays_ready_after_receive_or_change_allocation() {
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[43; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84'/0'/0'").unwrap())
+            .unwrap();
+        let key = format!(
+            "[{}/84'/0'/0']{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        let wallet =
+            ImportedWalletAttachment::new(descriptor.clone(), ChainId::Bitcoin, 0, 200).unwrap();
+        let mut import = BitcoinImport::pending();
+        import.stage = BitcoinImportStage::Ready { wallet };
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-ready-test"));
+        let mut panel = ImportedBitcoinPanel::new(directory, "cube-1".into(), import);
+        panel.info = Some(model::GetInfoResult {
+            version: "test".into(),
+            network: Network::Bitcoin,
+            chain_id: Some(ChainId::Bitcoin),
+            block_height: 1,
+            sync: 1.0,
+            descriptors: GetInfoDescriptors {
+                main: WalletDescriptor::Imported(descriptor.clone()),
+            },
+            imported_wallet: Some(ImportedWalletSync {
+                wallet_identity: descriptor.identity(ChainId::Bitcoin).unwrap().to_string(),
+                chain_id: ChainId::Bitcoin,
+                birthday: 0,
+                initial_lookahead: 200,
+                discovery_target: 200,
+                receive_scanned: 200,
+                change_scanned: 200,
+                history_complete: true,
+            }),
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: Some(1),
+            history_sync: Default::default(),
+            receive_index: 0,
+            change_index: 0,
+        });
+        assert!(panel.is_ready());
+
+        // Ordinary address allocation advances durable high-water indices but
+        // does not invalidate the attested, completed historical scan.
+        panel.info.as_mut().unwrap().receive_index = 1;
+        panel.info.as_mut().unwrap().change_index = 1;
+        assert!(panel.is_ready());
+
+        // A restored or wider scan clears the durable completion marker first.
+        panel
+            .info
+            .as_mut()
+            .unwrap()
+            .imported_wallet
+            .as_mut()
+            .unwrap()
+            .history_complete = false;
+        assert!(!panel.is_ready());
+        let status = panel
+            .info
+            .as_mut()
+            .unwrap()
+            .imported_wallet
+            .as_mut()
+            .unwrap();
+        status.history_complete = true;
+        status.discovery_target = 300;
+        assert!(!panel.is_ready());
+    }
 
     #[test]
     fn late_event_from_closed_panel_cannot_mutate_reopened_cube() {
