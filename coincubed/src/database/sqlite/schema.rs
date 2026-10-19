@@ -85,6 +85,13 @@ CREATE TABLE wallets (
     )
 );
 
+/* A broader, restartable historical discovery request. Kept separate from
+ * the immutable import_initial_lookahead that binds config to this wallet. */
+CREATE TABLE import_discovery (
+    id INTEGER PRIMARY KEY CHECK (id = 1),
+    target INTEGER NOT NULL CHECK (target BETWEEN 1 AND 10000)
+);
+
 /* Our (U)TxOs.
  *
  * The 'spend_block_height' and 'spend_block.time' are only present if the spending

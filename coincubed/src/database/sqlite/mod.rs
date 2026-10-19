@@ -333,6 +333,10 @@ pub fn create_imported_db(
         rusqlite::params![birthday, chain.dir_name(), descriptor.receive_descriptor().to_string(),
             descriptor.change_descriptor().to_string(), initial_lookahead],
     )?;
+    tx.execute(
+        "INSERT INTO import_discovery (id, target) VALUES (1, ?1)",
+        [initial_lookahead],
+    )?;
     {
         let mut insert = tx.prepare(
             "INSERT INTO addresses (receive_address, change_address, derivation_index) VALUES (?1, ?2, ?3)",
@@ -482,6 +486,86 @@ pub fn restore_imported_address_state(
     Ok(())
 }
 
+/// Raise historical discovery coverage without pretending the new addresses
+/// were allocated. The pending marker and new target are one durable write.
+pub fn expand_imported_discovery(
+    db_path: &path::Path,
+    chain: ChainId,
+    descriptor: &ImportedWalletDescriptor,
+    birthday: u32,
+    initial_lookahead: u32,
+    target: u32,
+) -> Result<u32, SqliteDbError> {
+    if descriptor.chain() != chain || chain.is_blake2b() {
+        return Err(SqliteDbError::ChainMismatch {
+            expected: chain,
+            found: descriptor.chain(),
+        });
+    }
+    if !(1..=10_000).contains(&target) || target < initial_lookahead {
+        return Err(SqliteDbError::MalformedIdentity(
+            "discovery target must be at least the original lookahead and at most 10000".into(),
+        ));
+    }
+    let mut conn = rusqlite::Connection::open(db_path)?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tip: (String, String) = tx.query_row("SELECT chain, network FROM tip", [], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+    let row: (String, String, String, String, u32, u32) = tx.query_row(
+        "SELECT wallet_kind, import_chain, imported_receive_descriptor,
+                imported_change_descriptor, import_birthday, import_initial_lookahead
+         FROM wallets WHERE id = 1",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+            ))
+        },
+    )?;
+    if tip != (chain.dir_name().into(), chain.bitcoin_network().to_string())
+        || row.0 != "imported"
+        || row.1 != chain.dir_name()
+        || row.2 != descriptor.receive_descriptor().to_string()
+        || row.3 != descriptor.change_descriptor().to_string()
+        || row.4 != birthday
+        || row.5 != initial_lookahead
+    {
+        return Err(SqliteDbError::MalformedIdentity(
+            "discovery storage does not match the imported wallet attachment".into(),
+        ));
+    }
+    let current: Option<u32> = tx
+        .query_row(
+            "SELECT target FROM import_discovery WHERE id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let current = current.unwrap_or(initial_lookahead);
+    let final_target = target.max(current);
+    if final_target > current {
+        tx.execute(
+            "INSERT INTO import_discovery (id, target) VALUES (1, ?1)
+             ON CONFLICT(id) DO UPDATE SET target = excluded.target",
+            [final_target],
+        )?;
+        tx.execute(
+            "UPDATE wallets SET import_history_complete = 0 WHERE id = 1",
+            [],
+        )?;
+    }
+    tx.commit()?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    Ok(final_target)
+}
+
 // We only support single wallet. The id of the wallet row is always 1.
 const WALLET_ID: i64 = 1;
 
@@ -524,6 +608,7 @@ impl SqliteConn {
         self.conn
             .query_row(
                 "SELECT import_birthday, import_initial_lookahead,
+                        COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead),
                         import_receive_scanned, import_change_scanned,
                         import_history_complete
                  FROM wallets WHERE wallet_kind = 'imported' AND id = 1",
@@ -532,9 +617,10 @@ impl SqliteConn {
                     Ok(ImportedHistory {
                         birthday: row.get(0)?,
                         initial_lookahead: row.get(1)?,
-                        receive_scanned: row.get(2)?,
-                        change_scanned: row.get(3)?,
-                        history_complete: row.get(4)?,
+                        discovery_target: row.get(2)?,
+                        receive_scanned: row.get(3)?,
+                        change_scanned: row.get(4)?,
+                        history_complete: row.get(5)?,
                     })
                 },
             )
@@ -567,10 +653,12 @@ impl SqliteConn {
             "UPDATE wallets SET import_receive_scanned = ?1,
                 import_change_scanned = ?2,
                 import_history_complete = CASE
-                    WHEN ?1 >= import_initial_lookahead AND ?2 >= import_initial_lookahead
+                    WHEN ?1 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
+                     AND ?2 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
                     THEN 1 ELSE 0 END,
                 timestamp = CASE
-                    WHEN ?1 >= import_initial_lookahead AND ?2 >= import_initial_lookahead
+                    WHEN ?1 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
+                     AND ?2 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
                     THEN import_birthday ELSE timestamp END
              WHERE id = 1 AND wallet_kind = 'imported'",
             rusqlite::params![receive_scanned, change_scanned],
@@ -5107,6 +5195,40 @@ CREATE TABLE labels (
             assert_eq!(u32::from(conn.receive_index()), 45);
             assert_eq!(u32::from(conn.change_index()), 32);
             drop(conn);
+            let mut conn = db.connection().unwrap();
+            conn.complete_import_history(20, 20).unwrap();
+            assert!(conn.imported_history().unwrap().unwrap().history_complete);
+            drop(conn);
+            assert_eq!(
+                expand_imported_discovery(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 40)
+                    .unwrap(),
+                40
+            );
+            let mut conn = db.connection().unwrap();
+            let history = conn.imported_history().unwrap().unwrap();
+            assert_eq!(history.initial_lookahead, 20);
+            assert_eq!(history.discovery_target, 40);
+            assert!(!history.history_complete);
+            assert_eq!(u32::from(conn.receive_index()), 45);
+            assert_eq!(u32::from(conn.change_index()), 32);
+            conn.complete_import_history(39, 40).unwrap();
+            assert!(!conn.imported_history().unwrap().unwrap().history_complete);
+            conn.complete_import_history(40, 40).unwrap();
+            assert!(conn.imported_history().unwrap().unwrap().history_complete);
+            drop(conn);
+            assert_eq!(
+                expand_imported_discovery(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 30)
+                    .unwrap(),
+                40
+            );
+            assert!(
+                db.connection()
+                    .unwrap()
+                    .imported_history()
+                    .unwrap()
+                    .unwrap()
+                    .history_complete
+            );
             assert!(restore_imported_address_state(
                 &db_path,
                 ChainId::Bitcoin,

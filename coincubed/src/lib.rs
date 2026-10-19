@@ -149,6 +149,40 @@ pub fn restore_imported_address_state(
     Ok(())
 }
 
+/// Queue a wider historical scan while the imported daemon is stopped. The
+/// immutable initial lookahead stays bound to config; the separate target and
+/// incomplete marker survive restart and cause a full scan on next startup.
+pub fn expand_imported_discovery(
+    config: &Config,
+    data_dir: &DataDirectory,
+    target: u32,
+) -> Result<u32, StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "discovery expansion requires an imported wallet".into(),
+        ))
+    })?;
+    let expected = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if expected.path() != data_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "discovery directory does not match the imported wallet configuration".into(),
+        )));
+    }
+    Ok(database::sqlite::expand_imported_discovery(
+        &data_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        config.import_birthday.expect("validated imported birthday"),
+        config
+            .import_initial_lookahead
+            .expect("validated imported lookahead"),
+        target,
+    )?)
+}
+
 #[cfg(not(test))]
 use std::panic;
 // A panic in any thread should stop the main thread, and print the panic.
@@ -829,7 +863,7 @@ fn setup_electrum(
         change_index,
         imported_history
             .as_ref()
-            .map_or(30, |state| state.initial_lookahead),
+            .map_or(30, |state| state.discovery_target),
     );
     let full_scan = db_conn.rescan_timestamp().is_some()
         || imported_history
@@ -839,7 +873,7 @@ fn setup_electrum(
         Electrum::new(client, bdk_wallet, full_scan).map_err(StartupError::Electrum)?;
     if let Some(history) = imported_history {
         electrum
-            .set_full_scan_gap(history.initial_lookahead as usize)
+            .set_full_scan_gap(history.discovery_target as usize)
             .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
     }
     electrum
@@ -909,7 +943,7 @@ fn setup_esplora(
         change_index,
         imported_history
             .as_ref()
-            .map_or(30, |state| state.initial_lookahead),
+            .map_or(30, |state| state.discovery_target),
     );
     let full_scan = db_conn.rescan_timestamp().is_some()
         || imported_history
@@ -918,7 +952,7 @@ fn setup_esplora(
     let mut esplora = Esplora::new(client, bdk_wallet, full_scan).map_err(StartupError::Esplora)?;
     if let Some(history) = imported_history {
         esplora
-            .set_full_scan_gap(history.initial_lookahead as usize)
+            .set_full_scan_gap(history.discovery_target as usize)
             .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
     }
     esplora

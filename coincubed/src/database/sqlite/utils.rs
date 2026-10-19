@@ -642,6 +642,10 @@ fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbErro
                  'vault' FROM wallets;
         DROP TABLE wallets;
         ALTER TABLE wallets_v10 RENAME TO wallets;
+        CREATE TABLE IF NOT EXISTS import_discovery (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            target INTEGER NOT NULL CHECK (target BETWEEN 1 AND 10000)
+        );
         UPDATE version SET version = 10;",
         )?;
         tx.execute("ALTER TABLE spend_transactions ADD COLUMN broadcast_txid BLOB CHECK (broadcast_txid IS NULL OR length(broadcast_txid) = 32)", [])?;

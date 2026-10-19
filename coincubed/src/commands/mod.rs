@@ -1013,6 +1013,7 @@ impl DaemonControl {
                         chain_id: self.config.bitcoin_config.chain,
                         birthday: state.birthday,
                         initial_lookahead: state.initial_lookahead,
+                        discovery_target: state.discovery_target,
                         receive_scanned: state.receive_scanned,
                         change_scanned: state.change_scanned,
                         history_complete: state.history_complete,
@@ -2256,6 +2257,10 @@ pub struct ImportedWalletSync {
     pub chain_id: coincube_core::chain::ChainId,
     pub birthday: u32,
     pub initial_lookahead: u32,
+    /// Durable wider historical scan request. Readiness requires both branch
+    /// coverage counts to reach this bound, separately from allocation state.
+    #[serde(default)]
+    pub discovery_target: u32,
     pub receive_scanned: u32,
     pub change_scanned: u32,
     pub history_complete: bool,

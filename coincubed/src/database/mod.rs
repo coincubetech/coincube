@@ -51,6 +51,7 @@ pub struct Wallet {
 pub struct ImportedHistory {
     pub birthday: u32,
     pub initial_lookahead: u32,
+    pub discovery_target: u32,
     pub receive_scanned: u32,
     pub change_scanned: u32,
     pub history_complete: bool,
