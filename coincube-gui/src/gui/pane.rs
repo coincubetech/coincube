@@ -14,8 +14,14 @@ use super::tab;
 
 #[derive(Debug)]
 pub enum Message {
-    Tab(usize, tab::Message),
+    Tab(usize, Box<tab::Message>),
     View(ViewMessage),
+}
+
+impl Message {
+    pub fn tab(id: usize, message: tab::Message) -> Self {
+        Self::Tab(id, Box::new(message))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -68,7 +74,7 @@ impl Pane {
                 tabs_created: 1,
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             },
-            task.map(|msg| Message::Tab(1, msg)),
+            task.map(|msg| Message::tab(1, msg)),
         )
     }
 
@@ -89,7 +95,7 @@ impl Pane {
         tab.set_theme_mode(self.theme_mode);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
-        task.map(move |msg| Message::Tab(id, msg))
+        task.map(move |msg| Message::tab(id, msg))
     }
 
     /// Focus an existing Home tab (or spawn one) and route it to `nav`. Shared
@@ -104,7 +110,7 @@ impl Pane {
             .map(|(i, t)| (i, t.id));
         if let Some((idx, tab_id)) = home_tab {
             self.focused_tab = idx;
-            return Task::done(Message::Tab(tab_id, tab::Message::Launch(nav)));
+            return Task::done(Message::tab(tab_id, tab::Message::Launch(nav)));
         }
         // No Home tab open — spawn one and queue the navigation against its id
         // so it lands on the target Connect section rather than the default view.
@@ -113,7 +119,7 @@ impl Pane {
         if let Some(tab_id) = new_tab_id {
             return Task::batch([
                 add_task,
-                Task::done(Message::Tab(tab_id, tab::Message::Launch(nav))),
+                Task::done(Message::tab(tab_id, tab::Message::Launch(nav))),
             ]);
         }
         add_task
@@ -167,7 +173,7 @@ impl Pane {
     pub fn on_tick(&mut self) -> Task<Message> {
         Task::batch(self.tabs.iter_mut().map(|t| {
             let id = t.id;
-            t.on_tick().map(move |msg| Message::Tab(id, msg))
+            t.on_tick().map(move |msg| Message::tab(id, msg))
         }))
     }
 
@@ -178,7 +184,7 @@ impl Pane {
         app_msg: impl Into<app::Message>,
         cfg: &Config,
     ) -> Task<Message> {
-        self.update(Message::Tab(tab_id, tab::Message::Run(app_msg.into())), cfg)
+        self.update(Message::tab(tab_id, tab::Message::Run(app_msg.into())), cfg)
     }
 
     pub fn update(&mut self, message: Message, cfg: &Config) -> Task<Message> {
@@ -189,7 +195,7 @@ impl Pane {
                     .iter_mut()
                     .find(|t| t.id == id)
                     .map(|t| {
-                        t.update(msg).then(move |msg| match msg {
+                        t.update(*msg).then(move |msg| match msg {
                             // Bubble ToggleTheme up to pane level as a ViewMessage
                             tab::Message::GlobalSettingsChanged => {
                                 Task::done(Message::View(ViewMessage::GlobalSettingsChanged))
@@ -212,7 +218,7 @@ impl Pane {
                             tab::Message::ConnectSignedIn => {
                                 Task::done(Message::View(ViewMessage::ConnectSignedIn))
                             }
-                            other => Task::done(Message::Tab(id, other)),
+                            other => Task::done(Message::tab(id, other)),
                         })
                     })
                     .unwrap_or(Task::none());
@@ -225,7 +231,7 @@ impl Pane {
                         let id = tab.id;
                         return home
                             .on_focus()
-                            .map(move |message| Message::Tab(id, tab::Message::Launch(message)));
+                            .map(move |message| Message::tab(id, tab::Message::Launch(message)));
                     }
                 }
             }
@@ -249,7 +255,7 @@ impl Pane {
                         let init_msg = app::Message::View(app::view::Message::ConnectAccount(
                             app::view::ConnectAccountMessage::Init,
                         ));
-                        tasks.push(Task::done(Message::Tab(t.id, tab::Message::Run(init_msg))));
+                        tasks.push(Task::done(Message::tab(t.id, tab::Message::Run(init_msg))));
                     }
                 }
                 if !tasks.is_empty() {
@@ -295,7 +301,7 @@ impl Pane {
             .map(|t| {
                 t.subscription()
                     .with(t.id)
-                    .map(|(id, msg)| Message::Tab(id, msg))
+                    .map(|(id, msg)| Message::tab(id, msg))
             })
             .collect();
         Subscription::batch(subs)
@@ -401,7 +407,7 @@ impl Pane {
     pub fn view(&self) -> Element<Message> {
         Container::new(if let Some(t) = self.tabs.get(self.focused_tab) {
             let id = t.id;
-            t.view().map(move |msg| Message::Tab(id, msg))
+            t.view().map(move |msg| Message::tab(id, msg))
         } else {
             Row::new().into()
         })

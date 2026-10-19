@@ -200,7 +200,7 @@ pub fn decrypt_wallet_descriptor_blob(
 /// Keychain envelopes share this version dispatch; heir recovery continues to
 /// use its Vault-only descriptor parser.
 pub fn parse_wallet_descriptor_blob(bytes: &[u8]) -> Result<RecoveredWalletBlob, RestoreError> {
-    let value: serde_json::Value = serde_json::from_slice(&bytes)
+    let value: serde_json::Value = serde_json::from_slice(bytes)
         .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
     let version = value
         .get("version")

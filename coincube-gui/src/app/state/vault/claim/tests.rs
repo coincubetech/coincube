@@ -4722,20 +4722,12 @@ mod flow {
                         let loaded = gui.update(message);
                         for follow in gui_outputs(loaded).await {
                             // Deliver the real queued SessionLoaded too; omit unrelated network bootstrap.
-                            if matches!(
-                                &follow,
-                                crate::gui::Message::Pane(
-                                    _,
-                                    crate::gui::pane::Message::Tab(
-                                        _,
-                                        crate::gui::tab::Message::Run(Message::View(
-                                            view::Message::ConnectAccount(
-                                                view::ConnectAccountMessage::SessionLoaded { .. }
-                                            )
-                                        ))
-                                    )
-                                )
-                            ) {
+                            if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
+                            if matches!(inner.as_ref(), crate::gui::tab::Message::Run(Message::View(
+                                view::Message::ConnectAccount(
+                                    view::ConnectAccountMessage::SessionLoaded { .. }
+                                )))))
+                            {
                                 drop(gui.update(follow));
                             }
                         }
@@ -4786,21 +4778,12 @@ mod flow {
                     let mut queue =
                         std::collections::VecDeque::from(gui_outputs(gui.update(message)).await);
                     while let Some(follow) = queue.pop_front() {
-                        if matches!(
-                            &follow,
-                            crate::gui::Message::Pane(
-                                _,
-                                crate::gui::pane::Message::Tab(
-                                    _,
-                                    crate::gui::tab::Message::Run(
-                                        Message::Claim(_)
-                                            | Message::View(view::Message::ConnectAccount(
-                                                view::ConnectAccountMessage::SessionLoaded { .. }
-                                            ))
-                                    )
-                                )
-                            )
-                        ) {
+                        if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
+                        if matches!(inner.as_ref(), crate::gui::tab::Message::Run(
+                            Message::Claim(_) | Message::View(view::Message::ConnectAccount(
+                                view::ConnectAccountMessage::SessionLoaded { .. }
+                            )))))
+                        {
                             queue.extend(gui_outputs(gui.update(follow)).await);
                         }
                     }

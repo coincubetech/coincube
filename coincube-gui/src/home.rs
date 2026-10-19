@@ -4397,11 +4397,13 @@ impl Home {
             &self.create_cube_pin,
             &self.create_cube_pin_confirm,
             &self.error,
-            self.creating_cube,
-            self.passkey_mode,
-            self.connect_account.authenticated_client().is_some(),
-            self.pending_bitcoin_import.is_some(),
-            self.network == ChainId::Bitcoin,
+            CreateCubeFormOptions {
+                creating_cube: self.creating_cube,
+                passkey_mode: self.passkey_mode,
+                signed_in: self.connect_account.authenticated_client().is_some(),
+                importing_bitcoin: self.pending_bitcoin_import.is_some(),
+                can_import_bitcoin: self.network == ChainId::Bitcoin,
+            },
         )
     }
 
@@ -5205,19 +5207,31 @@ fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message>
     .into()
 }
 
-fn create_cube_form<'a>(
-    cube_name: &coincube_ui::component::form::Value<String>,
-    pin: &'a pin_input::PinInput,
-    pin_confirm: &'a pin_input::PinInput,
-    error: &'a Option<String>,
+#[derive(Clone, Copy)]
+struct CreateCubeFormOptions {
     creating_cube: bool,
     passkey_mode: bool,
     signed_in: bool,
     importing_bitcoin: bool,
     can_import_bitcoin: bool,
+}
+
+fn create_cube_form<'a>(
+    cube_name: &coincube_ui::component::form::Value<String>,
+    pin: &'a pin_input::PinInput,
+    pin_confirm: &'a pin_input::PinInput,
+    error: &'a Option<String>,
+    options: CreateCubeFormOptions,
 ) -> Element<'a, ViewMessage> {
     use coincube_ui::component::form;
     use std::time::Duration;
+    let CreateCubeFormOptions {
+        creating_cube,
+        passkey_mode,
+        signed_in,
+        importing_bitcoin,
+        can_import_bitcoin,
+    } = options;
 
     let mut column = Column::new()
         .spacing(20)
@@ -8496,22 +8510,26 @@ mod tests {
             &pin,
             &pin,
             &None,
-            false,
-            false,
-            true,
-            false,
-            true,
+            CreateCubeFormOptions {
+                creating_cube: false,
+                passkey_mode: false,
+                signed_in: true,
+                importing_bitcoin: false,
+                can_import_bitcoin: true,
+            },
         );
         let _ = create_cube_form(
             &invalid_name,
             &pin_input::PinInput::new(),
             &pin_input::PinInput::new(),
             &Some("form error".to_string()),
-            true,
-            true,
-            false,
-            true,
-            true,
+            CreateCubeFormOptions {
+                creating_cube: true,
+                passkey_mode: true,
+                signed_in: false,
+                importing_bitcoin: true,
+                can_import_bitcoin: true,
+            },
         );
 
         let mut words: [String; 12] = Default::default();

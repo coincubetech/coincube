@@ -183,7 +183,7 @@ fn import_signed_psbt_value(
     }
     let original = unsigned_construction(current);
     let secp = secp256k1::Secp256k1::verification_only();
-    let incoming = verify_imported_signatures(wallet, &original, &signed, &secp)
+    let incoming = verify_imported_signatures(wallet, &original, signed, &secp)
         .map_err(|error| error.to_string())?;
     if incoming.iter().all(|count| *count == 0) {
         return Err("The PSBT has no valid signer signatures.".into());
@@ -244,38 +244,32 @@ pub enum ImportMessage {
     SignWithDevice(String),
 }
 
+type RefreshSnapshot = (
+    model::GetInfoResult,
+    model::ListCoinsResult,
+    Vec<model::HistoryTransaction>,
+    Vec<ListSpendEntry>,
+    BitcoinImportStage,
+);
+
+type SignedSpend = (Psbt, Vec<usize>, Option<Txid>);
+
 #[derive(Debug)]
 pub enum ImportEvent {
     Start,
     Installed(u64, Result<(), String>),
     Resumed(u64, Result<Option<settings::WalletId>, String>),
     Opened(u64, Result<Arc<dyn Daemon + Send + Sync>, String>),
-    Refreshed(
-        u64,
-        Result<
-            (
-                model::GetInfoResult,
-                model::ListCoinsResult,
-                Vec<model::HistoryTransaction>,
-                Vec<ListSpendEntry>,
-                BitcoinImportStage,
-            ),
-            String,
-        >,
-    ),
+    Refreshed(u64, Result<RefreshSnapshot, String>),
     Address(u64, Result<model::GetAddressResult, String>),
     Abandoned(u64, Result<(), String>),
     DraftCreated(u64, Result<(Psbt, Vec<String>), String>),
-    SignedSaved(u64, Txid, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
+    SignedSaved(u64, Txid, Result<SignedSpend, String>),
     Broadcasted(u64, Result<(Txid, bool), String>),
-    HardwareSigned(u64, Txid, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
+    HardwareSigned(u64, Txid, Result<SignedSpend, String>),
     Expanded(u64, Result<u32, String>),
     FileSaved(u64, Txid, Result<bool, String>),
-    FileLoaded(
-        u64,
-        Txid,
-        Result<Option<(Psbt, Vec<usize>, Option<Txid>)>, String>,
-    ),
+    FileLoaded(u64, Txid, Result<Option<SignedSpend>, String>),
 }
 
 struct ImportedDraft {
