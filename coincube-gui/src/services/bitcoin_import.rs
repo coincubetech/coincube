@@ -442,3 +442,77 @@ pub async fn resume(
     }
     finish(directory, &mut journal).await.map(Some)
 }
+
+/// Reconcile durable setup readiness from a daemon positively identified as
+/// this Cube's wallet. Current backend errors remain separate UI freshness
+/// information; a different wallet/session cannot complete this operation.
+pub async fn reconcile_sync(
+    directory: &NetworkDirectory,
+    cube_id: &str,
+    operation_id: Uuid,
+    info: &coincubed::commands::GetInfoResult,
+) -> Result<(), String> {
+    let status = info
+        .imported_wallet
+        .as_ref()
+        .ok_or("The daemon did not report imported wallet synchronization status.")?;
+    let imported = match &info.descriptors.main {
+        WalletDescriptor::Imported(descriptor) => descriptor,
+        WalletDescriptor::Vault(_) => {
+            return Err("This daemon is running a Vault, not the imported Bitcoin wallet.".into())
+        }
+    };
+    if info.chain_id != Some(status.chain_id)
+        || info.network != status.chain_id.bitcoin_network()
+        || imported
+            .identity(status.chain_id)
+            .map_err(|e| e.to_string())?
+            .to_string()
+            != status.wallet_identity
+    {
+        return Err(
+            "The daemon's wallet identity or chain does not match its synchronization report."
+                .into(),
+        );
+    }
+    settings::update_settings_file_checked(directory, |mut settings| {
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|c| c.id == cube_id)
+            .ok_or_else(|| {
+                SettingsError::WritingFile("The import Cube no longer exists.".into())
+            })?;
+        let intent = cube.bitcoin_import.as_mut().ok_or_else(|| {
+            SettingsError::WritingFile("The import operation no longer exists.".into())
+        })?;
+        let wallet = intent
+            .active_attachment()
+            .ok_or_else(|| {
+                SettingsError::WritingFile("The imported wallet is not installed yet.".into())
+            })?
+            .clone();
+        if intent.operation_id != operation_id
+            || cube.network != status.chain_id
+            || wallet.descriptor != *imported
+        {
+            return Err(SettingsError::WritingFile(
+                "This synchronization result belongs to another wallet or setup operation.".into(),
+            ));
+        }
+        if status.history_complete
+            && status.receive_scanned >= status.initial_lookahead
+            && status.change_scanned >= status.initial_lookahead
+        {
+            intent.stage = BitcoinImportStage::Ready { wallet };
+        } else {
+            intent.stage = BitcoinImportStage::Syncing { wallet };
+        }
+        Ok(Some(settings))
+    })
+    .await
+    .map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests;
