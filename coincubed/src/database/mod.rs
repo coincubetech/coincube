@@ -318,8 +318,27 @@ pub trait DatabaseConnection {
     /// Insert a new Spend transaction or replace an existing one.
     fn store_spend(&mut self, psbt: &Psbt);
 
+    fn store_imported_construction(&mut self, _psbt: &Psbt) -> Result<(), String> {
+        Err("imported draft persistence is unsupported".into())
+    }
+
+    fn spend_broadcast_txid(
+        &mut self,
+        _draft: &bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Txid>, String> {
+        Err("broadcast identity lookup is unsupported".into())
+    }
+
     /// List all existing Spend transactions, along with an optional last update timestamp.
-    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>)>;
+    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>, Option<bitcoin::Txid>)>;
+
+    fn record_broadcast_txid(
+        &mut self,
+        _draft: &bitcoin::Txid,
+        _actual: &bitcoin::Txid,
+    ) -> Result<(), String> {
+        Err("broadcast identity persistence is unsupported".into())
+    }
 
     /// Delete a Spend transaction from database.
     fn delete_spend(&mut self, txid: &bitcoin::Txid);
@@ -528,11 +547,33 @@ impl DatabaseConnection for SqliteConn {
         self.store_spend(psbt)
     }
 
-    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>)> {
+    fn store_imported_construction(&mut self, psbt: &Psbt) -> Result<(), String> {
+        self.store_imported_construction(psbt)
+            .map_err(|error| error.to_string())
+    }
+
+    fn spend_broadcast_txid(
+        &mut self,
+        draft: &bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Txid>, String> {
+        self.spend_broadcast_txid(draft)
+            .map_err(|error| error.to_string())
+    }
+
+    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>, Option<bitcoin::Txid>)> {
         self.list_spend()
             .into_iter()
-            .map(|db_spend| (db_spend.psbt, db_spend.updated_at))
+            .map(|db_spend| (db_spend.psbt, db_spend.updated_at, db_spend.broadcast_txid))
             .collect()
+    }
+
+    fn record_broadcast_txid(
+        &mut self,
+        draft: &bitcoin::Txid,
+        actual: &bitcoin::Txid,
+    ) -> Result<(), String> {
+        self.record_broadcast_txid(draft, actual)
+            .map_err(|error| error.to_string())
     }
 
     fn delete_spend(&mut self, txid: &bitcoin::Txid) {

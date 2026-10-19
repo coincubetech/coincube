@@ -16,7 +16,6 @@ use crate::{
 
 pub use crate::database::{CoinStatus, LabelItem};
 
-use coincube_core::descriptors;
 use coincube_core::spend::{
     self, create_spend, AddrInfo, AncestorInfo, CandidateCoin, CreateSpendRes, SpendCreationError,
     SpendOutputAddress, SpendTxFees, TxGetter,
@@ -1484,6 +1483,14 @@ impl DaemonControl {
                 self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
             }
 
+            // The imported spend's exact unsigned construction must exist
+            // before any externally signed PSBT can be accepted against it.
+            if self.config.main_descriptor.as_imported().is_some() {
+                db_conn
+                    .store_imported_construction(&psbt)
+                    .map_err(CommandError::ImportedSpendValidation)?;
+            }
+
             return Ok(CreateSpendResult::Success {
                 psbt,
                 warnings: warnings.iter().map(|w| w.to_string()).collect(),
@@ -1496,13 +1503,16 @@ impl DaemonControl {
             backfill_previous_transactions(&mut psbt, &mut DbTxGetter::new(&self.db))?;
             let mut db_conn = self.db.connection();
             let txid = psbt.unsigned_tx.compute_txid();
-            let stored = db_conn.spend_tx(&txid);
-            let construction = stored
-                .as_ref()
-                .map_or_else(|| imported_construction(&psbt), imported_construction);
+            let stored = db_conn.spend_tx(&txid).ok_or_else(|| {
+                CommandError::ImportedSpendValidation(
+                    "spend was not created and saved by this imported wallet".into(),
+                )
+            })?;
+            let construction = imported_construction(&stored);
             imported_spend::verify_imported_signatures(imported, &construction, &psbt, &self.secp)
                 .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
-            let merged = if let Some(mut stored) = stored {
+            let merged = {
+                let mut stored = stored.clone();
                 for (old, incoming) in stored.inputs.iter_mut().zip(&psbt.inputs) {
                     for (key, signature) in &incoming.partial_sigs {
                         if old
@@ -1525,21 +1535,19 @@ impl DaemonControl {
                 )
                 .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
                 stored
-            } else {
-                let outpoints: Vec<_> = psbt
-                    .unsigned_tx
-                    .input
-                    .iter()
-                    .map(|input| input.previous_output)
-                    .collect();
-                let coins = db_conn.coins_by_outpoints(&outpoints);
-                for outpoint in outpoints {
-                    if !coins.contains_key(&outpoint) {
-                        return Err(CommandError::UnknownOutpoint(outpoint));
-                    }
-                }
-                psbt
             };
+            if db_conn
+                .spend_broadcast_txid(&txid)
+                .map_err(CommandError::ImportedSpendValidation)?
+                .is_some()
+            {
+                if merged == stored {
+                    return Ok(());
+                }
+                return Err(CommandError::ImportedSpendValidation(
+                    "a broadcast spend cannot accept more signatures".into(),
+                ));
+            }
             db_conn.store_spend(&merged);
             return Ok(());
         }
@@ -1625,13 +1633,17 @@ impl DaemonControl {
         let txids_set: Option<HashSet<_>> = txids.as_ref().map(|list| list.iter().collect());
         let spend_txs = spend_psbts
             .into_iter()
-            .filter_map(|(psbt, updated_at)| {
+            .filter_map(|(psbt, updated_at, broadcast_txid)| {
                 if let Some(set) = &txids_set {
                     if !set.contains(&psbt.unsigned_tx.compute_txid()) {
                         return None;
                     }
                 }
-                Some(ListSpendEntry { psbt, updated_at })
+                Some(ListSpendEntry {
+                    psbt,
+                    updated_at,
+                    broadcast_txid,
+                })
             })
             .collect();
         Ok(ListSpendResult { spend_txs })
@@ -1680,9 +1692,28 @@ impl DaemonControl {
                 .clone()
             }
         };
+        if self.config.main_descriptor.as_imported().is_some() {
+            if let Some(recorded) = db_conn
+                .spend_broadcast_txid(txid)
+                .map_err(CommandError::ImportedSpendValidation)?
+            {
+                if recorded == final_tx.compute_txid() {
+                    return Ok(());
+                }
+                return Err(CommandError::ImportedSpendValidation(
+                    "stored broadcast transaction ID conflicts with finalized spend".into(),
+                ));
+            }
+        }
         self.bitcoin
             .broadcast_tx(&final_tx)
             .map_err(CommandError::TxBroadcast)?;
+        if self.config.main_descriptor.as_imported().is_some() {
+            db_conn.record_broadcast_txid(txid, &final_tx.compute_txid()).map_err(|error|
+                CommandError::ImportedSpendValidation(format!(
+                    "broadcast may have succeeded, but saving the actual transaction ID failed: {error}"
+                )))?;
+        }
 
         // Finally, update our state with the changes from this transaction.
         let (tx, rx) = mpsc::sync_channel(0);
@@ -1976,6 +2007,11 @@ impl DaemonControl {
                     }
                     if has_change {
                         self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
+                    }
+                    if self.config.main_descriptor.as_imported().is_some() {
+                        db_conn
+                            .store_imported_construction(&psbt)
+                            .map_err(CommandError::ImportedSpendValidation)?;
                     }
 
                     return Ok(CreateSpendResult::Success {
@@ -2417,6 +2453,8 @@ pub struct ListSpendEntry {
     #[serde(serialize_with = "ser_to_string", deserialize_with = "deser_fromstr")]
     pub psbt: Psbt,
     pub updated_at: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_txid: Option<bitcoin::Txid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

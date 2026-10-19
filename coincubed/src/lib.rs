@@ -1083,7 +1083,13 @@ impl DaemonHandle {
 
         // Before touching anything: the configuration must be self-consistent, and this build
         // must be able to run the chain it names. Neither check does any I/O.
-        config.check().map_err(StartupError::Config)?;
+        config
+            .bitcoin_config
+            .check_chain_encoding()
+            .map_err(StartupError::Config)?;
+        if config.main_descriptor.as_imported().is_some() {
+            config.check().map_err(StartupError::Config)?;
+        }
         if config.main_descriptor.as_imported().is_some()
             && matches!(
                 config.bitcoin_backend,
@@ -2855,12 +2861,12 @@ mod tests {
             let db_path = v8_database(&data_directory, ChainId::Bitcoin);
             rusqlite::Connection::open(&db_path)
                 .unwrap()
-                .execute("UPDATE version SET version = 10", [])
+                .execute("UPDATE version SET version = 11", [])
                 .unwrap();
             let before = (sha256_of(&db_path), listing(&data_directory));
             let config = config_for(ChainId::Bitcoin, &tmp_dir, data_directory.clone(), &node);
             match DaemonHandle::start_default(config, false) {
-                Err(StartupError::DbPreflight(PreflightError::UnsupportedVersion(10))) => {}
+                Err(StartupError::DbPreflight(PreflightError::UnsupportedVersion(11))) => {}
                 other => panic!("expected UnsupportedVersion, got {:?}", other.map(|_| ())),
             }
             assert_eq!((sha256_of(&db_path), listing(&data_directory)), before);
@@ -3024,13 +3030,13 @@ mod tests {
             complete_tip_init(&server);
             finish_daemon_shutdown(&server, t);
 
-            // Migrated in place: v9, identity backfilled, encoding kept.
+            // Migrated in place: v10, identity backfilled, encoding kept.
             let stored =
                 crate::database::sqlite::preflight::read_stored_identity(&db_path).unwrap();
             assert_eq!(
                 stored,
                 StoredIdentity {
-                    version: 9,
+                    version: 10,
                     chain: ChainId::Bitcoin,
                     network: bitcoin::Network::Bitcoin,
                 }

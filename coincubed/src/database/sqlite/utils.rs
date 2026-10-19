@@ -643,7 +643,8 @@ fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbErro
         DROP TABLE wallets;
         ALTER TABLE wallets_v10 RENAME TO wallets;
         UPDATE version SET version = 10;",
-    )?;
+        )?;
+        tx.execute("ALTER TABLE spend_transactions ADD COLUMN broadcast_txid BLOB CHECK (broadcast_txid IS NULL OR length(broadcast_txid) = 32)", [])?;
         let broken: i64 =
             tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
                 row.get(0)

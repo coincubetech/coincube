@@ -8,6 +8,7 @@ use crate::{
 
 use std::{collections::HashSet, convert::TryInto, sync, thread, time};
 
+#[cfg(test)]
 use coincube_core::descriptors;
 use miniscript::bitcoin::{self, secp256k1};
 
@@ -66,7 +67,7 @@ fn update_coins(
     db_conn: &mut Box<dyn DatabaseConnection>,
     previous_tip: &BlockChainTip,
     descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
-    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
 ) -> Result<UpdatedCoins, String> {
     let network = db_conn.network();
     let curr_coins = db_conn.coins(&[], &[]);

@@ -607,13 +607,14 @@ impl DatabaseConnection for DummyDatabase {
             .map(|x| x.0)
     }
 
-    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>)> {
+    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>, Option<bitcoin::Txid>)> {
         self.db
             .read()
             .unwrap()
             .spend_txs
             .values()
             .cloned()
+            .map(|(psbt, updated_at)| (psbt, updated_at, None))
             .collect()
     }
 

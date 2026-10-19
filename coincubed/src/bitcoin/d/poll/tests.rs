@@ -844,7 +844,7 @@ fn store_coin(
     block_info: Option<crate::database::BlockInfo>,
     is_from_self: bool,
 ) -> bitcoin::OutPoint {
-    use bitcoin::{absolute, bip32, transaction::Version};
+    use bitcoin::{absolute, transaction::Version};
     let script_pubkey = control
         .config
         .main_descriptor

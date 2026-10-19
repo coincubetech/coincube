@@ -149,7 +149,8 @@ CREATE TABLE spend_transactions (
     id INTEGER PRIMARY KEY NOT NULL,
     psbt BLOB UNIQUE NOT NULL,
     txid BLOB UNIQUE NOT NULL,
-    updated_at INTEGER
+    updated_at INTEGER,
+    broadcast_txid BLOB CHECK (broadcast_txid IS NULL OR length(broadcast_txid) = 32)
 );
 
 /* Labels applied on addresses (0), outpoints (1), txids (2) */
@@ -402,6 +403,7 @@ pub struct DbSpendTransaction {
     pub psbt: Psbt,
     pub txid: bitcoin::Txid,
     pub updated_at: Option<u32>,
+    pub broadcast_txid: Option<bitcoin::Txid>,
 }
 
 impl TryFrom<&rusqlite::Row<'_>> for DbSpendTransaction {
@@ -418,12 +420,16 @@ impl TryFrom<&rusqlite::Row<'_>> for DbSpendTransaction {
         assert_eq!(txid, psbt.unsigned_tx.compute_txid());
 
         let updated_at = row.get(3)?;
+        let broadcast_txid: Option<Vec<u8>> = row.get(4)?;
+        let broadcast_txid = broadcast_txid
+            .map(|bytes| encode::deserialize(&bytes).expect("stored broadcast txid is valid"));
 
         Ok(DbSpendTransaction {
             id,
             psbt,
             txid,
             updated_at,
+            broadcast_txid,
         })
     }
 }

@@ -69,6 +69,7 @@ impl BdkWallet {
 
     /// Use a wider persistent script window for an imported wallet whose
     /// existing activity may be beyond the normal newly-created Vault gap.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_with_lookahead(
         main_descriptor: &CoincubeDescriptor,
         genesis_hash: BlockHash,
@@ -98,6 +99,7 @@ impl BdkWallet {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_for_wallet(
         wallet: &WalletDescriptor,
         genesis_hash: BlockHash,
@@ -122,6 +124,7 @@ impl BdkWallet {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn new_with_descriptors(
         receive_desc: Descriptor<DescriptorPublicKey>,
         change_desc: Descriptor<DescriptorPublicKey>,

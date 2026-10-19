@@ -233,6 +233,7 @@ impl SqliteDb {
     }
 
     /// Perform startup sanity checks.
+    #[cfg(test)]
     pub fn sanity_check(
         &self,
         chain: ChainId,
@@ -481,7 +482,7 @@ impl SqliteConn {
         &mut self,
         index: bip32::ChildNumber,
         change: bool,
-        secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+        _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     ) {
         let network = self.db_tip().network;
 
@@ -836,6 +837,68 @@ impl SqliteConn {
             Ok(())
         })
         .expect("Db must not fail");
+    }
+
+    pub fn store_imported_construction(&mut self, psbt: &Psbt) -> Result<(), rusqlite::Error> {
+        if psbt
+            .inputs
+            .iter()
+            .any(|input| !input.partial_sigs.is_empty())
+        {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        let draft_txid = psbt.unsigned_tx.compute_txid();
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        tx.execute(
+            "INSERT INTO spend_transactions (psbt, txid, updated_at)
+             VALUES (?1, ?2, ?3) ON CONFLICT(txid) DO NOTHING",
+            rusqlite::params![psbt.serialize(), &draft_txid[..], curr_timestamp()],
+        )?;
+        let stored: Vec<u8> = tx.query_row(
+            "SELECT psbt FROM spend_transactions WHERE txid = ?1",
+            rusqlite::params![&draft_txid[..]],
+            |row| row.get(0),
+        )?;
+        let mut stored = Psbt::deserialize(&stored).map_err(|_| rusqlite::Error::InvalidQuery)?;
+        for input in &mut stored.inputs {
+            input.partial_sigs.clear();
+        }
+        if stored != *psbt {
+            return Err(rusqlite::Error::InvalidQuery);
+        }
+        tx.commit()
+    }
+
+    pub fn spend_broadcast_txid(
+        &mut self,
+        draft_txid: &bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Txid>, rusqlite::Error> {
+        let bytes: Option<Vec<u8>> = self.conn.query_row(
+            "SELECT broadcast_txid FROM spend_transactions WHERE txid = ?1",
+            rusqlite::params![&draft_txid[..]],
+            |row| row.get(0),
+        )?;
+        bytes
+            .map(|bytes| encode::deserialize(&bytes).map_err(|_| rusqlite::Error::InvalidQuery))
+            .transpose()
+    }
+
+    pub fn record_broadcast_txid(
+        &mut self,
+        draft_txid: &bitcoin::Txid,
+        actual_txid: &bitcoin::Txid,
+    ) -> Result<(), rusqlite::Error> {
+        let updated = self.conn.execute(
+            "UPDATE spend_transactions SET broadcast_txid = ?1
+             WHERE txid = ?2 AND (broadcast_txid IS NULL OR broadcast_txid = ?1)",
+            rusqlite::params![&actual_txid[..], &draft_txid[..]],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
     }
 
     pub fn list_spend(&mut self) -> Vec<DbSpendTransaction> {
@@ -3980,6 +4043,7 @@ CREATE TABLE labels (
                     rescan_timestamp, last_poll_timestamp FROM wallets;
                 DROP TABLE wallets;
                 ALTER TABLE wallets_v9 RENAME TO wallets;
+                ALTER TABLE spend_transactions DROP COLUMN broadcast_txid;
                 UPDATE version SET version = 9;",
             )
             .unwrap();
@@ -4808,6 +4872,60 @@ CREATE TABLE labels (
             assert_eq!(stored, psbt);
             // Close the SQLite file before directory removal on Windows.
             drop(conn);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn repeated_imported_draft_preserves_signatures_and_broadcast_identity() {
+            use bitcoin::{absolute, transaction, Amount, Sequence, Transaction, TxOut, Witness};
+            let (tmp_dir, db_path, _) = v10_fixture(ChainId::Bitcoin);
+            let secp = secp256k1::Secp256k1::verification_only();
+            let db = SqliteDb::new(db_path, None, &secp).unwrap();
+            let mut conn = db.connection().unwrap();
+            let unsigned = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::ZERO,
+                input: vec![TxIn {
+                    previous_output: bitcoin::OutPoint::null(),
+                    script_sig: ScriptBuf::new(),
+                    sequence: Sequence::ENABLE_RBF_NO_LOCKTIME,
+                    witness: Witness::new(),
+                }],
+                output: vec![TxOut {
+                    value: Amount::from_sat(1000),
+                    script_pubkey: ScriptBuf::new(),
+                }],
+            };
+            let draft = Psbt::from_unsigned_tx(unsigned).unwrap();
+            let draft_txid = draft.unsigned_tx.compute_txid();
+            conn.store_imported_construction(&draft).unwrap();
+
+            let mut signed = draft.clone();
+            signed.inputs[0].partial_sigs.insert(
+                bitcoin::PublicKey::from_str(
+                    "023a664c5617412f0b292665b1fd9d766456a7a3b1614c7e7c5f411200ff1958ef",
+                )
+                .unwrap(),
+                bitcoin::ecdsa::Signature::from_str("304402204004fcdbb9c0d0cbf585f58cee34dccb012efbd8fc2b0d5e97760045ae35803802201a0bd7ec2383e0b93748abc9946c8e17a8312e314dab85982aeba650e738cbf401").unwrap(),
+            );
+            conn.store_spend(&signed);
+            let actual_txid = bitcoin::Txid::from_str(
+                "2222222222222222222222222222222222222222222222222222222222222222",
+            )
+            .unwrap();
+            conn.record_broadcast_txid(&draft_txid, &actual_txid)
+                .unwrap();
+            conn.store_imported_construction(&draft).unwrap();
+            assert_eq!(conn.db_spend(&draft_txid).unwrap().psbt, signed);
+            assert_eq!(
+                conn.spend_broadcast_txid(&draft_txid).unwrap(),
+                Some(actual_txid)
+            );
+
+            let mut changed = draft.clone();
+            changed.inputs[0].sighash_type = Some(bitcoin::sighash::EcdsaSighashType::All.into());
+            assert!(conn.store_imported_construction(&changed).is_err());
+            assert_eq!(conn.db_spend(&draft_txid).unwrap().psbt, signed);
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
