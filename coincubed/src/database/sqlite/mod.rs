@@ -26,11 +26,12 @@ use crate::{
                 maybe_apply_migration,
             },
         },
-        Coin, CoinStatus, LabelItem,
+        Coin, CoinStatus, ImportedHistory, LabelItem,
     },
 };
 use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
+use rusqlite::OptionalExtension;
 
 use std::{
     cmp,
@@ -304,6 +305,67 @@ impl SqliteConn {
         .expect("Db must not fail")
         .pop()
         .expect("There is always a row in the wallet table")
+    }
+
+    pub fn imported_history(&mut self) -> Result<Option<ImportedHistory>, rusqlite::Error> {
+        self.conn
+            .query_row(
+                "SELECT import_birthday, import_initial_lookahead,
+                        import_receive_scanned, import_change_scanned,
+                        import_history_complete
+                 FROM wallets WHERE wallet_kind = 'imported' AND id = 1",
+                [],
+                |row| {
+                    Ok(ImportedHistory {
+                        birthday: row.get(0)?,
+                        initial_lookahead: row.get(1)?,
+                        receive_scanned: row.get(2)?,
+                        change_scanned: row.get(3)?,
+                        history_complete: row.get(4)?,
+                    })
+                },
+            )
+            .optional()
+    }
+
+    pub fn mark_import_history_pending(&mut self) -> Result<(), rusqlite::Error> {
+        let updated = self.conn.execute(
+            "UPDATE wallets SET import_history_complete = 0 WHERE id = 1 AND wallet_kind = 'imported'",
+            [],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        Ok(())
+    }
+
+    pub fn complete_import_history(
+        &mut self,
+        receive_scanned: u32,
+        change_scanned: u32,
+    ) -> Result<(), rusqlite::Error> {
+        // The true marker and both successful coverage bounds become visible
+        // in one transaction. A short scan records its true bounds but stays
+        // incomplete, so an empty balance cannot be mistaken for zero funds.
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let updated = tx.execute(
+            "UPDATE wallets SET import_receive_scanned = ?1,
+                import_change_scanned = ?2,
+                import_history_complete = CASE
+                    WHEN ?1 >= import_initial_lookahead AND ?2 >= import_initial_lookahead
+                    THEN 1 ELSE 0 END,
+                timestamp = CASE
+                    WHEN ?1 >= import_initial_lookahead AND ?2 >= import_initial_lookahead
+                    THEN import_birthday ELSE timestamp END
+             WHERE id = 1 AND wallet_kind = 'imported'",
+            rusqlite::params![receive_scanned, change_scanned],
+        )?;
+        if updated != 1 {
+            return Err(rusqlite::Error::QueryReturnedNoRows);
+        }
+        tx.commit()
     }
 
     /// Update the network tip.
@@ -3893,6 +3955,41 @@ CREATE TABLE labels (
                     .unwrap(),
                 "vault"
             );
+            drop(conn);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn imported_history_is_only_complete_after_both_branches_are_scanned() {
+            let (tmp_dir, db_path, _) = v10_fixture(ChainId::Bitcoin);
+            raw(
+                &db_path,
+                "UPDATE wallets SET main_descriptor = NULL, wallet_kind = 'imported',
+                    imported_receive_descriptor = 'receive',
+                    imported_change_descriptor = 'change',
+                    import_birthday = 1231006505,
+                    import_history_complete = 0,
+                    import_initial_lookahead = 200,
+                    import_receive_scanned = 0,
+                    import_change_scanned = 0",
+            );
+            let secp = secp256k1::Secp256k1::verification_only();
+            let db = SqliteDb::new(db_path, None, &secp).unwrap();
+            let mut conn = db.connection().unwrap();
+            assert!(!conn.imported_history().unwrap().unwrap().history_complete);
+            conn.complete_import_history(200, 199).unwrap();
+            let short = conn.imported_history().unwrap().unwrap();
+            assert_eq!((short.receive_scanned, short.change_scanned), (200, 199));
+            assert!(!short.history_complete);
+            conn.complete_import_history(220, 200).unwrap();
+            assert!(conn.imported_history().unwrap().unwrap().history_complete);
+            let timestamp: u32 = rusqlite::Connection::open(&db.db_path)
+                .unwrap()
+                .query_row("SELECT timestamp FROM wallets", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(timestamp, 1231006505);
+            conn.mark_import_history_pending().unwrap();
+            assert!(!conn.imported_history().unwrap().unwrap().history_complete);
             drop(conn);
             fs::remove_dir_all(tmp_dir).unwrap();
         }

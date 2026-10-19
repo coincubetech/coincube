@@ -43,6 +43,17 @@ pub struct Wallet {
     pub last_poll_timestamp: Option<u32>,
 }
 
+/// Durable historical discovery state for imported public wallets. These
+/// bounds count addresses whose lookup completed, not addresses merely queued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedHistory {
+    pub birthday: u32,
+    pub initial_lookahead: u32,
+    pub receive_scanned: u32,
+    pub change_scanned: u32,
+    pub history_complete: bool,
+}
+
 pub trait DatabaseInterface: Send {
     fn connection(&self) -> Box<dyn DatabaseConnection>;
 
@@ -130,6 +141,24 @@ impl DatabaseInterface for sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
 }
 
 pub trait DatabaseConnection {
+    fn imported_history(&mut self) -> Option<ImportedHistory> {
+        None
+    }
+
+    /// Record successful branch coverage after a backend scan. A backend
+    /// failure must not call this; the previous incomplete state survives.
+    fn complete_import_history(
+        &mut self,
+        _receive_scanned: u32,
+        _change_scanned: u32,
+    ) -> Result<(), String> {
+        Err("imported history tracking is unsupported".into())
+    }
+
+    fn mark_import_history_pending(&mut self) -> Result<(), String> {
+        Err("imported history tracking is unsupported".into())
+    }
+
     /// Get the tip of the best chain we've seen.
     fn chain_tip(&mut self) -> Option<BlockChainTip>;
 
@@ -269,6 +298,23 @@ pub trait DatabaseConnection {
 }
 
 impl DatabaseConnection for SqliteConn {
+    fn imported_history(&mut self) -> Option<ImportedHistory> {
+        SqliteConn::imported_history(self).ok().flatten()
+    }
+
+    fn complete_import_history(
+        &mut self,
+        receive_scanned: u32,
+        change_scanned: u32,
+    ) -> Result<(), String> {
+        SqliteConn::complete_import_history(self, receive_scanned, change_scanned)
+            .map_err(|error| error.to_string())
+    }
+
+    fn mark_import_history_pending(&mut self) -> Result<(), String> {
+        SqliteConn::mark_import_history_pending(self).map_err(|error| error.to_string())
+    }
+
     fn chain_tip(&mut self) -> Option<BlockChainTip> {
         match self.db_tip() {
             DbTip {
