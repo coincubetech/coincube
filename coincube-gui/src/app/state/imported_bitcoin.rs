@@ -1760,15 +1760,21 @@ impl ImportedBitcoinPanel {
                 return Task::none();
             }
         };
+        if let Err(error) = crate::loader::authenticate_imported_connect_provider(
+            &mut config,
+            ChainId::Bitcoin,
+            self.connect_token.as_deref(),
+        ) {
+            self.sync_failed = true;
+            self.error = Some(error.to_string());
+            return Task::none();
+        }
         match config.bitcoin_backend.as_mut() {
             Some(BitcoinBackend::Esplora(esplora))
                 if esplora.addr == crate::installer::connect_url(ChainId::Bitcoin) =>
             {
                 self.provider = Provider::Connect;
                 self.endpoint = esplora.addr.clone();
-                if let Some(token) = &self.connect_token {
-                    esplora.token = Some(token.clone());
-                }
             }
             Some(BitcoinBackend::Esplora(esplora))
                 if esplora.addr == crate::installer::public_esplora_url(Network::Bitcoin) =>
