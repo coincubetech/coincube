@@ -1545,7 +1545,11 @@ async fn start_bitcoind_and_daemon_with_import_auth(
         }
     };
     if config.main_descriptor.as_imported().is_some() {
-        authenticate_imported_connect_provider(&mut config, chain, connect_client.as_ref())?;
+        authenticate_imported_connect_provider(
+            &mut config,
+            chain,
+            connect_client.as_ref().and_then(|client| client.token()),
+        )?;
     }
     let bitcoind = match (start_internal_bitcoind, &config.bitcoin_backend) {
         (true, Some(BitcoinBackend::Bitcoind(bitcoind_config))) => {
@@ -1646,10 +1650,10 @@ async fn start_bitcoind_and_daemon_with_import_auth(
     ))
 }
 
-fn authenticate_imported_connect_provider(
+pub(crate) fn authenticate_imported_connect_provider(
     config: &mut Config,
     chain: crate::chain::ChainId,
-    connect_client: Option<&crate::services::coincube::CoincubeClient>,
+    token: Option<&str>,
 ) -> Result<(), Error> {
     let Some(BitcoinBackend::Esplora(esplora)) = config.bitcoin_backend.as_mut() else {
         return Ok(());
@@ -1661,13 +1665,11 @@ fn authenticate_imported_connect_provider(
     if !uses_connect {
         return Ok(());
     }
-    let token = connect_client
-        .and_then(|client| client.token())
-        .ok_or_else(|| {
-            Error::Unexpected(
-                "Sign in to Connect from Home to open this imported Bitcoin wallet".into(),
-            )
-        })?;
+    let token = token.ok_or_else(|| {
+        Error::Unexpected(
+            "Sign in to Connect from Home to open this imported Bitcoin wallet".into(),
+        )
+    })?;
     if esplora.addr == connect_url {
         esplora.token = Some(token.to_owned());
     }
@@ -1933,7 +1935,7 @@ mod tests {
 
         let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
         client.set_token("session-token");
-        authenticate_imported_connect_provider(&mut config, chain, Some(&client)).unwrap();
+        authenticate_imported_connect_provider(&mut config, chain, client.token()).unwrap();
         let Some(BitcoinBackend::Esplora(esplora)) = config.bitcoin_backend.as_ref() else {
             panic!("expected Esplora config");
         };
