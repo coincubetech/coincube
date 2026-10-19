@@ -885,7 +885,7 @@ impl State for GlobalHome {
                         if self.current_view.step == 1 {
                             if self
                                 .transfer_direction
-                                .is_some_and(|direction| Self::direction_uses_vault(direction))
+                                .is_some_and(Self::direction_uses_vault)
                                 && !self.legacy_vault_available(cache)
                             {
                                 return Task::none();

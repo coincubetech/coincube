@@ -4931,7 +4931,7 @@ async fn reconstruct_recorded_claim(
     }
     reconstruct_poison_self_transfer(
         wallet.chain,
-        require_vault_descriptor(&wallet)?,
+        require_vault_descriptor(wallet)?,
         &secp256k1::Secp256k1::verification_only(),
         &mut getter,
         &candidates,
