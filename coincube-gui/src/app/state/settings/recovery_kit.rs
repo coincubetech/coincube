@@ -99,13 +99,33 @@ impl ImportedBackupSource {
     }
 }
 
-fn imported_backup_source_missing(
+fn imported_backup_source_error(
     cache: &Cache,
     local_cube_id: &str,
     imported: Option<&ImportedBackupSource>,
-) -> bool {
-    imported.is_none()
-        && lookup_cube(cache, local_cube_id).is_some_and(|cube| cube.has_imported_bitcoin())
+) -> Option<&'static str> {
+    let Some(cube) = lookup_cube(cache, local_cube_id) else {
+        return imported.map(|_| "Could not verify this Cube's imported wallet attachment.");
+    };
+    let attachment = cube
+        .bitcoin_import
+        .as_ref()
+        .and_then(|intent| intent.active_attachment());
+    match (attachment, imported) {
+        (Some(_), None) => Some(IMPORTED_BACKUP_SOURCE_UNAVAILABLE),
+        (Some(attachment), Some(source))
+            if cube.network == source.chain
+                && attachment.descriptor == source.descriptor
+                && attachment.birthday == source.birthday
+                && attachment.initial_lookahead == source.initial_lookahead =>
+        {
+            None
+        }
+        (Some(_), Some(_)) | (None, Some(_)) => {
+            Some("The imported wallet attachment changed; reopen this Cube before backing it up.")
+        }
+        (None, None) => None,
+    }
 }
 
 const IMPORTED_BACKUP_SOURCE_UNAVAILABLE: &str =
@@ -505,9 +525,11 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::Start(mode) => {
             rk.pin.clear();
-            if imported_backup_source_missing(cache, local_cube_id, imported.as_ref()) {
+            if let Some(error) =
+                imported_backup_source_error(cache, local_cube_id, imported.as_ref())
+            {
                 rk.flow = RecoveryKitState::Error {
-                    message: IMPORTED_BACKUP_SOURCE_UNAVAILABLE.into(),
+                    message: error.into(),
                 };
                 return Task::none();
             }
@@ -1160,8 +1182,8 @@ fn submit_password(
     wallet: Option<Arc<Wallet>>,
     imported: Option<ImportedBackupSource>,
 ) -> Task<Message> {
-    if imported_backup_source_missing(cache, local_cube_id, imported.as_ref()) {
-        set_pw_error(rk, IMPORTED_BACKUP_SOURCE_UNAVAILABLE);
+    if let Some(error) = imported_backup_source_error(cache, local_cube_id, imported.as_ref()) {
+        set_pw_error(rk, error);
         return Task::none();
     }
     // Pull validation + cloneable inputs out of the state without
@@ -1511,8 +1533,8 @@ fn start_phone_seal(
     mode: RecoveryKitMode,
     mnemonic: Option<Zeroizing<Vec<String>>>,
 ) -> Task<Message> {
-    if imported_backup_source_missing(cache, local_cube_id, imported.as_ref()) {
-        return fail_phone_preflight(rk, mnemonic, IMPORTED_BACKUP_SOURCE_UNAVAILABLE);
+    if let Some(error) = imported_backup_source_error(cache, local_cube_id, imported.as_ref()) {
+        return fail_phone_preflight(rk, mnemonic, error);
     }
     let Some(client) = client else {
         return fail_phone_preflight(rk, mnemonic, "Sign in to Connect to back up to your phone.");
