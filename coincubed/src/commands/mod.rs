@@ -966,6 +966,7 @@ impl DaemonControl {
             descriptors: GetInfoDescriptors {
                 main: self.config.main_descriptor.clone(),
             },
+            imported_wallet: None,
             rescan_progress,
             refused_reorg_depth,
             chain_divergence,
@@ -2040,6 +2041,21 @@ pub struct GetInfoDescriptors {
     pub main: descriptors::CoincubeDescriptor,
 }
 
+/// Durable discovery status for a descriptor-imported Bitcoin wallet. Scanned
+/// counts are exclusive receive/change derivation bounds whose history was
+/// successfully checked; requested bounds are never reported as coverage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedWalletSync {
+    /// Full, chain-bound SHA256 wallet identity encoded as 64 hex digits.
+    pub wallet_identity: String,
+    pub chain_id: coincube_core::chain::ChainId,
+    pub birthday: u32,
+    pub initial_lookahead: u32,
+    pub receive_scanned: u32,
+    pub change_scanned: u32,
+    pub history_complete: bool,
+}
+
 /// Information about the daemon
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetInfoResult {
@@ -2053,6 +2069,9 @@ pub struct GetInfoResult {
     pub block_height: i32,
     pub sync: f64,
     pub descriptors: GetInfoDescriptors,
+    /// Absent for every historical Vault response and old daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_wallet: Option<ImportedWalletSync>,
     /// The progress as a percentage (between 0 and 1) of an ongoing rescan if there is any
     pub rescan_progress: Option<f64>,
     /// Depth, in blocks, of a block chain reorganization the poller refused to apply because
@@ -4979,6 +4998,19 @@ mod tests {
         let info: GetInfoResult = serde_json::from_value(value).unwrap();
         assert_eq!(info.history_sync, crate::bitcoin::HistorySync::default());
         assert_eq!(info.chain_id, None);
+    }
+
+    #[test]
+    fn legacy_get_info_descriptor_json_remains_the_struct_object() {
+        let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let info = serde_json::to_value(dummy.control().get_info()).unwrap();
+        let main = &info["descriptors"]["main"];
+        let object = main.as_object().expect("legacy main is a JSON object");
+        assert!(object.contains_key("multi_desc"));
+        assert!(object.contains_key("receive_desc"));
+        assert!(object.contains_key("change_desc"));
+        assert!(!object.contains_key("kind"));
+        assert!(info.get("imported_wallet").is_none());
     }
 
     mod chain_keyed_spend {
