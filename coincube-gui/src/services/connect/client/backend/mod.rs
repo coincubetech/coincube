@@ -753,6 +753,7 @@ impl Daemon for BackendWalletClient {
                 .map(|psbt| ListSpendEntry {
                     psbt: psbt.raw,
                     updated_at: Some(psbt.updated_at as u32),
+                    broadcast_txid: None,
                 })
                 .collect(),
         })
