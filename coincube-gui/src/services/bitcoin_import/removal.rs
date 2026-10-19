@@ -219,38 +219,8 @@ pub async fn remove_cube_import(
         }
     }
 
-    // Remove the user-facing owner first. Should file cleanup fail, a retry
-    // with the same expected Cube and operation can finish from owner markers.
-    settings::update_settings_file_checked(directory, |mut current| {
-        checked_live_cube(&current, expected).map_err(SettingsError::WritingFile)?;
-        if let Some(wallet_id) = wallet_id {
-            if current.cubes.iter().any(|other| {
-                other.id != expected.id
-                    && (other.vault_wallet_id.as_ref() == Some(wallet_id)
-                        || other
-                            .bitcoin_import
-                            .as_ref()
-                            .and_then(|import| import.attachment())
-                            .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
-            }) {
-                return Err(SettingsError::WritingFile(
-                    "Another Cube now references this wallet; no files were removed.".into(),
-                ));
-            }
-            current
-                .wallets
-                .retain(|wallet| wallet.wallet_id() != *wallet_id);
-        }
-        current.cubes.retain(|cube| cube.id != expected.id);
-        if current.cubes.is_empty() && current.wallets.is_empty() {
-            Ok(None)
-        } else {
-            Ok(Some(current))
-        }
-    })
-    .await
-    .map_err(|error| error.to_string())?;
-
+    // Keep the Cube visible until cleanup finishes. An interrupted removal
+    // can be retried from its delete dialog, even if some owned files are gone.
     if stage_present {
         remove_owned_directory(
             &stage,
@@ -270,6 +240,35 @@ pub async fn remove_cube_import(
         Err(error) if error.kind() == ErrorKind::NotFound => (),
         Err(error) => return Err(error.to_string()),
     }
+    settings::update_settings_file_checked(directory, |mut current| {
+        checked_live_cube(&current, expected).map_err(SettingsError::WritingFile)?;
+        if let Some(wallet_id) = wallet_id {
+            if current.cubes.iter().any(|other| {
+                other.id != expected.id
+                    && (other.vault_wallet_id.as_ref() == Some(wallet_id)
+                        || other
+                            .bitcoin_import
+                            .as_ref()
+                            .and_then(|import| import.attachment())
+                            .is_some_and(|wallet| &wallet.wallet_id == wallet_id))
+            }) {
+                return Err(SettingsError::WritingFile(
+                    "Another Cube now references this wallet; retry its deletion.".into(),
+                ));
+            }
+            current
+                .wallets
+                .retain(|wallet| wallet.wallet_id() != *wallet_id);
+        }
+        current.cubes.retain(|cube| cube.id != expected.id);
+        if current.cubes.is_empty() && current.wallets.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(current))
+        }
+    })
+    .await
+    .map_err(|error| error.to_string())?;
     Ok(())
 }
 
@@ -439,6 +438,25 @@ mod tests {
         remove_cube_import(&f.directory, &f.cube).await.unwrap();
         assert!(!stage.exists());
         assert!(!journal.path(&f.directory).exists());
+    }
+
+    #[tokio::test]
+    async fn interrupted_cleanup_finishes_from_visible_cube() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        fs::remove_dir_all(f.destination()).unwrap();
+        fs::remove_file(journal_path(&f.directory, f.operation_id())).unwrap();
+        assert!(Settings::from_file(&f.directory)
+            .unwrap()
+            .cubes
+            .iter()
+            .any(|cube| cube.id == f.cube.id));
+        remove_cube_import(&f.directory, &f.cube).await.unwrap();
+        assert!(!Settings::from_file(&f.directory)
+            .unwrap()
+            .cubes
+            .iter()
+            .any(|cube| cube.id == f.cube.id));
     }
 
     #[tokio::test]
