@@ -140,6 +140,18 @@ impl CubeSettings {
     }
 }
 
+impl WalletId {
+    pub fn for_imported(
+        descriptor: &ImportedWalletDescriptor,
+        chain: ChainId,
+    ) -> Result<Self, ImportedWalletError> {
+        Ok(Self {
+            timestamp: None,
+            descriptor_checksum: format!("imported-v1-{}", descriptor.identity(chain)?),
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -163,17 +175,5 @@ mod tests {
         );
         let restored: CubeSettings = serde_json::from_value(json).unwrap();
         assert_eq!(restored.bitcoin_import.unwrap().operation_id, Uuid::nil());
-    }
-}
-
-impl WalletId {
-    pub fn for_imported(
-        descriptor: &ImportedWalletDescriptor,
-        chain: ChainId,
-    ) -> Result<Self, ImportedWalletError> {
-        Ok(Self {
-            timestamp: None,
-            descriptor_checksum: format!("imported-v1-{}", descriptor.identity(chain)?),
-        })
     }
 }
