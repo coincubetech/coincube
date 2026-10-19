@@ -40,7 +40,7 @@ pub(super) async fn build_preferred(
     .map_err(describe_production)?;
     if daemon
         .config()
-        .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
+        .is_none_or(|c| c.main_descriptor.as_vault() != Some(&wallet.main_descriptor))
     {
         return Err("The selected backend does not match this Vault.".into());
     }

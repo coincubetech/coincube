@@ -3160,7 +3160,12 @@ impl ConnectAccountPanel {
                     return self.reload_duress_cubes();
                 }
                 if let Err(error) = crate::app::check_import_duress_compatibility() {
-                    self.error = Some(error);
+                    self.error = Some(PanelError::settled(UserError::new(
+                        "Duress Mode is unavailable",
+                        error,
+                        crate::user_error::CC_CONFIG,
+                        false,
+                    )));
                     return iced::Task::none();
                 }
                 self.open_enroll_wizard();

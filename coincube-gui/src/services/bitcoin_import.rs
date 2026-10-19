@@ -241,6 +241,8 @@ fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(
         Config::from_file(Some(destination.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
     if config.main_descriptor != WalletDescriptor::Imported(journal.wallet.descriptor.clone())
         || config.bitcoin_config.chain != journal.wallet.descriptor.chain()
+        || config.import_birthday != Some(journal.wallet.birthday)
+        || config.import_initial_lookahead != Some(journal.wallet.initial_lookahead)
         || config.data_directory().as_ref().map(|d| d.path()) != Some(destination.as_path())
         || !destination.join("coincubed.sqlite3").is_file()
     {
@@ -356,7 +358,7 @@ pub async fn install(
         .map_err(|e| e.to_string())?
         .lock_write()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Cannot lock wallet import: {e:?}"))?;
     check_duress(directory)?;
     let mut journal = Journal {
         version: 1,
@@ -452,7 +454,7 @@ pub async fn resume(
         .map_err(|e| e.to_string())?
         .lock_write()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Cannot lock wallet import: {e:?}"))?;
     let Some(mut journal) = read_journal(&journal_path(directory, operation_id))? else {
         return Ok(None);
     };
@@ -489,7 +491,7 @@ pub async fn abandon_pending(
         .map_err(|e| e.to_string())?
         .lock_write()
         .await
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| format!("Cannot lock wallet import: {e:?}"))?;
     let current = Settings::from_file(directory).map_err(|e| e.to_string())?;
     let cube = current
         .cubes

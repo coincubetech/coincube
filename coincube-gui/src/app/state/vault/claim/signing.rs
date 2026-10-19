@@ -892,7 +892,7 @@ pub(super) async fn check_inputs(
     if transfer.descriptor() != &wallet.main_descriptor
         || daemon
             .config()
-            .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(&wallet.main_descriptor))
     {
         return Err("The Claim does not match this Vault and backend.".into());
     }

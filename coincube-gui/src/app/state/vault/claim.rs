@@ -4693,7 +4693,7 @@ async fn restore_recorded_claim(
     drop(controller);
     if daemon
         .config()
-        .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
+        .is_none_or(|c| c.main_descriptor.as_vault() != Some(&wallet.main_descriptor))
     {
         return Err("The recorded claim does not match this Bitcoin Vault.".into());
     }
