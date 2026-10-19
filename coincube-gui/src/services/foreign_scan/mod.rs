@@ -22,6 +22,9 @@ use tokio::sync::watch;
 
 pub const MAX_ADDRESSES: u32 = 200;
 pub const MAX_DURATION: Duration = Duration::from_secs(30);
+/// A known Vault scan covers both branches on two chains and may need more
+/// time than the interactive foreign-wallet discovery limit.
+pub const CLAIM_SCAN_DURATION: Duration = Duration::from_secs(90);
 const MAX_UTXOS: usize = 1000;
 // Keep the remote Connect scan within its deadline without flooding the API.
 // Results are still admitted in address order and every address gets a second
@@ -44,6 +47,75 @@ pub enum ScanError {
     AddressLimit,
     BodyLimit,
     Prevout,
+}
+
+/// Read-only, single-address deposit visibility. It is deliberately not a
+/// two-chain ancestry proof or permission to spend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AddressFunds {
+    pub confirmed_sats: u64,
+    pub pending_sats: u64,
+    pub largest_confirmed_sats: u64,
+    pub largest_mature_sats: u64,
+    /// Conservative depth when several unspent deposits share this address.
+    pub min_confirmations: u64,
+}
+
+pub async fn address_funds(
+    client: CoincubeClient,
+    chain: ChainId,
+    address: &str,
+) -> Result<AddressFunds, ScanError> {
+    let source = http::HttpSource::new(client)?;
+    let utxos = source.utxos(chain, address).await?;
+    if utxos.len() > MAX_UTXOS {
+        return Err(ScanError::BodyLimit);
+    }
+    let height = if utxos.iter().any(|coin| coin.status.confirmed) {
+        Some(source.current_height(chain).await?)
+    } else {
+        None
+    };
+    summarize_address_funds(&utxos, height)
+}
+
+fn summarize_address_funds(utxos: &[Utxo], height: Option<u32>) -> Result<AddressFunds, ScanError> {
+    let mut funds = AddressFunds::default();
+    for coin in utxos {
+        if coin.value > bitcoin::Amount::MAX_MONEY.to_sat()
+            || (coin.status.confirmed
+                && (coin.status.block_hash.is_none() || coin.status.block_height.is_none()))
+            || (!coin.status.confirmed
+                && (coin.status.block_hash.is_some() || coin.status.block_height.is_some()))
+        {
+            return Err(ScanError::Malformed);
+        }
+        let total = if coin.status.confirmed {
+            &mut funds.confirmed_sats
+        } else {
+            &mut funds.pending_sats
+        };
+        *total = total.checked_add(coin.value).ok_or(ScanError::BodyLimit)?;
+        if coin.status.confirmed {
+            let block_height = coin.status.block_height.ok_or(ScanError::Malformed)?;
+            let depth = u64::from(
+                height
+                    .ok_or(ScanError::Malformed)?
+                    .checked_sub(block_height)
+                    .ok_or(ScanError::Changed)?,
+            ) + 1;
+            funds.largest_confirmed_sats = funds.largest_confirmed_sats.max(coin.value);
+            funds.min_confirmations = if funds.min_confirmations == 0 {
+                depth
+            } else {
+                funds.min_confirmations.min(depth)
+            };
+            if depth >= coincube_core::claim::MIN_CONFIRMATIONS {
+                funds.largest_mature_sats = funds.largest_mature_sats.max(coin.value);
+            }
+        }
+    }
+    Ok(funds)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -431,7 +503,17 @@ pub async fn scan(
     client: CoincubeClient,
     plan: ScanPlan,
     expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<ScanReport, ScanError> {
+    scan_with_timeout(client, plan, expected, generation, MAX_DURATION).await
+}
+
+pub async fn scan_with_timeout(
+    client: CoincubeClient,
+    plan: ScanPlan,
+    expected: u64,
     mut generation: watch::Receiver<u64>,
+    duration: Duration,
 ) -> Result<ScanReport, ScanError> {
     plan.validate()?;
     if *generation.borrow() != expected || generation.has_changed().is_err() {
@@ -447,7 +529,7 @@ pub async fn scan(
     };
     let result = tokio::select! { biased;
         _ = cancelled => Err(ScanError::Cancelled),
-        result = tokio::time::timeout(MAX_DURATION, collect(&source, &plan, expected)) => result.map_err(|_| ScanError::Deadline)?,
+        result = tokio::time::timeout(duration, collect(&source, &plan, expected)) => result.map_err(|_| ScanError::Deadline)?,
     };
     if *generation.borrow() != expected || generation.has_changed().is_err() {
         return Err(ScanError::Cancelled);

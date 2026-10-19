@@ -82,7 +82,7 @@ pub(super) async fn restore_recorded_initial_pair(
         generation.clone(),
     )
     .await
-    .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+    .map_err(inventory_scan_refusal)?;
     current()?;
     if !fork_binding.current() {
         return Err("The paired BTCB2 Vault changed during Claim recovery.".into());
@@ -601,7 +601,7 @@ pub(super) async fn prepare_exact_pair_intent(
         generation.clone(),
     )
     .await
-    .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+    .map_err(inventory_scan_refusal)?;
     current()?;
     if !fork_binding.current() {
         return Err("The paired BTCB2 Vault changed during Claim preparation.".into());

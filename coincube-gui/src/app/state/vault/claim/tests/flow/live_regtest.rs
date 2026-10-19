@@ -727,7 +727,10 @@ async fn claim_gui_regtest_driver() {
         ));
         assert!(has_label(&deposit_labels, &addresses.bitcoin_deposit));
         assert!(has_label(&deposit_labels, &addresses.btcb2_deposit));
-        assert!(has_label(&deposit_labels, "Check deposits"));
+        assert!(has_label(
+            &deposit_labels,
+            "Deposit status — updates automatically"
+        ));
         assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
         use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
         let descriptor = panel.wallet.main_descriptor.clone();
