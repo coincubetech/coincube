@@ -147,7 +147,8 @@ fn imported_backup_source_error(
     imported: Option<&ImportedBackupSource>,
 ) -> Option<&'static str> {
     let Some(cube) = lookup_cube(cache, local_cube_id) else {
-        return imported.map(|_| "Could not verify this Cube's imported wallet attachment.");
+        return (cache.has_imported_bitcoin || imported.is_some())
+            .then_some("Could not verify this Cube's imported wallet attachment.");
     };
     imported_attachment_error(
         &cube,
@@ -2508,6 +2509,23 @@ mod tests {
             imported_attachment_error(&cube, Some((&descriptor, 123, 200, ChainId::Bitcoin)))
                 .is_some()
         );
+    }
+
+    #[test]
+    fn imported_backup_fails_closed_when_settings_cannot_be_read() {
+        use crate::dir::CoincubeDirectory;
+        let missing_root = std::env::temp_dir().join(format!(
+            "missing-import-kit-settings-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let mut cache = Cache {
+            datadir_path: CoincubeDirectory::new(missing_root),
+            has_imported_bitcoin: true,
+            ..Cache::default()
+        };
+        assert!(imported_backup_source_error(&cache, "cube", None).is_some());
+        cache.has_imported_bitcoin = false;
+        assert!(imported_backup_source_error(&cache, "cube", None).is_none());
     }
 
     #[test]
