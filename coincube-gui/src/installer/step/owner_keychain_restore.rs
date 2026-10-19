@@ -453,12 +453,21 @@ mod tests {
         let mut descriptor_only = OwnerKeychainRestoreStep::new(RestoreScope::DescriptorOnly, 7);
         descriptor_only.phase = Phase::Ready {
             seed: None,
-            descriptor: Some(RecoveredWalletBlob::Imported(imported)),
+            descriptor: Some(RecoveredWalletBlob::Imported(imported.clone())),
         };
         let mut ctx = context();
         ctx.cube_id = Some("wrong-cube".into());
         assert!(!descriptor_only.apply(&mut ctx));
         assert!(ctx.restored_imported_wallet.is_none());
+        assert!(matches!(descriptor_only.phase, Phase::Error { .. }));
+
+        // A Cube mismatch ends this restore attempt. A retry enters with a
+        // fresh decrypted step after the user selects the matching Cube.
+        let mut descriptor_only = OwnerKeychainRestoreStep::new(RestoreScope::DescriptorOnly, 8);
+        descriptor_only.phase = Phase::Ready {
+            seed: None,
+            descriptor: Some(RecoveredWalletBlob::Imported(imported)),
+        };
         ctx.cube_id = Some("restored-cube".into());
         assert!(descriptor_only.apply(&mut ctx));
         assert!(ctx.recovered_signer.is_none());
