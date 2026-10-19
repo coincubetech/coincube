@@ -892,7 +892,14 @@ pub async fn load_application(
     // the seed-derived password. Without it the seed on disk is unreadable and
     // the Vault silently loses the ability to sign with a key it holds.
     let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
-    let wallet = Wallet::new(config.info.descriptors.main)
+    let descriptor = config
+        .info
+        .descriptors
+        .main
+        .as_vault()
+        .cloned()
+        .ok_or_else(|| Error::Unexpected("This Cube has an imported Bitcoin wallet, not a Vault.".into()))?;
+    let wallet = Wallet::new(descriptor)
         .with_chain(config.cube_settings.network)
         .load_from_settings(config.wallet_settings)?
         .load_hotsigners(

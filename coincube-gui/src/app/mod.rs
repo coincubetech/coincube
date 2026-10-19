@@ -4550,7 +4550,7 @@ impl App {
             return None;
         }
         (config.bitcoin_config.chain == crate::chain::ChainId::BitcoinBlake2b
-            && config.main_descriptor == request.descriptor)
+            && config.main_descriptor.as_vault() == Some(&request.descriptor))
             .then(|| {
                 state::vault::claim::ClaimForkBinding::new(
                     daemon,
@@ -10890,7 +10890,7 @@ mod tests {
         let (cfg, wallet_settings) =
             crate::chain::managed_local_fixture(&directory, crate::chain::ChainId::BitcoinBlake2b);
         let wallet = Arc::new(
-            Wallet::new(cfg.main_descriptor.clone())
+            Wallet::new(cfg.main_descriptor.as_vault().expect("Vault test config").clone())
                 .with_chain(crate::chain::ChainId::BitcoinBlake2b)
                 .load_from_settings(wallet_settings)
                 .unwrap(),

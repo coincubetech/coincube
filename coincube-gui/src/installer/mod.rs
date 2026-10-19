@@ -1545,11 +1545,11 @@ pub async fn install_local_wallet(
 
     info!("Daemon configuration file created");
 
-    if cfg
-        .main_descriptor
-        .to_string()
-        .contains(&signer.lock().unwrap().fingerprint().to_string())
-    {
+    if cfg.main_descriptor.as_vault().is_some_and(|vault| {
+        vault
+            .to_string()
+            .contains(&signer.lock().unwrap().fingerprint().to_string())
+    }) {
         // In developer mode this signer is a *clone of the Cube master signer*
         // (see `Installer::new`), so the pre-hardening `store(...)` here was
         // writing the master seed itself to disk in the clear. It gets the same
