@@ -28,6 +28,7 @@ pub(super) async fn build_preferred(
         }
     };
     current()?;
+    let descriptor = super::require_vault_descriptor(&wallet)?;
     // Admit the exact account/backend/provider pair before discovery or address
     // reservation, using the same admission as journal creation and submission.
     let production = Production::new(
@@ -40,7 +41,7 @@ pub(super) async fn build_preferred(
     .map_err(describe_production)?;
     if daemon
         .config()
-        .is_none_or(|c| c.main_descriptor.as_vault() != Some(&wallet.main_descriptor))
+        .is_none_or(|c| c.main_descriptor.as_vault() != Some(descriptor))
     {
         return Err("The selected backend does not match this Vault.".into());
     }
@@ -174,7 +175,7 @@ pub(super) async fn build_preferred(
             .ok_or_else(|| "The Bitcoin tip height is invalid.".to_string())?;
         let transfer = create_ancestry_self_transfer(
             wallet.chain,
-            &wallet.main_descriptor,
+            descriptor,
             &secp256k1::Secp256k1::verification_only(),
             &mut getter,
             &owned,

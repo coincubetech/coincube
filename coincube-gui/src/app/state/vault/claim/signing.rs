@@ -29,14 +29,14 @@ pub(super) async fn restore_recorded_initial_pair(
         }
     };
     current()?;
-    let descriptor = wallet.main_descriptor.clone();
+    let descriptor = require_vault_descriptor(&wallet)?.clone();
     let fork_wallet = fork_binding
         .wallet()
         .ok_or_else(|| "The paired BTCB2 Vault closed during Claim recovery.".to_string())?;
     if wallet.chain != ChainId::Bitcoin
         || !fork_binding.current()
         || fork_wallet.chain != ChainId::BitcoinBlake2b
-        || fork_wallet.main_descriptor != descriptor
+        || fork_wallet.inheritance_descriptor() != Some(&descriptor)
     {
         return Err("The paired Bitcoin and BTCB2 Vaults changed. Reopen both Cubes.".into());
     }
@@ -168,7 +168,9 @@ pub(super) async fn prepare_recorded_initial_review(
     let identity = claim_workflow::WalletIdentity {
         bitcoin_cube,
         fork_cube,
-        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+        descriptor_digest: sha256::Hash::hash(
+            require_vault_descriptor(&wallet)?.to_string().as_bytes(),
+        ),
     };
     let mut controller =
         claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
@@ -279,7 +281,7 @@ pub(super) async fn prepare_recorded_post_bitcoin_review(
         }
     };
     current_session()?;
-    let descriptor = wallet.main_descriptor.clone();
+    let descriptor = require_vault_descriptor(&wallet)?.clone();
     let fork_wallet = fork_binding
         .wallet()
         .ok_or_else(|| "The paired BTCB2 Vault closed during review.".to_string())?;
@@ -288,7 +290,7 @@ pub(super) async fn prepare_recorded_post_bitcoin_review(
         .ok_or_else(|| "The paired BTCB2 Vault closed during review.".to_string())?;
     if wallet.chain != ChainId::Bitcoin
         || fork_wallet.chain != ChainId::BitcoinBlake2b
-        || fork_wallet.main_descriptor != descriptor
+        || fork_wallet.inheritance_descriptor() != Some(&descriptor)
         || !fork_binding.current()
     {
         return Err("The paired Bitcoin and BTCB2 Vaults changed. Reopen both Cubes.".into());
@@ -563,9 +565,9 @@ pub(super) async fn prepare_exact_pair_intent(
     let fork_wallet = fork_binding
         .wallet()
         .ok_or_else(|| "The paired BTCB2 Vault closed during Claim preparation.".to_string())?;
-    let descriptor = wallet.main_descriptor.clone();
+    let descriptor = require_vault_descriptor(&wallet)?.clone();
     if fork_wallet.chain != ChainId::BitcoinBlake2b
-        || fork_wallet.main_descriptor != descriptor
+        || fork_wallet.inheritance_descriptor() != Some(&descriptor)
         || pair.bitcoin.descriptor() != &descriptor
         || pair.fork.descriptor() != &descriptor
     {
@@ -750,7 +752,9 @@ pub(super) async fn record_exact_signed_pair(
     let identity = claim_workflow::WalletIdentity {
         bitcoin_cube,
         fork_cube,
-        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+        descriptor_digest: sha256::Hash::hash(
+            require_vault_descriptor(&wallet)?.to_string().as_bytes(),
+        ),
     };
     let mut controller =
         claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
@@ -826,7 +830,9 @@ impl CheckedInputs {
             || !crate::services::claim_observation::session_current(&self.generation, self.expected)
             || !valid_session
             || wallet.chain != ChainId::Bitcoin
-            || wallet.main_descriptor.to_string() != self.descriptor
+            || wallet
+                .inheritance_descriptor()
+                .is_none_or(|descriptor| descriptor.to_string() != self.descriptor)
             || sha256::Hash::hash(&path.encode()) != self.path_digest
             || sha256::Hash::hash(&built.psbt().serialize()) != self.psbt_digest
         {
@@ -889,10 +895,11 @@ pub(super) async fn check_inputs(
         generation.clone(),
     )
     .map_err(describe_production)?;
-    if transfer.descriptor() != &wallet.main_descriptor
+    let descriptor = require_vault_descriptor(&wallet)?;
+    if transfer.descriptor() != descriptor
         || daemon
             .config()
-            .is_none_or(|c| c.main_descriptor.as_vault() != Some(&wallet.main_descriptor))
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(descriptor))
     {
         return Err("The Claim does not match this Vault and backend.".into());
     }
@@ -959,9 +966,9 @@ pub(super) async fn check_inputs(
                 return Err("The Claim input derivation is invalid.".into());
             }
             let derived = if coin.is_change {
-                wallet.main_descriptor.change_descriptor()
+                descriptor.change_descriptor()
             } else {
-                wallet.main_descriptor.receive_descriptor()
+                descriptor.receive_descriptor()
             }
             .derive(coin.derivation_index, &secp);
             if coin.amount != prevout.value || derived.script_pubkey() != prevout.script_pubkey {
@@ -1023,7 +1030,7 @@ pub(super) async fn check_inputs(
             coins,
             psbt_digest: sha256::Hash::hash(&built.psbt().serialize()),
             path_digest: sha256::Hash::hash(&path.encode()),
-            descriptor: wallet.main_descriptor.to_string(),
+            descriptor: descriptor.to_string(),
             account,
             origin,
             expected,

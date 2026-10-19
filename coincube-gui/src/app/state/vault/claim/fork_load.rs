@@ -94,6 +94,9 @@ pub async fn load(
         }
     };
     current()?;
+    let descriptor = wallet
+        .inheritance_descriptor()
+        .ok_or_else(|| "An imported Bitcoin wallet cannot continue a Vault Claim.".to_string())?;
     let pair = Pairing::read(root, bitcoin_cube, fork_cube, &wallet)?;
     let production = ForkProduction::new(
         connect.client,
@@ -107,7 +110,7 @@ pub async fn load(
     let identity = WalletIdentity {
         bitcoin_cube: pair.bitcoin_cube().into(),
         fork_cube: pair.fork_cube().into(),
-        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
     };
     let directory = pair.journal_directory(root);
     let mut controller = Controller::reopen_settling(&directory, &identity, context.clone())
@@ -192,7 +195,7 @@ pub async fn load(
         .is_some()
     {
         let (selected, transaction) = controller
-            .recorded_ancestry_input(&context, &wallet.main_descriptor)
+            .recorded_ancestry_input(&context, descriptor)
             .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?
             .ok_or_else(|| {
                 "Open the Bitcoin Cube to recover this Claim's input metadata.".to_string()
@@ -206,12 +209,7 @@ pub async fn load(
             .0
             .insert(transaction.compute_txid(), transaction);
         let (source, signed) = controller
-            .restore_ancestry(
-                &context,
-                &wallet.main_descriptor,
-                &mut bitcoin_getter,
-                &bitcoin_inputs,
-            )
+            .restore_ancestry(&context, descriptor, &mut bitcoin_getter, &bitcoin_inputs)
             .map_err(|e| super::describe(crate::services::claim_coordinator::Error::Journal(e)))?;
         if signed.is_none() {
             return Err("The recorded Bitcoin witness is required to continue this Claim.".into());
@@ -221,7 +219,7 @@ pub async fn load(
         Source::OpReturn(
             reconstruct_poison_self_transfer(
                 plan.bitcoin_chain,
-                &wallet.main_descriptor,
+                descriptor,
                 &secp,
                 &mut getter,
                 &candidates,

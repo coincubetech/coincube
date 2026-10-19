@@ -1036,7 +1036,7 @@ impl Tab {
                     && wallet_settings.is_none()
                 {
                     let (mut home, command) = Home::new_for_chain(datadir, Some(chain));
-                    home.set_error("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.".into());
+                    home.set_error("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.");
                     self.state = State::Home(home);
                     return command.map(Message::Launch);
                 }

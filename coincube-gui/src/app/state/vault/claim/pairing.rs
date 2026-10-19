@@ -31,9 +31,10 @@ impl Pairing {
         if wallet.chain != ChainId::BitcoinBlake2b {
             return Err("Open the Bitcoin Blake2b Cube to continue this Claim.".into());
         }
-        if wallet.descriptor_checksum
-            != WalletId::generate(&wallet.main_descriptor).descriptor_checksum
-        {
+        let descriptor = wallet.inheritance_descriptor().ok_or_else(|| {
+            "An imported Bitcoin wallet cannot be used as a Vault Claim pair.".to_string()
+        })?;
+        if wallet.descriptor_checksum != WalletId::generate(descriptor).descriptor_checksum {
             return Err("The open Vault's storage identity does not match its descriptor.".into());
         }
         let bitcoin = Settings::from_file(&root.network_directory(ChainId::Bitcoin))

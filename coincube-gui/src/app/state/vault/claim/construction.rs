@@ -42,7 +42,7 @@ impl Construction {
             Self::OpReturn(transfer) => (transfer.descriptor(), transfer.chain()),
             Self::Ancestry { transfer, .. } => (transfer.descriptor(), transfer.chain()),
         };
-        if descriptor != &wallet.main_descriptor || chain != wallet.chain {
+        if wallet.inheritance_descriptor() != Some(descriptor) || chain != wallet.chain {
             return Err("Claim return address belongs to a different Vault.".into());
         }
         let address = match self {
@@ -170,13 +170,14 @@ pub(super) async fn restore_ancestry(
         }
     };
     check()?;
+    let descriptor = super::require_vault_descriptor(wallet)?;
     let journal_error = |e| describe(claim_coordinator::Error::Journal(e));
     let path = controller
         .recorded_ancestry()
         .map_err(journal_error)?
         .ok_or_else(|| "The recorded Claim has no ancestry path.".to_string())?;
     let (selected, transaction) = controller
-        .recorded_ancestry_input(context, &wallet.main_descriptor)
+        .recorded_ancestry_input(context, descriptor)
         .map_err(journal_error)?
         .ok_or_else(|| "This older Claim has no verified input derivation metadata.".to_string())?;
     let plan = controller.plan();
@@ -222,7 +223,7 @@ pub(super) async fn restore_ancestry(
     );
     getter.0.insert(transaction.compute_txid(), transaction);
     let (transfer, _) = controller
-        .restore_ancestry(context, &wallet.main_descriptor, &mut getter, &candidates)
+        .restore_ancestry(context, descriptor, &mut getter, &candidates)
         .map_err(journal_error)?;
     check()?;
     Ok(Box::new(Construction::Ancestry { transfer, path }))
