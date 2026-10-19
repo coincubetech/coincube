@@ -34,5 +34,6 @@ pub use plaintext::{
 pub use restore::{
     decrypt_descriptor_blob, decrypt_seed_blob, decrypt_wallet_descriptor_blob,
     fetch_and_decrypt_descriptor, fetch_and_decrypt_for_install, fetch_and_decrypt_kit,
-    fetch_and_decrypt_wallet_kit, DecryptedKit, RecoveredKit, RecoveredWalletBlob, RestoreError,
+    fetch_and_decrypt_wallet_kit, parse_wallet_descriptor_blob, DecryptedKit, RecoveredKit,
+    RecoveredWalletBlob, RestoreError,
 };

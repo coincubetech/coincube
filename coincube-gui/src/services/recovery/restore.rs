@@ -193,6 +193,13 @@ pub fn decrypt_wallet_descriptor_blob(
     password: &Zeroizing<String>,
 ) -> Result<RecoveredWalletBlob, RestoreError> {
     let bytes = decrypt(ciphertext_b64, password)?;
+    parse_wallet_descriptor_blob(&bytes)
+}
+
+/// Parse an already-authenticated wallet payload. Password Kits and owner-self
+/// Keychain envelopes share this version dispatch; heir recovery continues to
+/// use its Vault-only descriptor parser.
+pub fn parse_wallet_descriptor_blob(bytes: &[u8]) -> Result<RecoveredWalletBlob, RestoreError> {
     let value: serde_json::Value = serde_json::from_slice(&bytes)
         .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
     let version = value

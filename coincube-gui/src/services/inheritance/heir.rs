@@ -10,6 +10,7 @@
 //! desktop. Keychain never returns the seed or the recovery private key.
 
 use std::time::Duration;
+use zeroize::Zeroizing;
 
 use super::ecies::ArtifactKind;
 use super::error::EciesError;
@@ -173,6 +174,41 @@ pub async fn decrypt_envelopes(
     cube_id: u64,
     wires: &[InheritanceEnvelopeWire],
 ) -> Result<DecryptedKit, HeirDecryptError> {
+    let raw = decrypt_envelopes_raw(grpc, cube_id, wires).await?;
+    let mut artifacts = Vec::with_capacity(raw.len());
+    for (kind, plaintext) in raw {
+        let artifact = match kind {
+            ArtifactKind::Seed => {
+                let blob: SeedBlob = serde_json::from_slice(&plaintext)
+                    .map_err(|e| HeirDecryptError::BlobParse(format!("seed blob: {e}")))?;
+                check_blob_version("seed blob", blob.version)?;
+                OpenedArtifact::Seed(blob)
+            }
+            ArtifactKind::Descriptor => {
+                let blob: DescriptorBlob = serde_json::from_slice(&plaintext)
+                    .map_err(|e| HeirDecryptError::BlobParse(format!("descriptor blob: {e}")))?;
+                check_blob_version("descriptor blob", blob.version)?;
+                OpenedArtifact::Descriptor(blob)
+            }
+            ArtifactKind::Xpub => {
+                return Err(HeirDecryptError::Envelope(
+                    "recovery envelope has an unexpected artifact kind (xpub)".into(),
+                ));
+            }
+        };
+        artifacts.push(artifact);
+    }
+    Ok(assemble(artifacts))
+}
+
+/// Shared owner/heir relay and AEAD-open seam. Only the owner may interpret a
+/// descriptor artifact as the imported v2 wallet payload; the heir caller above
+/// retains its strict Vault v1 parser. Plaintext remains zeroized until parsed.
+pub async fn decrypt_envelopes_raw(
+    grpc: &mut impl DecryptRelay,
+    cube_id: u64,
+    wires: &[InheritanceEnvelopeWire],
+) -> Result<Vec<(ArtifactKind, Zeroizing<Vec<u8>>)>, HeirDecryptError> {
     if wires.is_empty() {
         return Err(HeirDecryptError::MissingMaterial);
     }
@@ -222,9 +258,19 @@ pub async fn decrypt_envelopes(
     for (request_id, wire) in pending {
         let wrapped = await_wrapped_key(grpc, &request_id).await?;
         let k = unwrap_shared_key(&transport, &request_id, &wrapped)?;
-        artifacts.push(open_blob(wire, &k, cube_id)?);
+        let keyholder_key_id = wire.keyholder_key_id.ok_or_else(|| {
+            HeirDecryptError::Envelope("recovery envelope is missing keyholderKeyId".into())
+        })?;
+        let envelope = wire_to_envelope(wire)?;
+        if envelope.artifact_kind == ArtifactKind::Xpub {
+            return Err(HeirDecryptError::Envelope(
+                "recovery envelope has an unexpected artifact kind (xpub)".into(),
+            ));
+        }
+        let plaintext = open_with_shared_key(&k, &envelope, cube_id, keyholder_key_id)?;
+        artifacts.push((envelope.artifact_kind, plaintext));
     }
-    Ok(assemble(artifacts))
+    Ok(artifacts)
 }
 
 /// Polls `GetDecryptResult` until the Keychain answers or the wait elapses. The

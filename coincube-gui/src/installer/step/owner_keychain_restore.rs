@@ -26,7 +26,7 @@ use crate::{
     hw::HardwareWallets,
     installer::{
         context::Context,
-        message::{InheritanceRestoreMsg, Message},
+        message::{Message, OwnerKeychainRestoreMsg},
         step::{
             recovery_kit_restore::{stage_restore, RestoreScope, StagedRestore},
             Step,
@@ -39,9 +39,10 @@ use crate::{
             client::resolve_connect_grpc_url,
             grpc::{create_channel, interceptor::AuthInterceptor, session::GrpcSessionClient},
         },
-        inheritance::heir::decrypt_envelopes,
+        inheritance::{heir::decrypt_envelopes_raw, ArtifactKind},
         recovery::{
-            fetch_owner_recovery_envelope, DescriptorBlob, OwnerKeychainRecoveryError, SeedBlob,
+            fetch_owner_recovery_envelope, parse_wallet_descriptor_blob,
+            OwnerKeychainRecoveryError, RecoveredWalletBlob, SeedBlob, BLOB_VERSION,
         },
     },
 };
@@ -54,10 +55,43 @@ enum Phase {
     /// auto-advances. Holds the seed only transiently (ZeroizeOnDrop blobs).
     Ready {
         seed: Option<SeedBlob>,
-        descriptor: Option<DescriptorBlob>,
+        descriptor: Option<RecoveredWalletBlob>,
     },
     /// Terminal, display-safe copy (the duress 423 never explains why — I3).
     Error { message: String },
+}
+
+fn parse_owner_artifacts(
+    raw: Vec<(ArtifactKind, Zeroizing<Vec<u8>>)>,
+) -> Result<(Option<SeedBlob>, Option<RecoveredWalletBlob>), String> {
+    let mut seed = None;
+    let mut descriptor = None;
+    for (kind, plaintext) in raw {
+        match kind {
+            ArtifactKind::Seed => {
+                if seed.is_some() {
+                    return Err("The phone backup contains duplicate seed material.".into());
+                }
+                let blob: SeedBlob = serde_json::from_slice(&plaintext)
+                    .map_err(|e| format!("Seed backup is invalid: {e}"))?;
+                if blob.version != BLOB_VERSION {
+                    return Err("This seed backup needs a newer version of Tenshu.".into());
+                }
+                seed = Some(blob);
+            }
+            ArtifactKind::Descriptor => {
+                if descriptor.is_some() {
+                    return Err("The phone backup contains duplicate wallet material.".into());
+                }
+                descriptor =
+                    Some(parse_wallet_descriptor_blob(&plaintext).map_err(|e| e.to_string())?);
+            }
+            ArtifactKind::Xpub => {
+                return Err("The phone backup contains an unexpected key artifact.".into());
+            }
+        }
+    }
+    Ok((seed, descriptor))
 }
 
 /// Owner self-recovery decrypt step. Self-contained: it reuses the owner's
@@ -106,12 +140,12 @@ impl OwnerKeychainRestoreStep {
                     .await
                     .map_err(|e| format!("Couldn't reach Connect: {}", e))?;
                 let mut grpc = GrpcSessionClient::new(channel, AuthInterceptor::new(&token));
-                let kit = decrypt_envelopes(&mut grpc, cube_id, &wires)
+                let raw = decrypt_envelopes_raw(&mut grpc, cube_id, &wires)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok::<_, String>((kit.seed, kit.descriptor))
+                parse_owner_artifacts(raw)
             },
-            |res| Message::InheritanceRestore(InheritanceRestoreMsg::DecryptResult(res)),
+            |res| Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(res)),
         )
     }
 }
@@ -137,8 +171,8 @@ impl Step for OwnerKeychainRestoreStep {
         }
         match &self.client {
             Some(client) => Self::decrypt_task(client.clone(), self.cube_id),
-            None => Task::done(Message::InheritanceRestore(
-                InheritanceRestoreMsg::DecryptResult(Err(
+            None => Task::done(Message::OwnerKeychainRestore(
+                OwnerKeychainRestoreMsg::DecryptResult(Err(
                     "Sign in to your account to recover this Cube.".to_string(),
                 )),
             )),
@@ -146,7 +180,8 @@ impl Step for OwnerKeychainRestoreStep {
     }
 
     fn update(&mut self, _hws: &mut HardwareWallets, message: Message) -> Task<Message> {
-        let Message::InheritanceRestore(InheritanceRestoreMsg::DecryptResult(res)) = message else {
+        let Message::OwnerKeychainRestore(OwnerKeychainRestoreMsg::DecryptResult(res)) = message
+        else {
             return Task::none();
         };
         match res {
@@ -181,11 +216,32 @@ impl Step for OwnerKeychainRestoreStep {
         };
         // Reuse the shared seam: parse descriptor + derive the seed signer (Full
         // only), all-or-nothing.
+        let (vault_blob, imported_blob) = match descriptor.as_ref() {
+            Some(RecoveredWalletBlob::Vault(vault)) => (Some(vault), None),
+            Some(RecoveredWalletBlob::Imported(imported)) => (None, Some(imported.clone())),
+            None => (None, None),
+        };
+        if let Some(imported) = &imported_blob {
+            if let Err(message) = imported.validate(ctx.bitcoin_config.chain) {
+                self.phase = Phase::Error { message };
+                return false;
+            }
+            if seed.as_ref().is_some_and(|seed| {
+                seed.cube.uuid != imported.cube.uuid || seed.cube.network != imported.cube.network
+            }) || (matches!(self.scope, RestoreScope::DescriptorOnly)
+                && ctx.cube_id.as_deref() != Some(imported.cube.uuid.as_str()))
+            {
+                self.phase = Phase::Error {
+                    message: "This phone backup belongs to a different Cube or chain.".into(),
+                };
+                return false;
+            }
+        }
         let staged = match stage_restore(
             ctx.bitcoin_config.network,
             self.scope,
             seed.as_ref(),
-            descriptor.as_ref(),
+            vault_blob,
         ) {
             Ok(staged) => staged,
             Err(message) => {
@@ -194,6 +250,12 @@ impl Step for OwnerKeychainRestoreStep {
             }
         };
         staged.commit(ctx, RestoreSource::KeychainSeal);
+        ctx.restored_imported_wallet = imported_blob;
+        if let Some(imported) = &ctx.restored_imported_wallet {
+            ctx.descriptor = None;
+            ctx.restored_wallet_birthday = Some(imported.wallet.birthday);
+            ctx.wallet_alias = imported.wallet.name.clone();
+        }
         // Carry the original Cube identity (UUID + name) out of the decrypted
         // envelope so the post-install `find_or_create_cube` re-mints the same
         // Cube. Reusing the UUID makes the Connect `register_cube` call
@@ -227,6 +289,7 @@ impl Step for OwnerKeychainRestoreStep {
             ctx.cube_name = None;
         }
         StagedRestore::revert_commit(ctx);
+        ctx.restored_imported_wallet = None;
         ctx.connect_jwt = None;
         ctx.use_coincube_connect = false;
     }
@@ -253,5 +316,159 @@ impl Step for OwnerKeychainRestoreStep {
                 view::install(progress, email, false, false, Some(message), None)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        chain::ChainId,
+        dir::CoincubeDirectory,
+        installer::context::RemoteBackend,
+        services::recovery::{
+            ImportedDescriptorBlob, ImportedDescriptorBlobWallet, SeedBlobCube, SeedBlobMnemonic,
+        },
+    };
+    use coincube_core::{
+        miniscript::bitcoin::{
+            bip32::{DerivationPath, Xpriv, Xpub},
+            secp256k1::Secp256k1,
+            Network,
+        },
+        wallet_descriptor::ImportedWalletDescriptor,
+    };
+    use std::str::FromStr;
+
+    fn imported_blob() -> ImportedDescriptorBlob {
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[31; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let xpub = Xpub::from_priv(&secp, &account);
+        let key = format!("[{}/84h/0h/0h]{xpub}", master.fingerprint(&secp));
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        ImportedDescriptorBlob::new(
+            "restored-cube".into(),
+            ChainId::Bitcoin,
+            ImportedDescriptorBlobWallet {
+                name: "Existing wallet".into(),
+                descriptor,
+                birthday: 0,
+                initial_lookahead: 200,
+                receive_index: 45,
+                change_index: 32,
+            },
+        )
+        .unwrap()
+    }
+
+    fn seed_blob() -> SeedBlob {
+        SeedBlob {
+            version: BLOB_VERSION,
+            cube: SeedBlobCube {
+                uuid: "restored-cube".into(),
+                name: "Restored Cube".into(),
+                network: "mainnet".into(),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                lightning_address: None,
+            },
+            mnemonic: SeedBlobMnemonic {
+                phrase: "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon about".into(),
+                language: "en".into(),
+            },
+        }
+    }
+
+    fn context() -> Context {
+        Context::new(
+            Network::Bitcoin,
+            CoincubeDirectory::new(
+                std::env::temp_dir().join("owner-imported-restore-context-only"),
+            ),
+            RemoteBackend::None,
+            None,
+            None,
+        )
+    }
+
+    #[test]
+    fn owner_phone_parses_imported_v2_without_changing_heir_vault_parser() {
+        let imported = imported_blob();
+        let seed = seed_blob();
+        let raw = vec![
+            (
+                ArtifactKind::Seed,
+                Zeroizing::new(serde_json::to_vec(&seed).unwrap()),
+            ),
+            (
+                ArtifactKind::Descriptor,
+                Zeroizing::new(serde_json::to_vec(&imported).unwrap()),
+            ),
+        ];
+        let (parsed_seed, parsed_wallet) = parse_owner_artifacts(raw).unwrap();
+        assert_eq!(parsed_seed.unwrap().cube.uuid, "restored-cube");
+        let RecoveredWalletBlob::Imported(parsed_wallet) = parsed_wallet.unwrap() else {
+            panic!("owner phone restore must retain imported wallet type");
+        };
+        assert_eq!(parsed_wallet.wallet.receive_index, 45);
+        assert_eq!(parsed_wallet.wallet.change_index, 32);
+        assert!(
+            parse_owner_artifacts(vec![(ArtifactKind::Xpub, Zeroizing::new(vec![1, 2, 3]),)])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn owner_phone_full_and_descriptor_only_restore_stage_exact_imported_wallet() {
+        let imported = imported_blob();
+        let mut full = OwnerKeychainRestoreStep::new(RestoreScope::Full, 7);
+        full.phase = Phase::Ready {
+            seed: Some(seed_blob()),
+            descriptor: Some(RecoveredWalletBlob::Imported(imported.clone())),
+        };
+        let mut ctx = context();
+        assert!(full.apply(&mut ctx));
+        assert_eq!(ctx.cube_id.as_deref(), Some("restored-cube"));
+        assert!(ctx.recovered_signer.is_some());
+        assert!(ctx.descriptor.is_none());
+        assert_eq!(ctx.restore_source, Some(RestoreSource::KeychainSeal));
+        assert_eq!(
+            ctx.restored_imported_wallet
+                .as_ref()
+                .unwrap()
+                .wallet
+                .change_index,
+            32
+        );
+        full.revert(&mut ctx);
+        assert!(ctx.restored_imported_wallet.is_none());
+
+        let mut descriptor_only = OwnerKeychainRestoreStep::new(RestoreScope::DescriptorOnly, 7);
+        descriptor_only.phase = Phase::Ready {
+            seed: None,
+            descriptor: Some(RecoveredWalletBlob::Imported(imported)),
+        };
+        let mut ctx = context();
+        ctx.cube_id = Some("wrong-cube".into());
+        assert!(!descriptor_only.apply(&mut ctx));
+        assert!(ctx.restored_imported_wallet.is_none());
+        ctx.cube_id = Some("restored-cube".into());
+        assert!(descriptor_only.apply(&mut ctx));
+        assert!(ctx.recovered_signer.is_none());
+        assert_eq!(
+            ctx.restored_imported_wallet
+                .as_ref()
+                .unwrap()
+                .wallet
+                .receive_index,
+            45
+        );
     }
 }
