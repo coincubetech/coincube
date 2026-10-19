@@ -1178,7 +1178,7 @@ pub async fn import_backup(
         }
     };
 
-    if backup_descriptor != descriptor {
+    if descriptor.as_vault() != Some(&backup_descriptor) {
         return Err(Error::BackupImport(
             "The backup descriptor do not match this wallet!".into(),
         ));
@@ -1579,7 +1579,7 @@ pub async fn import_backup_at_launch(
     let backup_descriptor = CoincubeDescriptor::from_str(&account.descriptor)
         .map_err(|_| RestoreBackupError::InvalidDescriptor)?;
 
-    if backup_descriptor != descriptor {
+    if descriptor.as_vault() != Some(&backup_descriptor) {
         return Err(RestoreBackupError::WrongDescriptor);
     }
 

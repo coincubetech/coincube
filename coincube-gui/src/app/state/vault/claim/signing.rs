@@ -323,7 +323,7 @@ pub(super) async fn prepare_recorded_post_bitcoin_review(
     if fork_info.chain_id != Some(ChainId::BitcoinBlake2b)
         || fork_daemon
             .config()
-            .is_none_or(|config| config.main_descriptor != descriptor)
+            .is_none_or(|config| config.main_descriptor.as_vault() != Some(&descriptor))
     {
         return Err("The paired BTCB2 Vault is not ready for review.".into());
     }

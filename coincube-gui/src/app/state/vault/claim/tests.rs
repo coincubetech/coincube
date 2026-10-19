@@ -32,7 +32,7 @@ fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backe
         block_height: 1_000,
         sync: 1.0,
         descriptors: coincubed::commands::GetInfoDescriptors {
-            main: descriptor.clone(),
+            main: descriptor.clone().into(),
         },
         rescan_progress: None,
         refused_reorg_depth: None,
@@ -40,6 +40,7 @@ fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backe
         timestamp: 0,
         last_poll_timestamp: None,
         history_sync: Default::default(),
+        imported_wallet: None,
         receive_index: 1,
         change_index: 1,
     };
@@ -976,6 +977,7 @@ mod flow {
                 timestamp: 0,
                 last_poll_timestamp: None,
                 history_sync: Default::default(),
+                imported_wallet: None,
                 receive_index: 1,
                 change_index: 0,
             })
@@ -1130,7 +1132,7 @@ mod flow {
             #[cfg(feature = "regtest-harness")]
             if self.live.is_some()
                 && self.config.bitcoin_config.chain == chain
-                && self.config.main_descriptor == *descriptor
+                && self.config.main_descriptor.as_vault() == Some(descriptor)
             {
                 return self.reserve_change().await;
             }

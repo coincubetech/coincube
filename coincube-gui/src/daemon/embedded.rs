@@ -511,7 +511,9 @@ impl Daemon for EmbeddedDaemon {
         chain: coincube_core::chain::ChainId,
         descriptor: &coincube_core::descriptors::CoincubeDescriptor,
     ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
-        if self.config.bitcoin_config.chain != chain || self.config.main_descriptor != *descriptor {
+        if self.config.bitcoin_config.chain != chain
+            || self.config.main_descriptor.as_vault() != Some(descriptor)
+        {
             return Err(DaemonError::Unexpected(
                 "Claim wallet identity does not match this daemon".into(),
             ));

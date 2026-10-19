@@ -176,7 +176,7 @@ fn check_target_fresh(
 ) -> Result<(), ForeignPsbtError> {
     let info = &reservation.info;
     if info.chain_id != Some(ChainId::BitcoinBlake2b)
-        || info.descriptors.main != wallet.main_descriptor
+        || info.descriptors.main.as_vault() != Some(&wallet.main_descriptor)
     {
         return Err(ForeignPsbtError::TargetChanged);
     }
@@ -820,7 +820,7 @@ mod tests {
                 block_height: 1_000,
                 sync: 1.0,
                 descriptors: coincubed::commands::GetInfoDescriptors {
-                    main: descriptor.clone(),
+                    main: descriptor.clone().into(),
                 },
                 rescan_progress: None,
                 refused_reorg_depth: None,
@@ -828,6 +828,7 @@ mod tests {
                 timestamp: 0,
                 last_poll_timestamp: Some(RESERVED_AT + 1),
                 history_sync: Default::default(),
+                imported_wallet: None,
                 receive_index: index,
                 change_index: 0,
             },
@@ -1688,7 +1689,7 @@ mod tests {
         other.info.descriptors.main = CoincubeDescriptor::from_str(
             "wsh(or_d(pk([ffd63c8d/48'/1'/0'/2']tpubDExA3EC3iAsPxPhFn4j6gMiVup6V2eH3qKyk69RcTc9TTNRfFYVPad8bJD5FCHVQxyBT4izKsvr7Btd2R4xmQ1hZkvsqGBaeE82J71uTK4N/<0;1>/*),and_v(v:pkh([de6eb005/48'/1'/0'/2']tpubDFGuYfS2JwiUSEXiQuNGdT3R7WTDhbaE6jbUhgYSSdhmfQcSx7ZntMPPv7nrkvAqjpj3jX9wbhSGMeKVao4qAzhbNyBi7iQmv5xxQk6H6jz/<0;1>/*),older(3))))",
         )
-        .unwrap();
+        .unwrap().into();
         assert_eq!(
             authenticate(&other).unwrap_err(),
             ForeignPsbtError::TargetChanged

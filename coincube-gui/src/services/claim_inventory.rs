@@ -527,7 +527,7 @@ impl ClaimInventory {
         let reports = [&self.scan.bitcoin, &self.scan.btcb2];
         if info.network != Network::Bitcoin
             || info.chain_id != Some(chain)
-            || info.descriptors.main != self.descriptor
+            || info.descriptors.main.as_vault() != Some(&self.descriptor)
             || !info.sync.is_finite()
             || info.sync < 0.9999
             || info.block_height < 0
@@ -702,7 +702,7 @@ impl ClaimInventory {
         let report = &self.scan.btcb2;
         if info.network != Network::Bitcoin
             || info.chain_id != Some(ChainId::BitcoinBlake2b)
-            || info.descriptors.main != self.descriptor
+            || info.descriptors.main.as_vault() != Some(&self.descriptor)
             || !info.sync.is_finite()
             || info.sync < 0.9999
             || info.block_height < 0
@@ -1239,7 +1239,7 @@ mod tests {
             block_height: 130,
             sync: 1.0,
             descriptors: coincubed::commands::GetInfoDescriptors {
-                main: descriptor.clone(),
+                main: descriptor.clone().into(),
             },
             rescan_progress: None,
             refused_reorg_depth: None,
@@ -1247,6 +1247,7 @@ mod tests {
             timestamp: 0,
             last_poll_timestamp: Some(1),
             history_sync: Default::default(),
+            imported_wallet: None,
             receive_index: 3,
             change_index: 3,
         };

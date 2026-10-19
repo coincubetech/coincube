@@ -603,7 +603,7 @@ impl Daemon for BackendWalletClient {
             version: "".to_string(),
             block_height: wallet.tip_height.unwrap_or(0),
             descriptors: GetInfoDescriptors {
-                main: wallet.descriptor.to_owned(),
+                main: wallet.descriptor.to_owned().into(),
             },
             sync: 1.0,
             rescan_progress: None,
@@ -615,6 +615,7 @@ impl Daemon for BackendWalletClient {
             // We can ignore this field for remote backend as the wallet should remain synced.
             last_poll_timestamp: None,
             history_sync: Default::default(),
+            imported_wallet: None,
             receive_index: wallet.deposit_derivation_index,
             change_index: wallet.change_derivation_index,
         })

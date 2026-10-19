@@ -4385,7 +4385,7 @@ fn bitcoin_funding_wallet_ready(
 ) -> bool {
     info.network == Network::Bitcoin
         && info.chain_id == Some(ChainId::Bitcoin)
-        && &info.descriptors.main == descriptor
+        && info.descriptors.main.as_vault() == Some(descriptor)
         && info.block_height > 0
         && info.sync.is_finite()
         && info.sync >= 0.9999

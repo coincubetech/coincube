@@ -33,6 +33,7 @@ impl LiveTransport {
             timestamp: 0,
             last_poll_timestamp: None,
             history_sync: Default::default(),
+            imported_wallet: None,
             receive_index: 1,
             change_index: 0,
         }
