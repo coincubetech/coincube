@@ -436,11 +436,13 @@ pub struct Config {
 }
 
 impl Config {
-    /// Copy suitable for persistence: fork authentication is runtime-only.
-    /// Bitcoin persistence remains unchanged for compatibility.
+    /// Copy suitable for persistence: fork and imported-wallet Connect
+    /// authentication are runtime-only. Legacy Vault persistence is unchanged.
     pub fn for_persistence(&self) -> Self {
         let mut config = self.clone();
-        if config.bitcoin_config.chain.is_blake2b() {
+        if config.bitcoin_config.chain.is_blake2b()
+            || config.main_descriptor.as_imported().is_some()
+        {
             if let Some(backend) = config.fallback_esplora.as_mut() {
                 backend.token = None;
                 backend.fallback_token = None;
@@ -665,6 +667,52 @@ mod tests {
             secondary_fallback_addr: None,
             secondary_fallback_token: None,
         }
+    }
+
+    #[test]
+    fn imported_connect_tokens_are_runtime_only_even_on_bitcoin_mainnet() {
+        use coincube_core::miniscript::bitcoin::{
+            bip32::{DerivationPath, Xpriv, Xpub},
+            secp256k1::Secp256k1,
+        };
+        use std::str::FromStr;
+
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[45; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let key = format!(
+            "[{}/84h/0h/0h]{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        let mut provider = bare_esplora_config();
+        provider.token = Some("jwt-primary".into());
+        provider.fallback_addr = Some("https://example.com/fallback".into());
+        provider.fallback_token = Some("jwt-fallback".into());
+        provider.secondary_fallback_addr = Some("https://example.com/secondary".into());
+        provider.secondary_fallback_token = Some("jwt-secondary".into());
+        let mut config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30)),
+            Some(BitcoinBackend::Esplora(provider.clone())),
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(descriptor),
+            DataDirectory::new(std::env::temp_dir().join("imported-token-test")),
+        );
+        config.fallback_esplora = Some(provider);
+        let serialized = toml::to_string(&config.for_persistence()).unwrap();
+        assert!(!serialized.contains("jwt-"));
+        assert!(serialized.contains("example.com/fallback"));
+        assert!(serialized.contains("example.com/secondary"));
+        // Authentication remains available to this process while the disk copy is public.
+        assert!(toml::to_string(&config).unwrap().contains("jwt-primary"));
     }
 
     /// Regression: an orphan `fallback_token` (no matching
