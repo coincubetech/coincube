@@ -3863,6 +3863,39 @@ CREATE TABLE labels (
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
+        #[test]
+        fn v10_imported_wallet_requires_bounded_history_metadata() {
+            let (tmp_dir, db_path, _) = v10_fixture(ChainId::Bitcoin);
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            for (birthday, lookahead) in [
+                (None, Some(200_i64)),
+                (Some(-1), Some(200)),
+                (Some(u32::MAX as i64 + 1), Some(200)),
+                (Some(0), None),
+                (Some(0), Some(0)),
+                (Some(0), Some(10_001)),
+            ] {
+                assert!(conn
+                    .execute(
+                        "UPDATE wallets SET main_descriptor = NULL, wallet_kind = 'imported',
+                            imported_receive_descriptor = 'receive',
+                            imported_change_descriptor = 'change',
+                            import_birthday = ?1, import_history_complete = 0,
+                            import_initial_lookahead = ?2",
+                        rusqlite::params![birthday, lookahead],
+                    )
+                    .is_err());
+            }
+            assert_eq!(
+                conn.query_row("SELECT wallet_kind FROM wallets", [], |row| row
+                    .get::<_, String>(0))
+                    .unwrap(),
+                "vault"
+            );
+            drop(conn);
+            fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
         fn sha256_of(path: &path::Path) -> sha256::Hash {
             sha256::Hash::hash(&fs::read(path).unwrap())
         }

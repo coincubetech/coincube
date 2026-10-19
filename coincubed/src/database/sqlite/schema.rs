@@ -66,8 +66,10 @@ CREATE TABLE wallets (
         OR
         (wallet_kind = 'imported' AND main_descriptor IS NULL
             AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
-            AND import_birthday IS NOT NULL AND import_history_complete IS NOT NULL
-            AND import_initial_lookahead > 0)
+            AND import_birthday IS NOT NULL AND import_birthday BETWEEN 0 AND 4294967295
+            AND import_history_complete IS NOT NULL
+            AND import_initial_lookahead IS NOT NULL
+            AND import_initial_lookahead BETWEEN 1 AND 10000)
     )
 );
 
