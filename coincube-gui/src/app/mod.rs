@@ -9306,7 +9306,25 @@ impl App {
                 let server_cube_id = self.panels.connect.cube.server_cube_id;
                 let wallet = self.wallet.clone();
                 let local_cube_id = self.cube_settings.id.clone();
-                return crate::app::state::settings::recovery_kit::update(
+                let imported = self
+                    .cube_settings
+                    .bitcoin_import
+                    .as_ref()
+                    .and_then(settings::BitcoinImport::active_attachment)
+                    .and_then(|attachment| {
+                        let daemon = self.panels.imported_bitcoin.as_ref()?.backup_daemon()?;
+                        Some(
+                            crate::app::state::settings::recovery_kit::ImportedBackupSource {
+                                descriptor: attachment.descriptor.clone(),
+                                name: self.cube_settings.name.clone(),
+                                birthday: attachment.birthday,
+                                initial_lookahead: attachment.initial_lookahead,
+                                chain: self.cube_settings.network,
+                                daemon,
+                            },
+                        )
+                    });
+                return crate::app::state::settings::recovery_kit::update_with_imported(
                     &mut self.panels.global_settings.recovery_kit,
                     msg,
                     &self.cache,
@@ -9315,6 +9333,7 @@ impl App {
                     client,
                     server_cube_id,
                     wallet,
+                    imported,
                 );
             }
 

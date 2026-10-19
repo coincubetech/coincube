@@ -427,6 +427,11 @@ impl ImportedBitcoinPanel {
             .then_some((info.receive_index, info.change_index))
     }
 
+    pub fn backup_daemon(&self) -> Option<Arc<dyn Daemon + Send + Sync>> {
+        self.import.active_attachment()?;
+        self.daemon.clone()
+    }
+
     pub fn abandoned(&self) -> bool {
         self.abandoned
     }
