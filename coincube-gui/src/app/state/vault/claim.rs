@@ -474,7 +474,16 @@ pub(crate) fn funding_proof_refusal(
     }
 }
 
-fn inventory_scan_refusal(error: crate::services::claim_inventory::ClaimInventoryError) -> String {
+#[derive(Clone, Copy)]
+enum ScanRetry {
+    Automatic,
+    Manual,
+}
+
+fn inventory_scan_refusal(
+    error: crate::services::claim_inventory::ClaimInventoryError,
+    retry: ScanRetry,
+) -> String {
     use crate::services::{
         claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
     };
@@ -495,16 +504,25 @@ fn inventory_scan_refusal(error: crate::services::claim_inventory::ClaimInventor
             if matches!(cause, ScanError::AddressLimit | ScanError::RangeLimit) {
                 format!("Could not verify the deposits on {chain}: {detail}. This Vault needs a wider scan before the Claim can proceed.")
             } else {
-                format!("Could not verify the deposits on {chain}: {detail}. The addresses are being watched and verification will retry automatically.")
+                let next = match retry {
+                    ScanRetry::Automatic => "The addresses are being watched and verification will retry automatically.",
+                    ScanRetry::Manual => "Retry this step when the indexer is available.",
+                };
+                format!("Could not verify the deposits on {chain}: {detail}. {next}")
             }
         }
-        ClaimInventoryError::Scan(_) => "The two-chain Vault scan was inconsistent. Deposit verification will retry automatically.".into(),
+        ClaimInventoryError::Scan(_) => match retry {
+            ScanRetry::Automatic => "The two-chain Vault scan was inconsistent. Deposit verification will retry automatically.".into(),
+            ScanRetry::Manual => "The two-chain Vault scan was inconsistent. Retry this step to verify the deposits.".into(),
+        },
         ClaimInventoryError::Descriptor(_) | ClaimInventoryError::Ownership =>
             "The scanned coins did not match this Vault's descriptor. Deposit verification is unavailable.".into(),
         ClaimInventoryError::TooManyFundingCandidates =>
             "This Vault has more deposit candidates than the claim can verify safely.".into(),
-        ClaimInventoryError::WalletState =>
-            "The Vault's coin set changed during the deposit scan. Verification will retry automatically.".into(),
+        ClaimInventoryError::WalletState => match retry {
+            ScanRetry::Automatic => "The Vault's coin set changed during the deposit scan. Verification will retry automatically.".into(),
+            ScanRetry::Manual => "The Vault's coin set changed during the deposit scan. Reopen the Claim and retry.".into(),
+        },
     }
 }
 
@@ -1659,7 +1677,7 @@ impl ClaimStep1Panel {
                     generation.clone(),
                 )
                 .await
-                .map_err(inventory_scan_refusal)?;
+                .map_err(|error| inventory_scan_refusal(error, ScanRetry::Manual))?;
                 if inventory.shared().is_empty() {
                     return Err("No shared pre-fork coins were found in this Vault.".into());
                 }
@@ -1780,7 +1798,7 @@ impl ClaimStep1Panel {
                     generation.clone(),
                 )
                 .await
-                .map_err(inventory_scan_refusal)?;
+                .map_err(|error| inventory_scan_refusal(error, ScanRetry::Automatic))?;
                 let for_load = (
                     directory.clone(),
                     descriptor.clone(),
@@ -3345,6 +3363,8 @@ impl ClaimStep1Panel {
                 self.deposit_polling = false;
                 if self.authorized(generation, revocations) && self.backend_ready() {
                     self.deposit_status = Some(status);
+                } else {
+                    self.deposit_status = None;
                 }
                 Task::none()
             }
@@ -3661,6 +3681,8 @@ impl ClaimStep1Panel {
                     Ok(addresses) => {
                         self.stage = Stage::FundingDeposits(addresses);
                         self.deposit_status = None;
+                        self.deposit_polling = false;
+                        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_status = None;
                         return Task::done(Message::Claim(ClaimEvent::DepositPoll));
                     }
@@ -3737,6 +3759,9 @@ impl ClaimStep1Panel {
                     }
                     RestartedState::PairedFunding(addresses) => {
                         self.restart_pending = false;
+                        self.deposit_status = None;
+                        self.deposit_polling = false;
+                        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_review = None;
                         self.prepared_pair = None;
                         self.funding_status = Some(

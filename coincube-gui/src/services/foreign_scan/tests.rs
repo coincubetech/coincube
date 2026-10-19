@@ -24,11 +24,13 @@ fn deposit_summary_counts_confirmation_depth_per_output() {
     let funds =
         summarize_address_funds(&[confirmed(10_000, 100), confirmed(800, 105)], Some(105)).unwrap();
     assert_eq!(funds.confirmed_sats, 10_800);
+    assert_eq!(funds.mature_sats, 10_000);
     assert_eq!(funds.largest_confirmed_sats, 10_000);
     assert_eq!(funds.largest_mature_sats, 10_000);
     assert_eq!(funds.min_confirmations, 1);
     let funds = summarize_address_funds(&[confirmed(10_000, 101)], Some(105)).unwrap();
     assert_eq!(funds.largest_mature_sats, 0);
+    assert_eq!(funds.mature_sats, 0);
     assert_eq!(funds.min_confirmations, 5);
 }
 

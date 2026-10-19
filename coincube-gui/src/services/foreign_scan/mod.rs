@@ -55,6 +55,7 @@ pub enum ScanError {
 pub struct AddressFunds {
     pub confirmed_sats: u64,
     pub pending_sats: u64,
+    pub mature_sats: u64,
     pub largest_confirmed_sats: u64,
     pub largest_mature_sats: u64,
     /// Conservative depth when several unspent deposits share this address.
@@ -111,6 +112,10 @@ fn summarize_address_funds(utxos: &[Utxo], height: Option<u32>) -> Result<Addres
                 funds.min_confirmations.min(depth)
             };
             if depth >= coincube_core::claim::MIN_CONFIRMATIONS {
+                funds.mature_sats = funds
+                    .mature_sats
+                    .checked_add(coin.value)
+                    .ok_or(ScanError::BodyLimit)?;
                 funds.largest_mature_sats = funds.largest_mature_sats.max(coin.value);
             }
         }

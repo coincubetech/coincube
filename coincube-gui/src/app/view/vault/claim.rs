@@ -433,7 +433,7 @@ fn deposit_row<'a>(
         Some(Err(_)) => (Some(false), "Indexer status unavailable; retrying automatically.".to_string()),
         Some(Ok(funds)) if funds.largest_mature_sats >= minimum => (
             Some(true),
-            format!("{} sats confirmed with at least {MIN_CONFIRMATIONS} confirmations. {}", funds.confirmed_sats,
+            format!("{} sats have at least {MIN_CONFIRMATIONS} confirmations. {}", funds.mature_sats,
                 if verified { "Two-chain proof verified." } else { "Waiting for two-chain verification." }),
         ),
         Some(Ok(funds)) if funds.largest_confirmed_sats >= minimum => (
