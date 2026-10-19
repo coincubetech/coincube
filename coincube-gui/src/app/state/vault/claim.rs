@@ -32,7 +32,7 @@ use std::{
     fmt,
     path::PathBuf,
     sync::{Arc, Weak},
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use iced::Task;
@@ -87,6 +87,7 @@ use crate::{
         },
         coincube::CoincubeClient,
         feeestimation::fee_estimation::FeeEstimator,
+        foreign_scan::{self, AddressFunds, ScanError},
     },
 };
 
@@ -293,6 +294,26 @@ pub struct ClaimDepositProgress {
     prepared: Option<Box<PreparedClaimPair>>,
 }
 
+/// Fresh, read-only address observations. These show deposit arrival only;
+/// they never replace the full two-chain inventory or ancestry proof.
+#[derive(Debug, Clone)]
+pub struct DepositStatus {
+    pub bitcoin: Result<AddressFunds, ScanError>,
+    pub btcb2: Result<AddressFunds, ScanError>,
+}
+
+impl DepositStatus {
+    pub fn ready_for_verification(&self, bitcoin_minimum: u64, btcb2_minimum: u64) -> bool {
+        self.bitcoin
+            .as_ref()
+            .is_ok_and(|funds| funds.largest_mature_sats >= bitcoin_minimum)
+            && self
+                .btcb2
+                .as_ref()
+                .is_ok_and(|funds| funds.largest_mature_sats >= btcb2_minimum)
+    }
+}
+
 /// The exact pair and selected ancestry paths from the last deposit review.
 /// Its short lifetime is for a future explicit signer transition, not a
 /// substitute for fresh wallet, UTXO and two-chain admission at dispatch.
@@ -453,6 +474,58 @@ pub(crate) fn funding_proof_refusal(
     }
 }
 
+#[derive(Clone, Copy)]
+enum ScanRetry {
+    Automatic,
+    Manual,
+}
+
+fn inventory_scan_refusal(
+    error: crate::services::claim_inventory::ClaimInventoryError,
+    retry: ScanRetry,
+) -> String {
+    use crate::services::{
+        claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
+    };
+    match error {
+        ClaimInventoryError::Scan(InventoryError::Scan(chain, cause)) => {
+            let chain = if chain == ChainId::Bitcoin { "Bitcoin" } else { "BTCB2" };
+            let detail = match cause {
+                ScanError::Deadline => "the indexer did not finish the Vault scan in time",
+                ScanError::Changed => "the chain or an address changed during the scan",
+                ScanError::Http(429 | 502 | 503 | 504) | ScanError::Unavailable =>
+                    "the indexer is temporarily unavailable",
+                ScanError::AddressLimit | ScanError::RangeLimit =>
+                    "this Vault's address history exceeds the scan limit",
+                ScanError::Cancelled => "the Connect session changed",
+                ScanError::Freshness => "fresh indexer data could not be verified",
+                _ => "the indexer returned incomplete or inconsistent data",
+            };
+            if matches!(cause, ScanError::AddressLimit | ScanError::RangeLimit) {
+                format!("Could not verify the deposits on {chain}: {detail}. This Vault needs a wider scan before the Claim can proceed.")
+            } else {
+                let next = match retry {
+                    ScanRetry::Automatic => "The addresses are being watched and verification will retry automatically.",
+                    ScanRetry::Manual => "Retry this step when the indexer is available.",
+                };
+                format!("Could not verify the deposits on {chain}: {detail}. {next}")
+            }
+        }
+        ClaimInventoryError::Scan(_) => match retry {
+            ScanRetry::Automatic => "The two-chain Vault scan was inconsistent. Deposit verification will retry automatically.".into(),
+            ScanRetry::Manual => "The two-chain Vault scan was inconsistent. Retry this step to verify the deposits.".into(),
+        },
+        ClaimInventoryError::Descriptor(_) | ClaimInventoryError::Ownership =>
+            "The scanned coins did not match this Vault's descriptor. Deposit verification is unavailable.".into(),
+        ClaimInventoryError::TooManyFundingCandidates =>
+            "This Vault has more deposit candidates than the claim can verify safely.".into(),
+        ClaimInventoryError::WalletState => match retry {
+            ScanRetry::Automatic => "The Vault's coin set changed during the deposit scan. Verification will retry automatically.".into(),
+            ScanRetry::Manual => "The Vault's coin set changed during the deposit scan. Reopen the Claim and retry.".into(),
+        },
+    }
+}
+
 /// Results of the panel's async work. Every variant that carries the
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
@@ -464,6 +537,8 @@ pub enum ClaimEvent {
         Result<claim_workflow::CheckedClaimFundingAddresses, String>,
     ),
     FundingChecked(u64, u64, u64, Result<ClaimDepositProgress, String>),
+    DepositPoll,
+    DepositStatusChecked(u64, u64, u64, DepositStatus),
     /// A read-only ancestry status is only a short-lived observation.
     FundingProofExpired(u64, u64, u64),
     PairedSigningPrepared(u64, u64, u64, Result<(), String>),
@@ -703,6 +778,10 @@ pub struct ClaimStep1Panel {
     pre: Preconditions,
     funding_error: Option<String>,
     funding_status: Option<String>,
+    deposit_status: Option<DepositStatus>,
+    deposit_polling: bool,
+    deposit_poll_seq: u64,
+    last_full_check: Option<Instant>,
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
     funding_checking: bool,
@@ -758,6 +837,10 @@ impl ClaimStep1Panel {
             pre: Preconditions::default(),
             funding_error: None,
             funding_status: None,
+            deposit_status: None,
+            deposit_polling: false,
+            deposit_poll_seq: 0,
+            last_full_check: None,
             funding_review: None,
             prepared_pair: None,
             funding_checking: false,
@@ -861,6 +944,18 @@ impl ClaimStep1Panel {
         self.funding_error.as_deref()
     }
 
+    pub fn deposit_status(&self) -> Option<&DepositStatus> {
+        self.deposit_status.as_ref()
+    }
+
+    pub fn deposit_polling(&self) -> bool {
+        self.deposit_polling
+    }
+
+    pub fn paired_vault_ready(&self) -> bool {
+        self.fork_pair_current()
+    }
+
     pub fn funding_status(&self) -> Option<&str> {
         if self.funding_review.is_some() && !self.fork_pair_current() {
             return Some("The paired BTCB2 Cube changed. Reopen it and check both deposits again.");
@@ -950,6 +1045,10 @@ impl ClaimStep1Panel {
             self.stage = Stage::Preconditions;
             self.funding_error = None;
             self.funding_status = None;
+            self.deposit_status = None;
+            self.deposit_polling = false;
+            self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
+            self.last_full_check = None;
             self.funding_review = None;
             self.prepared_pair = None;
             self.funding_checking = false;
@@ -1578,7 +1677,7 @@ impl ClaimStep1Panel {
                     generation.clone(),
                 )
                 .await
-                .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+                .map_err(|error| inventory_scan_refusal(error, ScanRetry::Manual))?;
                 if inventory.shared().is_empty() {
                     return Err("No shared pre-fork coins were found in this Vault.".into());
                 }
@@ -1658,7 +1757,8 @@ impl ClaimStep1Panel {
         let fork_binding = self.fork_daemon.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_checking = true;
-        self.funding_status = None;
+        self.last_full_check = Some(Instant::now());
+        self.funding_status = Some("Verifying both deposits and their ancestry…".into());
         self.funding_error = None;
         self.funding_review = None;
         self.prepared_pair = None;
@@ -1698,7 +1798,7 @@ impl ClaimStep1Panel {
                     generation.clone(),
                 )
                 .await
-                .map_err(|_| "The two-chain Vault scan did not complete.".to_string())?;
+                .map_err(|error| inventory_scan_refusal(error, ScanRetry::Automatic))?;
                 let for_load = (
                     directory.clone(),
                     descriptor.clone(),
@@ -1958,6 +2058,63 @@ impl ClaimStep1Panel {
                 ))
             },
         )
+    }
+
+    /// Watch the two reserved receive addresses without running a full
+    /// descriptor scan on every poll. This is display-only: the normal paired
+    /// inventory and ancestry collector still gate review and signing.
+    fn poll_deposits(&mut self) -> Task<Message> {
+        let Stage::FundingDeposits(addresses) = &self.stage else {
+            return Task::none();
+        };
+        if self.deposit_polling || !self.backend_ready() {
+            return Task::none();
+        }
+        let Some(connect) = self.connect.clone() else {
+            return Task::none();
+        };
+        self.deposit_polling = true;
+        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
+        let seq = self.deposit_poll_seq;
+        let expected = *self.generation.borrow();
+        let revocations = self.revocations;
+        let bitcoin = addresses.bitcoin_deposit.clone();
+        let btcb2 = addresses.btcb2_deposit.clone();
+        Task::perform(
+            async move {
+                let (bitcoin, btcb2) = tokio::join!(
+                    foreign_scan::address_funds(connect.client.clone(), ChainId::Bitcoin, &bitcoin),
+                    foreign_scan::address_funds(connect.client, ChainId::BitcoinBlake2b, &btcb2),
+                );
+                DepositStatus { bitcoin, btcb2 }
+            },
+            move |status| {
+                Message::Claim(ClaimEvent::DepositStatusChecked(
+                    seq,
+                    expected,
+                    revocations,
+                    status,
+                ))
+            },
+        )
+    }
+
+    fn should_auto_verify(&self) -> bool {
+        let (Stage::FundingDeposits(addresses), Some(status)) =
+            (&self.stage, self.deposit_status.as_ref())
+        else {
+            return false;
+        };
+        !self.funding_checking
+            && self.funding_review().is_none()
+            && self.fork_pair_current()
+            && status.ready_for_verification(
+                addresses.bitcoin_minimum_sats,
+                addresses.btcb2_minimum_sats,
+            )
+            && self
+                .last_full_check
+                .is_none_or(|last| last.elapsed() >= Duration::from_secs(90))
     }
 
     fn build(&mut self, daemon: Arc<dyn Daemon + Sync + Send>) -> Task<Message> {
@@ -3167,6 +3324,10 @@ impl ClaimStep1Panel {
                 self.paired_signing_pending = false;
                 self.funding_checking = false;
                 self.funding_status = None;
+                self.deposit_status = None;
+                self.deposit_polling = false;
+                self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
+                self.last_full_check = None;
                 self.funding_review = None;
                 self.prepared_pair = None;
                 self.stage = Stage::Preconditions;
@@ -3193,6 +3354,20 @@ impl ClaimStep1Panel {
     /// session travelling inside one is never dropped for want of it.
     fn apply(&mut self, event: ClaimEvent) -> Task<Message> {
         match event {
+            ClaimEvent::DepositPoll => Task::none(),
+            ClaimEvent::DepositStatusChecked(seq, generation, revocations, status) => {
+                if seq != self.deposit_poll_seq || !matches!(self.stage, Stage::FundingDeposits(_))
+                {
+                    return Task::none();
+                }
+                self.deposit_polling = false;
+                if self.authorized(generation, revocations) && self.backend_ready() {
+                    self.deposit_status = Some(status);
+                } else {
+                    self.deposit_status = None;
+                }
+                Task::none()
+            }
             ClaimEvent::PairedBitcoinReviewed(seq, generation, revocations, result) => {
                 if seq != self.paired_broadcast_seq {
                     return Task::none();
@@ -3405,6 +3580,9 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 self.funding_checking = false;
+                // Space automatic retries from the completed scan. A slow
+                // timeout must not trigger another full scan immediately.
+                self.last_full_check = Some(Instant::now());
                 if !self.authorized(generation, revocations) || !self.backend_ready() {
                     self.stage = Stage::Preconditions;
                     self.funding_status = None;
@@ -3418,7 +3596,8 @@ impl ClaimStep1Panel {
                 if proof_complete && !self.fork_pair_current() {
                     self.funding_review = None;
                     self.prepared_pair = None;
-                    self.funding_status = Some(
+                    self.funding_status = None;
+                    self.funding_error = Some(
                         "The paired BTCB2 Cube changed during the deposit check. Reopen it and check both deposits again."
                             .into(),
                     );
@@ -3432,27 +3611,32 @@ impl ClaimStep1Panel {
                     .as_mut()
                     .ok()
                     .and_then(|progress| progress.prepared.take());
-                self.funding_status = Some(match result {
-                    Ok(progress) => format!(
-                        "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
-                        if progress.bitcoin_candidate {
-                            "post-fork candidate found"
-                        } else {
-                            "no confirmed candidate at the reserved address"
-                        },
-                        if progress.btcb2_candidate {
-                            "post-fork candidate found"
-                        } else {
-                            "no confirmed candidate at the reserved address"
-                        },
-                        if progress.both_verified {
-                            "Both deposits have current two-chain ancestry proofs."
-                        } else {
-                            "Candidates are not yet spend authority."
-                        }
-                    ),
-                    Err(reason) => reason,
-                });
+                match result {
+                    Ok(progress) => {
+                        self.funding_status = Some(format!(
+                            "Bitcoin deposit: {}. Bitcoin Blake2b deposit: {}. {}",
+                            if progress.bitcoin_candidate {
+                                "post-fork candidate found"
+                            } else {
+                                "no confirmed candidate at the reserved address"
+                            },
+                            if progress.btcb2_candidate {
+                                "post-fork candidate found"
+                            } else {
+                                "no confirmed candidate at the reserved address"
+                            },
+                            if progress.both_verified {
+                                "Both deposits have current two-chain ancestry proofs."
+                            } else {
+                                "Candidates are not yet spend authority."
+                            }
+                        ))
+                    }
+                    Err(reason) => {
+                        self.funding_status = None;
+                        self.funding_error = Some(reason);
+                    }
+                }
                 if proof_complete {
                     Task::perform(
                         async { tokio::time::sleep(std::time::Duration::from_secs(30)).await },
@@ -3476,9 +3660,10 @@ impl ClaimStep1Panel {
                     self.funding_review = None;
                     self.prepared_pair = None;
                     self.funding_status = Some(
-                        "The deposit proof has expired. Check both deposits again for current chain state and fees."
+                        "The deposit proof has expired. Watching the deposits and refreshing verification automatically."
                             .into(),
                     );
+                    self.last_full_check = None;
                 }
                 Task::none()
             }
@@ -3493,7 +3678,14 @@ impl ClaimStep1Panel {
                     return Task::none();
                 }
                 match result {
-                    Ok(addresses) => self.stage = Stage::FundingDeposits(addresses),
+                    Ok(addresses) => {
+                        self.stage = Stage::FundingDeposits(addresses);
+                        self.deposit_status = None;
+                        self.deposit_polling = false;
+                        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
+                        self.funding_status = None;
+                        return Task::done(Message::Claim(ClaimEvent::DepositPoll));
+                    }
                     Err(reason) => {
                         self.stage = Stage::Preconditions;
                         self.funding_error = Some(reason);
@@ -3567,13 +3759,17 @@ impl ClaimStep1Panel {
                     }
                     RestartedState::PairedFunding(addresses) => {
                         self.restart_pending = false;
+                        self.deposit_status = None;
+                        self.deposit_polling = false;
+                        self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_review = None;
                         self.prepared_pair = None;
                         self.funding_status = Some(
-                            "The recorded Claim pair is unsigned. Check both deposits again before signing."
+                            "The recorded Claim pair is unsigned. Watching both deposits and refreshing verification before signing."
                                 .into(),
                         );
                         self.stage = Stage::FundingDeposits(addresses);
+                        return Task::done(Message::Claim(ClaimEvent::DepositPoll));
                     }
                 }
                 Task::none()
@@ -3986,6 +4182,8 @@ impl State for ClaimStep1Panel {
 
     fn subscription(&self) -> iced::Subscription<Message> {
         match &self.stage {
+            Stage::FundingDeposits(_) => iced::time::every(Duration::from_secs(15))
+                .map(|_| Message::Claim(ClaimEvent::DepositPoll)),
             Stage::Sign { psbt, .. } => psbt.subscription(),
             Stage::PairedSign { bitcoin, fork, .. } => iced::Subscription::batch([
                 bitcoin
@@ -4172,6 +4370,16 @@ impl State for ClaimStep1Panel {
                     return Task::none();
                 }
                 self.update_paired_psbt(daemon, cache, side, *message, true)
+            }
+            Message::Claim(ClaimEvent::DepositPoll) => self.poll_deposits(),
+            Message::Claim(event @ ClaimEvent::DepositStatusChecked(..)) => {
+                let completed = self.apply(event);
+                if self.should_auto_verify() {
+                    if let Some(daemon) = daemon {
+                        return Task::batch([completed, self.check_funding(daemon)]);
+                    }
+                }
+                completed
             }
             Message::Claim(event) => self.apply(event),
             other => {

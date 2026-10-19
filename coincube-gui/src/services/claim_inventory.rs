@@ -185,7 +185,7 @@ impl ClaimInventory {
                 })
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let scan = foreign_split_inventory::scan(
+        let scan = foreign_split_inventory::scan_for_claim(
             client,
             ScanPlan {
                 chain: ChainId::BitcoinBlake2b,

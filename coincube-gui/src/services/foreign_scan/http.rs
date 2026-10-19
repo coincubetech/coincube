@@ -94,6 +94,15 @@ impl HttpSource {
         }
         Ok(bytes)
     }
+
+    pub(super) async fn current_height(&self, chain: ChainId) -> Result<u32, ScanError> {
+        let bytes = self.get(chain, "blocks/tip/height", true).await?;
+        std::str::from_utf8(&bytes)
+            .map_err(|_| ScanError::Malformed)?
+            .trim()
+            .parse()
+            .map_err(|_| ScanError::Malformed)
+    }
 }
 #[async_trait]
 impl Source for HttpSource {

@@ -9,6 +9,44 @@ use coincube_core::{
 };
 use std::{str::FromStr, sync::Mutex};
 
+#[test]
+fn deposit_arrival_does_not_authorize_verification_before_six_confirmations() {
+    let mut funds = AddressFunds {
+        confirmed_sats: 10_000_000,
+        largest_confirmed_sats: 10_000_000,
+        min_confirmations: 1,
+        ..AddressFunds::default()
+    };
+    let mut status = DepositStatus {
+        bitcoin: Ok(funds),
+        btcb2: Ok(funds),
+    };
+    assert!(!status.ready_for_verification(894, 447));
+    funds.largest_mature_sats = 10_000_000;
+    status.bitcoin = Ok(funds);
+    assert!(!status.ready_for_verification(894, 447));
+    status.btcb2 = Ok(funds);
+    assert!(status.ready_for_verification(894, 447));
+}
+
+#[test]
+fn incomplete_inventory_identifies_the_failing_chain() {
+    use crate::services::{
+        claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
+    };
+    let failure = ClaimInventoryError::Scan(InventoryError::Scan(
+        ChainId::BitcoinBlake2b,
+        ScanError::Deadline,
+    ));
+    let message = inventory_scan_refusal(failure, ScanRetry::Automatic);
+    assert!(message.contains("BTCB2"));
+    assert!(message.contains("did not finish"));
+    assert!(message.contains("retry automatically"));
+    let signing_message = inventory_scan_refusal(failure, ScanRetry::Manual);
+    assert!(signing_message.contains("Retry this step"));
+    assert!(!signing_message.contains("automatically"));
+}
+
 /// Single-key primary path, native SegWit: what the coordinator admits.
 const SINGLE_WSH: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
 /// A 1-of-2 primary path: refused by the coordinator (`Coordinator::open`).
@@ -401,8 +439,37 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     };
     drop(p.apply(ClaimEvent::FundingPrepared(10, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingChecking));
+    p.deposit_polling = true;
+    p.deposit_poll_seq = 9;
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
+    assert!(!p.deposit_polling);
+    assert_ne!(p.deposit_poll_seq, 9);
+    let observed = DepositStatus {
+        bitcoin: Ok(AddressFunds::default()),
+        btcb2: Ok(AddressFunds::default()),
+    };
+    drop(p.apply(ClaimEvent::DepositStatusChecked(9, 7, 0, observed.clone())));
+    assert!(p.deposit_status.is_none());
+    p.deposit_polling = true;
+    let current_poll_seq = p.deposit_poll_seq;
+    drop(p.apply(ClaimEvent::DepositStatusChecked(
+        current_poll_seq,
+        7,
+        0,
+        observed.clone(),
+    )));
+    assert!(!p.deposit_polling);
+    assert!(p.deposit_status.is_some());
+    p.deposit_polling = true;
+    drop(p.apply(ClaimEvent::DepositStatusChecked(
+        current_poll_seq,
+        8,
+        0,
+        observed,
+    )));
+    assert!(!p.deposit_polling);
+    assert!(p.deposit_status.is_none());
     let session = p.connect.clone().unwrap();
     assert_eq!(p.funding_pair_target(&session), Some("fork-cube"));
     let mut other = session.clone();
@@ -474,7 +541,7 @@ fn claim_funding_results_require_the_current_panel_and_session() {
         }),
     )));
     assert!(p
-        .funding_status()
+        .funding_error()
         .unwrap()
         .contains("paired BTCB2 Cube changed"));
     p.revoke();

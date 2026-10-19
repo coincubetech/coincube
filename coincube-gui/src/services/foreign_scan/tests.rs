@@ -8,6 +8,32 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Mutex,
 };
+
+#[test]
+fn deposit_summary_counts_confirmation_depth_per_output() {
+    let confirmed = |value, block_height| Utxo {
+        txid: Txid::from_byte_array([1; 32]),
+        vout: 0,
+        value,
+        status: Status {
+            confirmed: true,
+            block_height: Some(block_height),
+            block_hash: Some(BlockHash::from_byte_array([2; 32])),
+        },
+    };
+    let funds =
+        summarize_address_funds(&[confirmed(10_000, 100), confirmed(800, 105)], Some(105)).unwrap();
+    assert_eq!(funds.confirmed_sats, 10_800);
+    assert_eq!(funds.mature_sats, 10_000);
+    assert_eq!(funds.largest_confirmed_sats, 10_000);
+    assert_eq!(funds.largest_mature_sats, 10_000);
+    assert_eq!(funds.min_confirmations, 1);
+    let funds = summarize_address_funds(&[confirmed(10_000, 101)], Some(105)).unwrap();
+    assert_eq!(funds.largest_mature_sats, 0);
+    assert_eq!(funds.mature_sats, 0);
+    assert_eq!(funds.min_confirmations, 5);
+}
+
 fn ranged() -> String {
     let secp = Secp256k1::new();
     let xpub = Xpub::from_priv(

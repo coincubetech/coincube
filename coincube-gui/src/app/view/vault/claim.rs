@@ -72,10 +72,20 @@ pub fn view<'a>(
                 .push(p1_bold(format!("Bitcoin Blake2b deposit — at least {} sats ({} sat/vB)", addresses.btcb2_minimum_sats, addresses.btcb2_rate_sat_vb)))
                 .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
                 .push(p1_regular("Send only Bitcoin to the Bitcoin address and only BTCB2 to the BTCB2 address. These minimums use fee quotes from when the addresses were prepared; if fees rise before signing, you may need to add funds. Both deposits must later pass independent ancestry, confirmation, ownership and unspent checks; neither deposit by itself splits the coins."))
-                .push(button::secondary(None, if panel.funding_checking() { "Checking deposits…" } else { "Check deposits" }).on_press_maybe(
-                    (!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding))
-                ))
+                .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats))
                 .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
+                .push_maybe(panel.funding_error().map(|error| card::warning(error.to_string())))
+                .push_maybe((!panel.paired_vault_ready()
+                    && panel.deposit_status().is_some_and(|status| status.ready_for_verification(
+                        addresses.bitcoin_minimum_sats,
+                        addresses.btcb2_minimum_sats,
+                    )))
+                    .then(|| card::warning("Open the paired BTCB2 Cube under this Connect account to verify both deposits for signing.".into())))
+                .push_maybe(panel.funding_error().map(|_| {
+                    button::secondary(Some(icon::reload_icon()), "Retry verification now")
+                        .on_press_maybe((!panel.funding_checking())
+                            .then_some(Message::Claim(ClaimMessage::CheckFunding)))
+                }))
                 .push_maybe(panel.funding_review().map(|review| {
                     let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
                     funding_review_view(review, threshold)
@@ -371,6 +381,76 @@ fn address_row<'a>(address: String, notice: &'static str) -> Element<'a, Message
                 .on_press(Message::CopyWithToast(address, notice.to_string())),
         )
         .into()
+}
+
+fn deposit_status_view<'a>(
+    panel: &ClaimStep1Panel,
+    bitcoin_minimum: u64,
+    btcb2_minimum: u64,
+) -> Element<'a, Message> {
+    let status = panel.deposit_status();
+    let verified = panel.funding_review().is_some();
+    Container::new(
+        Column::new()
+            .spacing(12)
+            .push(p1_bold("Deposit status — updates automatically"))
+            .push(deposit_row(
+                "Bitcoin",
+                status.map(|status| &status.bitcoin),
+                bitcoin_minimum,
+                verified,
+            ))
+            .push(deposit_row(
+                "Bitcoin Blake2b",
+                status.map(|status| &status.btcb2),
+                btcb2_minimum,
+                verified,
+            ))
+            .push_maybe(
+                (panel.deposit_polling() && status.is_some())
+                    .then(|| p2_regular("Refreshing deposit status…")),
+            ),
+    )
+    .padding(20)
+    .style(theme::card::simple)
+    .width(Length::Fill)
+    .into()
+}
+
+fn deposit_row<'a>(
+    label: &'static str,
+    observed: Option<
+        &Result<
+            crate::services::foreign_scan::AddressFunds,
+            crate::services::foreign_scan::ScanError,
+        >,
+    >,
+    minimum: u64,
+    verified: bool,
+) -> Element<'a, Message> {
+    let (mark, detail) = match observed {
+        None => (None, "Checking the reserved address…".to_string()),
+        Some(Err(_)) => (Some(false), "Indexer status unavailable; retrying automatically.".to_string()),
+        Some(Ok(funds)) if funds.largest_mature_sats >= minimum => (
+            Some(true),
+            format!("{} sats have at least {MIN_CONFIRMATIONS} confirmations. {}", funds.mature_sats,
+                if verified { "Two-chain proof verified." } else { "Waiting for two-chain verification." }),
+        ),
+        Some(Ok(funds)) if funds.largest_confirmed_sats >= minimum => (
+            None,
+            format!("{} sats confirmed; at least {} of {MIN_CONFIRMATIONS} confirmations. Waiting for more confirmations.", funds.confirmed_sats, funds.min_confirmations),
+        ),
+        Some(Ok(funds)) if funds.pending_sats > 0 => (
+            None,
+            format!("{} sats received, awaiting confirmation.", funds.pending_sats),
+        ),
+        Some(Ok(funds)) if funds.confirmed_sats > 0 => (
+            Some(false),
+            format!("{} sats confirmed, but no single deposit reaches the {minimum}-sat minimum.", funds.confirmed_sats),
+        ),
+        Some(Ok(_)) => (None, "Waiting for a deposit at this address.".to_string()),
+    };
+    check_row(label, mark, detail)
 }
 
 fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Element<'a, Message> {

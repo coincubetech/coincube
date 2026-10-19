@@ -780,6 +780,26 @@ pub async fn scan(
     .await
 }
 
+/// The known-Vault Claim scan may cover a wider used range than a foreign
+/// wallet preview. It retains the same completeness and freshness checks.
+pub async fn scan_for_claim(
+    client: CoincubeClient,
+    plan: ScanPlan,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<TwoChainScan, InventoryError> {
+    run(plan, expected, generation, move |plan, receiver| {
+        foreign_scan::scan_with_timeout(
+            client.clone(),
+            plan,
+            expected,
+            receiver,
+            foreign_scan::CLAIM_SCAN_DURATION,
+        )
+    })
+    .await
+}
+
 async fn run<F, Fut>(
     plan: ScanPlan,
     expected: u64,
