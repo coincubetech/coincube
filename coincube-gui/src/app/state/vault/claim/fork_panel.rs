@@ -611,7 +611,9 @@ impl State for ForkClaimPanel {
                     false,
                 ));
             } else {
-                body = body.push(card::warning("This wallet has no Vault Claim policy."));
+                body = body.push(card::warning(
+                    "This wallet has no Vault Claim policy.".into(),
+                ));
             }
             let content = view::dashboard(menu, cache, body);
             return if let Some(modal) = &psbt.modal {

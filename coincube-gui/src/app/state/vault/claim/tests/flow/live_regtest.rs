@@ -307,8 +307,9 @@ async fn claim_gui_regtest_driver() {
             (ChainId::BitcoinBlake2b, "fork-cube", fork_wallet.clone()),
         ] {
             use crate::app::settings::{update_settings_file, CubeSettings, VaultIdentity};
-            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain)
-                .with_vault(VaultIdentity::new(vault.id(), Some(&vault.main_descriptor)));
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
+                VaultIdentity::new(vault.id(), vault.inheritance_descriptor()),
+            );
             update_settings_file(&datadir.network_directory(chain), |mut settings| {
                 settings.cubes = vec![cube];
                 Some(settings)
@@ -355,7 +356,8 @@ async fn claim_gui_regtest_driver() {
         (&fork_daemon, "btcb2_funding"),
     ] {
         if init[field].is_object() {
-            let (coin, previous) = received_coin(&wallet.main_descriptor, &init[field]);
+            let (coin, previous) =
+                received_coin(require_vault_descriptor(&wallet).unwrap(), &init[field]);
             source.extra_coins.lock().unwrap().push((coin, previous));
         }
     }
@@ -496,7 +498,10 @@ async fn claim_gui_regtest_driver() {
             bitcoin_cube: "bitcoin-cube".into(),
             fork_cube: "fork-cube".into(),
             descriptor_digest: sha256::Hash::hash(
-                panel.wallet.main_descriptor.to_string().as_bytes(),
+                require_vault_descriptor(&panel.wallet)
+                    .unwrap()
+                    .to_string()
+                    .as_bytes(),
             ),
         };
         let directory = journal_directory(&datadir, &panel.wallet);
@@ -731,7 +736,7 @@ async fn claim_gui_regtest_driver() {
         assert!(has_label(&deposit_labels, "Check deposits"));
         assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
         use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
-        let descriptor = panel.wallet.main_descriptor.clone();
+        let descriptor = require_vault_descriptor(&panel.wallet).unwrap().clone();
         let identity = claim_workflow::WalletIdentity {
             bitcoin_cube: "bitcoin-cube".into(),
             fork_cube: "fork-cube".into(),

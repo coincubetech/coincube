@@ -1265,7 +1265,7 @@ impl Tab {
                         .is_some()
                         && wallet_settings.is_none()
                     {
-                        l.set_error("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.".into());
+                        l.set_error("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.");
                         return Task::none();
                     }
 
