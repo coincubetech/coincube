@@ -9,6 +9,8 @@ pub enum Menu {
     Spark(SparkSubMenu),
     Liquid(LiquidSubMenu),
     Vault(VaultSubMenu),
+    /// A public descriptor wallet attached to this Cube, independent of Vault.
+    ImportedBitcoin,
     Marketplace(MarketplaceSubMenu),
 }
 
@@ -155,6 +157,7 @@ pub enum TopLevel {
     Spark,
     Liquid,
     Vault,
+    Bitcoin,
     Marketplace,
 }
 
@@ -164,6 +167,7 @@ impl TopLevel {
         TopLevel::Spark,
         TopLevel::Liquid,
         TopLevel::Vault,
+        TopLevel::Bitcoin,
         TopLevel::Marketplace,
     ];
 
@@ -173,6 +177,7 @@ impl TopLevel {
             TopLevel::Spark => "Spark",
             TopLevel::Liquid => "Liquid",
             TopLevel::Vault => "Vault",
+            TopLevel::Bitcoin => "Bitcoin",
             TopLevel::Marketplace => "Marketplace",
         }
     }
@@ -184,6 +189,7 @@ impl TopLevel {
             TopLevel::Spark => Menu::Spark(SparkSubMenu::Overview),
             TopLevel::Liquid => Menu::Liquid(LiquidSubMenu::Overview),
             TopLevel::Vault => Menu::Vault(VaultSubMenu::Overview),
+            TopLevel::Bitcoin => Menu::ImportedBitcoin,
             TopLevel::Marketplace => {
                 Menu::Marketplace(MarketplaceSubMenu::P2P(P2PSubMenu::Overview))
             }
@@ -198,6 +204,7 @@ impl From<&Menu> for TopLevel {
             Menu::Spark(_) => TopLevel::Spark,
             Menu::Liquid(_) => TopLevel::Liquid,
             Menu::Vault(_) => TopLevel::Vault,
+            Menu::ImportedBitcoin => TopLevel::Bitcoin,
             Menu::Marketplace(_) => TopLevel::Marketplace,
         }
     }

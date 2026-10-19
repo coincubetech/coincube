@@ -4208,6 +4208,7 @@ impl State for P2PPanel {
                                     menu,
                                     &view::nav::NavContext {
                                         has_vault,
+                                        has_imported_bitcoin: cache.has_imported_bitcoin,
                                         has_p2p: cache.has_p2p,
                                         network: cache.chain(),
                                         p2p_test_coordinator: cache.p2p_test_coordinator,
@@ -4376,6 +4377,7 @@ impl State for P2PPanel {
                                         menu,
                                         &view::nav::NavContext {
                                             has_vault,
+                                            has_imported_bitcoin: cache.has_imported_bitcoin,
                                             has_p2p: cache.has_p2p,
                                             network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
@@ -4440,6 +4442,7 @@ impl State for P2PPanel {
                                         menu,
                                         &view::nav::NavContext {
                                             has_vault,
+                                            has_imported_bitcoin: cache.has_imported_bitcoin,
                                             has_p2p: cache.has_p2p,
                                             network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
@@ -4576,6 +4579,7 @@ impl State for P2PPanel {
                                         menu,
                                         &view::nav::NavContext {
                                             has_vault,
+                                            has_imported_bitcoin: cache.has_imported_bitcoin,
                                             has_p2p: cache.has_p2p,
                                             network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,
@@ -4637,6 +4641,7 @@ impl State for P2PPanel {
                                         menu,
                                         &view::nav::NavContext {
                                             has_vault,
+                                            has_imported_bitcoin: cache.has_imported_bitcoin,
                                             has_p2p: cache.has_p2p,
                                             network: cache.chain(),
                                             p2p_test_coordinator: cache.p2p_test_coordinator,

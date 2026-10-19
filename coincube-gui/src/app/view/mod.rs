@@ -220,6 +220,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     let show_backup_warning = !cache.current_cube_backed_up && !cache.backup_warning_dismissed;
     let nav_ctx = nav::NavContext {
         has_vault,
+        has_imported_bitcoin: cache.has_imported_bitcoin,
         has_p2p,
         network: cache.chain(),
         p2p_test_coordinator: cache.p2p_test_coordinator,

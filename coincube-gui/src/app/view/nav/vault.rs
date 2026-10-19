@@ -95,6 +95,7 @@ mod tests {
     ) -> NavContext<'a> {
         NavContext {
             has_vault: true,
+            has_imported_bitcoin: false,
             has_p2p: false,
             network,
             p2p_test_coordinator: false,

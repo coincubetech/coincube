@@ -1496,6 +1496,7 @@ pub struct GlobalViewConfig<'a> {
     /// from `cache.display_mode`.
     pub display_mode: crate::app::settings::display::DisplayMode,
     pub has_vault: bool,
+    pub has_imported_bitcoin: bool,
     /// Whether this cube has a working Spark backend. Mirrors
     /// `spark_backend.is_some()` in the state layer. Drives the Spark card
     /// visibility and feeds [`transfer_available`].
@@ -1588,6 +1589,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         vault_loaded,
         display_mode,
         has_vault,
+        has_imported_bitcoin,
         has_spark,
         has_liquid,
         current_view,
@@ -2094,20 +2096,54 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         )))
     });
 
-    let vault_card_element = mouse_area(wallet_card(
-        WalletType::Vault,
-        &vault_balance,
-        fiat_converter,
-        balance_masked,
-        has_vault,
-        bitcoin_unit,
-        pending_vault_incoming,
-        vault_pending_send_sats,
-        vault_pending_receive_sats,
-        display_mode,
-        vault_loaded,
-    ))
-    .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview)));
+    let vault_card_element: Element<'a, Message> = if has_imported_bitcoin {
+        Container::new(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(coincube_ui::icon::bitcoin_icon())
+                .push(
+                    Column::new()
+                        .spacing(4)
+                        .push(p1_bold("Bitcoin wallet"))
+                        .push(caption(
+                            "Imported wallet · Open to check scan progress and balance",
+                        )),
+                )
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    button::orange_outline(None, "Open wallet")
+                        .on_press(Message::Menu(Menu::ImportedBitcoin)),
+                ),
+        )
+        .padding(20)
+        .style(|t| iced::widget::container::Style {
+            border: iced::Border {
+                color: color::ORANGE,
+                width: 0.2,
+                radius: 25.0.into(),
+            },
+            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
+            ..Default::default()
+        })
+        .into()
+    } else {
+        mouse_area(wallet_card(
+            WalletType::Vault,
+            &vault_balance,
+            fiat_converter,
+            balance_masked,
+            has_vault,
+            bitcoin_unit,
+            pending_vault_incoming,
+            vault_pending_send_sats,
+            vault_pending_receive_sats,
+            display_mode,
+            vault_loaded,
+        ))
+        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
+        .into()
+    };
 
     // Total Balance block — the fiat-first headline number above the
     // Wallets section. While any wallet is still loading we render
@@ -2339,6 +2375,7 @@ mod tests {
                 vault_loaded: true,
                 display_mode: DisplayMode::FiatNative,
                 has_vault: true,
+                has_imported_bitcoin: false,
                 has_spark: true,
                 has_liquid: true,
                 current_view: HomeView { step },

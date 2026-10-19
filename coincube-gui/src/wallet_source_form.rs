@@ -133,6 +133,14 @@ impl SourceFormCopy {
             hardware_help: "Hardware accounts use standard singlesig paths (BIP84, BIP49, BIP44) on Bitcoin mainnet. Only pre-fork coins can be split. The bounded scan uses a gap of 20 and checks at most 100 addresses per branch.",
         }
     }
+
+    pub const fn import() -> Self {
+        Self {
+            internal_label: "Internal / change descriptor",
+            descriptor_help: "Import public Bitcoin mainnet descriptors for the receive and change branches. A combined descriptor with /<0;1>/* can be entered in the first field. Include every signer origin for hardware and PSBT signing. Only public keys are accepted; this Cube's recovery seed is separate from the wallet's signing keys.",
+            hardware_help: "Read one standard Bitcoin mainnet singlesig account from a connected hardware wallet (BIP84, BIP49 or BIP44). The device stays responsible for signing; its seed is never copied into this Cube.",
+        }
+    }
 }
 
 pub fn view<'a>(form: &'a WalletSourceForm, copy: &SourceFormCopy) -> Element<'a, Message> {

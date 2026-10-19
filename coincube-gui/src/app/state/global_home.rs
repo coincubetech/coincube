@@ -624,6 +624,7 @@ impl State for GlobalHome {
                 vault_loaded: !vault_pending,
                 display_mode: cache.display_mode,
                 has_vault: cache.has_vault,
+                has_imported_bitcoin: cache.has_imported_bitcoin,
                 has_spark,
                 has_liquid,
                 current_view: self.current_view,

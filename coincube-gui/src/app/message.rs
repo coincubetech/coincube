@@ -34,6 +34,7 @@ use crate::{
 
 #[derive(Debug)]
 pub enum Message {
+    ImportedBitcoin(super::state::imported_bitcoin::ImportEvent),
     VaultSpendPrepared {
         generation: u64,
         result: Result<(Psbt, Vec<String>), Error>,

@@ -264,6 +264,7 @@ fn connect_status_dot<'a>(status: &'a crate::app::ConnectionStatus) -> Element<'
 /// Ambient data both rails need while rendering.
 pub struct NavContext<'a> {
     pub has_vault: bool,
+    pub has_imported_bitcoin: bool,
     pub has_p2p: bool,
     /// Active chain identity. Drives per-feature availability gating
     /// (Spark/Liquid on the primary rail, Buy/Sell + P2P in Marketplace)

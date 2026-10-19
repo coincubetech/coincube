@@ -967,6 +967,7 @@ pub async fn load_application(
         // via the Connect tab; `App::new` flips this on if it restores one.
         has_connect_session: false,
         has_vault: true,
+        has_imported_bitcoin: false,
         cube_name: config.cube_settings.name.clone(),
         cube_connect_owner: config.cube_settings.connect_owner.clone(),
         cube_owned_by_other_account: false,

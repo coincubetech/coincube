@@ -42,6 +42,7 @@ mod tests {
     fn ctx<'a>(status: &'a crate::app::ConnectionStatus) -> NavContext<'a> {
         NavContext {
             has_vault: false,
+            has_imported_bitcoin: false,
             has_p2p: false,
             network: crate::chain::ChainId::Bitcoin,
             p2p_test_coordinator: false,

@@ -1858,6 +1858,13 @@ impl Tab {
                     command.map(Message::Launch)
                 }
                 loader::Message::View(loader::ViewMessage::SetupVault) => {
+                    if loader.cube_settings.bitcoin_import.is_some() {
+                        loader.fail(loader::Error::Unexpected(
+                            "This Cube is reserved for an imported Bitcoin wallet. Resume its import from the Cube overview."
+                                .into(),
+                        ));
+                        return Task::none();
+                    }
                     // Launch installer for vault setup from loader - should return to app on Previous
                     // Opened on the Cube's own chain through the admission gate,
                     // like the App paths: `loader.network` cannot name a fork.
@@ -2083,6 +2090,14 @@ impl Tab {
             (State::App(app), Message::Run(msg)) => {
                 match msg {
                     app::Message::View(app::view::Message::SetupVault) => {
+                        if app.cube_settings().bitcoin_import.is_some() {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This Cube is reserved for an imported Bitcoin wallet. Resume its import from the Cube overview."
+                                        .into(),
+                                ),
+                            )));
+                        }
                         // Launch installer for vault setup from app - should return to app on Previous.
                         // The installer is opened on the Cube's own chain through the
                         // admission gate: `app.cache().network` is a `bitcoin::Network`
@@ -3846,6 +3861,11 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             // reuse it; otherwise mint one with that UUID.
             if let Some(RestoreCubeIdentity { uuid, .. }) = &restored_cube {
                 if let Some(idx) = settings_data.cubes.iter().position(|c| &c.id == uuid) {
+                    if settings_data.cubes[idx].bitcoin_import.is_some() {
+                        return Err(
+                            "The restored Cube is reserved for a Bitcoin wallet import.".into()
+                        );
+                    }
                     if settings_data.cubes[idx].vault_wallet_id.is_some() {
                         return Err(format!(
                             "Cube '{}' has already been recovered on this device.",
@@ -3888,6 +3908,12 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                     .find(|c| c.id == target_cube_id)
                 {
                     if let Some(v) = vault {
+                        if target_cube.bitcoin_import.is_some() {
+                            return Err(format!(
+                                "Cube '{}' is reserved for an imported Bitcoin wallet. Resume or cancel that import before creating a Vault.",
+                                target_cube.name
+                            ));
+                        }
                         if target_cube.vault_wallet_id.is_some() {
                             return Err(format!(
                                 "Cube '{}' already has a vault. Remove the existing vault before creating a new one.",
@@ -3932,7 +3958,7 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             if let Some(empty_idx) = settings_data
                 .cubes
                 .iter()
-                .position(|c| c.vault_wallet_id.is_none())
+                .position(|c| c.vault_wallet_id.is_none() && c.bitcoin_import.is_none())
             {
                 let mut empty_cube = settings_data.cubes[empty_idx].clone();
                 attach_vault(&mut empty_cube, vault);
@@ -4174,6 +4200,7 @@ pub fn create_app_with_remote_backend(
             // start, even before the Connect panel reaches its Dashboard step.
             has_connect_session: true,
             has_vault: true,
+            has_imported_bitcoin: false,
             cube_name: cube_settings.name.clone(),
             cube_connect_owner: cube_settings.connect_owner.clone(),
             cube_owned_by_other_account: false,

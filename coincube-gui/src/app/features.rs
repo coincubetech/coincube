@@ -311,6 +311,9 @@ pub fn route_availability<C: Into<ChainId>>(
 ) -> Availability {
     let net = chain.into();
     match menu {
+        Menu::ImportedBitcoin if net != ChainId::Bitcoin => {
+            unavailable("Imported Bitcoin wallets", net)
+        }
         Menu::Spark(_) => spark(net),
         // Sunset gate first, then the per-network gate — a gated-off Liquid
         // reads as "not on this account", not "not on this network".

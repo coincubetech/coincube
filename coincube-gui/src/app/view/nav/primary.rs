@@ -14,8 +14,8 @@ use crate::app::{
 use coincube_ui::{
     color,
     icon::{
-        cube_icon, droplet_outline_icon, lightning_outline_icon, shield_plus_icon, shop_icon,
-        vault_icon,
+        bitcoin_icon, cube_icon, droplet_outline_icon, lightning_outline_icon, shield_plus_icon,
+        shop_icon, vault_icon,
     },
     theme,
     widget::{Button, Column, Element, Row, Text},
@@ -77,7 +77,9 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     // "setup vault" action button in the same row slot. Keeping the
     // slot always occupied means the vault-aligned secondary/tertiary
     // offsets stay stable across cube configurations.
-    if ctx.has_vault {
+    if ctx.has_imported_bitcoin {
+        top = top.push(item(TopLevel::Bitcoin, current == TopLevel::Bitcoin, None));
+    } else if ctx.has_vault {
         top = top.push(item(TopLevel::Vault, current == TopLevel::Vault, None));
     } else {
         top = top.push(setup_vault_item());
@@ -239,6 +241,7 @@ fn icon_for<'a>(t: TopLevel) -> Text<'a> {
         TopLevel::Spark => lightning_outline_icon(),
         TopLevel::Liquid => droplet_outline_icon(),
         TopLevel::Vault => vault_icon(),
+        TopLevel::Bitcoin => bitcoin_icon(),
         TopLevel::Marketplace => shop_icon(),
     }
 }
