@@ -1011,9 +1011,17 @@ mod flow {
             let live_receive = false;
             let _ = is_change;
             let descriptor = if live_receive {
-                self.config.main_descriptor.receive_descriptor()
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .expect("Vault fixture")
+                    .receive_descriptor()
             } else {
-                self.config.main_descriptor.change_descriptor()
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .expect("Vault fixture")
+                    .change_descriptor()
             };
             Ok(model::ListRevealedAddressesResult {
                 addresses: vec![coincubed::commands::ListRevealedAddressesEntry {

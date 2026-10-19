@@ -4551,13 +4551,13 @@ impl App {
         }
         (config.bitcoin_config.chain == crate::chain::ChainId::BitcoinBlake2b
             && config.main_descriptor.as_vault() == Some(&request.descriptor))
-            .then(|| {
-                state::vault::claim::ClaimForkBinding::new(
-                    daemon,
-                    wallet,
-                    self.panels.claim_generation.subscribe(),
-                )
-            })
+        .then(|| {
+            state::vault::claim::ClaimForkBinding::new(
+                daemon,
+                wallet,
+                self.panels.claim_generation.subscribe(),
+            )
+        })
     }
 
     pub(crate) fn bind_claim_fork_daemon(
@@ -10890,10 +10890,15 @@ mod tests {
         let (cfg, wallet_settings) =
             crate::chain::managed_local_fixture(&directory, crate::chain::ChainId::BitcoinBlake2b);
         let wallet = Arc::new(
-            Wallet::new(cfg.main_descriptor.as_vault().expect("Vault test config").clone())
-                .with_chain(crate::chain::ChainId::BitcoinBlake2b)
-                .load_from_settings(wallet_settings)
-                .unwrap(),
+            Wallet::new(
+                cfg.main_descriptor
+                    .as_vault()
+                    .expect("Vault test config")
+                    .clone(),
+            )
+            .with_chain(crate::chain::ChainId::BitcoinBlake2b)
+            .load_from_settings(wallet_settings)
+            .unwrap(),
         );
         let signer =
             coincube_core::signer::MasterSigner::generate(bitcoin::Network::Bitcoin).unwrap();

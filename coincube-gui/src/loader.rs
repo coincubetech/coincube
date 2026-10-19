@@ -898,7 +898,9 @@ pub async fn load_application(
         .main
         .as_vault()
         .cloned()
-        .ok_or_else(|| Error::Unexpected("This Cube has an imported Bitcoin wallet, not a Vault.".into()))?;
+        .ok_or_else(|| {
+            Error::Unexpected("This Cube has an imported Bitcoin wallet, not a Vault.".into())
+        })?;
     let wallet = Wallet::new(descriptor)
         .with_chain(config.cube_settings.network)
         .load_from_settings(config.wallet_settings)?
