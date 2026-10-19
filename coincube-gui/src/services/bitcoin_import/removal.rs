@@ -349,7 +349,7 @@ mod tests {
                 directory.coincubed_data_directory(&wallet.wallet_id),
             );
             let mut cube = CubeSettings::new("Selected".into(), ChainId::Regtest);
-            cube.bitcoin_import = Some(BitcoinImport::pending());
+            cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
             let other = CubeSettings::new("Unrelated".into(), ChainId::Regtest);
             settings::update_settings_file(&directory, |mut settings| {
                 settings.cubes = vec![other.clone(), cube.clone()];
@@ -541,13 +541,13 @@ mod tests {
                 .iter_mut()
                 .find(|cube| cube.id == f.other.id)
                 .unwrap();
-            other.bitcoin_import = Some(BitcoinImport {
+            other.bitcoin_import = Some(Box::new(BitcoinImport {
                 operation_id: Uuid::new_v4(),
                 stage: BitcoinImportStage::Ready {
                     wallet: f.wallet.clone(),
                 },
                 last_error: None,
-            });
+            }));
             Some(settings)
         })
         .await

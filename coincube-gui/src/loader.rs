@@ -1827,13 +1827,13 @@ mod tests {
         let attachment =
             app::settings::ImportedWalletAttachment::new(descriptor.clone(), chain, 0, 20).unwrap();
         let mut cube = CubeSettings::new("Imported".into(), chain);
-        cube.bitcoin_import = Some(app::settings::BitcoinImport {
+        cube.bitcoin_import = Some(Box::new(app::settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
             stage: app::settings::BitcoinImportStage::Syncing {
                 wallet: attachment.clone(),
             },
             last_error: None,
-        });
+        }));
         let wallet = WalletSettings {
             name: "Imported".into(),
             alias: None,

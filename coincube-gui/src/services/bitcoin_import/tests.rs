@@ -72,9 +72,9 @@ impl Fixture {
             directory.coincubed_data_directory(&wallet.wallet_id),
         );
         let mut cube = CubeSettings::new("Import target".into(), ChainId::Regtest);
-        cube.bitcoin_import = Some(BitcoinImport::pending());
+        cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
         let mut other = CubeSettings::new("Another pending Cube".into(), ChainId::Regtest);
-        other.bitcoin_import = Some(BitcoinImport::pending());
+        other.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
         directory.init().unwrap();
         settings::update_settings_file(&directory, |mut settings| {
             // The other Cube deliberately comes first: a first-empty fallback
@@ -282,7 +282,7 @@ async fn duress_conflict_refuses_before_settings_or_wallet_storage_changes() {
 #[test]
 fn pending_import_preserves_vault_and_duress_capability_boundaries() {
     let mut cube = CubeSettings::new("Pending".into(), ChainId::Bitcoin);
-    cube.bitcoin_import = Some(BitcoinImport::pending());
+    cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
     let bytes = serde_json::to_vec(&cube).unwrap();
     let mut restored: CubeSettings = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(restored.bitcoin_import, cube.bitcoin_import);
@@ -550,7 +550,7 @@ async fn recovery_kit_restore_preserves_exact_cube_wallet_and_method_marker() {
         assert_eq!(
             restored
                 .bitcoin_import
-                .as_ref()
+                .as_deref()
                 .and_then(BitcoinImport::active_attachment),
             Some(&f.wallet)
         );

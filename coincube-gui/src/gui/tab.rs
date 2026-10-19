@@ -1030,7 +1030,7 @@ impl Tab {
                 let wallet_settings = bitcoin_wallet_settings_for_cube(&datadir, chain, &cube);
                 if cube
                     .bitcoin_import
-                    .as_ref()
+                    .as_deref()
                     .and_then(app::settings::BitcoinImport::active_attachment)
                     .is_some()
                     && wallet_settings.is_none()
@@ -1260,7 +1260,7 @@ impl Tab {
                         bitcoin_wallet_settings_for_cube(&datadir_path, chain, &cube);
                     if cube
                         .bitcoin_import
-                        .as_ref()
+                        .as_deref()
                         .and_then(app::settings::BitcoinImport::active_attachment)
                         .is_some()
                         && wallet_settings.is_none()
@@ -1710,7 +1710,7 @@ impl Tab {
                     // route as every later open.
                     let settings_opt = if cube
                         .bitcoin_import
-                        .as_ref()
+                        .as_deref()
                         .and_then(app::settings::BitcoinImport::active_attachment)
                         .is_some()
                     {
@@ -4924,13 +4924,13 @@ mod find_or_create_cube_tests {
         let mut cube =
             app::settings::CubeSettings::new("Imported".into(), crate::chain::ChainId::Bitcoin);
         cube.id = ORIG_UUID.into();
-        cube.bitcoin_import = Some(app::settings::BitcoinImport {
+        cube.bitcoin_import = Some(Box::new(app::settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
             stage: app::settings::BitcoinImportStage::Syncing {
                 wallet: attachment.clone(),
             },
             last_error: None,
-        });
+        }));
         let wallet = app::settings::WalletSettings {
             name: "Imported".into(),
             alias: None,
@@ -4995,11 +4995,11 @@ mod find_or_create_cube_tests {
         )
         .with_master_signer(fp);
         cube.id = ORIG_UUID.to_string();
-        cube.bitcoin_import = Some(app::settings::BitcoinImport {
+        cube.bitcoin_import = Some(Box::new(app::settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
             stage: app::settings::BitcoinImportStage::Syncing { wallet: attachment },
             last_error: None,
-        });
+        }));
         update_settings_file(&nd, |_| {
             Some(app::settings::Settings {
                 cubes: vec![cube.clone()],

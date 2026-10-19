@@ -246,7 +246,7 @@ impl Wallet {
         }
         let attachment = cube
             .bitcoin_import
-            .as_ref()
+            .as_deref()
             .and_then(settings::BitcoinImport::active_attachment)
             .ok_or("Finish importing this wallet before opening it.")?;
         attachment.validate(cube.network)?;
@@ -1184,13 +1184,13 @@ mod tests {
             "Imported savings".into(),
             ChainId::Regtest,
         );
-        cube.bitcoin_import = Some(settings::BitcoinImport {
+        cube.bitcoin_import = Some(Box::new(settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
             stage: settings::BitcoinImportStage::Ready {
                 wallet: attachment.clone(),
             },
             last_error: None,
-        });
+        }));
 
         let wallet = Wallet::from_imported_cube(&cube).unwrap();
         assert_eq!(wallet.id(), attachment.wallet_id);

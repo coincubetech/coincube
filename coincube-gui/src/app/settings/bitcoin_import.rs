@@ -117,14 +117,14 @@ impl ImportedWalletAttachment {
 impl CubeSettings {
     pub fn has_imported_bitcoin(&self) -> bool {
         self.bitcoin_import
-            .as_ref()
+            .as_deref()
             .and_then(BitcoinImport::active_attachment)
             .is_some()
     }
 
     pub fn bitcoin_import_pending(&self) -> bool {
         self.bitcoin_import
-            .as_ref()
+            .as_deref()
             .is_some_and(BitcoinImport::is_pending)
     }
 
@@ -137,6 +137,32 @@ impl CubeSettings {
     /// Imported signing keys have no supported duress-recovery contract yet.
     pub fn supports_duress(&self) -> bool {
         self.bitcoin_import.is_none()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn boxed_import_keeps_existing_settings_json_shape() {
+        let mut cube = CubeSettings::new("Importing".into(), ChainId::Bitcoin);
+        cube.bitcoin_import = Some(Box::new(BitcoinImport {
+            operation_id: Uuid::nil(),
+            stage: BitcoinImportStage::PendingSource,
+            last_error: None,
+        }));
+
+        let json = serde_json::to_value(&cube).unwrap();
+        assert_eq!(
+            json["bitcoin_import"],
+            serde_json::json!({
+                "operation_id": Uuid::nil().to_string(),
+                "stage": { "stage": "pending_source" },
+            })
+        );
+        let restored: CubeSettings = serde_json::from_value(json).unwrap();
+        assert_eq!(restored.bitcoin_import.unwrap().operation_id, Uuid::nil());
     }
 }
 

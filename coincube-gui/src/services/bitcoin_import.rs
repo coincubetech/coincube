@@ -559,7 +559,7 @@ pub async fn restore_from_kit(
                     "This Cube is already importing another Bitcoin wallet.".into(),
                 ));
             }
-            None => cube.bitcoin_import = Some(settings::BitcoinImport::pending()),
+            None => cube.bitcoin_import = Some(Box::new(settings::BitcoinImport::pending())),
             _ => (),
         }
         Ok(Some(settings))

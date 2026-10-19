@@ -289,7 +289,7 @@ pub struct Home {
     create_cube_pin_confirm: pin_input::PinInput,
     /// A stable operation identity selected before Cube creation. It is
     /// persisted with the Cube only after the normal backup gate succeeds.
-    pending_bitcoin_import: Option<BitcoinImport>,
+    pending_bitcoin_import: Option<Box<BitcoinImport>>,
     /// Opens a newly created import Cube through the ordinary unlock path
     /// after the settings reload makes its row available.
     open_created_import_cube: Option<String>,
@@ -1446,7 +1446,7 @@ impl Home {
                     return Task::none();
                 }
                 if self.pending_bitcoin_import.is_none() {
-                    self.pending_bitcoin_import = Some(BitcoinImport::pending());
+                    self.pending_bitcoin_import = Some(Box::new(BitcoinImport::pending()));
                 }
                 self.passkey_mode = self.default_passkey_mode();
                 match &mut self.state {

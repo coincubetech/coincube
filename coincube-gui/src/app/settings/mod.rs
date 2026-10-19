@@ -607,7 +607,7 @@ pub struct CubeSettings {
     pub vault_wallet_id: Option<WalletId>,
     /// Imported Bitcoin wallet setup/attachment. Never implies inheritance or Connect hasVault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub bitcoin_import: Option<BitcoinImport>,
+    pub bitcoin_import: Option<Box<BitcoinImport>>,
     /// The vault's descriptor fingerprint
     /// ([`crate::app::wallet::descriptor_id_fingerprint`]), 8 lowercase hex.
     /// The user-facing vault identity — the same value shown in vault
@@ -3574,7 +3574,7 @@ mod bitcoin_atomic_import_settings_tests {
                 &task_dir,
                 |mut settings| {
                     let mut cube = CubeSettings::new("Importing".into(), ChainId::Bitcoin);
-                    cube.bitcoin_import = Some(BitcoinImport::pending());
+                    cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
                     settings.cubes.push(cube);
                     Some(settings)
                 },

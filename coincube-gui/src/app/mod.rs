@@ -185,7 +185,7 @@ impl Panels {
         cube_id: String,
         cube_name: String,
         cube_network: String,
-        bitcoin_import: Option<settings::BitcoinImport>,
+        bitcoin_import: Option<Box<settings::BitcoinImport>>,
     ) -> Panels {
         // NO VAULT - All vault panels are None, but Liquid panels always work
         // The UI layer prevents navigation to vault panels when has_vault=false
@@ -201,7 +201,7 @@ impl Panels {
                 let mut panel = state::imported_bitcoin::ImportedBitcoinPanel::new(
                     datadir.network_directory(chain),
                     cube_id.clone(),
-                    import,
+                    *import,
                 );
                 panel.set_hardware_root(datadir.clone());
                 Box::new(panel)
@@ -3593,7 +3593,7 @@ impl App {
                 let mut panel = state::imported_bitcoin::ImportedBitcoinPanel::new(
                     data_dir.network_directory(cube_settings.network),
                     cube_settings.id.clone(),
-                    import,
+                    *import,
                 );
                 panel.set_hardware_root(data_dir.clone());
                 tasks.push(panel.bind_runtime(daemon.clone()));
@@ -3880,7 +3880,7 @@ impl App {
         );
         panels.global_home.imported_installed = cube_settings
             .bitcoin_import
-            .as_ref()
+            .as_deref()
             .and_then(settings::BitcoinImport::active_attachment)
             .is_some();
         if cube_settings.bitcoin_import_pending() {
@@ -6367,7 +6367,7 @@ impl App {
         if self
             .cube_settings
             .bitcoin_import
-            .as_ref()
+            .as_deref()
             .and_then(settings::BitcoinImport::active_attachment)
             .is_none()
         {
@@ -6552,7 +6552,7 @@ impl App {
                             self.panels.global_home.imported_installed = self
                                 .cube_settings
                                 .bitcoin_import
-                                .as_ref()
+                                .as_deref()
                                 .and_then(settings::BitcoinImport::active_attachment)
                                 .is_some();
                         }
@@ -9527,7 +9527,7 @@ impl App {
                 let imported = self
                     .cube_settings
                     .bitcoin_import
-                    .as_ref()
+                    .as_deref()
                     .and_then(settings::BitcoinImport::active_attachment)
                     .and_then(|attachment| {
                         let daemon = self.panels.imported_bitcoin.as_ref()?.backup_daemon()?;
@@ -11152,13 +11152,13 @@ mod tests {
                 .unwrap();
         let mut cube =
             settings::CubeSettings::new("Imported family Vault".into(), ChainId::Bitcoin);
-        cube.bitcoin_import = Some(settings::BitcoinImport {
+        cube.bitcoin_import = Some(Box::new(settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
             stage: settings::BitcoinImportStage::Syncing {
                 wallet: attachment.clone(),
             },
             last_error: None,
-        });
+        }));
         let wallet = Arc::new(Wallet::from_imported_cube(&cube).unwrap());
         let mut daemon_config = coincubed::config::Config::new(
             BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30)),

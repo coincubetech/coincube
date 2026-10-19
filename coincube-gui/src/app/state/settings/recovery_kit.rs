@@ -2487,11 +2487,11 @@ mod tests {
             "Import Cube".into(),
             ChainId::Bitcoin,
         );
-        cube.bitcoin_import = Some(settings::BitcoinImport {
+        cube.bitcoin_import = Some(Box::new(settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
             stage: settings::BitcoinImportStage::Syncing { wallet },
             last_error: None,
-        });
+        }));
         assert_eq!(
             imported_attachment_error(&cube, None),
             Some(IMPORTED_BACKUP_SOURCE_UNAVAILABLE)
