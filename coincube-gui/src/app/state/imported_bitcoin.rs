@@ -48,7 +48,7 @@ use crate::{
     daemon::{embedded::EmbeddedDaemon, model, Daemon},
     dir::{CoincubeDirectory, NetworkDirectory},
     hw::{HardwareWallet, HardwareWalletMessage, HardwareWallets},
-    services::{bitcoin_import, coincube::CoincubeClient},
+    services::{bitcoin_import, coincube::CoincubeClient, psbt_file},
     split_hardware::{bind::ProductionBinder, policy::imported_policy, sign::SigningSession},
     wallet_source_form::{self, Source, SourceFormCopy, WalletSourceForm},
 };
@@ -165,6 +165,14 @@ fn import_signed_psbt(
         return Err("The signed PSBT is too large.".into());
     }
     let signed = Psbt::from_str(text.trim()).map_err(|_| "Paste a base64 Bitcoin PSBT.")?;
+    import_signed_psbt_value(wallet, current, &signed)
+}
+
+fn import_signed_psbt_value(
+    wallet: &ImportedWalletDescriptor,
+    current: &Psbt,
+    signed: &Psbt,
+) -> Result<(Psbt, Vec<usize>, Option<Txid>), String> {
     if signed.inputs.iter().any(|input| {
         input.final_script_sig.is_some()
             || input.final_script_witness.is_some()
@@ -214,6 +222,7 @@ pub enum ImportMessage {
     Confirm,
     Retry,
     Refresh,
+    ExpandDiscovery,
     Receive,
     CopyAddress,
     ToggleDetails,
@@ -228,6 +237,8 @@ pub enum ImportMessage {
     CopyPsbt,
     SignedPsbtEdited(String),
     ImportSignedPsbt,
+    SavePsbt,
+    LoadSignedPsbt,
     Broadcast,
     Hardware(HardwareWalletMessage),
     SignWithDevice(String),
@@ -258,6 +269,12 @@ pub enum ImportEvent {
     SignedSaved(u64, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
     Broadcasted(u64, Result<(Txid, bool), String>),
     HardwareSigned(u64, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
+    Expanded(u64, Result<u32, String>),
+    FileSaved(u64, Txid, Result<bool, String>),
+    FileLoaded(
+        u64,
+        Result<Option<(Psbt, Vec<usize>, Option<Txid>)>, String>,
+    ),
 }
 
 struct ImportedDraft {
@@ -299,6 +316,7 @@ pub struct ImportedBitcoinPanel {
     draft: Option<ImportedDraft>,
     last_broadcast_txid: Option<Txid>,
     broadcast_notice: Option<String>,
+    file_notice: Option<String>,
     hardware_root: Option<CoincubeDirectory>,
     hardware_wallets: Option<HardwareWallets>,
 }
@@ -339,6 +357,7 @@ impl ImportedBitcoinPanel {
             draft: None,
             last_broadcast_txid: None,
             broadcast_notice: None,
+            file_notice: None,
             hardware_root: None,
             hardware_wallets: None,
         }
@@ -355,6 +374,10 @@ impl ImportedBitcoinPanel {
                 info.imported_wallet.as_ref().is_some_and(|status| {
                     status.history_complete
                         && status.chain_id == ChainId::Bitcoin
+                        && status.receive_scanned
+                            >= info.receive_index.saturating_add(status.discovery_target)
+                        && status.change_scanned
+                            >= info.change_index.saturating_add(status.discovery_target)
                         && self.import.active_attachment().is_some_and(|wallet| {
                             wallet.wallet_id.descriptor_checksum
                                 == format!("imported-v1-{}", status.wallet_identity)
@@ -380,6 +403,22 @@ impl ImportedBitcoinPanel {
                 })
             })
             .flatten()
+    }
+
+    /// Last durably allocated addresses, only after the daemon proves it is
+    /// reporting for this exact Cube attachment. Historical scan bounds are
+    /// deliberately not used as address-allocation state.
+    pub fn verified_address_state(&self) -> Option<(u32, u32)> {
+        let wallet = self.import.active_attachment()?;
+        let info = self.info.as_ref()?;
+        let status = info.imported_wallet.as_ref()?;
+        (info.chain_id == Some(ChainId::Bitcoin)
+            && status.chain_id == ChainId::Bitcoin
+            && wallet.wallet_id.descriptor_checksum
+                == format!("imported-v1-{}", status.wallet_identity)
+            && wallet.birthday == status.birthday
+            && status.initial_lookahead >= wallet.initial_lookahead)
+            .then_some((info.receive_index, info.change_index))
     }
 
     pub fn abandoned(&self) -> bool {
@@ -421,6 +460,7 @@ impl ImportedBitcoinPanel {
 
     fn select_saved_draft(&mut self, id: Txid) {
         self.draft = None;
+        self.file_notice = None;
         self.last_broadcast_txid = None;
         self.broadcast_notice = None;
         self.signed_psbt_text.clear();
@@ -744,6 +784,62 @@ impl ImportedBitcoinPanel {
                     self.open_daemon()
                 }
             }
+            ImportMessage::ExpandDiscovery => {
+                let Some(wallet) = self.import.active_attachment().cloned() else {
+                    return Task::none();
+                };
+                if self.verified_address_state().is_none() {
+                    self.error =
+                        Some("Refresh this wallet before expanding its history search.".into());
+                    return Task::none();
+                }
+                let Some(status) = self
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.imported_wallet.as_ref())
+                else {
+                    return Task::none();
+                };
+                let target = status
+                    .discovery_target
+                    .max(wallet.initial_lookahead)
+                    .saturating_add(200)
+                    .min(10_000);
+                if target <= status.discovery_target {
+                    self.error = Some("The maximum discovery range has been reached.".into());
+                    return Task::none();
+                }
+                self.stop();
+                self.info = None;
+                self.coins = None;
+                self.history.clear();
+                self.address = None;
+                self.spend_drafts.clear();
+                self.draft = None;
+                self.import.stage = BitcoinImportStage::Syncing {
+                    wallet: wallet.clone(),
+                };
+                self.busy = true;
+                self.error = None;
+                let generation = self.generation;
+                let data_dir = self.directory.coincubed_data_directory(&wallet.wallet_id);
+                Task::perform(
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            let config =
+                                Config::from_file(Some(data_dir.path().join("daemon.toml")))
+                                    .map_err(|error| error.to_string())?;
+                            coincubed::expand_imported_discovery(&config, &data_dir, target)
+                                .map_err(|error| error.to_string())
+                        })
+                        .await
+                        .map_err(|error| error.to_string())?
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::Expanded(generation, result))
+                    },
+                )
+            }
             ImportMessage::Receive => {
                 if !self.is_ready() {
                     self.error =
@@ -890,6 +986,101 @@ impl ImportedBitcoinPanel {
                     },
                     move |result| {
                         Message::ImportedBitcoin(ImportEvent::SignedSaved(generation, result))
+                    },
+                )
+            }
+            ImportMessage::SavePsbt => {
+                let Some(draft) = &self.draft else {
+                    return Task::none();
+                };
+                let psbt = draft.psbt.clone();
+                let id = psbt.unsigned_tx.compute_txid();
+                let generation = self.generation;
+                let gate = self.generation_gate.clone();
+                self.busy = true;
+                self.error = None;
+                Task::perform(
+                    async move {
+                        let name = format!("bitcoin-spend-{}.psbt", &id.to_string()[..12]);
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Save unsigned Bitcoin PSBT")
+                            .set_file_name(&name)
+                            .save_file()
+                            .await
+                        else {
+                            return Ok(false);
+                        };
+                        if gate.load(Ordering::SeqCst) != generation {
+                            return Err("This Cube was closed before the PSBT was saved.".into());
+                        }
+                        let bytes = psbt_file::encode(&psbt, psbt_file::Encoding::Binary);
+                        if bytes.len() as u64 > psbt_file::MAX_FILE_BYTES {
+                            return Err("The PSBT is too large to save.".into());
+                        }
+                        tokio::fs::write(handle.path(), bytes)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Ok(true)
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::FileSaved(generation, id, result))
+                    },
+                )
+            }
+            ImportMessage::LoadSignedPsbt => {
+                let Some(draft) = &self.draft else {
+                    return Task::none();
+                };
+                let wallet = match self.import_descriptor() {
+                    Ok(wallet) => wallet,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return Task::none();
+                    }
+                };
+                let Some(daemon) = self.daemon.clone() else {
+                    return Task::none();
+                };
+                let current = draft.psbt.clone();
+                let generation = self.generation;
+                let gate = self.generation_gate.clone();
+                self.busy = true;
+                self.error = None;
+                Task::perform(
+                    async move {
+                        let Some(handle) = rfd::AsyncFileDialog::new()
+                            .set_title("Choose a signed Bitcoin PSBT")
+                            .add_filter("Bitcoin PSBT", &["psbt", "txt"])
+                            .pick_file()
+                            .await
+                        else {
+                            return Ok(None);
+                        };
+                        if gate.load(Ordering::SeqCst) != generation {
+                            return Err(
+                                "This Cube was closed before the signed PSBT was loaded.".into()
+                            );
+                        }
+                        let path = handle.path().to_path_buf();
+                        let signed = tokio::task::spawn_blocking(move || psbt_file::load(&path))
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .map_err(|error| format!("Could not read signed PSBT: {error:?}"))?;
+                        let (psbt, counts, final_txid) =
+                            import_signed_psbt_value(&wallet, &current, &signed)?;
+                        if gate.load(Ordering::SeqCst) != generation {
+                            return Err(
+                                "This Cube was closed before the signatures were saved.".into()
+                            );
+                        }
+                        daemon
+                            .update_spend_tx(&psbt)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Ok(Some((psbt, counts, final_txid)))
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::FileLoaded(generation, result))
                     },
                 )
             }
@@ -1276,6 +1467,57 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
+            ImportEvent::Expanded(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(_) => self.open_daemon(),
+                    Err(error) => {
+                        self.error = Some(format!(
+                            "Could not expand the wallet history search: {error}"
+                        ));
+                        Task::none()
+                    }
+                }
+            }
+            ImportEvent::FileSaved(generation, id, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(true)
+                        if self
+                            .draft
+                            .as_ref()
+                            .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == id) =>
+                    {
+                        self.file_notice = Some("PSBT saved. Open it in the original signing wallet, then load the signed file here.".into());
+                    }
+                    Ok(_) => {}
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
+            ImportEvent::FileLoaded(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(Some((psbt, counts, final_txid))) => {
+                        let warnings = self
+                            .draft
+                            .as_ref()
+                            .map_or_else(Vec::new, |draft| draft.warnings.clone());
+                        self.draft = Some(ImportedDraft {
+                            psbt,
+                            signatures_per_input: counts,
+                            final_txid,
+                            warnings,
+                        });
+                        self.file_notice = Some("Signed PSBT loaded and verified.".into());
+                        self.error = None;
+                        return self.refresh();
+                    }
+                    Ok(None) => {}
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
             ImportEvent::Opened(_, Ok(daemon)) => Task::perform(
                 async move {
                     if let Err(error) = daemon.stop().await {
@@ -1591,7 +1833,7 @@ impl ImportedBitcoinPanel {
         if let Some(info) = &self.info {
             if let Some(status) = &info.imported_wallet {
                 content = content.push(p1_regular(format!(
-                    "{} · receive {} · change {} addresses checked",
+                    "{} · receive {} · change {} addresses checked · target {} per branch",
                     if ready {
                         "History complete"
                     } else {
@@ -1599,7 +1841,16 @@ impl ImportedBitcoinPanel {
                     },
                     status.receive_scanned,
                     status.change_scanned,
+                    status.discovery_target,
                 )));
+                if status.discovery_target < 10_000 {
+                    content = content
+                        .push(caption("If an older transaction is missing, search another 200 addresses on both branches. This restarts the history scan."))
+                        .push(button::secondary(None, "Search 200 more addresses")
+                            .on_press_maybe((ready && !self.busy).then_some(
+                                view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery)
+                            )));
+                }
             }
         }
         if ready {
@@ -1692,6 +1943,9 @@ impl ImportedBitcoinPanel {
         if let Some(notice) = &self.broadcast_notice {
             content = content.push(caption(notice));
         }
+        if let Some(notice) = &self.file_notice {
+            content = content.push(caption(notice));
+        }
         if let Some(draft) = &self.draft {
             content = content
                 .push(p1_bold("Review transaction"))
@@ -1717,9 +1971,14 @@ impl ImportedBitcoinPanel {
             content = content
                 .push(caption(format!("Valid signer signatures per input: {}",
                     draft.signatures_per_input.iter().map(|count| count.to_string()).collect::<Vec<_>>().join(", "))))
-                .push(p1_regular("Copy this PSBT into the original signing wallet, then paste the signed PSBT below. For multisig, repeat with each signer."))
-                .push(button::secondary(None, "Copy PSBT")
-                    .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyPsbt)))
+                .push(p1_regular("Save or copy this PSBT for the original signing wallet. Load the signed file or paste its base64 below. For multisig, repeat with each signer."))
+                .push(Row::new().spacing(10)
+                    .push(button::secondary(None, "Save PSBT file")
+                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::SavePsbt))))
+                    .push(button::secondary(None, "Load signed PSBT")
+                        .on_press_maybe((!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::LoadSignedPsbt))))
+                    .push(button::secondary(None, "Copy PSBT")
+                        .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyPsbt))))
                 .push(p1_bold("Sign with a connected device"));
             if let Some(listing) = &self.hardware_wallets {
                 if listing.list.is_empty() {

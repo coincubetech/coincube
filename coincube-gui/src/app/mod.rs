@@ -6205,13 +6205,10 @@ impl App {
         // a launch-time session restore.
         self.cache.connect_authenticated = self.panels.connect.account.is_authenticated();
 
-        // W12 drift detection: SHA-256 over a JSON blob —
-        // microseconds — so running it every tick is fine and
-        // avoids a separate invalidation pathway tied to wallet
-        // changes. When the wallet is absent (no Vault yet) the
-        // fingerprint is `None`, which the card treats as "nothing
-        // to drift against".
-        self.cache.current_descriptor_fingerprint = self.wallet.as_ref().and_then(|w| {
+        // The Kit fingerprint must include the imported wallet's durable
+        // address-allocation state. A Cube seed cannot stand in for its
+        // descriptor or its external signers.
+        self.cache.current_descriptor_fingerprint = if let Some(w) = self.wallet.as_ref() {
             use crate::app::state::settings::recovery_kit as rk;
             // Canonical API string ("mainnet" for Bitcoin mainnet) —
             // the fingerprint inputs must agree byte-for-byte with
@@ -6220,7 +6217,33 @@ impl App {
             // would make every tick report a spurious drift.
             let network = self.cache.chain().api_str();
             rk::live_descriptor_fingerprint(w.as_ref(), &self.cube_settings.id, network)
-        });
+        } else {
+            self.cube_settings
+                .bitcoin_import
+                .as_ref()
+                .and_then(|import| {
+                    let wallet = import.active_attachment()?;
+                    let (receive_index, change_index) = self
+                        .panels
+                        .imported_bitcoin
+                        .as_ref()?
+                        .verified_address_state()?;
+                    let blob = crate::services::recovery::ImportedDescriptorBlob::new(
+                        self.cube_settings.id.clone(),
+                        self.cache.chain(),
+                        crate::services::recovery::ImportedDescriptorBlobWallet {
+                            name: self.cube_settings.name.clone(),
+                            descriptor: wallet.descriptor.clone(),
+                            birthday: wallet.birthday,
+                            initial_lookahead: wallet.initial_lookahead,
+                            receive_index,
+                            change_index,
+                        },
+                    )
+                    .ok()?;
+                    crate::services::recovery::imported_descriptor_blob_fingerprint(&blob)
+                })
+        };
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
