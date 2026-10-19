@@ -1156,6 +1156,12 @@ impl DaemonHandle {
             preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
                 .map_err(StartupError::DbPreflight)?;
         }
+        // Retain the historical Vault refusal order (chain admission and
+        // existing-database identity first), while still validating every
+        // caller-built configuration before any startup writes.
+        if config.main_descriptor.as_vault().is_some() {
+            config.check().map_err(StartupError::Config)?;
+        }
         if !data_dir.exists() {
             data_dir
                 .init()
