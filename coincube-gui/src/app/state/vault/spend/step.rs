@@ -170,7 +170,6 @@ pub struct DefineSpend {
 
     network: Network,
     wallet: Arc<Wallet>,
-    curve: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     /// Leave as `None` for a primary path spend. Otherwise, this is the timelock
     /// corresponding to the recovery path to use for the spend.
     ///
@@ -234,7 +233,6 @@ impl DefineSpend {
         Self {
             network,
             wallet,
-            curve: secp256k1::Secp256k1::verification_only(),
             recovery_timelock,
             tip_height,
             generated: None,
