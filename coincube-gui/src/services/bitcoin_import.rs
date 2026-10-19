@@ -240,6 +240,7 @@ fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(
     let config =
         Config::from_file(Some(destination.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
     if config.main_descriptor != WalletDescriptor::Imported(journal.wallet.descriptor.clone())
+        || config.bitcoin_config.chain != journal.wallet.descriptor.chain()
         || config.data_directory().as_ref().map(|d| d.path()) != Some(destination.as_path())
         || !destination.join("coincubed.sqlite3").is_file()
     {
@@ -380,7 +381,10 @@ pub async fn install(
     }
     journal.wallet.validate(config.bitcoin_config.chain)?;
     if let Some(prior) = read_journal(&journal.path(directory))? {
-        if prior.cube_id != journal.cube_id || prior.wallet != journal.wallet {
+        if prior.cube_id != journal.cube_id
+            || prior.operation_id != operation_id
+            || prior.wallet != journal.wallet
+        {
             return Err("This import operation already names a different wallet.".into());
         }
         journal = prior;
@@ -452,9 +456,15 @@ pub async fn resume(
     let Some(mut journal) = read_journal(&journal_path(directory, operation_id))? else {
         return Ok(None);
     };
-    if journal.cube_id != cube_id {
-        return Err("This import journal belongs to a different Cube.".into());
+    if journal.cube_id != cube_id || journal.operation_id != operation_id {
+        return Err("This import journal belongs to a different Cube or setup operation.".into());
     }
+    check_cube(
+        directory,
+        &Settings::from_file(directory).map_err(|e| e.to_string())?,
+        &journal,
+        true,
+    )?;
     if journal.phase == Phase::Prepared && !journal.final_path(directory).exists() {
         return Ok(None);
     }
@@ -497,7 +507,10 @@ pub async fn abandon_pending(
     let path = journal_path(directory, operation_id);
     if let Some(journal) = read_journal(&path)? {
         check_cube(directory, &current, &journal, false)?;
-        if journal.cube_id != cube_id || journal.final_path(directory).exists() {
+        if journal.cube_id != cube_id
+            || journal.operation_id != operation_id
+            || journal.final_path(directory).exists()
+        {
             return Err(
                 "This wallet has already been installed. Resume it before changing its attachment."
                     .into(),

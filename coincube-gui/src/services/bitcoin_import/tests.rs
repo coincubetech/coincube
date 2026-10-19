@@ -411,3 +411,24 @@ async fn copied_settings_cannot_install_under_another_chain_directory() {
     assert_eq!(fs::read(&wrong_settings).unwrap(), before);
     assert!(!wrong.coincubed_data_directory(&f.wallet.wallet_id).exists());
 }
+
+#[tokio::test]
+async fn journal_file_cannot_redirect_a_different_setup_operation() {
+    let f = Fixture::new().await;
+    f.install().await.unwrap();
+    let old_operation = Uuid::new_v4();
+    fs::copy(
+        journal_path(&f.directory, f.operation()),
+        journal_path(&f.directory, old_operation),
+    )
+    .unwrap();
+    let before = fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap();
+    assert!(resume(&f.directory, &f.cube.id, old_operation)
+        .await
+        .unwrap_err()
+        .contains("different Cube or setup operation"));
+    assert_eq!(
+        fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap(),
+        before
+    );
+}
