@@ -11,6 +11,29 @@ use coincube_core::{
 };
 use std::{str::FromStr, time::Duration};
 
+fn restored_blob(f: &Fixture) -> crate::services::recovery::ImportedDescriptorBlob {
+    crate::services::recovery::ImportedDescriptorBlob::new(
+        f.cube.id.clone(),
+        ChainId::Regtest,
+        crate::services::recovery::ImportedDescriptorBlobWallet {
+            name: "Restored Bitcoin account".into(),
+            descriptor: f.wallet.descriptor.clone(),
+            birthday: f.wallet.birthday,
+            initial_lookahead: f.wallet.initial_lookahead,
+            receive_index: 37,
+            change_index: 19,
+        },
+    )
+    .unwrap()
+}
+
+fn restored_backend() -> coincubed::config::BitcoinBackend {
+    coincubed::config::BitcoinBackend::Electrum(coincubed::config::ElectrumConfig {
+        addr: "tcp://127.0.0.1:50001".into(),
+        validate_domain: true,
+    })
+}
+
 struct Fixture {
     root: PathBuf,
     directory: NetworkDirectory,
@@ -506,4 +529,92 @@ async fn restored_allocations_are_durable_before_publication_and_resume() {
     )
     .await
     .is_err());
+}
+
+#[tokio::test]
+async fn recovery_kit_restore_preserves_exact_cube_wallet_and_method_marker() {
+    for source in [
+        RestoredKitSource::Password,
+        RestoredKitSource::OwnerKeychain,
+    ] {
+        let f = Fixture::new().await;
+        let blob = restored_blob(&f);
+        let fingerprint =
+            crate::services::recovery::imported_descriptor_blob_fingerprint(&blob).unwrap();
+        let restored =
+            restore_from_kit(&f.directory, &f.cube.id, &blob, restored_backend(), source)
+                .await
+                .unwrap();
+        assert_eq!(restored.id, f.cube.id);
+        assert!(restored.vault_wallet_id.is_none());
+        assert_eq!(
+            restored
+                .bitcoin_import
+                .as_ref()
+                .and_then(BitcoinImport::active_attachment),
+            Some(&f.wallet)
+        );
+        assert!(f.stored().has_imported_bitcoin());
+        assert!(Settings::from_file(&f.directory)
+            .unwrap()
+            .cubes
+            .iter()
+            .find(|cube| cube.id == f.other.id)
+            .unwrap()
+            .bitcoin_import_pending());
+        let data = f.directory.coincubed_data_directory(&f.wallet.wallet_id);
+        let config = Config::from_file(Some(data.path().join(CONFIG_FILE))).unwrap();
+        assert_eq!(
+            coincubed::read_imported_address_state(&config, &data).unwrap(),
+            (37, 19)
+        );
+        match source {
+            RestoredKitSource::Password => {
+                assert!(restored.recovery_kit_password_backed_up);
+                assert_eq!(
+                    restored.recovery_kit_last_backed_up_descriptor_fingerprint,
+                    Some(fingerprint)
+                );
+                assert!(restored
+                    .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
+                    .is_none());
+            }
+            RestoredKitSource::OwnerKeychain => {
+                assert!(!restored.recovery_kit_password_backed_up);
+                assert!(restored
+                    .recovery_kit_last_backed_up_descriptor_fingerprint
+                    .is_none());
+                assert_eq!(
+                    restored.recovery_kit_last_backed_up_keychain_descriptor_fingerprint,
+                    Some(fingerprint)
+                );
+            }
+        }
+        assert_eq!(f.stored().bitcoin_import, restored.bitcoin_import);
+    }
+}
+
+#[tokio::test]
+async fn recovery_kit_restore_refuses_another_cube_before_mutation() {
+    let f = Fixture::new().await;
+    let blob = restored_blob(&f);
+    let before = fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap();
+    let error = restore_from_kit(
+        &f.directory,
+        &f.other.id,
+        &blob,
+        restored_backend(),
+        RestoredKitSource::Password,
+    )
+    .await
+    .unwrap_err();
+    assert!(error.contains("another Cube"));
+    assert_eq!(
+        fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap(),
+        before
+    );
+    assert!(!f
+        .directory
+        .coincubed_data_directory(&f.wallet.wallet_id)
+        .exists());
 }
