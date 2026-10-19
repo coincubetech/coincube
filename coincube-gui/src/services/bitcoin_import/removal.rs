@@ -160,6 +160,15 @@ pub async fn remove_cube_import(
         .as_ref()
         .or(staged_owner.as_ref())
         .or(final_owner.as_ref());
+    if journal.is_none() {
+        if let Some(path) = final_from_attachment.as_ref() {
+            if fs::symlink_metadata(path).is_ok() {
+                return Err(
+                    "Imported wallet storage lacks an owner; no files were removed.".into(),
+                );
+            }
+        }
+    }
     for owner in [
         file_journal.as_ref(),
         staged_owner.as_ref(),
@@ -457,6 +466,21 @@ mod tests {
             .cubes
             .iter()
             .any(|cube| cube.id == f.cube.id));
+    }
+
+    #[tokio::test]
+    async fn existing_final_storage_without_journal_or_owner_blocks_deletion() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        fs::remove_file(journal_path(&f.directory, f.operation_id())).unwrap();
+        fs::remove_file(f.destination().join(OWNER_FILE)).unwrap();
+        let before = fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap();
+        assert!(remove_cube_import(&f.directory, &f.cube).await.is_err());
+        assert_eq!(
+            fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap(),
+            before
+        );
+        assert!(f.destination().join("coincubed.sqlite3").is_file());
     }
 
     #[tokio::test]
