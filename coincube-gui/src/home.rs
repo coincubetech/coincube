@@ -5466,14 +5466,14 @@ fn create_cube_form<'a>(
 fn vault_subtitle(cube: &CubeSettings) -> String {
     if let Some(import) = &cube.bitcoin_import {
         return match &import.stage {
-            settings::BitcoinImportStage::PendingSource => "Bitcoin wallet import pending".into(),
+            settings::BitcoinImportStage::PendingSource => "Vault import pending".into(),
             settings::BitcoinImportStage::Installing { .. } => {
-                "Bitcoin wallet installation interrupted — resume import".into()
+                "Vault import interrupted — resume import".into()
             }
             settings::BitcoinImportStage::Syncing { .. } => {
-                "Imported Bitcoin wallet · Sync incomplete".into()
+                "Vault · Imported wallet · Sync incomplete".into()
             }
-            settings::BitcoinImportStage::Ready { .. } => "Imported Bitcoin wallet".into(),
+            settings::BitcoinImportStage::Ready { .. } => "Vault · Imported wallet".into(),
         };
     }
     match (&cube.vault_wallet_id, &cube.vault_fingerprint) {
@@ -7083,7 +7083,7 @@ mod tests {
         assert!(home.pending_bitcoin_import.is_some());
         let mut cube = CubeSettings::new("Imported".to_string(), Network::Bitcoin);
         cube.bitcoin_import = home.pending_bitcoin_import.clone();
-        assert_eq!(vault_subtitle(&cube), "Bitcoin wallet import pending");
+        assert_eq!(vault_subtitle(&cube), "Vault import pending");
     }
 
     fn signed_in_home() -> Home {

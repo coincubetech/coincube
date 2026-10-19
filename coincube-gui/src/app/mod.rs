@@ -379,29 +379,33 @@ impl Panels {
             ),
             coins: Some(CoinsPanel::new(
                 cache.coins(),
-                wallet.main_descriptor.first_timelock_value(),
+                wallet.recovery_timelock(),
                 wallet.chain,
             )),
             transactions: Some(VaultTransactionsPanel::new(wallet.clone())),
-            psbts: Some(PsbtsPanel::new(wallet.clone())),
-            recovery: Some(new_recovery_panel(
-                wallet.clone(),
-                cache,
-                sync_status(
-                    daemon_backend.clone(),
-                    cache.blockheight(),
-                    cache.sync_progress(),
-                    cache.last_poll_timestamp(),
-                    cache.last_poll_at_startup,
-                    cache.history_sync(),
-                ),
-            )),
+            psbts: wallet
+                .supports_inheritance()
+                .then(|| PsbtsPanel::new(wallet.clone())),
+            recovery: wallet.supports_inheritance().then(|| {
+                new_recovery_panel(
+                    wallet.clone(),
+                    cache,
+                    sync_status(
+                        daemon_backend.clone(),
+                        cache.blockheight(),
+                        cache.sync_progress(),
+                        cache.last_poll_timestamp(),
+                        cache.last_poll_at_startup,
+                        cache.history_sync(),
+                    ),
+                )
+            }),
             receive: Some(VaultReceivePanel::new(data_dir.clone(), wallet.clone())),
-            create_spend: Some({
+            create_spend: wallet.supports_inheritance().then(|| {
                 let (balance, unconfirmed_balance, _, _) = state::coins_summary(
                     cache.coins(),
                     cache.blockheight().max(0) as u32,
-                    wallet.main_descriptor.first_timelock_value(),
+                    wallet.recovery_timelock(),
                 );
                 CreateSpendPanel::new(
                     wallet.clone(),
@@ -421,13 +425,15 @@ impl Panels {
                     cache.bitcoin_unit,
                 )
             }),
-            vault_settings: Some(VaultSettingsState::new(
-                data_dir.clone(),
-                wallet.clone(),
-                daemon_backend,
-                internal_bitcoind.is_some(),
-                config.clone(),
-            )),
+            vault_settings: wallet.supports_inheritance().then(|| {
+                VaultSettingsState::new(
+                    data_dir.clone(),
+                    wallet.clone(),
+                    daemon_backend,
+                    internal_bitcoind.is_some(),
+                    config.clone(),
+                )
+            }),
             claim,
             fork_claim: None,
             claim_generation,
@@ -436,8 +442,8 @@ impl Panels {
                 cube_id.clone(),
                 cube_name,
                 cube_network,
-                // `new` (vault constructor): this Cube has a Vault wallet.
-                true,
+                // Connect's legacy hasVault contract requires an inheritance policy.
+                wallet.supports_inheritance(),
             ),
             buy_sell: breez_client.as_ref().map(|client| {
                 crate::app::view::buysell::BuySellPanel::new(
@@ -478,7 +484,7 @@ impl Panels {
         cube_id: &str,
         claim_generation: &tokio::sync::watch::Sender<u64>,
     ) -> Option<state::vault::claim::ClaimStep1Panel> {
-        (chain == crate::chain::ChainId::Bitcoin).then(|| {
+        (chain == crate::chain::ChainId::Bitcoin && wallet.supports_inheritance()).then(|| {
             state::vault::claim::ClaimStep1Panel::new(
                 wallet.clone(),
                 data_dir.clone(),
@@ -519,29 +525,33 @@ impl Panels {
         ));
         self.coins = Some(CoinsPanel::new(
             cache.coins(),
-            wallet.main_descriptor.first_timelock_value(),
+            wallet.recovery_timelock(),
             wallet.chain,
         ));
         self.transactions = Some(VaultTransactionsPanel::new(wallet.clone()));
-        self.psbts = Some(PsbtsPanel::new(wallet.clone()));
-        self.recovery = Some(new_recovery_panel(
-            wallet.clone(),
-            cache,
-            sync_status(
-                daemon_backend.clone(),
-                cache.blockheight(),
-                cache.sync_progress(),
-                cache.last_poll_timestamp(),
-                cache.last_poll_at_startup,
-                cache.history_sync(),
-            ),
-        ));
+        self.psbts = wallet
+            .supports_inheritance()
+            .then(|| PsbtsPanel::new(wallet.clone()));
+        self.recovery = wallet.supports_inheritance().then(|| {
+            new_recovery_panel(
+                wallet.clone(),
+                cache,
+                sync_status(
+                    daemon_backend.clone(),
+                    cache.blockheight(),
+                    cache.sync_progress(),
+                    cache.last_poll_timestamp(),
+                    cache.last_poll_at_startup,
+                    cache.history_sync(),
+                ),
+            )
+        });
         self.receive = Some(VaultReceivePanel::new(data_dir.clone(), wallet.clone()));
-        self.create_spend = Some({
+        self.create_spend = wallet.supports_inheritance().then(|| {
             let (balance, unconfirmed_balance, _, _) = state::coins_summary(
                 cache.coins(),
                 cache.blockheight() as u32,
-                wallet.main_descriptor.first_timelock_value(),
+                wallet.recovery_timelock(),
             );
             CreateSpendPanel::new(
                 wallet.clone(),
@@ -561,13 +571,15 @@ impl Panels {
                 cache.bitcoin_unit,
             )
         });
-        self.vault_settings = Some(VaultSettingsState::new(
-            data_dir.clone(),
-            wallet.clone(),
-            daemon_backend,
-            internal_bitcoind.is_some(),
-            config.clone(),
-        ));
+        self.vault_settings = wallet.supports_inheritance().then(|| {
+            VaultSettingsState::new(
+                data_dir.clone(),
+                wallet.clone(),
+                daemon_backend,
+                internal_bitcoind.is_some(),
+                config.clone(),
+            )
+        });
         self.fork_claim = None; // replacing the Vault drops and revokes its old session
         self.claim = Self::claim_panel(
             &wallet,
@@ -583,11 +595,14 @@ impl Panels {
     }
 
     fn current(&self) -> Option<&dyn State> {
+        if let Some(panel) = self
+            .imported_bitcoin
+            .as_ref()
+            .filter(|panel| panel.handles_route(&self.current))
+        {
+            return Some(panel.as_ref());
+        }
         match &self.current {
-            Menu::ImportedBitcoin => self
-                .imported_bitcoin
-                .as_ref()
-                .map(|p| p.as_ref() as &dyn State),
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&self.global_home),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&self.global_settings as &dyn State)
@@ -673,11 +688,17 @@ impl Panels {
     }
 
     fn current_mut(&mut self) -> Option<&mut dyn State> {
-        match &self.current {
-            Menu::ImportedBitcoin => self
+        if self
+            .imported_bitcoin
+            .as_ref()
+            .is_some_and(|panel| panel.handles_route(&self.current))
+        {
+            return self
                 .imported_bitcoin
                 .as_mut()
-                .map(|p| p.as_mut() as &mut dyn State),
+                .map(|panel| panel.as_mut() as &mut dyn State);
+        }
+        match &self.current {
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&mut self.global_home),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&mut self.global_settings as &mut dyn State)
@@ -1075,7 +1096,7 @@ fn discover_split_panel(
             directory,
         ))
     };
-    panel.bind_target_vault(wallet.id(), wallet.main_descriptor.clone());
+    panel.bind_target_vault(wallet.id(), wallet.inheritance_descriptor()?.clone());
     // B4b-3b: the session-only device listing is rooted here; it writes
     // nothing under it.
     panel.set_device_datadir(data_dir.clone());
@@ -2475,7 +2496,7 @@ impl VaultHistoryProbe {
                         self.chain,
                         node,
                         &wallet_path,
-                        &self.wallet.main_descriptor.to_string(),
+                        &self.wallet.inheritance_descriptor()?.to_string(),
                     )
                     .ok()?;
                     job.validate(&binding).ok()?;
@@ -3476,13 +3497,16 @@ impl App {
             (breez_client, spark_backend)
         };
         cache.fiat_chain = cube_settings.network;
+        cache.has_vault = wallet.supports_inheritance();
+        cache.has_imported_bitcoin = wallet.is_imported();
         if cache.fiat_chain.is_blake2b() {
             cache.clear_btcb2_fiat();
         }
         // Resolved once per cube-open, from the fork chain's settings file.
         // Only a Bitcoin Cube can be a claim source, so the question is not
         // asked on any other chain.
-        cache.btcb2_already_claimed = cube_settings.network == crate::chain::ChainId::Bitcoin
+        cache.btcb2_already_claimed = wallet.supports_inheritance()
+            && cube_settings.network == crate::chain::ChainId::Bitcoin
             && claim_target_exists(&data_dir, &wallet.descriptor_checksum);
         // A Home claim card pressed before unlock lands here. Taken on every
         // open so a stale intent cannot fire on an unrelated Cube later; the
@@ -3525,7 +3549,10 @@ impl App {
         // the kit's recorded birthday. Read off disk rather than threaded
         // through the loader messages: the rescan has to survive a quit or a
         // crash part-way through, which an in-memory flag would not.
-        let pending_rescan = pending_rescan(&data_dir, cache.chain(), &wallet);
+        let pending_rescan = wallet
+            .supports_inheritance()
+            .then(|| pending_rescan(&data_dir, cache.chain(), &wallet))
+            .flatten();
         let mut panels = Panels::new(
             breez_client.clone(),
             spark_backend.clone(),
@@ -3561,6 +3588,19 @@ impl App {
             .connect
             .set_spark_stable_balance(cube_settings.spark_stable_balance);
         let mut tasks = vec![];
+        if wallet.is_imported() {
+            if let Some(import) = cube_settings.bitcoin_import.clone() {
+                let mut panel = state::imported_bitcoin::ImportedBitcoinPanel::new(
+                    data_dir.network_directory(cube_settings.network),
+                    cube_settings.id.clone(),
+                    import,
+                );
+                panel.set_hardware_root(data_dir.clone());
+                tasks.push(panel.bind_runtime(daemon.clone()));
+                panels.imported_bitcoin = Some(Box::new(panel));
+                panels.global_home.imported_installed = true;
+            }
+        }
         let completed_recovery = daemon
             .config()
             .and_then(|cfg| {
@@ -3572,7 +3612,7 @@ impl App {
                     cache.chain(),
                     node,
                     &wallet_path,
-                    &wallet.main_descriptor.to_string(),
+                    &wallet.inheritance_descriptor()?.to_string(),
                 )
                 .ok()?;
                 let path = crate::node::history::recovery_path(
@@ -3619,7 +3659,8 @@ impl App {
         }
         let cmd = Task::batch(tasks);
         let mut cache_with_vault = cache;
-        cache_with_vault.has_vault = true;
+        cache_with_vault.has_vault = wallet.supports_inheritance();
+        cache_with_vault.has_imported_bitcoin = wallet.is_imported();
         cache_with_vault.has_p2p = panels.p2p.is_some();
         // Liquid sunset gate, local half. `load_breez_client` has already run its
         // keep-or-discard policy (grandfathered wallet / server grant / a scan
@@ -3843,7 +3884,7 @@ impl App {
             .and_then(settings::BitcoinImport::active_attachment)
             .is_some();
         if cube_settings.bitcoin_import_pending() {
-            panels.current = Menu::ImportedBitcoin;
+            panels.current = Menu::Vault(menu::VaultSubMenu::Overview);
         }
         // See the sibling assignments in `App::new` (PRs D2/D3).
         panels.connect.account.bitcoin_blake2b_opt_in =
@@ -4021,6 +4062,9 @@ impl App {
             return Task::none();
         };
         let client = session.client.clone();
+        if !wallet.supports_inheritance() {
+            return Task::none();
+        }
         let outputs = unswept_notice::owned(&self.cache, &wallet.main_descriptor);
         if outputs.is_empty() {
             return Task::none();
@@ -4100,7 +4144,12 @@ impl App {
     fn recovery_heartbeat_task(&self) -> Task<Message> {
         // The existing recovery-alert contract only accepts Bitcoin-family
         // network IDs; never report a fork Vault under Bitcoin mainnet.
-        if self.cache.chain().is_blake2b() {
+        if self.cache.chain().is_blake2b()
+            || !self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.supports_inheritance())
+        {
             return Task::none();
         }
         use crate::services::coincube::{VaultHeartbeatRequest, VaultMonitoringLevel};
@@ -4168,7 +4217,9 @@ impl App {
         // owned, unspent. With no such coins there are no funds at recovery
         // risk yet, so fall back to the tip-based estimate — harmless and
         // still monotonic.
-        let timelock = wallet.main_descriptor.first_timelock_value() as i64;
+        let Some(timelock) = wallet.recovery_timelock().map(i64::from) else {
+            return Task::none();
+        };
         let oldest_confirmed = self
             .cache
             .coins()
@@ -4234,7 +4285,9 @@ impl App {
                 .notified
                 .is_empty(),
             self.panels.global_settings.recovery_alerts.alerts_on(),
-            self.wallet.is_some(),
+            self.wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.supports_inheritance()),
         ) {
             self.show_recovery_alerts_prompt = true;
         }
@@ -4276,7 +4329,9 @@ impl App {
         // Cloned before the panels are borrowed mutably below. The reconcile
         // needs the descriptor itself, not just its fingerprint: it decides
         // which registered cube keys this Vault actually commits to.
-        let descriptor = wallet.main_descriptor.clone();
+        let Some(descriptor) = wallet.inheritance_descriptor().cloned() else {
+            return Task::none();
+        };
         // Seed *and* fire the assertion wave regardless of whether the local
         // settings already agree: the server half converges independently of
         // the disk half, and a Cube can have been persisted here but never
@@ -4516,7 +4571,7 @@ impl App {
         Some(ClaimPairRequest {
             root: self.datadir.clone(),
             fork_cube,
-            descriptor: wallet.main_descriptor.clone(),
+            descriptor: wallet.inheritance_descriptor()?.clone(),
             session,
         })
     }
@@ -4537,7 +4592,7 @@ impl App {
         }
         let wallet = self.wallet.as_ref()?;
         if wallet.chain != crate::chain::ChainId::BitcoinBlake2b
-            || wallet.main_descriptor != request.descriptor
+            || wallet.inheritance_descriptor() != Some(&request.descriptor)
             || self.cube_settings.vault_wallet_id.as_ref() != Some(&wallet.id())
         {
             return None;
@@ -4827,9 +4882,12 @@ impl App {
                 SPLIT_START_CANCELLED.to_string(),
             )));
         }
+        let Some(descriptor) = wallet.inheritance_descriptor().cloned() else {
+            return Task::none();
+        };
         let binding = match crate::services::claim_workflow::SplitTargetBinding::from_evidence(
             &target,
-            &wallet.main_descriptor,
+            &descriptor,
         ) {
             Ok(binding) => binding,
             Err(_) => {
@@ -4841,7 +4899,7 @@ impl App {
         };
         let root = state::vault::split::step1::journal_root(&self.datadir, &wallet.id());
         let target_wallet_id = wallet.id();
-        let target_descriptor = wallet.main_descriptor.clone();
+        let target_descriptor = descriptor;
         self.revoke_split_handoff();
         let mut panel = Box::new(state::vault::split::SplitPanel::start(
             self.cube_settings.id.clone(),
@@ -5243,7 +5301,10 @@ impl App {
     pub(crate) fn claim_source_cube(&self) -> crate::app::features::ClaimSourceCube {
         crate::app::features::ClaimSourceCube {
             chain: self.cube_settings.network,
-            has_vault: self.wallet.is_some(),
+            has_vault: self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.supports_inheritance()),
             server_enabled: self.cache.btcb2_server_enabled,
             already_claimed: self.cache.btcb2_already_claimed,
         }
@@ -5319,8 +5380,30 @@ impl App {
     }
 
     fn set_current_panel(&mut self, menu: Menu) -> Task<Message> {
-        if menu == Menu::ImportedBitcoin && self.panels.imported_bitcoin.is_none() {
-            return Task::none();
+        if self.cache.has_imported_bitcoin {
+            if matches!(
+                &menu,
+                Menu::Vault(
+                    menu::VaultSubMenu::Recovery
+                        | menu::VaultSubMenu::Claim
+                        | menu::VaultSubMenu::Settings(Some(menu::SettingsOption::LocalSigning))
+                )
+            ) {
+                return Task::none();
+            }
+            if self
+                .panels
+                .imported_bitcoin
+                .as_ref()
+                .is_some_and(|panel| panel.handles_route(&menu))
+            {
+                self.panels.current = menu.clone();
+                return self
+                    .panels
+                    .imported_bitcoin
+                    .as_mut()
+                    .map_or_else(Task::none, |panel| panel.enter_route(&menu));
+            }
         }
         if self.cache.chain().is_blake2b()
             && matches!(
@@ -5458,7 +5541,7 @@ impl App {
                             let (balance, unconfirmed_balance, _, _) = state::coins_summary(
                                 self.cache.coins(),
                                 self.cache.blockheight() as u32,
-                                wallet.main_descriptor.first_timelock_value(),
+                                wallet.recovery_timelock(),
                             );
                             self.panels.create_spend = Some(CreateSpendPanel::new_self_send(
                                 wallet.clone(),
@@ -5501,7 +5584,7 @@ impl App {
                                     let (balance, unconfirmed_balance, _, _) = state::coins_summary(
                                         self.cache.coins(),
                                         self.cache.blockheight() as u32,
-                                        wallet.main_descriptor.first_timelock_value(),
+                                        wallet.recovery_timelock(),
                                     );
                                     CreateSpendPanel::new(
                                         wallet.clone(),
@@ -5661,6 +5744,12 @@ impl App {
                 .unwrap_or(&self.panels.global_home)
                 .subscription(),
         );
+
+        if let Some(imported) = self.panels.imported_bitcoin.as_ref() {
+            if !imported.handles_route(&self.panels.current) {
+                subscriptions.push(imported.subscription());
+            }
+        }
 
         // Keep P2P subscription alive even when another panel is active,
         // so trade updates and DMs are not lost while navigating elsewhere.
@@ -5874,6 +5963,21 @@ impl App {
 
         tasks.push(price_task);
         tasks.push(local_feature_task);
+
+        // Imported policies use the same App daemon, with a generation-bound
+        // snapshot that also verifies discovery coverage and the Cube attachment.
+        if self.cache.has_imported_bitcoin {
+            let client = self.authenticated_coincube_client();
+            let epoch = self.panels.connect.account.session_generation();
+            if let Some(panel) = self.panels.imported_bitcoin.as_mut() {
+                tasks.push(panel.update_view(
+                    state::imported_bitcoin::ImportMessage::Refresh,
+                    client,
+                    epoch,
+                ));
+            }
+            return Task::batch(tasks);
+        }
 
         // Check if we need to update the daemon cache.
         let duration = Duration::from_secs(
@@ -6214,7 +6318,11 @@ impl App {
         // The Kit fingerprint must include the imported wallet's durable
         // address-allocation state. A Cube seed cannot stand in for its
         // descriptor or its external signers.
-        self.cache.current_descriptor_fingerprint = if let Some(w) = self.wallet.as_ref() {
+        self.cache.current_descriptor_fingerprint = if let Some(w) = self
+            .wallet
+            .as_ref()
+            .filter(|wallet| wallet.supports_inheritance())
+        {
             use crate::app::state::settings::recovery_kit as rk;
             // Canonical API string ("mainnet" for Bitcoin mainnet) —
             // the fingerprint inputs must agree byte-for-byte with
@@ -6250,6 +6358,98 @@ impl App {
                     crate::services::recovery::imported_descriptor_blob_fingerprint(&blob)
                 })
         };
+    }
+
+    /// Adopt an imported policy into the existing Vault wallet and App runtime.
+    /// The import controller retains only a shared handle for its policy-specific
+    /// signing and discovery work; the App owns the wallet and shutdown.
+    fn adopt_imported_runtime(&mut self) -> Task<Message> {
+        if self
+            .cube_settings
+            .bitcoin_import
+            .as_ref()
+            .and_then(settings::BitcoinImport::active_attachment)
+            .is_none()
+        {
+            return Task::none();
+        }
+        let wallet = match Wallet::from_imported_cube(&self.cube_settings) {
+            Ok(wallet) => Arc::new(wallet),
+            Err(error) => return Task::done(Message::View(view::Message::ShowError(error))),
+        };
+        if self
+            .wallet
+            .as_ref()
+            .is_some_and(|current| current.id() != wallet.id() || !current.is_imported())
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                "The imported policy does not match this Cube's Vault.".into(),
+            )));
+        }
+        let Some(panel) = self.panels.imported_bitcoin.as_mut() else {
+            return Task::none();
+        };
+        let Some(daemon) = panel.handoff_runtime() else {
+            // A wider scan stops and replaces the daemon. Do not show the old balance.
+            self.panels.global_home.imported_balance = None;
+            self.cache.daemon_cache.coins.clear();
+            self.cache.daemon_cache.sync_progress = 0.0;
+            if self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.is_imported())
+            {
+                self.daemon = None;
+            }
+            return Task::none();
+        };
+        let was_ready = self.panels.global_home.imported_balance.is_some();
+        let ready = panel.sync_cache(&mut self.cache);
+        if !ready {
+            self.cache.daemon_cache.coins.clear();
+            self.cache.daemon_cache.sync_progress = 0.0;
+        }
+        let first_load = self.wallet.is_none();
+        let runtime_changed = self
+            .daemon
+            .as_ref()
+            .is_none_or(|previous| !Arc::ptr_eq(previous, &daemon));
+        self.daemon = Some(daemon.clone());
+        self.cache.has_vault = false;
+        self.cache.has_imported_bitcoin = true;
+        self.panels.global_home.imported_installed = true;
+        self.panels.global_home.imported_balance = panel.authoritative_balance();
+        let mut tasks = Vec::new();
+        if first_load {
+            self.wallet = Some(wallet.clone());
+            self.panels.build_vault_panels(
+                &self.cube_settings.id,
+                wallet.clone(),
+                &self.cache,
+                daemon.backend(),
+                self.datadir.clone(),
+                None,
+                self.config.clone(),
+                self.breez_client.clone(),
+            );
+            tasks.push(
+                self.panels
+                    .global_home
+                    .reload(Some(daemon.clone()), Some(wallet.clone())),
+            );
+        }
+        if ready {
+            tasks.push(Task::done(Message::CacheUpdated));
+            if first_load || !was_ready || runtime_changed {
+                if let Some(overview) = self.panels.vault_overview.as_mut() {
+                    tasks.push(overview.reload(Some(daemon.clone()), Some(wallet.clone())));
+                }
+                if let Some(transactions) = self.panels.transactions.as_mut() {
+                    tasks.push(transactions.reload(Some(daemon), Some(wallet)));
+                }
+            }
+        }
+        Task::batch(tasks)
     }
 
     fn update_dispatch(&mut self, message: Message) -> Task<Message> {
@@ -6293,6 +6493,7 @@ impl App {
                     state::imported_bitcoin::ImportEvent::Installed(_, Ok(()))
                         | state::imported_bitcoin::ImportEvent::Resumed(_, Ok(Some(_)))
                         | state::imported_bitcoin::ImportEvent::Refreshed(_, Ok(_))
+                        | state::imported_bitcoin::ImportEvent::Opened(_, Ok(_))
                 );
                 let import_client = self.authenticated_coincube_client();
                 let task = self
@@ -6330,9 +6531,6 @@ impl App {
                     }
                     return task;
                 }
-                if let Some(panel) = &self.panels.imported_bitcoin {
-                    self.panels.global_home.imported_balance = panel.authoritative_balance();
-                }
                 if refresh_cube {
                     if let Ok(settings) = settings::Settings::from_file(
                         &self.datadir.network_directory(self.cube_settings.network),
@@ -6360,18 +6558,21 @@ impl App {
                         }
                     }
                 }
-                return task;
+                let runtime = self.adopt_imported_runtime();
+                return Task::batch([task, runtime]);
             }
             Message::View(view::Message::ImportedBitcoin(message)) => {
                 let client = self.authenticated_coincube_client();
                 let connect_epoch = self.panels.connect.account.session_generation();
-                return self
+                let task = self
                     .panels
                     .imported_bitcoin
                     .as_mut()
                     .map_or_else(Task::none, |panel| {
                         panel.update_view(message, client, connect_epoch)
                     });
+                let runtime = self.adopt_imported_runtime();
+                return Task::batch([task, runtime]);
             }
             Message::SplitTargetPrepared { generation, result } => {
                 if generation != self.split_handoff_generation {
@@ -7619,6 +7820,9 @@ impl App {
                 }
             }
             Message::UpdateDaemonCache(res) => {
+                if self.cache.has_imported_bitcoin {
+                    return Task::none();
+                }
                 match res {
                     Ok(mut daemon_cache) => {
                         // Apply optimistic-broadcast overrides before the
@@ -7866,11 +8070,9 @@ impl App {
 
                 // Vault-specific panels only exist on cubes with a
                 // configured vault.
-                if let (Some(daemon), Some(vault_overview), Some(vault_settings)) = (
-                    &self.daemon,
-                    self.panels.vault_overview.as_mut(),
-                    self.panels.vault_settings.as_mut(),
-                ) {
+                if let (Some(daemon), Some(vault_overview)) =
+                    (&self.daemon, self.panels.vault_overview.as_mut())
+                {
                     let daemon = daemon.clone();
                     let current = &self.panels.current;
                     let cache = self.cache.clone();
@@ -7893,11 +8095,13 @@ impl App {
                             current == &Menu::Vault(crate::app::menu::VaultSubMenu::Overview),
                         ),
                     ));
-                    commands.push(vault_settings.update(
-                        Some(daemon.clone()),
-                        &cache,
-                        Message::UpdatePanelCache(is_vault_settings_current),
-                    ));
+                    if let Some(vault_settings) = self.panels.vault_settings.as_mut() {
+                        commands.push(vault_settings.update(
+                            Some(daemon.clone()),
+                            &cache,
+                            Message::UpdatePanelCache(is_vault_settings_current),
+                        ));
+                    }
 
                     // Also update create_spend panel if it exists
                     if let Some(create_spend) = self.panels.create_spend.as_mut() {
@@ -8070,7 +8274,7 @@ impl App {
             }
             Message::WalletUpdated(Ok(wallet)) => {
                 // Check if we're transitioning from no-vault to has-vault state
-                let was_vaultless = !self.cache.has_vault;
+                let was_vaultless = self.wallet.is_none();
 
                 if self.wallet.as_ref().map(|w| w.id()) != Some(wallet.id()) {
                     // A permission to switch is specific to the probed Vault.
@@ -8085,7 +8289,8 @@ impl App {
                     self.cache.node_history_switch_requested = false;
                 }
                 self.wallet = Some(wallet.clone());
-                self.cache.has_vault = true;
+                self.cache.has_vault = wallet.supports_inheritance();
+                self.cache.has_imported_bitcoin = wallet.is_imported();
 
                 // A Vault attached mid-session never passes through `App::new`,
                 // so run the same identity backfill here — otherwise a Vault
@@ -8148,7 +8353,11 @@ impl App {
                     // surface the extra Recovery-Kit nudge line (master decision
                     // 6): the freshly-created Vault's Wallet Descriptor isn't in
                     // the kit yet, so a duress wipe of it would be irreversible.
-                    let report_task = self.panels.connect.report_vault_created();
+                    let report_task = if wallet.supports_inheritance() {
+                        self.panels.connect.report_vault_created()
+                    } else {
+                        Task::none()
+                    };
                     let duress_nudge_task: Option<Task<Message>> =
                         if self.panels.connect.account.is_duress_enrolled() {
                             Some(Task::done(Message::View(view::Message::ShowToast(
@@ -9310,7 +9519,10 @@ impl App {
                 };
                 let client = self.authenticated_coincube_client();
                 let server_cube_id = self.panels.connect.cube.server_cube_id;
-                let wallet = self.wallet.clone();
+                let wallet = self
+                    .wallet
+                    .clone()
+                    .filter(|wallet| wallet.supports_inheritance());
                 let local_cube_id = self.cube_settings.id.clone();
                 let imported = self
                     .cube_settings
@@ -10044,7 +10256,7 @@ fn new_recovery_panel(
     let (balance, unconfirmed_balance, _, _) = state::coins_summary(
         cache.coins(),
         cache.blockheight() as u32,
-        wallet.main_descriptor.first_timelock_value(),
+        wallet.recovery_timelock(),
     );
     CreateSpendPanel::new_recovery(
         wallet,
@@ -10925,6 +11137,104 @@ mod tests {
     }
 
     #[test]
+    fn imported_policy_loads_as_the_existing_vault_wallet() {
+        use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
+        use coincubed::config::{BitcoinBackend, BitcoinConfig, ElectrumConfig};
+        let root =
+            std::env::temp_dir().join(format!("imported-vault-app-{}", uuid::Uuid::new_v4()));
+        let datadir = CoincubeDirectory::new(root.clone());
+        let descriptor = ImportedWalletDescriptor::parse(
+            "wpkh([6cb116eb/84h/0h/0h]xpub6C6c6ShFaUMjohRwYGnrDr5kbrnUjBeGh5U8BPAjtZnZ2D7WpRidu2SUNpBVfmMaw8TpDA7quYNW4iNwGYaq9iAwp5fzHLCXJwTqe76WpmF/<0;1>/*)",
+            None, ChainId::Bitcoin,
+        ).unwrap();
+        let attachment =
+            settings::ImportedWalletAttachment::new(descriptor.clone(), ChainId::Bitcoin, 0, 20)
+                .unwrap();
+        let mut cube =
+            settings::CubeSettings::new("Imported family Vault".into(), ChainId::Bitcoin);
+        cube.bitcoin_import = Some(settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: settings::BitcoinImportStage::Syncing {
+                wallet: attachment.clone(),
+            },
+            last_error: None,
+        });
+        let wallet = Arc::new(Wallet::from_imported_cube(&cube).unwrap());
+        let mut daemon_config = coincubed::config::Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30)),
+            Some(BitcoinBackend::Electrum(ElectrumConfig {
+                addr: "tcp://127.0.0.1:1".into(),
+                validate_domain: false,
+            })),
+            log::LevelFilter::Off,
+            descriptor,
+            datadir
+                .network_directory(ChainId::Bitcoin)
+                .coincubed_data_directory(&attachment.wallet_id),
+        );
+        daemon_config.import_birthday = Some(0);
+        daemon_config.import_initial_lookahead = Some(20);
+        let daemon: Arc<dyn Daemon + Send + Sync> =
+            Arc::new(EmbeddedDaemon::unstarted_for_test(daemon_config, None));
+        let (mut app, startup) = App::new_inner(
+            Cache {
+                network: bitcoin::Network::Bitcoin,
+                fiat_chain: ChainId::Bitcoin,
+                cube_id: cube.id.clone(),
+                ..Cache::default()
+            },
+            wallet,
+            None,
+            None,
+            Config::new(false),
+            daemon.clone(),
+            datadir,
+            None,
+            cube,
+            None,
+        );
+        drop(startup);
+        assert!(app.wallet.as_ref().unwrap().is_imported());
+        assert!(Arc::ptr_eq(app.daemon.as_ref().unwrap(), &daemon));
+        assert!(app.panels.vault_overview.is_some());
+        assert!(app.panels.receive.is_some());
+        assert!(app.panels.coins.is_some());
+        assert!(app.panels.transactions.is_some());
+        assert!(app.panels.recovery.is_none());
+        assert!(app.panels.claim.is_none());
+        assert!(!app.claim_source_cube().has_vault);
+        assert!(!app.cache.has_vault); // Legacy inheritance/Connect capability.
+        assert!(app.cache.has_imported_bitcoin);
+        assert!(app.wallet.as_ref().unwrap().signer.is_none());
+        assert_eq!(app.wallet.as_ref().unwrap().id(), attachment.wallet_id);
+        assert!(Arc::ptr_eq(
+            &app.panels
+                .imported_bitcoin
+                .as_ref()
+                .unwrap()
+                .runtime_daemon()
+                .unwrap(),
+            &daemon
+        ));
+        drop(app.set_current_panel(Menu::Vault(menu::VaultSubMenu::Overview)));
+        assert_eq!(
+            app.panels.current,
+            Menu::Vault(menu::VaultSubMenu::Overview)
+        );
+        for route in [
+            menu::VaultSubMenu::Recovery,
+            menu::VaultSubMenu::Claim,
+            menu::VaultSubMenu::Settings(Some(menu::SettingsOption::LocalSigning)),
+        ] {
+            drop(app.set_current_panel(Menu::Vault(route)));
+            assert_eq!(
+                app.panels.current,
+                Menu::Vault(menu::VaultSubMenu::Overview)
+            );
+        }
+    }
+
+    #[test]
     fn claim_fork_pairing_requires_exact_open_wallet_and_connect_identity() {
         let root = std::env::temp_dir().join(format!("claim-fork-pair-{}", uuid::Uuid::new_v4()));
         let mut app = split_app(&root, false, true);
@@ -10933,7 +11243,7 @@ mod tests {
         let mut request = ClaimPairRequest {
             root: app.datadir.clone(),
             fork_cube: app.cube_settings.id.clone(),
-            descriptor: wallet.main_descriptor.clone(),
+            descriptor: wallet.inheritance_descriptor().unwrap().clone(),
             session: state::vault::claim::ConnectSession {
                 client: app.fork_connect_client.as_ref().unwrap().clone(),
                 account: "7".into(),
