@@ -1,6 +1,8 @@
 # Wallets
 
-COINCUBE ships three wallets today: a multisig Bitcoin **Vault**, a **Liquid** wallet (`breez-sdk-liquid`), and a **Spark** wallet (`breez-sdk-spark`). This note explains how the three fit together and how to add a fourth.
+COINCUBE ships three wallets today: a Bitcoin **Vault**, a **Liquid** wallet (`breez-sdk-liquid`), and a **Spark** wallet (`breez-sdk-spark`). This note explains how the three fit together and how to add a fourth.
+
+A Vault may use a newly configured inheritance policy or an imported single-signature/multisignature Bitcoin descriptor. Both use the same GUI `Wallet`, App daemon lifecycle and Vault navigation. Policy-specific capabilities determine signing and recovery actions; the imported wallet retains its external signers. See [BITCOIN_WALLET_IMPORT.md](./BITCOIN_WALLET_IMPORT.md).
 
 ## Layout
 
@@ -81,7 +83,7 @@ A premature trait would paper over those differences. Instead, `WalletRegistry` 
 
 Per-cube settings live in `coincube-gui/src/app/settings/mod.rs::CubeSettings`. Spark-relevant fields:
 
-- `master_signer_fingerprint: Option<Fingerprint>` — identifies the MasterSigner that drives all wallets (Vault, Liquid, Spark). All wallet backends derive keys from this single master seed at different BIP-32 paths.
+- `master_signer_fingerprint: Option<Fingerprint>` — identifies the Cube MasterSigner for Liquid, Spark and eligible locally created Vault signing. Imported Vault policies retain their original external signers; the Cube seed cannot sign their Bitcoin transactions.
 - `default_lightning_backend: WalletKind` — cube-level override for which backend fulfills incoming Lightning Address invoices. Serde default is `Spark` post-Phase-5.
 
 The `Cache` struct mirrors `default_lightning_backend` and `cube_id` so panels can read them without threading `CubeSettings` through the `State::update(daemon, cache, message)` signature. The authoritative copy lives on `App::cube_settings` and is re-read from disk on `Message::SettingsSaved`.
@@ -104,7 +106,7 @@ Liquid and Spark events are **not** unified into a generic `WalletEvent`. Unific
 5. **Extend `WalletRegistry`** with a new field + getter + routing-method updates.
 6. **Add a Menu variant** in `app/menu.rs` (`Menu::<Name>(<Name>SubMenu)`) and sidebar buttons in `app/view/mod.rs`.
 7. **Create parallel `state/<name>/` and `view/<name>/`** trees with Overview / Send / Receive / Transactions / Settings panels. Copy the Spark panels as a starting point — they're the most abstracted of the three today.
-8. **Derive keys from the master seed.** The new wallet should use `master_signer_fingerprint` to load the shared `MasterSigner` and derive wallet-specific keys at a dedicated BIP-32 path. Do not add a separate signer fingerprint field — all wallets share one master seed. Add any wallet-specific config (e.g., storage path, feature toggles) to `CubeSettings` and the corresponding `Cache` mirror if panels need it.
+8. **Derive keys from the master seed.** The new wallet should use `master_signer_fingerprint` to load the shared `MasterSigner` and derive wallet-specific keys at a dedicated BIP-32 path. This guidance applies to Cube-derived backends; imported Vault policies keep their own public signer origins and never substitute the Cube seed. Add any wallet-specific config (e.g., storage path, feature toggles) to `CubeSettings` and the corresponding `Cache` mirror if panels need it.
 9. **Wire events** into `App::subscription` and `App::update` under a new `Message::<Name>Event` variant.
 10. **Update routing rules** in `WalletRegistry::route_*` methods so the new backend participates where appropriate.
 11. **Update docs** — add a `docs/<NAME>_WALLET.md` mirroring [SPARK_WALLET.md](./SPARK_WALLET.md), and extend this file's Layout section.
