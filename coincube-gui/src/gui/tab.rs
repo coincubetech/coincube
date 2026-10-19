@@ -68,7 +68,7 @@ fn unlock_state(
 
 pub enum State {
     Home(Home),
-    Installer(Installer),
+    Installer(Box<Installer>),
     Loader(Loader),
     Login(login::CoincubeLiteLogin),
     PinEntry(crate::pin_entry::PinEntry),
@@ -1103,7 +1103,7 @@ impl Tab {
                             );
                         }
                     }
-                    self.state = State::Installer(install);
+                    self.state = State::Installer(Box::new(install));
                     command.map(Message::Install)
                 }
                 home::Message::InstallForSplit(datadir, coincube_client) => {
@@ -1132,7 +1132,7 @@ impl Tab {
                         }
                     };
                     self.pending_split_after_install = true;
-                    self.state = State::Installer(install);
+                    self.state = State::Installer(Box::new(install));
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
@@ -1326,7 +1326,7 @@ impl Tab {
                         None, // No coincube_client from login screen
                     ) {
                         Ok((install, command)) => {
-                            self.state = State::Installer(install);
+                            self.state = State::Installer(Box::new(install));
                             command.map(Message::Install)
                         }
                         Err(error) => {
@@ -2019,7 +2019,7 @@ impl Tab {
                         loader.connect_client.clone(), // the fork gate needs the session it was admitted with
                     ) {
                         Ok((install, command)) => {
-                            self.state = State::Installer(install);
+                            self.state = State::Installer(Box::new(install));
                             command.map(Message::Install)
                         }
                         Err(error) => {
@@ -2254,7 +2254,7 @@ impl Tab {
                             app.authenticated_coincube_client(), // authenticated API client for Keychain keys
                         ) {
                             Ok((install, command)) => {
-                                self.state = State::Installer(install);
+                                self.state = State::Installer(Box::new(install));
                                 command.map(Message::Install)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
@@ -2348,7 +2348,7 @@ impl Tab {
                             app.authenticated_coincube_client(),
                         ) {
                             Ok((install, command)) => {
-                                self.state = State::Installer(install);
+                                self.state = State::Installer(Box::new(install));
                                 command.map(Message::Install)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
@@ -2378,7 +2378,7 @@ impl Tab {
                             app.authenticated_coincube_client(),
                         ) {
                             Ok((install, command)) => {
-                                self.state = State::Installer(install);
+                                self.state = State::Installer(Box::new(install));
                                 command.map(Message::Install)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
@@ -6265,7 +6265,7 @@ mod fork_completion_tests {
         )
         .expect("installer fixture");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-        let mut tab = Tab::new(1, State::Installer(installer));
+        let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
         tab.pending_split_after_install = true;
 
         let _ = tab.update(Message::Install(installer::Message::BackToApp(
@@ -6330,7 +6330,7 @@ mod fork_completion_tests {
                 breez_client: None,
                 spark_backend: None,
             });
-            let mut tab = Box::new(Tab::new(1, State::Installer(installer)));
+            let mut tab = Box::new(Tab::new(1, State::Installer(Box::new(installer))));
             app::claim_intent::clear();
             let msg = if outcome.starts_with("cancel") {
                 Message::Install(installer::Message::BackToApp(bitcoin::Network::Bitcoin))
@@ -6522,7 +6522,7 @@ mod fork_completion_tests {
         installer.context.fresh_fork_seed_backed_up = true;
         installer.context.cube_id = Some("synthetic-save-cube".into());
         installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
-        let mut tab = Box::new(Tab::new(1, State::Installer(installer)));
+        let mut tab = Box::new(Tab::new(1, State::Installer(Box::new(installer))));
         let mut save = Some(tab.update(Message::Install(installer::Message::Exit(
             Some(Box::new(wallet("fork-vault"))),
             None,
@@ -6572,8 +6572,12 @@ mod layout_tests {
         let bytes = std::mem::size_of::<super::State>();
         assert!(
             bytes <= 8 * 1024,
-            "Tab State is {} bytes; review stack use and box bulky state",
-            bytes
+            "Tab State is {} bytes (Home {}, Installer {}, Loader {}, App {}); review stack use and box bulky state",
+            bytes,
+            std::mem::size_of::<crate::home::Home>(),
+            std::mem::size_of::<crate::installer::Installer>(),
+            std::mem::size_of::<crate::loader::Loader>(),
+            std::mem::size_of::<crate::app::App>(),
         );
     }
 }
