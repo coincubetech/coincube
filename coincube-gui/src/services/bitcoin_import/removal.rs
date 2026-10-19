@@ -570,7 +570,9 @@ mod tests {
         let outside = f.root.join("unrelated-data");
         fs::create_dir_all(&outside).unwrap();
         fs::write(outside.join("keep-me"), b"unrelated").unwrap();
-        symlink(&outside, f.directory.path().join("data")).unwrap();
+        let data = f.directory.path().join("data");
+        fs::rename(&data, f.directory.path().join("original-data")).unwrap();
+        symlink(&outside, &data).unwrap();
         let before = fs::read(f.directory.path().join(settings::SETTINGS_FILE_NAME)).unwrap();
         assert!(remove_cube_import(&f.directory, &f.cube).await.is_err());
         assert_eq!(
