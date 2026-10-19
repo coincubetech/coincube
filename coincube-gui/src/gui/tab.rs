@@ -1426,16 +1426,30 @@ impl Tab {
                     let generation = self.fork_session_generation;
                     let task = Task::perform(
                         async move {
-                            let mut cube = find_or_create_cube(
-                                &network_dir,
-                                vault.as_ref(),
-                                &wallet_alias,
-                                chain,
-                                originating_cube_id,
-                                restored_cube,
-                                restore_seed.as_ref(),
-                            )
-                            .await?;
+                            let mut cube = if let Some(blob) = imported_restore.as_ref() {
+                                find_or_create_cube_for_imported_restore(
+                                    &network_dir,
+                                    vault.as_ref(),
+                                    &wallet_alias,
+                                    chain,
+                                    originating_cube_id,
+                                    restored_cube,
+                                    restore_seed.as_ref(),
+                                    blob,
+                                )
+                                .await?
+                            } else {
+                                find_or_create_cube(
+                                    &network_dir,
+                                    vault.as_ref(),
+                                    &wallet_alias,
+                                    chain,
+                                    originating_cube_id,
+                                    restored_cube,
+                                    restore_seed.as_ref(),
+                                )
+                                .await?
+                            };
                             if let Some(blob) = &imported_restore {
                                 let backend = imported_backend.ok_or_else(||
                                     "Sign in to Connect to restore this imported Bitcoin wallet.".to_string())?;
@@ -3782,6 +3796,68 @@ fn marked_kit_backed_up(
     settings
 }
 
+/// Resume an imported Kit restore after its wallet was already attached but a
+/// later installer step failed. The generic restore path deliberately refuses
+/// every Cube with an import; only this exact wallet/Cube/seed match may reuse
+/// that attachment and retry the journal's idempotent completion.
+#[allow(clippy::too_many_arguments)]
+async fn find_or_create_cube_for_imported_restore(
+    network_dir: &NetworkDirectory,
+    vault: Option<&VaultIdentity>,
+    wallet_alias: &Option<String>,
+    chain: crate::chain::ChainId,
+    originating_cube_id: Option<String>,
+    restored_cube: Option<RestoreCubeIdentity>,
+    restore_seed: Option<&RestoreCubeSeed>,
+    blob: &crate::services::recovery::ImportedDescriptorBlob,
+) -> Result<app::settings::CubeSettings, String> {
+    blob.validate(chain)?;
+    if vault.is_some() {
+        return Err("An imported Bitcoin restore cannot also attach a Vault.".into());
+    }
+    let expected = app::settings::ImportedWalletAttachment::new(
+        blob.wallet.descriptor.clone(),
+        chain,
+        blob.wallet.birthday,
+        blob.wallet.initial_lookahead,
+    )?;
+    let target_id = restored_cube
+        .as_ref()
+        .map(|identity| identity.uuid.as_str())
+        .or(originating_cube_id.as_deref())
+        .ok_or("The imported wallet restore has no original Cube identity.")?;
+    if target_id != blob.cube.uuid {
+        return Err("This imported wallet backup belongs to a different Cube.".into());
+    }
+    if let Ok(settings) = app::settings::Settings::from_file(network_dir) {
+        if let Some(cube) = settings.cubes.iter().find(|cube| cube.id == target_id) {
+            if let Some(intent) = &cube.bitcoin_import {
+                if cube.network != chain
+                    || cube.vault_wallet_id.is_some()
+                    || intent.active_attachment() != Some(&expected)
+                    || (restored_cube.is_some()
+                        && !restore_seed.is_some_and(|seed| {
+                            cube.master_signer_fingerprint == Some(seed.master_signer_fingerprint)
+                        }))
+                {
+                    return Err("This Cube already has a different or unfinished Bitcoin wallet import. Resume that import before retrying recovery.".into());
+                }
+                return Ok(cube.clone());
+            }
+        }
+    }
+    find_or_create_cube(
+        network_dir,
+        vault,
+        wallet_alias,
+        chain,
+        originating_cube_id,
+        restored_cube,
+        restore_seed,
+    )
+    .await
+}
+
 pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
     network_dir: &NetworkDirectory,
     // Both halves of the Vault's identity, or `None` when the installer exited
@@ -4678,6 +4754,148 @@ mod find_or_create_cube_tests {
     //! listed as recoverable and let the flow be repeated indefinitely).
     use super::*;
     use app::settings::WalletId;
+    use coincube_core::miniscript::bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+    use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
+    use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+    use std::str::FromStr;
+
+    fn imported_restore_blob(seed_byte: u8) -> crate::services::recovery::ImportedDescriptorBlob {
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[seed_byte; 32]).unwrap();
+        let path = DerivationPath::from_str("m/84h/0h/0h").unwrap();
+        let account = master.derive_priv(&secp, &path).unwrap();
+        let xpub = Xpub::from_priv(&secp, &account);
+        let key = format!("[{}/84h/0h/0h]{xpub}", master.fingerprint(&secp));
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .unwrap();
+        crate::services::recovery::ImportedDescriptorBlob::new(
+            ORIG_UUID.to_string(),
+            crate::chain::ChainId::Bitcoin,
+            crate::services::recovery::ImportedDescriptorBlobWallet {
+                name: "My imported wallet".into(),
+                descriptor,
+                birthday: 0,
+                initial_lookahead: 20,
+                receive_index: 7,
+                change_index: 3,
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn imported_restore_retries_exact_attached_cube_without_replacing_it() {
+        let nd = temp_network_dir("imported-retry");
+        let blob = imported_restore_blob(19);
+        let attachment = app::settings::ImportedWalletAttachment::new(
+            blob.wallet.descriptor.clone(),
+            crate::chain::ChainId::Bitcoin,
+            blob.wallet.birthday,
+            blob.wallet.initial_lookahead,
+        )
+        .unwrap();
+        let fp = bitcoin::bip32::Fingerprint::from([1, 2, 3, 4]);
+        let seed = RestoreCubeSeed {
+            pin: zeroize::Zeroizing::new("246810".to_string()),
+            master_signer_fingerprint: fp,
+            seed_backed_up: false,
+        };
+        let mut cube = app::settings::CubeSettings::new(
+            "Restored".to_string(),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .with_master_signer(fp);
+        cube.id = ORIG_UUID.to_string();
+        cube.bitcoin_import = Some(app::settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: app::settings::BitcoinImportStage::Syncing { wallet: attachment },
+            last_error: None,
+        });
+        update_settings_file(&nd, |_| {
+            Some(app::settings::Settings {
+                cubes: vec![cube.clone()],
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+
+        let returned = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            None,
+            Some(RestoreCubeIdentity {
+                uuid: ORIG_UUID.to_string(),
+                name: "Restored".into(),
+            }),
+            Some(&seed),
+            &blob,
+        )
+        .await
+        .expect("exact published attachment may resume");
+        assert_eq!(returned.id, ORIG_UUID);
+        assert_eq!(reload(&nd).cubes.len(), 1);
+
+        let different_blob = imported_restore_blob(20);
+        let mismatch = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            None,
+            Some(RestoreCubeIdentity {
+                uuid: ORIG_UUID.to_string(),
+                name: "Restored".into(),
+            }),
+            Some(&seed),
+            &different_blob,
+        )
+        .await
+        .expect_err("another imported wallet must not reuse the Cube");
+        assert!(mismatch.contains("different or unfinished"));
+
+        let wrong_seed = RestoreCubeSeed {
+            pin: zeroize::Zeroizing::new("246810".to_string()),
+            master_signer_fingerprint: bitcoin::bip32::Fingerprint::from([9, 9, 9, 9]),
+            seed_backed_up: false,
+        };
+        let mismatch = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            None,
+            Some(RestoreCubeIdentity {
+                uuid: ORIG_UUID.to_string(),
+                name: "Restored".into(),
+            }),
+            Some(&wrong_seed),
+            &blob,
+        )
+        .await
+        .expect_err("another Cube seed must not reuse the attachment");
+        assert!(mismatch.contains("different or unfinished"));
+
+        let returned = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            Some(ORIG_UUID.to_string()),
+            None,
+            None,
+            &blob,
+        )
+        .await
+        .expect("descriptor-only restore may resume its exact Cube");
+        assert_eq!(returned.id, ORIG_UUID);
+    }
 
     #[tokio::test]
     async fn fork_install_save_preserves_updates_after_its_snapshot() {
