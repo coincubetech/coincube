@@ -296,6 +296,7 @@ pub struct ImportedBitcoinPanel {
     generation_gate: Arc<AtomicU64>,
     busy: bool,
     error: Option<String>,
+    sync_failed: bool,
     info: Option<model::GetInfoResult>,
     coins: Option<model::ListCoinsResult>,
     history: Vec<model::HistoryTransaction>,
@@ -338,6 +339,7 @@ impl ImportedBitcoinPanel {
             generation_gate: Arc::new(AtomicU64::new(generation)),
             busy: false,
             error: None,
+            sync_failed: false,
             info: None,
             coins: None,
             history: Vec::new(),
@@ -429,6 +431,14 @@ impl ImportedBitcoinPanel {
 
     pub fn abandoned(&self) -> bool {
         self.abandoned
+    }
+
+    fn synchronization_action_label(&self) -> &'static str {
+        if self.sync_failed {
+            "Retry synchronization"
+        } else {
+            "Check progress"
+        }
     }
 
     fn import_descriptor(&self) -> Result<ImportedWalletDescriptor, String> {
@@ -1391,10 +1401,17 @@ impl ImportedBitcoinPanel {
                 match result {
                     Ok(daemon) => {
                         self.daemon = Some(daemon);
+                        self.sync_failed = false;
                         self.refresh()
                     }
-                    Err(error) => {
-                        self.error = Some(error);
+                    Err(_) => {
+                        // Backend errors can contain an entire HTML error page, endpoint,
+                        // or authentication details. Keep those out of the wallet screen.
+                        log::warn!(
+                            "Imported Bitcoin daemon could not connect to its configured server"
+                        );
+                        self.sync_failed = true;
+                        self.error = Some("Could not connect to this wallet's Bitcoin server. Check the server and your connection, then retry synchronization.".into());
                         Task::none()
                     }
                 }
@@ -1409,6 +1426,7 @@ impl ImportedBitcoinPanel {
                         self.spend_drafts = spend_drafts;
                         self.import.stage = stage;
                         self.error = None;
+                        self.sync_failed = false;
                         if let Some(selected) = self.draft.take() {
                             let id = selected.psbt.unsigned_tx.compute_txid();
                             let current = self
@@ -1431,12 +1449,14 @@ impl ImportedBitcoinPanel {
                             }
                         }
                     }
-                    Err(error) => {
+                    Err(_) => {
+                        log::warn!("Imported Bitcoin synchronization failed");
                         self.info = None;
                         self.coins = None;
                         self.history.clear();
                         self.address = None;
-                        self.error = Some(error);
+                        self.sync_failed = true;
+                        self.error = Some("Could not synchronize this Bitcoin wallet. Check the Bitcoin server and your connection, then retry synchronization.".into());
                     }
                 }
                 Task::none()
@@ -1607,8 +1627,10 @@ impl ImportedBitcoinPanel {
             .join("daemon.toml");
         let mut config = match Config::from_file(Some(path)) {
             Ok(config) => config,
-            Err(error) => {
-                self.error = Some(format!("Could not open this Bitcoin wallet: {error}"));
+            Err(_) => {
+                log::warn!("Imported Bitcoin daemon settings could not be loaded");
+                self.sync_failed = true;
+                self.error = Some("Could not read this wallet's Bitcoin server settings. Retry synchronization or check the wallet setup.".into());
                 return Task::none();
             }
         };
@@ -1644,6 +1666,7 @@ impl ImportedBitcoinPanel {
         let generation = self.generation;
         let gate = self.generation_gate.clone();
         self.busy = true;
+        self.error = None;
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -2025,8 +2048,10 @@ impl ImportedBitcoinPanel {
                     "Checking Bitcoin history. A partial scan is not a zero balance.",
                 ))
                 .push(
-                    button::secondary(None, "Check progress")
-                        .on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
+                    button::secondary(None, self.synchronization_action_label()).on_press_maybe(
+                        (!self.busy)
+                            .then_some(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
+                    ),
                 );
         }
         if let Some(error) = &self.error {
@@ -2275,6 +2300,30 @@ mod tests {
         assert_ne!(old_generation, reopened.generation);
         let _ = reopened.update_event(ImportEvent::Abandoned(old_generation, Ok(())));
         assert!(!reopened.abandoned());
+    }
+
+    #[test]
+    fn backend_error_pages_are_not_shown_and_offer_synchronization_retry() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-panel-error-test"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let generation = panel.generation;
+        let raw = "Error setting up Esplora: <!DOCTYPE HTML><html>404</html>".to_string();
+
+        let _ = panel.update_event(ImportEvent::Opened(generation, Err(raw.clone())));
+        assert_eq!(
+            panel.synchronization_action_label(),
+            "Retry synchronization"
+        );
+        assert!(!panel.error.as_deref().unwrap().contains("<!DOCTYPE"));
+        assert!(panel.error.as_deref().unwrap().contains("Bitcoin server"));
+
+        let _ = panel.update_event(ImportEvent::Refreshed(generation, Err(raw)));
+        assert_eq!(
+            panel.synchronization_action_label(),
+            "Retry synchronization"
+        );
+        assert!(!panel.error.as_deref().unwrap().contains("<!DOCTYPE"));
     }
 
     #[test]
