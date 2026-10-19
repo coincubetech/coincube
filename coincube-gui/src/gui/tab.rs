@@ -1401,6 +1401,15 @@ impl Tab {
                     );
                     let restore_seed = installer_exit_seed(i);
                     let imported_restore = i.context.restored_imported_wallet.clone();
+                    let imported_kit_source = match i.context.restore_source {
+                        Some(installer::RestoreSource::PasswordKit) => {
+                            Some(crate::services::bitcoin_import::RestoredKitSource::Password)
+                        }
+                        Some(installer::RestoreSource::KeychainSeal) => {
+                            Some(crate::services::bitcoin_import::RestoredKitSource::OwnerKeychain)
+                        }
+                        _ => None,
+                    };
                     // Kit restore uses the authenticated Connect Esplora proxy;
                     // imported wallets never enter the remote Vault backend.
                     let imported_backend = i
@@ -1435,6 +1444,9 @@ impl Tab {
                                     &cube.id,
                                     blob,
                                     backend,
+                                    imported_kit_source.ok_or_else(|| {
+                                        "Imported wallets require owner recovery.".to_string()
+                                    })?,
                                 )
                                 .await?;
                             }

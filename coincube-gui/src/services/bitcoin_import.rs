@@ -506,6 +506,13 @@ async fn install_inner(
     finish(directory, &mut journal).await
 }
 
+/// The authenticated recovery route whose backup record was just restored.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoredKitSource {
+    Password,
+    OwnerKeychain,
+}
+
 /// Restore the public-wallet half of an authenticated Recovery Kit into its
 /// exact Cube. The caller restores/unlocks the Cube seed through the normal
 /// installer; it is never supplied to this wallet's spending code.
@@ -514,6 +521,7 @@ pub async fn restore_from_kit(
     cube_id: &str,
     blob: &crate::services::recovery::ImportedDescriptorBlob,
     backend: coincubed::config::BitcoinBackend,
+    source: RestoredKitSource,
 ) -> Result<settings::CubeSettings, String> {
     let chain = blob.wallet.descriptor.chain();
     blob.validate(chain)?;
@@ -600,8 +608,16 @@ pub async fn restore_from_kit(
                 "The Cube's imported wallet changed during recovery.".into(),
             ));
         }
-        cube.recovery_kit_password_backed_up = true;
-        cube.recovery_kit_last_backed_up_descriptor_fingerprint = Some(fingerprint.clone());
+        match source {
+            RestoredKitSource::Password => {
+                cube.recovery_kit_password_backed_up = true;
+                cube.recovery_kit_last_backed_up_descriptor_fingerprint = Some(fingerprint.clone());
+            }
+            RestoredKitSource::OwnerKeychain => {
+                cube.recovery_kit_last_backed_up_keychain_descriptor_fingerprint =
+                    Some(fingerprint.clone());
+            }
+        }
         if let Some(saved_wallet) = settings
             .wallets
             .iter_mut()
