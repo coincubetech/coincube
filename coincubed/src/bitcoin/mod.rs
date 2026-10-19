@@ -699,6 +699,18 @@ pub trait BitcoinInterface: Send {
     ) -> Result<Vec<UTxO>, String> {
         Ok(self.received_coins(tip, descs))
     }
+
+    /// Return every wallet output discovered by a historical imported-wallet scan,
+    /// including outputs confirmed before the database's current chain tip. The
+    /// poller de-duplicates these against its durable outpoints. Other backends
+    /// retain their ordinary tip-bounded behavior unless they support this scan.
+    fn try_historical_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        self.try_received_coins(tip, descs)
+    }
     fn try_confirmed_coins(
         &self,
         outpoints: &[bitcoin::OutPoint],
@@ -1339,14 +1351,18 @@ impl BitcoinInterface for d::BitcoinD {
 // four bodies byte-for-byte. Keeping the projection in one place stops the two
 // backends from silently diverging.
 
-fn received_coins_from(coins: &HashMap<bitcoin::OutPoint, Coin>, tip: &BlockChainTip) -> Vec<UTxO> {
-    // Wallet coins that are either unconfirmed or confirmed after `tip`. The
-    // poller discards any that had already been received.
+fn received_coins_from(
+    coins: &HashMap<bitcoin::OutPoint, Coin>,
+    tip: Option<&BlockChainTip>,
+) -> Vec<UTxO> {
+    // Ordinary polling only offers outputs confirmed after `tip`. Historical
+    // import catch-up offers every discovered output, even if its funding block
+    // predates the stored tip; the poller de-duplicates by outpoint.
     coins
         .values()
         .filter_map(|c| {
             let height = c.block_info.map(|info| info.height);
-            if height.filter(|h| *h <= tip.height).is_some() {
+            if height.is_some_and(|h| tip.is_some_and(|tip| h <= tip.height)) {
                 None
             } else {
                 Some(UTxO {
@@ -1443,7 +1459,15 @@ impl BitcoinInterface for electrum::Electrum {
         tip: &BlockChainTip,
         _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
-        received_coins_from(&self.wallet_coins(None), tip)
+        received_coins_from(&self.wallet_coins(None), Some(tip))
+    }
+
+    fn try_historical_received_coins(
+        &self,
+        _tip: &BlockChainTip,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(received_coins_from(&self.wallet_coins(None), None))
     }
 
     fn confirmed_coins(
@@ -1613,7 +1637,15 @@ impl BitcoinInterface for esplora::Esplora {
         tip: &BlockChainTip,
         _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
-        received_coins_from(&self.wallet_coins(None), tip)
+        received_coins_from(&self.wallet_coins(None), Some(tip))
+    }
+
+    fn try_historical_received_coins(
+        &self,
+        _tip: &BlockChainTip,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(received_coins_from(&self.wallet_coins(None), None))
     }
 
     fn confirmed_coins(
@@ -1757,6 +1789,15 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
         descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         self.lock().unwrap().try_received_coins(tip, descs)
+    }
+    fn try_historical_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        self.lock()
+            .unwrap()
+            .try_historical_received_coins(tip, descs)
     }
     fn try_confirmed_coins(
         &self,
@@ -1977,6 +2018,47 @@ pub struct Coin {
     pub block_info: Option<BlockInfo>,
     pub spend_txid: Option<bitcoin::Txid>,
     pub spend_block: Option<BlockInfo>,
+}
+
+#[cfg(test)]
+mod imported_history_projection_tests {
+    use super::*;
+    use bitcoin::hashes::Hash;
+
+    #[test]
+    fn historical_projection_includes_outputs_confirmed_before_stored_tip() {
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::all_zeros(),
+            vout: 0,
+        };
+        let coin = Coin {
+            outpoint,
+            amount: bitcoin::Amount::from_sat(42_000),
+            derivation_index: ChildNumber::from_normal_idx(250).unwrap(),
+            is_change: false,
+            is_immature: false,
+            block_info: Some(BlockInfo {
+                height: 100,
+                time: 1,
+            }),
+            spend_txid: None,
+            spend_block: None,
+        };
+        let coins = HashMap::from([(outpoint, coin)]);
+        let persisted_tip = BlockChainTip {
+            hash: bitcoin::BlockHash::all_zeros(),
+            height: 150,
+        };
+
+        assert!(received_coins_from(&coins, Some(&persisted_tip)).is_empty());
+        let discovered = received_coins_from(&coins, None);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].outpoint, outpoint);
+        assert!(matches!(
+            discovered[0].address,
+            UTxOAddress::DerivIndex(index, false) if u32::from(index) == 250
+        ));
+    }
 }
 
 #[cfg(test)]

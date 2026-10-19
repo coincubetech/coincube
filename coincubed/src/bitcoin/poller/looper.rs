@@ -78,7 +78,19 @@ fn update_coins(
 
     // Start by fetching newly received coins.
     let mut received = Vec::new();
-    let mut pending = bit.try_received_coins(previous_tip, descs)?;
+    // An imported wallet may expand its discovery window after the database
+    // tip already passed the funding blocks. During that pending historical
+    // scan, offer all backend-discovered outputs and let the durable outpoint
+    // set below de-duplicate them. A tip-bounded query would permanently hide
+    // those old outputs and falsely mark the larger scan complete at zero.
+    let mut pending = if db_conn
+        .imported_history()
+        .is_some_and(|history| !history.history_complete)
+    {
+        bit.try_historical_received_coins(previous_tip, descs)?
+    } else {
+        bit.try_received_coins(previous_tip, descs)?
+    };
     loop {
         let before = pending.len();
         let mut unresolved = Vec::new();
