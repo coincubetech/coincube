@@ -287,9 +287,12 @@ fn funding_view<'a>(
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
         .push_maybe(expanded.then_some(details))
         .push_maybe(panel.funding_error().map(|error| card::warning(error.to_string())))
+        .push_maybe(panel.funding_status()
+            .filter(|_| !panel.funding_checking() && panel.funding_error().is_none())
+            .map(|status| card::simple(p2_regular(status.to_owned()))))
         .push_maybe((!panel.paired_vault_ready()).then(|| card::warning(
             "Keep the paired BTCB2 Cube open and unlocked under the same Connect account. Return here after it loads; Tenshu will verify the Bitcoin deposit in this Vault and the BTCB2 deposit in the paired Vault automatically. No separate check is needed there.".into())))
-        .push_maybe(panel.funding_error().map(|_| button::secondary_compact(Some(icon::reload_icon()), "Retry verification now")
+        .push_maybe((panel.funding_error().is_some() || (!verified && panel.funding_status().is_some())).then(|| button::secondary_compact(Some(icon::reload_icon()), "Retry verification now")
             .on_press_maybe((!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding)))))
         .push(p1_bold("2. Review and sign"))
         .push(p2_regular("Next: transfer the coins back to your own Vaults."))

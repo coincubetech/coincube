@@ -1074,6 +1074,7 @@ impl ClaimStep1Panel {
             self.funding_error = None;
             self.funding_status = None;
             self.deposit_status = None;
+            self.deposit_details_override = None;
             self.deposit_polling = false;
             self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
             self.last_full_check = None;
@@ -3353,6 +3354,7 @@ impl ClaimStep1Panel {
                 self.funding_checking = false;
                 self.funding_status = None;
                 self.deposit_status = None;
+                self.deposit_details_override = None;
                 self.deposit_polling = false;
                 self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                 self.last_full_check = None;
@@ -3709,6 +3711,7 @@ impl ClaimStep1Panel {
                     Ok(addresses) => {
                         self.stage = Stage::FundingDeposits(addresses);
                         self.deposit_status = None;
+                        self.deposit_details_override = None;
                         self.deposit_polling = false;
                         self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_status = None;
@@ -3788,6 +3791,7 @@ impl ClaimStep1Panel {
                     RestartedState::PairedFunding(addresses) => {
                         self.restart_pending = false;
                         self.deposit_status = None;
+                        self.deposit_details_override = None;
                         self.deposit_polling = false;
                         self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_review = None;

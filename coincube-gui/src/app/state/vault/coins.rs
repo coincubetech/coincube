@@ -108,7 +108,10 @@ impl State for CoinsPanel {
                 self.labels_edited.cache(),
                 cache.bitcoin_unit,
                 self.chain.is_blake2b()
-                    || (self.chain == crate::chain::ChainId::Bitcoin && cache.btcb2_server_enabled),
+                    || (matches!(
+                        self.chain,
+                        crate::chain::ChainId::Bitcoin | crate::chain::ChainId::Testnet4
+                    ) && cache.btcb2_server_enabled),
             ),
         )
     }

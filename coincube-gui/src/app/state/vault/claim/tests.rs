@@ -536,8 +536,11 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(matches!(p.stage, Stage::FundingChecking));
     p.deposit_polling = true;
     p.deposit_poll_seq = 9;
+    p.deposit_details_override = Some(false);
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
     assert!(!p.deposit_polling);
     assert_ne!(p.deposit_poll_seq, 9);
     let observed = DepositStatus {
@@ -639,9 +642,38 @@ fn claim_funding_results_require_the_current_panel_and_session() {
         .funding_error()
         .unwrap()
         .contains("paired BTCB2 Cube changed"));
+    p.deposit_details_override = Some(false);
+    p.cancel();
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
+    // A resumed unsigned pair must also return to automatic disclosure,
+    // even if the previous attempt was manually collapsed.
+    p.deposit_details_override = Some(false);
+    p.restarting = Some(FinalizeAttempt {
+        id: 1,
+        generation: 7,
+        revocations: 0,
+    });
+    drop(p.apply(ClaimEvent::Restarted(
+        1,
+        Ok(RestartedClaim {
+            context: Context {
+                generation: 7,
+                account: "account".into(),
+                provider: "test-provider".into(),
+            },
+            state: RestartedState::PairedFunding(addresses.clone()),
+        }),
+    )));
+    assert!(matches!(p.stage, Stage::FundingDeposits(_)));
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
+    p.deposit_details_override = Some(false);
     p.revoke();
     assert!(matches!(p.stage, Stage::Preconditions));
     assert!(p.funding_status.is_none());
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
     assert!(matches!(p.stage, Stage::Preconditions));
 }
@@ -5557,6 +5589,10 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         bitcoin_rate_sat_vb: 2,
         btcb2_rate_sat_vb: 1,
     });
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "test-account".into(),
+    });
     let funds = AddressFunds {
         confirmed_sats: 100_000,
         mature_sats: 100_000,
@@ -5572,6 +5608,13 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
     let menu = crate::app::menu::Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
     for (width, expanded) in [(1400, false), (900, true)] {
         p.deposit_details_override = Some(expanded);
+        if expanded {
+            drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
+            assert!(p.funding_status().unwrap().contains("expired"));
+        } else {
+            p.funding_status = Some("Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into());
+        }
+        let expected_status = p.funding_status().unwrap().to_owned();
         let mut renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
             iced::Pixels(16.0),
@@ -5597,6 +5640,8 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             "3. Broadcast and confirm",
             "Replay protection not yet verified.",
             "Next: transfer the coins back",
+            &expected_status,
+            "Retry verification now",
         ] {
             assert!(
                 labels.0.iter().any(|label| label.contains(expected)),
