@@ -90,8 +90,8 @@ impl Electrum {
     }
 
     pub fn set_full_scan_gap(&mut self, gap: usize) -> Result<(), &'static str> {
-        if !(1..=10_000).contains(&gap) {
-            return Err("full scan gap must be between 1 and 10000");
+        if !(1..=1_010_000).contains(&gap) {
+            return Err("full scan gap must be between 1 and 1010000");
         }
         self.full_scan_gap = gap;
         Ok(())

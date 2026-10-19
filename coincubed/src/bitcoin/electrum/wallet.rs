@@ -149,6 +149,10 @@ impl BdkWallet {
             receive_desc: receive_desc.clone(),
             change_desc: change_desc.clone(),
         };
+        // Restored imported storage can have allocated addresses but no chain
+        // tip yet. Reveal them before the first historical full scan; otherwise
+        // BDK's stop-gap could end before any of those addresses are checked.
+        bdk_wallet.reveal_spks(receive_index, change_index);
         if let Some(tip) = tip {
             // This will be our anchor for any confirmed transactions.
             let anchor_block = block_id_from_tip(tip);
@@ -159,12 +163,6 @@ impl BdkWallet {
                     .insert_block(anchor_block)
                     .expect("local chain only contains genesis block");
             }
-            // Update the last used derivation index for both change and receive addresses.
-            log::debug!(
-                "revealing SPKs up to receive index {receive_index} and change index {change_index}"
-            );
-            bdk_wallet.reveal_spks(receive_index, change_index);
-
             // Update the existing coins and transactions information using a TxGraph changeset.
             log::debug!("Number of coins to load: {}.", coins.len());
             log::debug!("Number of txs to load: {}.", txs.len());
@@ -484,6 +482,33 @@ mod tests {
             .all_spks()
             .values()
             .any(|spk| *spk == distant));
+    }
+
+    #[test]
+    fn restored_high_water_is_revealed_even_without_a_tip() {
+        let descriptor = CoincubeDescriptor::from_str(super::super::tests::DESCRIPTOR).unwrap();
+        let wallet = BdkWallet::new_with_lookahead(
+            &descriptor,
+            BlockHash::all_zeros(),
+            None,
+            &[],
+            &[],
+            ChildNumber::from(45),
+            ChildNumber::from(32),
+            20,
+        );
+        let revealed = wallet.index().last_revealed_indices();
+        assert_eq!(revealed.get(&KeychainType::Receive), Some(&45));
+        assert_eq!(revealed.get(&KeychainType::Change), Some(&32));
+        for (index, change) in [(45, false), (32, true)] {
+            let script = wallet.get_spk(ChildNumber::from(index), change);
+            assert!(wallet
+                .index()
+                .inner()
+                .all_spks()
+                .values()
+                .any(|spk| *spk == script));
+        }
     }
 
     /// A sparse chain, as these backends actually keep one: genesis, an old block

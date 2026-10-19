@@ -478,7 +478,11 @@ pub fn restore_imported_address_state(
     }
     tx.execute(
         "UPDATE wallets SET deposit_derivation_index = ?1,
-                            change_derivation_index = ?2 WHERE id = 1",
+                            change_derivation_index = ?2,
+                            import_history_complete = CASE
+                                WHEN ?1 > deposit_derivation_index OR ?2 > change_derivation_index
+                                THEN 0 ELSE import_history_complete END
+         WHERE id = 1",
         rusqlite::params![final_receive, final_change],
     )?;
     tx.commit()?;
@@ -653,12 +657,12 @@ impl SqliteConn {
             "UPDATE wallets SET import_receive_scanned = ?1,
                 import_change_scanned = ?2,
                 import_history_complete = CASE
-                    WHEN ?1 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
-                     AND ?2 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
+                    WHEN ?1 >= deposit_derivation_index + COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
+                     AND ?2 >= change_derivation_index + COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
                     THEN 1 ELSE 0 END,
                 timestamp = CASE
-                    WHEN ?1 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
-                     AND ?2 >= COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
+                    WHEN ?1 >= deposit_derivation_index + COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
+                     AND ?2 >= change_derivation_index + COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead)
                     THEN import_birthday ELSE timestamp END
              WHERE id = 1 AND wallet_kind = 'imported'",
             rusqlite::params![receive_scanned, change_scanned],
@@ -5197,6 +5201,8 @@ CREATE TABLE labels (
             drop(conn);
             let mut conn = db.connection().unwrap();
             conn.complete_import_history(20, 20).unwrap();
+            assert!(!conn.imported_history().unwrap().unwrap().history_complete);
+            conn.complete_import_history(65, 52).unwrap();
             assert!(conn.imported_history().unwrap().unwrap().history_complete);
             drop(conn);
             assert_eq!(
@@ -5211,9 +5217,9 @@ CREATE TABLE labels (
             assert!(!history.history_complete);
             assert_eq!(u32::from(conn.receive_index()), 45);
             assert_eq!(u32::from(conn.change_index()), 32);
-            conn.complete_import_history(39, 40).unwrap();
+            conn.complete_import_history(84, 72).unwrap();
             assert!(!conn.imported_history().unwrap().unwrap().history_complete);
-            conn.complete_import_history(40, 40).unwrap();
+            conn.complete_import_history(85, 72).unwrap();
             assert!(conn.imported_history().unwrap().unwrap().history_complete);
             drop(conn);
             assert_eq!(

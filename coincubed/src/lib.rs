@@ -916,8 +916,18 @@ fn setup_electrum(
     let mut electrum =
         Electrum::new(client, bdk_wallet, full_scan).map_err(StartupError::Electrum)?;
     if let Some(history) = imported_history {
+        // BDK's full scan stop gap is counted from index zero, even when
+        // high-water addresses are revealed. Cover every restored allocation
+        // plus the requested discovery gap before declaring history complete.
+        let required_gap = u32::from(receive_index.max(change_index))
+            .checked_add(history.discovery_target)
+            .ok_or_else(|| {
+                StartupError::Config(ConfigError::Unexpected(
+                    "imported historical scan bound overflow".into(),
+                ))
+            })?;
         electrum
-            .set_full_scan_gap(history.discovery_target as usize)
+            .set_full_scan_gap(required_gap as usize)
             .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
     }
     electrum
@@ -995,8 +1005,15 @@ fn setup_esplora(
             .is_some_and(|state| !state.history_complete);
     let mut esplora = Esplora::new(client, bdk_wallet, full_scan).map_err(StartupError::Esplora)?;
     if let Some(history) = imported_history {
+        let required_gap = u32::from(receive_index.max(change_index))
+            .checked_add(history.discovery_target)
+            .ok_or_else(|| {
+                StartupError::Config(ConfigError::Unexpected(
+                    "imported historical scan bound overflow".into(),
+                ))
+            })?;
         esplora
-            .set_full_scan_gap(history.discovery_target as usize)
+            .set_full_scan_gap(required_gap as usize)
             .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
     }
     esplora
