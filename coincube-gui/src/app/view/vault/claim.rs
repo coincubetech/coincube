@@ -22,7 +22,7 @@ use crate::{
         cache::Cache,
         menu::Menu,
         state::vault::{
-            claim::{ClaimStep1Panel, CoinSet, Preconditions, Refusal, StageView},
+            claim::{ClaimStep1Panel, CoinSet, DepositStatus, Preconditions, Refusal, StageView},
             psbt::{PsbtModal, PsbtState},
         },
         view::{
@@ -271,6 +271,7 @@ fn funding_view<'a>(
     addresses: &'a crate::services::claim_workflow::CheckedClaimFundingAddresses,
 ) -> Element<'a, Message> {
     let verified = panel.funding_review().is_some();
+    let signing_available = crate::services::claim_ancestry_gate::authorization().is_some();
     let expanded = panel.deposit_details_expanded();
     let details = Column::new().spacing(15)
         .push(p1_regular("Send Bitcoin to the first address and BTCB2 to the second. Both belong to your paired Vaults. Keep both Cubes open under the same Connect account; all deposit checks happen automatically here."))
@@ -297,16 +298,22 @@ fn funding_view<'a>(
         .push(p1_bold("2. Review and sign"))
         .push(p2_regular("Next: transfer the coins back to your own Vaults."))
         .push(p1_regular("Each transfer combines the shared coins with a deposit verified to exist only on that chain. That chain-specific input prevents the transfer from replaying on the other chain. Your funds return to your own Vault, minus the network fee."))
-        .push(p2_regular("Review and sign both transfers here. Depositing funds alone does not split your shared coins."))
+        .push(p2_regular("Depositing funds alone does not split your shared coins. Both deposits must pass replay-protection verification before you can review and sign the self-transfers."))
+        .push_maybe((!signing_available).then(|| card::warning(
+            "Signing this split is not available in this version of Tenshu. You can monitor your deposits here, but completing the split requires a version that supports signing both self-transfers.".into())))
+        .push_maybe((signing_available && !verified && !panel.funding_checking()).then(|| p2_regular(
+            if !panel.paired_vault_ready() {
+                "Review and sign is waiting for the paired BTCB2 Cube. Open and unlock it under the same Connect account."
+            } else {
+                "Review and sign is waiting for both deposits to be confirmed and verified. Verification runs automatically."
+            })))
         .push_maybe(panel.funding_checking().then(|| p2_regular("Verifying deposit ancestry and preparing both self-transfers…")))
         .push_maybe(panel.funding_review().map(|review| {
             let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
             funding_review_view(review, threshold)
         }))
-        .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some() && verified).then(|| {
-            button::primary(None, if panel.paired_signing_pending() { "Checking both transactions…" } else { "Review and sign self-transfers" })
-                .on_press_maybe((!panel.paired_signing_pending() && !panel.funding_checking()).then_some(Message::Claim(ClaimMessage::SignPair)))
-        }))
+        .push(button::primary(None, if panel.paired_signing_pending() { "Checking both transactions…" } else { "Review and sign self-transfers" })
+            .on_press_maybe((signing_available && verified && !panel.paired_signing_pending() && !panel.funding_checking()).then_some(Message::Claim(ClaimMessage::SignPair))))
         .push(broadcast_stage_summary())
         .push(button::secondary_compact(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel)))
         .into()
@@ -417,6 +424,36 @@ fn address_row<'a>(address: String, notice: &'static str) -> Element<'a, Message
         .into()
 }
 
+fn deposit_heading(status: Option<&DepositStatus>, verified: bool) -> &'static str {
+    if verified {
+        return "Both deposits verified for replay protection";
+    }
+    let Some(status) = status else {
+        return "Checking for funds";
+    };
+    let results = [&status.bitcoin, &status.btcb2];
+    let received = results
+        .iter()
+        .filter(|result| {
+            result
+                .as_ref()
+                .is_ok_and(|funds| funds.confirmed_sats > 0 || funds.pending_sats > 0)
+        })
+        .count();
+    if results.iter().any(|result| result.is_err()) {
+        return if received > 0 {
+            "Funds received at one address; the other could not be checked"
+        } else {
+            "Unable to check both deposit addresses"
+        };
+    }
+    match received {
+        2 => "Funds received at both addresses",
+        1 => "Funds received at one of two addresses",
+        _ => "Waiting for funds",
+    }
+}
+
 fn deposit_status_view<'a>(
     panel: &ClaimStep1Panel,
     bitcoin_minimum: u64,
@@ -427,7 +464,7 @@ fn deposit_status_view<'a>(
     Container::new(
         Column::new()
             .spacing(12)
-            .push(p1_bold("Deposit status — updates automatically"))
+            .push(p1_bold(deposit_heading(status, review.is_some())))
             .push(match review {
                 Some(review) => coin_input_row(
                     &review.bitcoin.funding,
@@ -494,7 +531,18 @@ fn deposit_row<'a>(
         ),
         Some(Ok(_)) => (None, "Waiting for a deposit at this address.".to_string()),
     };
-    check_row(label, mark, detail)
+    let mark = if mark == Some(false) {
+        icon::warning_icon().style(theme::text::warning)
+    } else {
+        icon::receive_icon().style(theme::text::secondary)
+    };
+    Row::new()
+        .spacing(10)
+        .align_y(Alignment::Center)
+        .push(mark)
+        .push(p1_regular(label).width(Length::Fixed(170.0)))
+        .push(p1_regular(detail).style(theme::text::secondary))
+        .into()
 }
 
 fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Element<'a, Message> {
@@ -1198,6 +1246,56 @@ fn track_view<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn deposit_heading_distinguishes_arrival_verification_and_failed_reads() {
+        use crate::services::foreign_scan::{AddressFunds, ScanError};
+        let empty = AddressFunds::default();
+        let pending = AddressFunds {
+            pending_sats: 1_000,
+            ..empty
+        };
+        let confirmed = AddressFunds {
+            confirmed_sats: 2_000,
+            ..empty
+        };
+        assert_eq!(deposit_heading(None, false), "Checking for funds");
+        for (bitcoin, btcb2, expected) in [
+            (Ok(empty), Ok(empty), "Waiting for funds"),
+            (
+                Ok(pending),
+                Ok(empty),
+                "Funds received at one of two addresses",
+            ),
+            (
+                Ok(empty),
+                Ok(confirmed),
+                "Funds received at one of two addresses",
+            ),
+            (
+                Ok(pending),
+                Ok(confirmed),
+                "Funds received at both addresses",
+            ),
+            (
+                Err(ScanError::Unavailable),
+                Ok(empty),
+                "Unable to check both deposit addresses",
+            ),
+            (
+                Ok(confirmed),
+                Err(ScanError::Unavailable),
+                "Funds received at one address; the other could not be checked",
+            ),
+        ] {
+            let status = DepositStatus { bitcoin, btcb2 };
+            assert_eq!(deposit_heading(Some(&status), false), expected);
+        }
+        assert_eq!(
+            deposit_heading(None, true),
+            "Both deposits verified for replay protection"
+        );
+    }
 
     #[test]
     fn broadcast_review_reads_the_actual_return_output() {

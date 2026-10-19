@@ -5640,6 +5640,9 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             "3. Broadcast and confirm",
             "Replay protection not yet verified.",
             "Next: transfer the coins back",
+            "Funds received at both addresses",
+            "Signing this split is not available in this version",
+            "Review and sign self-transfers",
             &expected_status,
             "Retry verification now",
         ] {
@@ -5656,13 +5659,8 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                 .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
             expanded
         );
-        assert!(
-            !labels
-                .0
-                .iter()
-                .any(|label| label == "Review and sign self-transfers"),
-            "Confirmed deposits cannot enable signing without proof"
-        );
+        assert!(p.funding_review().is_none());
+        assert!(crate::services::claim_ancestry_gate::authorization().is_none());
         if let Ok(directory) = std::env::var("CLAIM_PREVIEW_DIR") {
             let mut messages = Vec::new();
             element.as_widget_mut().update(
