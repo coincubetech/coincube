@@ -365,13 +365,16 @@ def test_import_recovers_history_after_saved_scan_request(
         tmp_path / operation, receive, change, indexer, backend, lookahead=20
     )
     try:
-        daemon.start()
-        daemon.wait_ready(node.rpc.getblockcount())
-        assert not any(
-            coin["outpoint"].startswith(funding + ":")
-            for coin in daemon.rpc.listcoins()["coins"]
-        )
-        daemon.stop()
+        if operation == "expand":
+            daemon.start()
+            daemon.wait_ready(node.rpc.getblockcount())
+            assert not any(
+                coin["outpoint"].startswith(funding + ":")
+                for coin in daemon.rpc.listcoins()["coins"]
+            )
+            daemon.stop()
+        # A Kit restores into unpublished staged storage; wider discovery
+        # updates an existing stopped wallet. Both persist before startup.
         arguments = [tool, daemon.conf_file, operation]
         arguments += ["45", "32"] if operation == "restore" else ["300"]
         subprocess.run(arguments, check=True, capture_output=True, text=True)

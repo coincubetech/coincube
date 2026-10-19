@@ -187,9 +187,9 @@ mod tests {
         let path = DerivationPath::from_str(path).unwrap();
         let account = master.derive_priv(&secp, &path).unwrap();
         format!(
-            "[{}{}]{}",
+            "[{}/{}]{}",
             master.fingerprint(&secp),
-            path.to_string().trim_start_matches('m'),
+            path.to_string().trim_start_matches("m/"),
             Xpub::from_priv(&secp, &account)
         )
     }

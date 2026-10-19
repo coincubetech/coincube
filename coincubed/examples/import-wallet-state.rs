@@ -22,12 +22,29 @@ fn main() -> Result<(), Box<dyn Error>> {
             coincubed::expand_imported_discovery(&config, &data, args[2].parse()?)?;
         }
         "restore" if args.len() == 4 => {
+            if data.exists() {
+                return Err("Restore fixture requires unpublished storage".into());
+            }
+            let staged =
+                coincubed::datadir::DataDirectory::new(data.path().with_extension("restore-stage"));
+            if staged.exists() {
+                return Err("Restore fixture staging directory already exists".into());
+            }
+            coincubed::create_imported_storage(
+                &config,
+                &staged,
+                config.import_birthday.ok_or("Missing import birthday")?,
+                config
+                    .import_initial_lookahead
+                    .ok_or("Missing import lookahead")?,
+            )?;
             coincubed::restore_imported_address_state(
                 &config,
-                &data,
+                &staged,
                 args[2].parse()?,
                 args[3].parse()?,
             )?;
+            std::fs::rename(staged.path(), data.path())?;
         }
         _ => return Err("Invalid fixture operation".into()),
     }
