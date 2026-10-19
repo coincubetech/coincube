@@ -398,6 +398,101 @@ fn panel(descriptor: &str) -> ClaimStep1Panel {
 }
 
 #[test]
+fn verified_coin_display_expires_and_requires_the_current_pair() {
+    use crate::app::view::vault::ancestry_coins::{CoinPairReview, VerifiedCoinPairReview};
+    let (bitcoin, fork, _) = crate::services::claim_pair_signing::tests::fixture();
+    let bitcoin_funding = bitcoin.poison_input();
+    let fork_funding = fork
+        .psbt()
+        .unsigned_tx
+        .input
+        .iter()
+        .map(|input| input.previous_output)
+        .find(|input| !bitcoin.claimed_prevouts().contains(input))
+        .unwrap();
+    let coins = CoinPairReview::from_psbts(
+        bitcoin.psbt(),
+        fork.psbt(),
+        bitcoin.claimed_prevouts(),
+        bitcoin_funding,
+        fork_funding,
+    )
+    .unwrap();
+    let block = coincube_core::claim::BlockRef {
+        height: 100,
+        hash: BlockHash::from_str(&"01".repeat(32)).unwrap(),
+    };
+    let tip = coincube_core::claim::BlockRef {
+        height: 105,
+        hash: BlockHash::from_str(&"02".repeat(32)).unwrap(),
+    };
+    let mut p = panel(SINGLE_WSH);
+    let daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
+    let fork_wallet =
+        Arc::new(Wallet::new(p.wallet.main_descriptor.clone()).with_chain(ChainId::BitcoinBlake2b));
+    let (generation, receiver) = watch::channel(1);
+    p.bind_fork_daemon(Some(ClaimForkBinding::new(&daemon, &fork_wallet, receiver)));
+    p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "btc".into(),
+        btcb2_deposit: "btcb2".into(),
+        bitcoin_minimum_sats: 1,
+        btcb2_minimum_sats: 1,
+        bitcoin_rate_sat_vb: 5,
+        btcb2_rate_sat_vb: 5,
+    });
+    p.prepared_pair = Some(Box::new(PreparedClaimPair {
+        bitcoin,
+        fork,
+        bitcoin_funding,
+        fork_funding,
+        bitcoin_rate_vb: 5,
+        fork_rate_vb: 5,
+    }));
+    p.funding_review = Some(VerifiedCoinPairReview::new(coins, block, tip, block, tip).unwrap());
+    p.last_full_check = Some(Instant::now());
+    let (btc, btcb2, _) = p.verified_deposit_display().unwrap();
+    assert_eq!((btc, btcb2), (bitcoin_funding, fork_funding));
+    p.last_full_check = Some(Instant::now() - Duration::from_secs(31));
+    assert!(p.verified_deposit_display().is_none());
+    p.last_full_check = Some(Instant::now());
+    generation.send(2).unwrap();
+    assert!(p.verified_deposit_display().is_none());
+}
+
+#[test]
+fn deposit_instructions_collapse_after_receipt_but_can_be_reopened() {
+    let mut p = panel(SINGLE_WSH);
+    assert!(p.deposit_details_expanded());
+    let received = AddressFunds {
+        pending_sats: 1_000,
+        ..Default::default()
+    };
+    p.deposit_status = Some(DepositStatus {
+        bitcoin: Ok(received),
+        btcb2: Ok(AddressFunds::default()),
+    });
+    assert!(p.deposit_details_expanded());
+    p.deposit_status = Some(DepositStatus {
+        bitcoin: Ok(received),
+        btcb2: Ok(received),
+    });
+    assert!(!p.deposit_details_expanded());
+    drop(p.update(
+        None,
+        &Cache::default(),
+        Message::View(view::Message::Claim(
+            view::ClaimMessage::ToggleDepositDetails,
+        )),
+    ));
+    assert!(p.deposit_details_expanded());
+    assert!(
+        p.funding_review().is_none(),
+        "Receipt must never enable signing or a verified badge"
+    );
+    assert!(p.verified_deposit_display().is_none());
+}
+
+#[test]
 fn claim_funding_results_require_the_current_panel_and_session() {
     let (_sender, receiver) = watch::channel(7);
     let (fork_sender, fork_receiver) = watch::channel(1);
@@ -441,8 +536,11 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(matches!(p.stage, Stage::FundingChecking));
     p.deposit_polling = true;
     p.deposit_poll_seq = 9;
+    p.deposit_details_override = Some(false);
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses.clone()))));
     assert!(matches!(p.stage, Stage::FundingDeposits(ref got) if got == &addresses));
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
     assert!(!p.deposit_polling);
     assert_ne!(p.deposit_poll_seq, 9);
     let observed = DepositStatus {
@@ -544,9 +642,38 @@ fn claim_funding_results_require_the_current_panel_and_session() {
         .funding_error()
         .unwrap()
         .contains("paired BTCB2 Cube changed"));
+    p.deposit_details_override = Some(false);
+    p.cancel();
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
+    // A resumed unsigned pair must also return to automatic disclosure,
+    // even if the previous attempt was manually collapsed.
+    p.deposit_details_override = Some(false);
+    p.restarting = Some(FinalizeAttempt {
+        id: 1,
+        generation: 7,
+        revocations: 0,
+    });
+    drop(p.apply(ClaimEvent::Restarted(
+        1,
+        Ok(RestartedClaim {
+            context: Context {
+                generation: 7,
+                account: "account".into(),
+                provider: "test-provider".into(),
+            },
+            state: RestartedState::PairedFunding(addresses.clone()),
+        }),
+    )));
+    assert!(matches!(p.stage, Stage::FundingDeposits(_)));
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
+    p.deposit_details_override = Some(false);
     p.revoke();
     assert!(matches!(p.stage, Stage::Preconditions));
     assert!(p.funding_status.is_none());
+    assert!(p.deposit_details_expanded());
+    assert!(p.deposit_details_override.is_none());
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
     assert!(matches!(p.stage, Stage::Preconditions));
 }
@@ -5422,5 +5549,156 @@ fn closed_gate_candidates_are_refused_independently_of_rdts_window() {
         );
         assert!(!refusal.retry);
         assert!(matches!(p.stage, Stage::Preconditions));
+    }
+}
+
+#[tokio::test]
+async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded() {
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+    #[derive(Default)]
+    struct Labels(Vec<String>);
+    impl Operation for Labels {
+        fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
+            f(self);
+        }
+        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+            self.0.push(value.to_owned());
+        }
+    }
+    for bytes in [
+        coincube_ui::font::REGULAR_BYTES,
+        coincube_ui::font::BOLD_BYTES,
+        coincube_ui::font::BOOTSTRAP_ICONS_BYTE,
+    ] {
+        iced::advanced::graphics::text::font_system()
+            .write()
+            .unwrap()
+            .load_font(std::borrow::Cow::Borrowed(bytes));
+    }
+    let mut p = panel(SINGLE_WSH);
+    p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "bc1q-example-bitcoin-deposit".into(),
+        btcb2_deposit: "bc1q-example-btcb2-deposit".into(),
+        bitcoin_minimum_sats: 894,
+        btcb2_minimum_sats: 447,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 1,
+    });
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "test-account".into(),
+    });
+    let funds = AddressFunds {
+        confirmed_sats: 100_000,
+        mature_sats: 100_000,
+        largest_mature_sats: 100_000,
+        min_confirmations: 6,
+        ..Default::default()
+    };
+    p.deposit_status = Some(DepositStatus {
+        bitcoin: Ok(funds),
+        btcb2: Ok(funds),
+    });
+    let cache = Cache::default();
+    let menu = crate::app::menu::Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
+    for (width, expanded) in [(1400, false), (900, true)] {
+        p.deposit_details_override = Some(expanded);
+        if expanded {
+            drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
+            assert!(p.funding_status().unwrap().contains("expired"));
+        } else {
+            p.funding_status = Some("Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into());
+        }
+        let expected_status = p.funding_status().unwrap().to_owned();
+        let mut renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .unwrap();
+        let mut element = crate::app::view::vault::claim::view(&menu, &cache, &p);
+        let mut tree = Tree::new(element.as_widget());
+        let size = iced::Size::new(width as f32, 1500.0);
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, size),
+        );
+        let mut labels = Labels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        for expected in [
+            "1. Deposits",
+            "2. Review and sign",
+            "3. Broadcast and confirm",
+            "Replay protection not yet verified.",
+            "Next: transfer the coins back",
+            &expected_status,
+            "Retry verification now",
+        ] {
+            assert!(
+                labels.0.iter().any(|label| label.contains(expected)),
+                "Missing {expected}: {:?}",
+                labels.0
+            );
+        }
+        assert_eq!(
+            labels
+                .0
+                .iter()
+                .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
+            expanded
+        );
+        assert!(
+            !labels
+                .0
+                .iter()
+                .any(|label| label == "Review and sign self-transfers"),
+            "Confirmed deposits cannot enable signing without proof"
+        );
+        if let Ok(directory) = std::env::var("CLAIM_PREVIEW_DIR") {
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Window(iced::window::Event::RedrawRequested(Instant::now())),
+                Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &iced::Rectangle::with_size(size),
+            );
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &coincube_ui::theme::Theme::dark(),
+                &iced::advanced::renderer::Style {
+                    text_color: iced::Color::WHITE,
+                },
+                Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &iced::Rectangle::with_size(size),
+            );
+            let pixels = renderer.screenshot(
+                iced::Size::new(width, 1500),
+                1.0,
+                iced::Color::from_rgb8(22, 22, 22),
+            );
+            image::save_buffer(
+                std::path::Path::new(&directory).join(format!("claim-{width}.png")),
+                &pixels,
+                width,
+                1500,
+                image::ColorType::Rgba8,
+            )
+            .unwrap();
+        }
     }
 }

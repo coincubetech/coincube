@@ -40,7 +40,7 @@ use crate::{
     },
 };
 
-const TITLE: &str = "Claim Bitcoin Blake2b — step 1";
+const TITLE: &str = "Claim Bitcoin Blake2b";
 
 pub fn view<'a>(
     menu: &'a Menu,
@@ -56,56 +56,19 @@ pub fn view<'a>(
             cache,
             Column::new()
                 .spacing(20)
-                .push(header("Checking two-chain deposit addresses…"))
-                .push(p1_regular("Tenshu is scanning this Vault, saving two distinct receive addresses and checking their history on both chains."))
+                .push(workflow_header(0, "Loading your deposit addresses…"))
+                .push(p1_regular("Tenshu is checking this Vault and loading its reserved deposit addresses. Existing deposits will be detected automatically."))
                 .push(button::secondary(None, "Cancel").on_press(Message::Claim(ClaimMessage::Cancel))),
         ),
         StageView::FundingDeposits(addresses) => dashboard(
-            menu,
-            cache,
-            Column::new()
-                .spacing(20)
-                .push(header("Prepare Bitcoin and Bitcoin Blake2b deposits"))
-                .push(p1_regular("These are separate receive addresses in this Vault. The Bitcoin Vault is prepared to detect funds at both indices."))
-                .push(p1_bold(format!("Bitcoin deposit — at least {} sats ({} sat/vB)", addresses.bitcoin_minimum_sats, addresses.bitcoin_rate_sat_vb)))
-                .push(address_row(addresses.bitcoin_deposit.clone(), "Copied Bitcoin deposit address to clipboard"))
-                .push(p1_bold(format!("Bitcoin Blake2b deposit — at least {} sats ({} sat/vB)", addresses.btcb2_minimum_sats, addresses.btcb2_rate_sat_vb)))
-                .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
-                .push(p1_regular("Send only Bitcoin to the Bitcoin address and only BTCB2 to the BTCB2 address. These minimums use fee quotes from when the addresses were prepared; if fees rise before signing, you may need to add funds. Both deposits must later pass independent ancestry, confirmation, ownership and unspent checks; neither deposit by itself splits the coins."))
-                .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats))
-                .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
-                .push_maybe(panel.funding_error().map(|error| card::warning(error.to_string())))
-                .push_maybe((!panel.paired_vault_ready()
-                    && panel.deposit_status().is_some_and(|status| status.ready_for_verification(
-                        addresses.bitcoin_minimum_sats,
-                        addresses.btcb2_minimum_sats,
-                    )))
-                    .then(|| card::warning("Open the paired BTCB2 Cube under this Connect account to verify both deposits for signing.".into())))
-                .push_maybe(panel.funding_error().map(|_| {
-                    button::secondary(Some(icon::reload_icon()), "Retry verification now")
-                        .on_press_maybe((!panel.funding_checking())
-                            .then_some(Message::Claim(ClaimMessage::CheckFunding)))
-                }))
-                .push_maybe(panel.funding_review().map(|review| {
-                    let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
-                    funding_review_view(review, threshold)
-                }))
-                .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some()
-                    && panel.funding_review().is_some())
-                    .then(|| button::primary(None, if panel.paired_signing_pending() {
-                        "Checking both transactions…"
-                    } else {
-                        "Review and sign both transactions"
-                    }).on_press_maybe((!panel.paired_signing_pending() && !panel.funding_checking())
-                        .then_some(Message::Claim(ClaimMessage::SignPair)))))
-                .push(button::secondary(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel))),
+            menu, cache, funding_view(panel, addresses),
         ),
         StageView::PairedRecovery(recovery, checking, error) => dashboard(
             menu,
             cache,
             Column::new()
                 .spacing(20)
-                .push(header("Recorded two-chain claim"))
+                .push(workflow_header(2, "Recorded two-chain claim"))
                 .push(p1_regular("This device has a two-chain claim record. For each possible broadcast, Tenshu checks the exact saved transaction against its own chain. Checking status does not send either transaction."))
                 .push(p1_bold("Bitcoin transaction"))
                 .push_maybe(recovery.bitcoin_txid.map(|id| p2_regular(id.to_string())))
@@ -144,7 +107,7 @@ pub fn view<'a>(
                 let outputs = crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(&review.bitcoin, &review.fork);
                 Column::new()
                 .spacing(20)
-                .push(header("Review Bitcoin broadcast"))
+                .push(workflow_header(2, "Review Bitcoin broadcast"))
                 .push(p1_regular("Review these exact signed transactions. Only Bitcoin will be broadcast now; BTCB2 requires a separate review after Bitcoin confirmation."))
                 .push(p1_bold("Bitcoin — broadcast now"))
                 .push(p2_regular(format!("Txid: {}", review.bitcoin.compute_txid())))
@@ -168,7 +131,7 @@ pub fn view<'a>(
             cache,
             Column::new()
                 .spacing(20)
-                .push(header("Checking Bitcoin broadcast"))
+                .push(workflow_header(2, "Checking Bitcoin broadcast"))
                 .push(p1_regular("Tenshu is rechecking both chains, the signed transactions and Connect policy before attempting the Bitcoin send.")),
         ),
         StageView::PairedForkReview(review) => dashboard(
@@ -178,7 +141,7 @@ pub fn view<'a>(
                 let outputs = crate::app::state::vault::paired_summary::PairedOutputSummary::from_signed_pair(&review.bitcoin, &review.fork);
                 Column::new()
                 .spacing(20)
-                .push(header("Review Bitcoin Blake2b broadcast"))
+                .push(workflow_header(2, "Review Bitcoin Blake2b broadcast"))
                 .push(p1_regular("The recorded Bitcoin transaction has six canonical confirmations. Review the exact signed BTCB2 transaction before broadcasting it."))
                 .push(p1_bold("Bitcoin Blake2b — broadcast now"))
                 .push(p2_regular(format!("Txid: {}", review.fork.compute_txid())))
@@ -201,7 +164,7 @@ pub fn view<'a>(
             cache,
             Column::new()
                 .spacing(20)
-                .push(header("Checking Bitcoin Blake2b broadcast"))
+                .push(workflow_header(2, "Checking Bitcoin Blake2b broadcast"))
                 .push(p1_regular("Tenshu is rechecking both chains, the signed transactions and Connect policy before attempting the BTCB2 send.")),
         ),
         StageView::PairedSign {
@@ -278,6 +241,77 @@ pub fn view<'a>(
     }
 }
 
+/// The stages stay in the same Claim panel; only the active stage expands.
+fn workflow_header<'a>(active: usize, detail: &'static str) -> Element<'a, Message> {
+    let mut content = Column::new().spacing(20).push(header(detail));
+    for (index, (label, summary)) in [
+        ("1. Deposits", "Deposits selected for both chains. Tenshu rechecks them before signing and broadcasting."),
+        ("2. Review and sign", "Both signed self-transfers are recorded on this device."),
+        ("3. Broadcast and confirm", ""),
+    ].iter().enumerate() {
+        if index > active { break; }
+        let mut stage = Column::new().spacing(5).push(p1_bold(*label));
+        if index < active {
+            stage = stage.push(p2_regular(*summary).style(theme::text::secondary));
+        }
+        content = content.push(stage);
+    }
+    content.into()
+}
+
+fn broadcast_stage_summary<'a>() -> Element<'a, Message> {
+    Column::new().spacing(5)
+        .push(p1_bold("3. Broadcast and confirm"))
+        .push(p2_regular("After signing both self-transfers, broadcast Bitcoin and wait for six confirmations. Then review and broadcast BTCB2 here to finish the split.").style(theme::text::secondary))
+        .into()
+}
+
+fn funding_view<'a>(
+    panel: &'a ClaimStep1Panel,
+    addresses: &'a crate::services::claim_workflow::CheckedClaimFundingAddresses,
+) -> Element<'a, Message> {
+    let verified = panel.funding_review().is_some();
+    let expanded = panel.deposit_details_expanded();
+    let details = Column::new().spacing(15)
+        .push(p1_regular("Send Bitcoin to the first address and BTCB2 to the second. Both belong to your paired Vaults. Keep both Cubes open under the same Connect account; all deposit checks happen automatically here."))
+        .push(p1_bold(format!("Bitcoin deposit — at least {} sats ({} sat/vB)", addresses.bitcoin_minimum_sats, addresses.bitcoin_rate_sat_vb)))
+        .push(address_row(addresses.bitcoin_deposit.clone(), "Copied Bitcoin deposit address to clipboard"))
+        .push(p1_bold(format!("Bitcoin Blake2b deposit — at least {} sats ({} sat/vB)", addresses.btcb2_minimum_sats, addresses.btcb2_rate_sat_vb)))
+        .push(address_row(addresses.btcb2_deposit.clone(), "Copied BTCB2 deposit address to clipboard"))
+        .push(p2_regular("These minimums use the current fee estimates. Fees may change before signing. Confirmation alone does not prove replay protection: each deposit must also pass the chain-specific ancestry check."));
+    Column::new().spacing(20)
+        .push(workflow_header(0, "Split your coins between Bitcoin and Bitcoin Blake2b"))
+        .push(deposit_status_view(panel, addresses.bitcoin_minimum_sats, addresses.btcb2_minimum_sats))
+        .push(button::secondary_compact(Some(if expanded { icon::collapsed_icon() } else { icon::collapse_icon() }),
+            if expanded { "Hide deposit addresses and instructions" } else { "Show deposit addresses and instructions" })
+            .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
+        .push_maybe(expanded.then_some(details))
+        .push_maybe(panel.funding_error().map(|error| card::warning(error.to_string())))
+        .push_maybe(panel.funding_status()
+            .filter(|_| !panel.funding_checking() && panel.funding_error().is_none())
+            .map(|status| card::simple(p2_regular(status.to_owned()))))
+        .push_maybe((!panel.paired_vault_ready()).then(|| card::warning(
+            "Keep the paired BTCB2 Cube open and unlocked under the same Connect account. Return here after it loads; Tenshu will verify the Bitcoin deposit in this Vault and the BTCB2 deposit in the paired Vault automatically. No separate check is needed there.".into())))
+        .push_maybe((panel.funding_error().is_some() || (!verified && panel.funding_status().is_some())).then(|| button::secondary_compact(Some(icon::reload_icon()), "Retry verification now")
+            .on_press_maybe((!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding)))))
+        .push(p1_bold("2. Review and sign"))
+        .push(p2_regular("Next: transfer the coins back to your own Vaults."))
+        .push(p1_regular("Each transfer combines the shared coins with a deposit verified to exist only on that chain. That chain-specific input prevents the transfer from replaying on the other chain. Your funds return to your own Vault, minus the network fee."))
+        .push(p2_regular("Review and sign both transfers here. Depositing funds alone does not split your shared coins."))
+        .push_maybe(panel.funding_checking().then(|| p2_regular("Verifying deposit ancestry and preparing both self-transfers…")))
+        .push_maybe(panel.funding_review().map(|review| {
+            let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
+            funding_review_view(review, threshold)
+        }))
+        .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some() && verified).then(|| {
+            button::primary(None, if panel.paired_signing_pending() { "Checking both transactions…" } else { "Review and sign self-transfers" })
+                .on_press_maybe((!panel.paired_signing_pending() && !panel.funding_checking()).then_some(Message::Claim(ClaimMessage::SignPair)))
+        }))
+        .push(broadcast_stage_summary())
+        .push(button::secondary_compact(None, "Close").on_press(Message::Claim(ClaimMessage::Cancel)))
+        .into()
+}
+
 fn funding_review_view(
     review: &VerifiedCoinPairReview,
     threshold: usize,
@@ -315,7 +349,7 @@ fn funding_review_view(
     rows.push(p1_bold("Bitcoin transaction"))
         .push(coin_input_row(
             &review.bitcoin.funding,
-            "Bitcoin-only funding coin",
+            "Bitcoin-only deposit — replay protected",
             Some(review.bitcoin_confirmations),
         ))
         .push(p2_regular(format!(
@@ -327,7 +361,7 @@ fn funding_review_view(
         .push(p1_bold("Bitcoin Blake2b transaction"))
         .push(coin_input_row(
             &review.fork.funding,
-            "BTCB2-only funding coin",
+            "BTCB2-only deposit — replay protected",
             Some(review.fork_confirmations),
         ))
         .push(p2_regular(format!(
@@ -389,23 +423,35 @@ fn deposit_status_view<'a>(
     btcb2_minimum: u64,
 ) -> Element<'a, Message> {
     let status = panel.deposit_status();
-    let verified = panel.funding_review().is_some();
+    let review = panel.funding_review();
     Container::new(
         Column::new()
             .spacing(12)
             .push(p1_bold("Deposit status — updates automatically"))
-            .push(deposit_row(
-                "Bitcoin",
-                status.map(|status| &status.bitcoin),
-                bitcoin_minimum,
-                verified,
-            ))
-            .push(deposit_row(
-                "Bitcoin Blake2b",
-                status.map(|status| &status.btcb2),
-                btcb2_minimum,
-                verified,
-            ))
+            .push(match review {
+                Some(review) => coin_input_row(
+                    &review.bitcoin.funding,
+                    "Bitcoin-only deposit — replay protected",
+                    Some(review.bitcoin_confirmations),
+                ),
+                None => deposit_row(
+                    "Bitcoin",
+                    status.map(|status| &status.bitcoin),
+                    bitcoin_minimum,
+                ),
+            })
+            .push(match review {
+                Some(review) => coin_input_row(
+                    &review.fork.funding,
+                    "BTCB2-only deposit — replay protected",
+                    Some(review.fork_confirmations),
+                ),
+                None => deposit_row(
+                    "Bitcoin Blake2b",
+                    status.map(|status| &status.btcb2),
+                    btcb2_minimum,
+                ),
+            })
             .push_maybe(
                 (panel.deposit_polling() && status.is_some())
                     .then(|| p2_regular("Refreshing deposit status…")),
@@ -426,27 +472,25 @@ fn deposit_row<'a>(
         >,
     >,
     minimum: u64,
-    verified: bool,
 ) -> Element<'a, Message> {
     let (mark, detail) = match observed {
         None => (None, "Checking the reserved address…".to_string()),
         Some(Err(_)) => (Some(false), "Indexer status unavailable; retrying automatically.".to_string()),
         Some(Ok(funds)) if funds.largest_mature_sats >= minimum => (
-            Some(true),
-            format!("{} sats have at least {MIN_CONFIRMATIONS} confirmations. {}", funds.mature_sats,
-                if verified { "Two-chain proof verified." } else { "Waiting for two-chain verification." }),
+            None,
+            format!("{} sats have at least {MIN_CONFIRMATIONS} confirmations. Replay protection not yet verified.", format_u64_as_string(funds.mature_sats, ",")),
         ),
         Some(Ok(funds)) if funds.largest_confirmed_sats >= minimum => (
             None,
-            format!("{} sats confirmed; at least {} of {MIN_CONFIRMATIONS} confirmations. Waiting for more confirmations.", funds.confirmed_sats, funds.min_confirmations),
+            format!("{} sats confirmed; at least {} of {MIN_CONFIRMATIONS} confirmations. Waiting for more confirmations.", format_u64_as_string(funds.confirmed_sats, ","), funds.min_confirmations),
         ),
         Some(Ok(funds)) if funds.pending_sats > 0 => (
             None,
-            format!("{} sats received, awaiting confirmation.", funds.pending_sats),
+            format!("{} sats received, awaiting confirmation.", format_u64_as_string(funds.pending_sats, ",")),
         ),
         Some(Ok(funds)) if funds.confirmed_sats > 0 => (
             Some(false),
-            format!("{} sats confirmed, but no single deposit reaches the {minimum}-sat minimum.", funds.confirmed_sats),
+            format!("{} sats confirmed, but no single deposit reaches the {minimum}-sat minimum.", format_u64_as_string(funds.confirmed_sats, ",")),
         ),
         Some(Ok(_)) => (None, "Waiting for a deposit at this address.".to_string()),
     };
@@ -535,7 +579,7 @@ fn preconditions_view<'a>(
                     .map(|reason| card::warning(reason.to_string())),
             )
             .push(
-                button::primary(None, "Prepare two deposit addresses").on_press_maybe(
+                button::primary(None, "Continue split").on_press_maybe(
                     panel
                         .can_prepare_funding()
                         .then_some(Message::Claim(ClaimMessage::StartFunding)),
@@ -575,10 +619,10 @@ fn preconditions_view<'a>(
 
     Column::new()
         .spacing(20)
-        .push(header("Step 1 of 2 — split on Bitcoin"))
+        .push(workflow_header(0, "Prepare or resume your split"))
         .push(p1_regular("Your paired Blake2b Cube is set up, but creating the Cube alone did not split or claim coins."))
         .push(p1_regular(
-            "Claim requires one confirmed Bitcoin-only coin and one confirmed Bitcoin Blake2b-only coin in this Vault. Both must be verified before either transfer can be signed.",
+            "Deposit Bitcoin into this Vault and BTCB2 into its paired Vault. Tenshu checks both chains here, then combines each chain-specific deposit with the shared coins in a transfer back to your own Vault. You will review and sign both transfers before broadcasting.",
         ))
         .push(
             Container::new(checklist)
@@ -587,6 +631,9 @@ fn preconditions_view<'a>(
                 .width(Length::Fill),
         )
         .push(action)
+        .push(p1_bold("2. Review and sign"))
+        .push(p2_regular("Once both deposits are verified, review the coins, return addresses and fees, then sign the two self-transfers here."))
+        .push(broadcast_stage_summary())
         .into()
 }
 
@@ -839,7 +886,7 @@ fn paired_sign_view<'a>(
         cache,
         Column::new()
             .spacing(20)
-            .push(header("Sign both ordinary Claim transactions"))
+            .push(workflow_header(1, "Sign the two self-transfers"))
             .push_maybe(recording.then(|| p1_regular("Checking both chains and recording the signed pair…")))
             .push(p1_regular("Each transaction spends the same shared coins with its own verified chain-specific deposit. Both PSBTs need this Vault's normal signing threshold. A fresh two-chain check runs before every signer request."))
             .push_maybe(shared_count.map(|count| p1_regular(format!(
@@ -865,7 +912,8 @@ fn paired_sign_view<'a>(
                 None,
                 false,
                 Some(Message::Claim(ClaimMessage::Cancel)),
-            )),
+            ))
+            .push(broadcast_stage_summary()),
     );
     let rendered = match &state.modal {
         Some(modal) => {

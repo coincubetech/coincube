@@ -3987,18 +3987,18 @@ impl App {
         )
     }
 
-    /// Entangled-deposit detection for a Bitcoin Blake2b Cube (`#276` I13):
-    /// after each sync, look up every deposit txid the cache has no answer
-    /// for on the twin Bitcoin chain's Esplora through Connect, one call per
-    /// deposit. Returns `Task::none()` on a Bitcoin-family Cube, without a
-    /// Connect session (a lookup that cannot run is *Unknown*, not "not
-    /// entangled"), or when every deposit is already resolved. Never blocks
-    /// or affects sync.
+    /// Presence badges for either side of the fork, through Connect only.
+    /// Bitcoin-side lookups require the BTCB2 opt-in. Missing transactions
+    /// remain unverified; only the Claim ancestry check supplies proof.
+    /// Runs independently of sync and signing.
     fn entangled_lookup_task(&mut self) -> Task<Message> {
         let Some(wallet) = self.wallet.as_ref() else {
             return Task::none();
         };
-        if !wallet.chain.is_blake2b() {
+        if crate::services::entangled::twin_chain(wallet.chain).is_none()
+            || (!wallet.chain.is_blake2b()
+                && !self.panels.connect.account.bitcoin_blake2b_enabled())
+        {
             return Task::none();
         }
         let Some(client) = self.authenticated_coincube_client() else {
@@ -4524,6 +4524,45 @@ impl App {
     ) {
         if let Some(panel) = &mut self.panels.claim {
             panel.bind_fork_daemon(binding);
+        }
+    }
+
+    pub(crate) fn claim_deposit_display(
+        &self,
+    ) -> Option<(
+        ClaimPairRequest,
+        bitcoin::OutPoint,
+        bitcoin::OutPoint,
+        std::time::Instant,
+    )> {
+        let request = self.claim_pair_request()?;
+        let (bitcoin, fork, expires) = self.panels.claim.as_ref()?.verified_deposit_display()?;
+        Some((request, bitcoin, fork, expires))
+    }
+
+    pub(crate) fn clear_claim_deposit_display(&mut self) {
+        self.cache.split_deposit = None;
+    }
+
+    pub(crate) fn apply_claim_deposit_display(
+        &mut self,
+        request: &ClaimPairRequest,
+        bitcoin: bitcoin::OutPoint,
+        fork: bitcoin::OutPoint,
+        expires: std::time::Instant,
+    ) {
+        // Use the same exact Cube/account/descriptor binding as verification.
+        if self.claim_fork_daemon(request).is_some() {
+            self.cache.split_deposit = Some((fork, expires));
+        } else if self.claim_pair_request().is_some_and(|own| {
+            own.root == request.root
+                && own.fork_cube == request.fork_cube
+                && own.descriptor == request.descriptor
+                && own.session.account == request.session.account
+                && own.session.client.base_url == request.session.client.base_url
+                && own.session.client.token() == request.session.client.token()
+        }) {
+            self.cache.split_deposit = Some((bitcoin, expires));
         }
     }
 

@@ -2764,6 +2764,7 @@ pub enum ClaimMessage {
     BackPairedFork,
     /// Reserve distinct source-Vault addresses for chain-specific deposits.
     StartFunding,
+    ToggleDepositDetails,
     CheckFunding,
     /// Open the two ordinary Claim PSBTs after a fresh pair requalification.
     SignPair,
