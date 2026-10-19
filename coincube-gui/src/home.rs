@@ -5491,7 +5491,12 @@ fn cubes_list_item<'a>(
         ),
         CubeConnectState::Registered => (
             icon::cube_icon().style(theme::text::secondary).into(),
-            "Registered to Connect — no recovery kit".to_string(),
+            if cube.has_imported_bitcoin() && cube.has_recovery_kit() {
+                "Registered to Connect — Recovery Kit needs updating for imported wallet"
+                    .to_string()
+            } else {
+                "Registered to Connect — no recovery kit".to_string()
+            },
         ),
         CubeConnectState::Sovereign if signed_in => match sync_error {
             Some(reason) => (
@@ -6619,6 +6624,28 @@ impl DeleteCubeModal {
                 }
 
                 self.warning = None;
+
+                // Imported wallets have no Vault id. Their database and
+                // journal belong to an exact Cube/import operation, so use
+                // the ownership-checked removal path rather than the generic
+                // wallet deletion below.
+                if self.cube.bitcoin_import.is_some() {
+                    if let Err(error) = Handle::current().block_on(
+                        crate::services::bitcoin_import::remove_cube_import(
+                            &self.network_directory,
+                            &self.cube,
+                        ),
+                    ) {
+                        self.warning = Some(DeleteError::Settings(
+                            settings::SettingsError::WritingFile(error),
+                        ));
+                        return Task::none();
+                    }
+                    self.deleted = true;
+                    return Task::perform(async {}, |_| {
+                        Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted))
+                    });
+                }
 
                 // Delete vault if it exists
                 if let Some(wallet_settings) = &self.wallet_settings {
