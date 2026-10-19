@@ -274,3 +274,96 @@ fn pending_import_preserves_vault_and_duress_capability_boundaries() {
     assert!(WalletId::new("legacy".into(), None).is_legacy());
     assert!(!WalletId::new(format!("imported-v1-{}", "a".repeat(64)), None).is_legacy());
 }
+
+#[tokio::test]
+async fn readiness_requires_matching_identity_complete_history_and_actual_coverage() {
+    use coincubed::commands::{GetInfoDescriptors, GetInfoResult, ImportedWalletSync};
+    let f = Fixture::new().await;
+    f.install().await.unwrap();
+    let mut info = GetInfoResult {
+        version: "test".into(),
+        network: Network::Regtest,
+        chain_id: Some(ChainId::Regtest),
+        block_height: 100,
+        sync: 1.0,
+        descriptors: GetInfoDescriptors {
+            main: WalletDescriptor::Imported(f.wallet.descriptor.clone()),
+        },
+        imported_wallet: Some(ImportedWalletSync {
+            wallet_identity: f
+                .wallet
+                .descriptor
+                .identity(ChainId::Regtest)
+                .unwrap()
+                .to_string(),
+            chain_id: ChainId::Regtest,
+            birthday: 0,
+            initial_lookahead: 200,
+            receive_scanned: 200,
+            change_scanned: 200,
+            history_complete: false,
+        }),
+        rescan_progress: None,
+        refused_reorg_depth: None,
+        chain_divergence: false,
+        timestamp: 0,
+        last_poll_timestamp: Some(1),
+        history_sync: Default::default(),
+        receive_index: 0,
+        change_index: 0,
+    };
+    reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
+        .await
+        .unwrap();
+    assert!(!f.stored().bitcoin_import.unwrap().is_ready());
+    info.imported_wallet.as_mut().unwrap().history_complete = true;
+    info.imported_wallet.as_mut().unwrap().change_scanned = 199;
+    reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
+        .await
+        .unwrap();
+    assert!(!f.stored().bitcoin_import.unwrap().is_ready());
+    info.imported_wallet.as_mut().unwrap().change_scanned = 200;
+    info.sync = f64::NAN;
+    reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
+        .await
+        .unwrap();
+    assert!(!f.stored().bitcoin_import.unwrap().is_ready());
+    info.sync = 1.0;
+    assert!(
+        reconcile_sync(&f.directory, &f.cube.id, Uuid::new_v4(), &info)
+            .await
+            .is_err()
+    );
+    assert!(!f.stored().bitcoin_import.unwrap().is_ready());
+    reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
+        .await
+        .unwrap();
+    assert!(f.stored().bitcoin_import.unwrap().is_ready());
+    info.imported_wallet.as_mut().unwrap().wallet_identity = "0".repeat(64);
+    assert!(
+        reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
+            .await
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn explicit_abandon_clears_only_unpublished_setup() {
+    let f = Fixture::new().await;
+    abandon_pending(&f.directory, &f.cube.id, f.operation())
+        .await
+        .unwrap();
+    assert!(f.stored().bitcoin_import.is_none());
+    assert!(Settings::from_file(&f.directory).unwrap().cubes[0].bitcoin_import_pending());
+    let f = Fixture::new().await;
+    f.install().await.unwrap();
+    assert!(abandon_pending(&f.directory, &f.cube.id, f.operation())
+        .await
+        .is_err());
+    assert!(f.stored().has_imported_bitcoin());
+    assert!(f
+        .directory
+        .coincubed_data_directory(&f.wallet.wallet_id)
+        .sqlite_db_file_path()
+        .is_file());
+}

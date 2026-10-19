@@ -3500,3 +3500,91 @@ mod fork_atomic_save_tests {
         std::fs::remove_dir_all(dir.path().parent().unwrap()).unwrap();
     }
 }
+
+#[cfg(test)]
+mod bitcoin_atomic_import_settings_tests {
+    use super::*;
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn bitcoin_settings_writers_preserve_concurrent_cube_updates_and_owner_permissions() {
+        let root = std::env::temp_dir().join(format!("bitcoin-settings-{}", uuid::Uuid::new_v4()));
+        let directory = NetworkDirectory::new(root.join("bitcoin"));
+        update_settings_file(&directory, Some).await.unwrap();
+        let tasks: Vec<_> = (0..24)
+            .map(|index| {
+                let directory = directory.clone();
+                tokio::spawn(async move {
+                    update_settings_file(&directory, |mut settings| {
+                        settings
+                            .cubes
+                            .push(CubeSettings::new(format!("Cube {index}"), ChainId::Bitcoin));
+                        Some(settings)
+                    })
+                    .await
+                    .unwrap();
+                })
+            })
+            .collect();
+        for task in tasks {
+            task.await.unwrap();
+        }
+        let saved = Settings::from_file(&directory).unwrap();
+        assert_eq!(saved.cubes.len(), 24);
+        let names: HashSet<_> = saved.cubes.iter().map(|cube| &cube.name).collect();
+        assert_eq!(names.len(), 24);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = std::fs::metadata(directory.path().join(SETTINGS_FILE_NAME))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_bitcoin_settings_write_preserves_prior_bytes_and_retry() {
+        let root =
+            std::env::temp_dir().join(format!("bitcoin-settings-cancel-{}", uuid::Uuid::new_v4()));
+        let directory = NetworkDirectory::new(root.join("bitcoin"));
+        update_settings_file(&directory, Some).await.unwrap();
+        let before = std::fs::read(directory.path().join(SETTINGS_FILE_NAME)).unwrap();
+        let (reached, ready) = tokio::sync::oneshot::channel();
+        let task_dir = directory.clone();
+        let task = tokio::spawn(async move {
+            update_fork_settings_file(
+                &task_dir,
+                |mut settings| {
+                    let mut cube = CubeSettings::new("Importing".into(), ChainId::Bitcoin);
+                    cube.bitcoin_import = Some(BitcoinImport::pending());
+                    settings.cubes.push(cube);
+                    Some(settings)
+                },
+                async move {
+                    reached.send(()).unwrap();
+                    std::future::pending::<()>().await;
+                },
+            )
+            .await
+        });
+        ready.await.unwrap();
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        assert_eq!(
+            std::fs::read(directory.path().join(SETTINGS_FILE_NAME)).unwrap(),
+            before
+        );
+        update_settings_file(&directory, |mut settings| {
+            settings
+                .cubes
+                .push(CubeSettings::new("Retry".into(), ChainId::Bitcoin));
+            Some(settings)
+        })
+        .await
+        .unwrap();
+        assert_eq!(Settings::from_file(&directory).unwrap().cubes.len(), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}

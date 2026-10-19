@@ -443,6 +443,90 @@ pub async fn resume(
     finish(directory, &mut journal).await.map(Some)
 }
 
+/// Explicitly abandon setup before a wallet has been published. Ordinary
+/// Cancel does not call this: it leaves the Cube's resumable import intact.
+/// Published/attached wallets require the normal wallet-removal flow instead.
+pub async fn abandon_pending(
+    directory: &NetworkDirectory,
+    cube_id: &str,
+    operation_id: Uuid,
+) -> Result<(), String> {
+    let _lock = tokio::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.path().join("wallet-import.lock"))
+        .await
+        .map_err(|e| e.to_string())?
+        .lock_write()
+        .await
+        .map_err(|e| e.to_string())?;
+    let current = Settings::from_file(directory).map_err(|e| e.to_string())?;
+    let cube = current
+        .cubes
+        .iter()
+        .find(|c| c.id == cube_id)
+        .ok_or("The import Cube no longer exists.")?;
+    let intent = cube
+        .bitcoin_import
+        .as_ref()
+        .ok_or("This Cube has no pending import.")?;
+    if intent.operation_id != operation_id || !intent.is_pending() || cube.vault_wallet_id.is_some()
+    {
+        return Err("This import can no longer be abandoned as an unfinished setup.".into());
+    }
+    let path = journal_path(directory, operation_id);
+    if let Some(journal) = read_journal(&path)? {
+        check_cube(&current, &journal, false)?;
+        if journal.cube_id != cube_id || journal.final_path(directory).exists() {
+            return Err(
+                "This wallet has already been installed. Resume it before changing its attachment."
+                    .into(),
+            );
+        }
+        let stage = journal.stage_path(directory);
+        if stage.exists() {
+            if !owns_directory(&stage, &journal)? {
+                return Err(
+                    "The staged data is not owned by this import; no files were removed.".into(),
+                );
+            }
+            fs::remove_dir_all(&stage).map_err(|e| e.to_string())?;
+            sync_directory(stage.parent().ok_or("Missing staging parent")?)?;
+        }
+    }
+    settings::update_settings_file_checked(directory, |mut settings| {
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|c| c.id == cube_id)
+            .ok_or_else(|| {
+                SettingsError::WritingFile("The import Cube no longer exists.".into())
+            })?;
+        if !cube
+            .bitcoin_import
+            .as_ref()
+            .is_some_and(|intent| intent.operation_id == operation_id && intent.is_pending())
+            || cube.vault_wallet_id.is_some()
+        {
+            return Err(SettingsError::WritingFile(
+                "This Cube's wallet setup changed. Nothing was detached.".into(),
+            ));
+        }
+        cube.bitcoin_import = None;
+        Ok(Some(settings))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    match fs::remove_file(&path) {
+        Ok(()) => sync_directory(path.parent().ok_or("Missing journal parent")?)?,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => (),
+        Err(e) => return Err(e.to_string()),
+    }
+    Ok(())
+}
+
 /// Reconcile durable setup readiness from a daemon positively identified as
 /// this Cube's wallet. Current backend errors remain separate UI freshness
 /// information; a different wallet/session cannot complete this operation.
@@ -492,9 +576,14 @@ pub async fn reconcile_sync(
                 SettingsError::WritingFile("The imported wallet is not installed yet.".into())
             })?
             .clone();
+        wallet
+            .validate(cube.network)
+            .map_err(SettingsError::WritingFile)?;
         if intent.operation_id != operation_id
             || cube.network != status.chain_id
             || wallet.descriptor != *imported
+            || status.birthday != wallet.birthday
+            || status.initial_lookahead < wallet.initial_lookahead
         {
             return Err(SettingsError::WritingFile(
                 "This synchronization result belongs to another wallet or setup operation.".into(),
@@ -503,6 +592,13 @@ pub async fn reconcile_sync(
         if status.history_complete
             && status.receive_scanned >= status.initial_lookahead
             && status.change_scanned >= status.initial_lookahead
+            && info.sync.is_finite()
+            && info.sync >= 1.0
+            && info.rescan_progress.is_none()
+            && !info.history_sync.full_scan_in_progress
+            && info.history_sync.last_failure.is_none()
+            && !info.chain_divergence
+            && info.refused_reorg_depth.is_none()
         {
             intent.stage = BitcoinImportStage::Ready { wallet };
         } else {
