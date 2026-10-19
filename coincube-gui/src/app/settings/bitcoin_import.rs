@@ -1,0 +1,153 @@
+//! Persistent public-wallet attachment. This never contains a seed or an unlock credential.
+use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, ImportedWalletError};
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+use super::{CubeSettings, WalletId};
+use crate::chain::ChainId;
+
+/// The import operation belongs to one Cube for its entire lifetime. Retrying
+/// must reuse this id, rather than creating or selecting another empty Cube.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct BitcoinImport {
+    pub operation_id: Uuid,
+    pub stage: BitcoinImportStage,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "stage", rename_all = "snake_case", deny_unknown_fields)]
+pub enum BitcoinImportStage {
+    PendingSource,
+    Installing { wallet: ImportedWalletAttachment },
+    Syncing { wallet: ImportedWalletAttachment },
+    Ready { wallet: ImportedWalletAttachment },
+}
+
+/// Both public branches are retained independently of the daemon so an
+/// interrupted installation and a Recovery Kit can reconstruct the same wallet.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedWalletAttachment {
+    pub wallet_id: WalletId,
+    pub descriptor: ImportedWalletDescriptor,
+    /// Unix seconds. Zero means scan from genesis, never "use import time".
+    pub birthday: u32,
+    /// Initial address discovery window on each branch. The daemon persists
+    /// subsequent coverage and allocation; this value is not a scan result.
+    pub initial_lookahead: u32,
+}
+
+impl BitcoinImport {
+    pub fn pending() -> Self {
+        Self {
+            operation_id: Uuid::new_v4(),
+            stage: BitcoinImportStage::PendingSource,
+            last_error: None,
+        }
+    }
+
+    /// Includes the staged attachment so restart repair can recover it.
+    pub fn attachment(&self) -> Option<&ImportedWalletAttachment> {
+        match &self.stage {
+            BitcoinImportStage::PendingSource => None,
+            BitcoinImportStage::Installing { wallet }
+            | BitcoinImportStage::Syncing { wallet }
+            | BitcoinImportStage::Ready { wallet } => Some(wallet),
+        }
+    }
+
+    /// Only an installed attachment may be opened as a wallet.
+    pub fn active_attachment(&self) -> Option<&ImportedWalletAttachment> {
+        match &self.stage {
+            BitcoinImportStage::Syncing { wallet } | BitcoinImportStage::Ready { wallet } => {
+                Some(wallet)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(
+            self.stage,
+            BitcoinImportStage::PendingSource | BitcoinImportStage::Installing { .. }
+        )
+    }
+
+    pub fn is_ready(&self) -> bool {
+        matches!(self.stage, BitcoinImportStage::Ready { .. })
+    }
+}
+
+impl ImportedWalletAttachment {
+    pub fn new(
+        descriptor: ImportedWalletDescriptor,
+        chain: ChainId,
+        birthday: u32,
+        initial_lookahead: u32,
+    ) -> Result<Self, String> {
+        let attachment = Self {
+            wallet_id: WalletId::for_imported(&descriptor, chain).map_err(|e| e.to_string())?,
+            descriptor,
+            birthday,
+            initial_lookahead,
+        };
+        attachment.validate(chain)?;
+        Ok(attachment)
+    }
+
+    /// Reject a mismatched identity before using it as a directory name.
+    pub fn validate(&self, chain: ChainId) -> Result<(), String> {
+        if self.wallet_id
+            != WalletId::for_imported(&self.descriptor, chain).map_err(|e| e.to_string())?
+        {
+            return Err(
+                "The imported wallet identity does not match its descriptors and chain.".into(),
+            );
+        }
+        if self.initial_lookahead == 0 || self.initial_lookahead > 10_000 {
+            return Err("Choose an initial address discovery window between 1 and 10,000.".into());
+        }
+        Ok(())
+    }
+}
+
+impl CubeSettings {
+    pub fn has_imported_bitcoin(&self) -> bool {
+        self.bitcoin_import
+            .as_ref()
+            .and_then(BitcoinImport::active_attachment)
+            .is_some()
+    }
+
+    pub fn bitcoin_import_pending(&self) -> bool {
+        self.bitcoin_import
+            .as_ref()
+            .is_some_and(BitcoinImport::is_pending)
+    }
+
+    /// A pending import reserves the Bitcoin slot as well. Callers must not
+    /// silently replace its intent with Vault setup.
+    pub fn can_attach_vault(&self) -> bool {
+        self.bitcoin_import.is_none() && self.vault_wallet_id.is_none()
+    }
+
+    /// Imported signing keys have no supported duress-recovery contract yet.
+    pub fn supports_duress(&self) -> bool {
+        self.bitcoin_import.is_none()
+    }
+}
+
+impl WalletId {
+    pub fn for_imported(
+        descriptor: &ImportedWalletDescriptor,
+        chain: ChainId,
+    ) -> Result<Self, ImportedWalletError> {
+        Ok(Self {
+            timestamp: None,
+            descriptor_checksum: format!("imported-v1-{}", descriptor.identity(chain)?),
+        })
+    }
+}

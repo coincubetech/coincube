@@ -1,5 +1,7 @@
 //! Settings is the module to handle the GUI settings file.
 //! The settings file is used by the GUI to store useful information.
+pub mod bitcoin_import;
+pub use bitcoin_import::{BitcoinImport, BitcoinImportStage, ImportedWalletAttachment};
 pub mod display;
 pub mod fiat;
 pub mod unit;
@@ -8,10 +10,8 @@ use std::collections::{HashMap, HashSet};
 
 use async_fd_lock::LockWrite;
 use coincube_core::descriptors::CoincubeDescriptor;
-use std::io::SeekFrom;
 use tokio::fs::OpenOptions;
-use tokio::io::AsyncSeekExt;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
 use coincube_ui::component::form;
@@ -162,135 +162,13 @@ pub(crate) async fn update_settings_file_checked<F>(
 where
     F: FnOnce(Settings) -> Result<Option<Settings>, SettingsError>,
 {
-    if matches!(
-        network_dir
-            .path()
-            .file_name()
-            .and_then(|name| name.to_str()),
-        Some("bitcoin-blake2b" | "bitcoin-blake2b-testnet4")
-    ) {
-        return update_fork_settings_checked(network_dir, updater).await;
-    }
-    let path = network_dir.path().join(SETTINGS_FILE_NAME);
-
-    // Whether settings.json already existed before we touch anything. Only a
-    // brand-new file is safe to treat as "no prior settings"; a pre-existing
-    // file that reads back empty is corrupt/truncated and must NOT be silently
-    // replaced with defaults (that would drop the stored cube configuration),
-    // so it falls through to a parse error below. Checked before the create.
-    let file_existed = tokio::fs::try_exists(&path).await.unwrap_or(false);
-
-    // Open the settings file, retrying briefly on the transient failures
-    // Windows surfaces for freshly-created files. OpenOptions creates the file
-    // but never its parent directories, so we (re)create the network dir each
-    // attempt; and on Windows a virus scanner or search indexer momentarily
-    // holds a new file (or its just-created parent), so create(true) can return
-    // ERROR_PATH_NOT_FOUND ("os error 3") or a sharing/permission error even
-    // though the path is valid. Both map to NotFound / PermissionDenied — retry
-    // those with a short backoff; surface anything else immediately. This also
-    // hardens the real app, where AV software locks settings.json in the same way.
-    let raw_file = {
-        let mut attempt = 0u32;
-        loop {
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                    SettingsError::WritingFile(format!("Creating settings dir: {}", e))
-                })?;
-            }
-            match OpenOptions::new()
-                .read(true)
-                .write(true)
-                .create(true)
-                .truncate(false)
-                .open(&path)
-                .await
-            {
-                Ok(f) => break f,
-                Err(e)
-                    if attempt < 5
-                        && matches!(
-                            e.kind(),
-                            std::io::ErrorKind::NotFound | std::io::ErrorKind::PermissionDenied
-                        ) =>
-                {
-                    attempt += 1;
-                    tokio::time::sleep(std::time::Duration::from_millis(20 * u64::from(attempt)))
-                        .await;
-                }
-                Err(e) => return Err(SettingsError::ReadingFile(format!("Opening file: {}", e))),
-            }
-        }
-    };
-
-    let mut file = raw_file
-        .lock_write()
-        .await
-        .map_err(|e| SettingsError::ReadingFile(format!("Locking file: {:?}", e)))?;
-
-    // A file we created in this call starts empty and means "no prior
-    // settings". A file that already existed is parsed — including when it reads
-    // back empty, which surfaces as a parse error rather than silently
-    // discarding the previous contents.
-    let settings = if file_existed {
-        let mut file_content = Vec::new();
-        file.read_to_end(&mut file_content)
-            .await
-            .map_err(|e| SettingsError::ReadingFile(format!("Reading file content: {}", e)))?;
-        serde_json::from_slice::<Settings>(&file_content)
-            .map_err(|e| SettingsError::ReadingFile(e.to_string()))?
-    } else {
-        Settings::default()
-    };
-
-    let settings = updater(settings)?;
-
-    // If updater returns None, delete the file. Drop the locked handle first so
-    // the file isn't held open when we unlink it (required on Windows).
-    let Some(settings) = settings else {
-        drop(file);
-        tokio::fs::remove_file(&path)
-            .await
-            .map_err(|e| SettingsError::DeletingFile(e.to_string()))?;
-        return Ok(());
-    };
-
-    let content = serde_json::to_vec_pretty(&settings)
-        .map_err(|e| SettingsError::WritingFile(format!("Failed to serialize settings: {}", e)))?;
-
-    file.seek(SeekFrom::Start(0)).await.map_err(|e| {
-        SettingsError::WritingFile(format!("Failed to seek to start of file: {}", e))
-    })?;
-
-    file.write_all(&content).await.map_err(|e| {
-        tracing::warn!("failed to write to file: {:?}", e);
-        SettingsError::WritingFile(e.to_string())
-    })?;
-
-    file.inner_mut()
-        .set_len(content.len() as u64)
-        .await
-        .map_err(|e| SettingsError::WritingFile(format!("Failed to truncate file: {}", e)))?;
-
-    // Flush and fsync so the bytes are durably on disk, then drop the handle to
-    // release the lock — all before returning. Without this a subsequent reader
-    // (Settings::from_file takes no lock) can observe stale/empty content on
-    // Windows, where dropping an async handle does not guarantee the write has
-    // landed yet.
-    file.flush()
-        .await
-        .map_err(|e| SettingsError::WritingFile(format!("Failed to flush settings: {}", e)))?;
-    file.inner_mut()
-        .sync_all()
-        .await
-        .map_err(|e| SettingsError::WritingFile(format!("Failed to sync settings: {}", e)))?;
-    drop(file);
-
-    restrict_settings_permissions(&path).await;
-
-    Ok(())
+    // Import installation journals settings and wallet storage separately.
+    // Atomic replacement keeps settings readable after a process interruption;
+    // all writers must share its stable lock to avoid losing concurrent edits.
+    update_fork_settings_checked(network_dir, updater).await
 }
 
-/// Fork writers lock a stable sibling inode: replacing the data file must not
+/// Settings writers lock a stable sibling inode: replacing the data file must not
 /// let a waiter acquire an obsolete inode and overwrite a newer writer.
 /// The awaited hook is normally ready; tests pause at the last cancellable point.
 #[cfg(test)]
@@ -311,7 +189,7 @@ where
     .await
 }
 
-/// Apply a fallible fork mutation while holding the same stable writer lock.
+/// Apply a fallible mutation while holding the same stable writer lock.
 /// A conflict returns before creating a temporary replacement file.
 pub(crate) async fn update_fork_settings_checked<F>(
     network_dir: &NetworkDirectory,
@@ -404,6 +282,9 @@ where
         .and_then(|directory| directory.sync_all())
         .map_err(|e| SettingsError::WritingFile(e.to_string()))?;
     drop(lock);
+    // Preserve the existing permission hardening as well as creating each
+    // replacement with owner-only mode above.
+    restrict_settings_permissions(&path).await;
     Ok(())
 }
 
@@ -724,6 +605,9 @@ pub struct CubeSettings {
     /// The Vault wallet for this Cube (optional - may not be set up yet)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vault_wallet_id: Option<WalletId>,
+    /// Imported Bitcoin wallet setup/attachment. Never implies inheritance or Connect hasVault.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bitcoin_import: Option<BitcoinImport>,
     /// The vault's descriptor fingerprint
     /// ([`crate::app::wallet::descriptor_id_fingerprint`]), 8 lowercase hex.
     /// The user-facing vault identity — the same value shown in vault
@@ -757,7 +641,8 @@ pub struct CubeSettings {
     // still deserializes — the values are simply ignored, and dropped on the
     // next settings write. That is the whole migration.
     /// Fingerprint of this Cube's master seed MasterSigner.
-    /// All wallets (Vault, Liquid, Spark) derive from this single seed.
+    /// Cube-owned wallets (Vault, Liquid, Spark) derive from this seed.
+    /// Imported Bitcoin wallets retain their original external signers.
     /// The serde aliases keep existing settings.json files readable without migration.
     #[serde(
         default,
@@ -1020,6 +905,7 @@ impl CubeSettings {
             network: network.into(),
             created_at: chrono::Utc::now().timestamp(),
             vault_wallet_id: None,
+            bitcoin_import: None,
             vault_fingerprint: None,
             // Unknown until `/connect/features` answers for this account. A new
             // cube is not granted Liquid; if the account is, the flag lands on
@@ -1076,6 +962,12 @@ impl CubeSettings {
     /// wallet id and forgot the fingerprint would leave the Cube rendering
     /// "Vault configured" with no id until the next backfill.
     pub fn set_vault(&mut self, vault: VaultIdentity) {
+        // Legacy callers cannot overwrite an imported or reserved Bitcoin slot.
+        // UI/installer handlers report this conflict before reaching this guard.
+        if self.bitcoin_import.is_some() {
+            tracing::warn!("Refused to attach a Vault to a Cube with a Bitcoin import");
+            return;
+        }
         self.vault_wallet_id = Some(vault.wallet_id);
         self.vault_fingerprint = vault.fingerprint;
     }
@@ -1535,7 +1427,7 @@ impl WalletId {
         }
     }
     pub fn is_legacy(&self) -> bool {
-        self.timestamp.is_none()
+        self.timestamp.is_none() && !self.descriptor_checksum.starts_with("imported-v1-")
     }
 }
 

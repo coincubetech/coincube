@@ -1,3 +1,4 @@
+pub mod bitcoin_import;
 pub mod branta;
 pub(crate) mod claim_ancestry_gate;
 pub mod claim_coordinator;
