@@ -252,6 +252,8 @@ impl HistorySync {
 pub struct HistorySyncCache {
     scanning: sync::atomic::AtomicBool,
     checked: sync::atomic::AtomicU64,
+    receive_checked: sync::atomic::AtomicU64,
+    change_checked: sync::atomic::AtomicU64,
     expected: sync::atomic::AtomicU64,
     /// A full scan finished in the backend; the poll that writes it to the database
     /// has not succeeded yet.
@@ -267,6 +269,8 @@ impl HistorySyncCache {
     pub fn begin_full_scan(&self, expected: u64) {
         use sync::atomic::Ordering::{Relaxed, Release};
         self.checked.store(0, Relaxed);
+        self.receive_checked.store(0, Relaxed);
+        self.change_checked.store(0, Relaxed);
         self.expected.store(expected, Relaxed);
         // Release, paired with the Acquire in `snapshot`: a reader that sees this
         // scan running also sees its reset count and estimate, never the previous
@@ -279,11 +283,38 @@ impl HistorySyncCache {
         self.checked.fetch_add(1, sync::atomic::Ordering::Relaxed);
     }
 
+    /// Count an actually queried address on its branch. The generic checked
+    /// count still drives the existing progress indicator.
+    pub fn branch_address_checked(&self, change: bool) {
+        self.address_checked();
+        let counter = if change {
+            &self.change_checked
+        } else {
+            &self.receive_checked
+        };
+        counter.fetch_add(1, sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A backend returned a complete full scan, but the poller has not yet
+    /// persisted its wallet update. Counts remain pending on a failed poll.
+    pub fn pending_full_scan_coverage(&self) -> Option<(u32, u32)> {
+        use sync::atomic::Ordering::{Acquire, Relaxed};
+        self.awaiting_commit.load(Acquire).then(|| {
+            let bounded =
+                |count: &sync::atomic::AtomicU64| count.load(Relaxed).min(i32::MAX as u64) as u32;
+            (
+                bounded(&self.receive_checked),
+                bounded(&self.change_checked),
+            )
+        })
+    }
+
     /// The full scan returned a result for the backend to apply.
     pub fn full_scan_fetched(&self) {
         use sync::atomic::Ordering::Relaxed;
         self.scanning.store(false, Relaxed);
-        self.awaiting_commit.store(true, Relaxed);
+        self.awaiting_commit
+            .store(true, sync::atomic::Ordering::Release);
     }
 
     /// A poll completed: its result, including any full scan it carried, is in the
@@ -2027,6 +2058,27 @@ mod history_sync_cache_tests {
         }
         cache.begin_full_scan(10);
         assert_eq!(cache.snapshot().addresses_checked, 0);
+    }
+
+    #[test]
+    fn branch_coverage_is_available_only_after_a_fetched_scan_and_survives_failed_poll() {
+        let cache = HistorySyncCache::default();
+        cache.begin_full_scan(400);
+        cache.branch_address_checked(false);
+        cache.branch_address_checked(false);
+        cache.branch_address_checked(true);
+        assert_eq!(cache.pending_full_scan_coverage(), None);
+        cache.full_scan_fetched();
+        assert_eq!(cache.pending_full_scan_coverage(), Some((2, 1)));
+        cache.poll_failed("db write", 5);
+        assert_eq!(cache.pending_full_scan_coverage(), Some((2, 1)));
+        cache.poll_succeeded(7);
+        assert_eq!(cache.pending_full_scan_coverage(), None);
+        cache.begin_full_scan(400);
+        assert_eq!(cache.snapshot().addresses_checked, 0);
+        cache.branch_address_checked(true);
+        cache.full_scan_fetched();
+        assert_eq!(cache.pending_full_scan_coverage(), Some((0, 1)));
     }
 
     #[test]

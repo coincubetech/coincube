@@ -694,6 +694,17 @@ pub fn poll(
     if let Some(ticket) = replay_ticket {
         bit.acknowledge_wallet_record_replay(ticket);
     }
+    if let Some((receive_scanned, change_scanned)) = history_sync.pending_full_scan_coverage() {
+        if db_conn.imported_history().is_some() {
+            if let Err(error) = db_conn.complete_import_history(receive_scanned, change_scanned) {
+                let (failure, changed) = history_sync.poll_failed(&error, now);
+                if failure_is_worth_a_warning(&failure, changed) {
+                    log::warn!("Imported history status could not be saved: {error}");
+                }
+                return;
+            }
+        }
+    }
     history_sync.poll_succeeded(now);
     db_conn.set_last_poll(now);
 }

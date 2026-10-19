@@ -381,12 +381,13 @@ impl Esplora {
                             cache.begin_full_scan(expected_addresses);
                         }
                         for (k, spks) in bdk_wallet.index().all_unbounded_spk_iters() {
+                            let change = matches!(k, super::electrum::wallet::KeychainType::Change);
                             request = match &history_sync {
                                 Some(cache) => {
                                     let cache = cache.clone();
                                     request.set_spks_for_keychain(
                                         k,
-                                        spks.inspect(move |_| cache.address_checked()),
+                                        spks.inspect(move |_| cache.branch_address_checked(change)),
                                     )
                                 }
                                 None => request.set_spks_for_keychain(k, spks),

@@ -217,12 +217,13 @@ impl Electrum {
                 ));
             }
             for (k, spks) in spk_iters {
+                let change = matches!(k, wallet::KeychainType::Change);
                 request = match &self.history_sync {
                     Some(cache) => {
                         let cache = cache.clone();
                         request.set_spks_for_keychain(
                             k,
-                            spks.inspect(move |_| cache.address_checked()),
+                            spks.inspect(move |_| cache.branch_address_checked(change)),
                         )
                     }
                     None => request.set_spks_for_keychain(k, spks),
