@@ -101,7 +101,8 @@ fn remove_owned_directory(path: &Path, parent: &Path) -> Result<(), String> {
 
 /// Delete the selected Cube's imported wallet and its exact operation record.
 /// All present storage is checked against the journal and owner marker before
-/// changing settings. A retry can finish file cleanup after settings removal.
+/// mutation. Settings are changed last so an interrupted cleanup remains
+/// visible and can be retried from the Cube's delete dialog.
 pub async fn remove_cube_import(
     directory: &NetworkDirectory,
     expected: &CubeSettings,
@@ -128,7 +129,7 @@ pub async fn remove_cube_import(
         Err(SettingsError::NotFound) => Settings::default(),
         Err(error) => return Err(error.to_string()),
     };
-    checked_live_cube(&settings, expected)?;
+    let cube_present = checked_live_cube(&settings, expected)?;
     let expected_attachment = intent.attachment();
     if let Some(wallet) = expected_attachment {
         wallet.validate(expected.network)?;
@@ -211,6 +212,12 @@ pub async fn remove_cube_import(
         }
         _ => false,
     };
+    // A stale modal after successful deletion carries a wallet id but no
+    // longer proves ownership of a settings row. There is nothing left to
+    // retry when both the Cube and its exact operation records are absent.
+    if !cube_present && journal.is_none() && !stage_present && !final_present {
+        return Ok(());
+    }
     let wallet_id = journal
         .map(|owner| &owner.wallet.wallet_id)
         .or_else(|| expected_attachment.map(|wallet| &wallet.wallet_id));
@@ -433,6 +440,24 @@ mod tests {
         assert!(!journal.exists());
         assert_eq!(fs::read(unrelated).unwrap(), b"unrelated");
         remove_cube_import(&f.directory, &f.cube).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stale_retry_without_owner_does_not_remove_unclaimed_wallet_row() {
+        let mut f = Fixture::new().await;
+        f.install().await;
+        let row = Settings::from_file(&f.directory).unwrap().wallets[0].clone();
+        remove_cube_import(&f.directory, &f.cube).await.unwrap();
+        settings::update_settings_file(&f.directory, |mut settings| {
+            settings.wallets.push(row.clone());
+            Some(settings)
+        })
+        .await
+        .unwrap();
+        remove_cube_import(&f.directory, &f.cube).await.unwrap();
+        let saved = Settings::from_file(&f.directory).unwrap();
+        assert_eq!(saved.wallets.len(), 1);
+        assert_eq!(saved.wallets[0].wallet_id(), f.wallet.wallet_id.clone());
     }
 
     #[tokio::test]
