@@ -317,6 +317,7 @@ pub struct ImportedBitcoinPanel {
     last_broadcast_txid: Option<Txid>,
     broadcast_notice: Option<String>,
     file_notice: Option<String>,
+    connect_token: Option<String>,
     hardware_root: Option<CoincubeDirectory>,
     hardware_wallets: Option<HardwareWallets>,
 }
@@ -358,6 +359,7 @@ impl ImportedBitcoinPanel {
             last_broadcast_txid: None,
             broadcast_notice: None,
             file_notice: None,
+            connect_token: None,
             hardware_root: None,
             hardware_wallets: None,
         }
@@ -366,6 +368,10 @@ impl ImportedBitcoinPanel {
     pub fn set_hardware_root(&mut self, root: crate::dir::CoincubeDirectory) {
         self.source.set_hardware_root(root.clone());
         self.hardware_root = Some(root);
+    }
+
+    pub fn set_connect_client(&mut self, client: Option<&CoincubeClient>) {
+        self.connect_token = client.and_then(CoincubeClient::token).map(str::to_owned);
     }
 
     pub fn is_ready(&self) -> bool {
@@ -632,6 +638,7 @@ impl ImportedBitcoinPanel {
         client: Option<CoincubeClient>,
         connect_epoch: u64,
     ) -> Task<Message> {
+        self.set_connect_client(client.as_ref());
         if self.busy {
             return Task::none();
         }
@@ -849,6 +856,11 @@ impl ImportedBitcoinPanel {
                 let Some(daemon) = self.daemon.clone() else {
                     return Task::none();
                 };
+                // A successful reservation changes the Kit fingerprint. Hide
+                // the previous daemon snapshot until its new durable index is
+                // read back, even if the address request fails midway.
+                self.info = None;
+                self.busy = true;
                 let generation = self.generation;
                 Task::perform(
                     async move { daemon.get_new_address().await.map_err(|e| e.to_string()) },
@@ -1396,8 +1408,12 @@ impl ImportedBitcoinPanel {
                 Task::none()
             }
             ImportEvent::Address(generation, result) if generation == self.generation => {
+                self.busy = false;
                 match result {
-                    Ok(address) => self.address = Some(address),
+                    Ok(address) => {
+                        self.address = Some(address);
+                        return self.refresh();
+                    }
                     Err(error) => self.error = Some(error),
                 }
                 Task::none()
@@ -1539,13 +1555,48 @@ impl ImportedBitcoinPanel {
             .coincubed_data_directory(&wallet.wallet_id)
             .path()
             .join("daemon.toml");
+        let mut config = match Config::from_file(Some(path)) {
+            Ok(config) => config,
+            Err(error) => {
+                self.error = Some(format!("Could not open this Bitcoin wallet: {error}"));
+                return Task::none();
+            }
+        };
+        match config.bitcoin_backend.as_mut() {
+            Some(BitcoinBackend::Esplora(esplora))
+                if esplora.addr == crate::installer::connect_url(ChainId::Bitcoin) =>
+            {
+                self.provider = Provider::Connect;
+                self.endpoint = esplora.addr.clone();
+                if let Some(token) = &self.connect_token {
+                    esplora.token = Some(token.clone());
+                }
+            }
+            Some(BitcoinBackend::Esplora(esplora))
+                if esplora.addr == crate::installer::public_esplora_url(Network::Bitcoin) =>
+            {
+                self.provider = Provider::Public;
+                self.endpoint = esplora.addr.clone();
+            }
+            Some(BitcoinBackend::Esplora(esplora)) => {
+                self.provider = Provider::Esplora;
+                self.endpoint = esplora.addr.clone();
+            }
+            Some(BitcoinBackend::Electrum(electrum)) => {
+                self.provider = Provider::Electrum;
+                self.endpoint = electrum.addr.clone();
+            }
+            _ => {
+                self.error = Some("This imported wallet's Bitcoin server is unsupported.".into());
+                return Task::none();
+            }
+        }
         let generation = self.generation;
         let gate = self.generation_gate.clone();
         self.busy = true;
         Task::perform(
             async move {
                 tokio::task::spawn_blocking(move || {
-                    let config = Config::from_file(Some(path)).map_err(|e| e.to_string())?;
                     let daemon = EmbeddedDaemon::start(config)
                         .map(|d| Arc::new(d) as Arc<dyn Daemon + Send + Sync>)
                         .map_err(|e| e.to_string())?;

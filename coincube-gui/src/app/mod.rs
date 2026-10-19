@@ -6288,11 +6288,15 @@ impl App {
                         | state::imported_bitcoin::ImportEvent::Resumed(_, Ok(Some(_)))
                         | state::imported_bitcoin::ImportEvent::Refreshed(_, Ok(_))
                 );
+                let import_client = self.authenticated_coincube_client();
                 let task = self
                     .panels
                     .imported_bitcoin
                     .as_mut()
-                    .map_or_else(Task::none, |panel| panel.update_event(event));
+                    .map_or_else(Task::none, |panel| {
+                        panel.set_connect_client(import_client.as_ref());
+                        panel.update_event(event)
+                    });
                 if self
                     .panels
                     .imported_bitcoin
