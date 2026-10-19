@@ -219,7 +219,8 @@ macro_rules! launch {
 
 impl State for ImportExportSettingsState {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        let content = view::vault::settings::import_export(menu, cache);
+        let content =
+            view::vault::settings::import_export(menu, cache, self.wallet.supports_inheritance());
         if let Some(modal) = &self.modal {
             modal.view(content)
         } else {
@@ -316,6 +317,9 @@ impl State for ImportExportSettingsState {
                 }
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ExportWallet)) => {
+                if !self.wallet.supports_inheritance() {
+                    return Task::none();
+                }
                 if self.modal.is_none() {
                     let datadir = cache.datadir_path.clone();
                     let config = self.config.clone();
@@ -329,7 +333,7 @@ impl State for ImportExportSettingsState {
                 }
             }
             Message::View(view::Message::Settings(view::SettingsMessage::ImportWallet))
-                if self.modal.is_none() =>
+                if self.modal.is_none() && self.wallet.supports_inheritance() =>
             {
                 let modal = VaultExportModal::new(
                     Some(daemon.clone()),

@@ -3171,7 +3171,7 @@ mod tests {
             None,
             fixture.psbt,
             Vec::new(),
-            &wallet.main_descriptor,
+            wallet.inheritance_descriptor().unwrap(),
             &secp256k1::Secp256k1::verification_only(),
             Network::Signet,
         );

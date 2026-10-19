@@ -12,7 +12,7 @@ use iced::{
 };
 
 use coincube_core::{
-    descriptors::{CoincubeDescriptor, CoincubePolicy},
+    descriptors::CoincubePolicy,
     miniscript::bitcoin::{bip32::Fingerprint, Network},
     wallet_descriptor::WalletDescriptor,
 };
@@ -133,7 +133,11 @@ pub fn bitcoind_settings<'a>(
     )
 }
 
-pub fn import_export<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Message> {
+pub fn import_export<'a>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    supports_inheritance: bool,
+) -> Element<'a, Message> {
     let header = header("Import/Export", SettingsMessage::ImportExportSection);
 
     let description = Row::new()
@@ -217,13 +221,13 @@ pub fn import_export<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Messag
             .push(header)
             .push(description)
             .push(backup_to_connect)
-            .push(export_encrypted_descriptor)
-            .push(export_wallet)
-            .push(import_wallet)
+            .push_maybe(supports_inheritance.then_some(export_encrypted_descriptor))
+            .push_maybe(supports_inheritance.then_some(export_wallet))
+            .push_maybe(supports_inheritance.then_some(import_wallet))
             .push(separator)
             .push(export_labels)
             .push(export_transactions)
-            .push(export_descriptor)
+            .push_maybe(supports_inheritance.then_some(export_descriptor))
             .width(Length::Fill),
     )
 }

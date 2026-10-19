@@ -3,7 +3,7 @@ use super::{cache::Cache, wallet::Wallet};
 use crate::services::foreign_scan::known::{KnownOutput, KnownUnspent};
 use coincube_core::{
     chain::ChainId,
-    miniscript::bitcoin::{self, secp256k1},
+    miniscript::bitcoin::{self},
     wallet_descriptor::WalletDescriptor,
 };
 use std::time::Instant;
@@ -108,7 +108,10 @@ mod tests {
         let script = f
             .descriptor
             .receive_descriptor()
-            .derive(3.into(), &secp256k1::Secp256k1::verification_only())
+            .derive(
+                3.into(),
+                &bitcoin::secp256k1::Secp256k1::verification_only(),
+            )
             .script_pubkey();
         let mut cache = Cache {
             connect_authenticated: true,
@@ -137,7 +140,7 @@ mod tests {
         cache.unswept_notice = Some(Notice {
             proof,
             generation: 7,
-            descriptor: f.descriptor,
+            descriptor: f.descriptor.into(),
         });
         (cache, tx)
     }

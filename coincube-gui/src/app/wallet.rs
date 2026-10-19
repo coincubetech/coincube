@@ -1176,16 +1176,19 @@ mod tests {
             ChainId::Regtest,
         )
         .unwrap();
-        let attachment = settings::ImportedWalletAttachment::new(
-            descriptor.clone(), ChainId::Regtest, 0, 40,
-        )
-        .unwrap();
+        let attachment =
+            settings::ImportedWalletAttachment::new(descriptor.clone(), ChainId::Regtest, 0, 40)
+                .unwrap();
         let mut cube = settings::CubeSettings::new_with_raw_id(
-            "cube-imported".into(), "Imported savings".into(), ChainId::Regtest,
+            "cube-imported".into(),
+            "Imported savings".into(),
+            ChainId::Regtest,
         );
         cube.bitcoin_import = Some(settings::BitcoinImport {
             operation_id: uuid::Uuid::new_v4(),
-            stage: settings::BitcoinImportStage::Ready { wallet: attachment.clone() },
+            stage: settings::BitcoinImportStage::Ready {
+                wallet: attachment.clone(),
+            },
             last_error: None,
         });
 
@@ -1199,7 +1202,11 @@ mod tests {
         assert!(!wallet.id().is_legacy());
         assert_eq!(
             wallet.preview_change_address().script_pubkey(),
-            descriptor.change_descriptor().at_derivation_index(0).unwrap().script_pubkey()
+            descriptor
+                .change_descriptor()
+                .at_derivation_index(0)
+                .unwrap()
+                .script_pubkey()
         );
 
         cube.vault_wallet_id = Some(WalletId::new("unrelated".into(), None));
