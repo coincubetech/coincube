@@ -99,6 +99,18 @@ impl ImportedBackupSource {
     }
 }
 
+fn imported_backup_source_missing(
+    cache: &Cache,
+    local_cube_id: &str,
+    imported: Option<&ImportedBackupSource>,
+) -> bool {
+    imported.is_none()
+        && lookup_cube(cache, local_cube_id).is_some_and(|cube| cube.has_imported_bitcoin())
+}
+
+const IMPORTED_BACKUP_SOURCE_UNAVAILABLE: &str =
+    "Open the imported Bitcoin wallet before updating its Recovery Kit.";
+
 /// How this Cube's seed is re-obtained for the Kit. Both shapes can produce
 /// it; they differ only in the ceremony that unlocks it — a PIN and an Argon2id
 /// pass over the seed file, or a WebAuthn assertion and an HKDF.
@@ -493,6 +505,12 @@ pub fn update_with_imported(
 
         RecoveryKitMessage::Start(mode) => {
             rk.pin.clear();
+            if imported_backup_source_missing(cache, local_cube_id, imported.as_ref()) {
+                rk.flow = RecoveryKitState::Error {
+                    message: IMPORTED_BACKUP_SOURCE_UNAVAILABLE.into(),
+                };
+                return Task::none();
+            }
             // Gate the whole wizard on Connect auth + cube
             // registration *before* we collect anything sensitive
             // (PIN, password). Without those, the final upload in
@@ -1142,6 +1160,10 @@ fn submit_password(
     wallet: Option<Arc<Wallet>>,
     imported: Option<ImportedBackupSource>,
 ) -> Task<Message> {
+    if imported_backup_source_missing(cache, local_cube_id, imported.as_ref()) {
+        set_pw_error(rk, IMPORTED_BACKUP_SOURCE_UNAVAILABLE);
+        return Task::none();
+    }
     // Pull validation + cloneable inputs out of the state without
     // moving fields — we'll set `rk.flow = Uploading { pending }`
     // once all checks pass and the task is on its way. The `pending`
@@ -1489,6 +1511,9 @@ fn start_phone_seal(
     mode: RecoveryKitMode,
     mnemonic: Option<Zeroizing<Vec<String>>>,
 ) -> Task<Message> {
+    if imported_backup_source_missing(cache, local_cube_id, imported.as_ref()) {
+        return fail_phone_preflight(rk, mnemonic, IMPORTED_BACKUP_SOURCE_UNAVAILABLE);
+    }
     let Some(client) = client else {
         return fail_phone_preflight(rk, mnemonic, "Sign in to Connect to back up to your phone.");
     };
