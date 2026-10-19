@@ -266,13 +266,14 @@ pub enum ImportEvent {
     Address(u64, Result<model::GetAddressResult, String>),
     Abandoned(u64, Result<(), String>),
     DraftCreated(u64, Result<(Psbt, Vec<String>), String>),
-    SignedSaved(u64, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
+    SignedSaved(u64, Txid, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
     Broadcasted(u64, Result<(Txid, bool), String>),
-    HardwareSigned(u64, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
+    HardwareSigned(u64, Txid, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
     Expanded(u64, Result<u32, String>),
     FileSaved(u64, Txid, Result<bool, String>),
     FileLoaded(
         u64,
+        Txid,
         Result<Option<(Psbt, Vec<usize>, Option<Txid>)>, String>,
     ),
 }
@@ -988,13 +989,20 @@ impl ImportedBitcoinPanel {
                     return Task::none();
                 };
                 let current = draft.psbt.clone();
+                let draft_id = current.unsigned_tx.compute_txid();
                 let text = self.signed_psbt_text.clone();
                 self.busy = true;
                 let generation = self.generation;
+                let gate = self.generation_gate.clone();
                 Task::perform(
                     async move {
                         let (psbt, counts, final_txid) =
                             import_signed_psbt(&wallet, &current, &text)?;
+                        if gate.load(Ordering::SeqCst) != generation {
+                            return Err(
+                                "This Cube was closed before the signatures were saved.".into()
+                            );
+                        }
                         daemon
                             .update_spend_tx(&psbt)
                             .await
@@ -1002,7 +1010,9 @@ impl ImportedBitcoinPanel {
                         Ok((psbt, counts, final_txid))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::SignedSaved(generation, result))
+                        Message::ImportedBitcoin(ImportEvent::SignedSaved(
+                            generation, draft_id, result,
+                        ))
                     },
                 )
             }
@@ -1059,6 +1069,7 @@ impl ImportedBitcoinPanel {
                     return Task::none();
                 };
                 let current = draft.psbt.clone();
+                let draft_id = current.unsigned_tx.compute_txid();
                 let generation = self.generation;
                 let gate = self.generation_gate.clone();
                 self.busy = true;
@@ -1097,7 +1108,9 @@ impl ImportedBitcoinPanel {
                         Ok(Some((psbt, counts, final_txid)))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::FileLoaded(generation, result))
+                        Message::ImportedBitcoin(ImportEvent::FileLoaded(
+                            generation, draft_id, result,
+                        ))
                     },
                 )
             }
@@ -1233,6 +1246,7 @@ impl ImportedBitcoinPanel {
                     return Task::none();
                 };
                 let current = draft.psbt.clone();
+                let draft_id = current.unsigned_tx.compute_txid();
                 let generation = self.generation;
                 let gate = self.generation_gate.clone();
                 self.busy = true;
@@ -1265,6 +1279,11 @@ impl ImportedBitcoinPanel {
                         }
                         let (psbt, counts, final_txid) =
                             import_signed_psbt(&wallet, &current, &signed.to_string())?;
+                        if gate.load(Ordering::SeqCst) != generation {
+                            return Err(
+                                "The Cube was closed before the signatures were saved.".into()
+                            );
+                        }
                         daemon
                             .update_spend_tx(&psbt)
                             .await
@@ -1272,7 +1291,9 @@ impl ImportedBitcoinPanel {
                         Ok((psbt, counts, final_txid))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::HardwareSigned(generation, result))
+                        Message::ImportedBitcoin(ImportEvent::HardwareSigned(
+                            generation, draft_id, result,
+                        ))
                     },
                 )
             }
@@ -1450,11 +1471,18 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
-            ImportEvent::SignedSaved(generation, result)
-            | ImportEvent::HardwareSigned(generation, result)
+            ImportEvent::SignedSaved(generation, draft_id, result)
+            | ImportEvent::HardwareSigned(generation, draft_id, result)
                 if generation == self.generation =>
             {
                 self.busy = false;
+                if !self
+                    .draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                {
+                    return Task::none();
+                }
                 match result {
                     Ok((psbt, counts, final_txid)) => {
                         let warnings = self
@@ -1516,8 +1544,17 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
-            ImportEvent::FileLoaded(generation, result) if generation == self.generation => {
+            ImportEvent::FileLoaded(generation, draft_id, result)
+                if generation == self.generation =>
+            {
                 self.busy = false;
+                if !self
+                    .draft
+                    .as_ref()
+                    .is_some_and(|draft| draft.psbt.unsigned_tx.compute_txid() == draft_id)
+                {
+                    return Task::none();
+                }
                 match result {
                     Ok(Some((psbt, counts, final_txid))) => {
                         let warnings = self
@@ -2153,8 +2190,10 @@ impl ImportedBitcoinPanel {
             for entry in self.spend_drafts.iter().take(10) {
                 let id = entry.psbt.unsigned_tx.compute_txid();
                 content = content.push(caption(format!("Draft {id}"))).push(
-                    button::secondary(None, "Open saved PSBT").on_press(
-                        view::Message::ImportedBitcoin(ImportMessage::SelectDraft(id)),
+                    button::secondary(None, "Open saved PSBT").on_press_maybe(
+                        (!self.busy).then_some(view::Message::ImportedBitcoin(
+                            ImportMessage::SelectDraft(id),
+                        )),
                     ),
                 );
             }
@@ -2252,5 +2291,78 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("no longer available"));
+    }
+
+    #[test]
+    fn late_signer_results_cannot_replace_a_different_selected_psbt() {
+        let directory =
+            NetworkDirectory::new(std::env::temp_dir().join("import-panel-signing-test"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        let make_psbt = |version| {
+            Psbt::from_unsigned_tx(Transaction {
+                version,
+                lock_time: LockTime::ZERO,
+                input: Vec::new(),
+                output: Vec::new(),
+            })
+            .unwrap()
+        };
+        let prior = make_psbt(transaction::Version::ONE);
+        let selected = make_psbt(transaction::Version::TWO);
+        let prior_id = prior.unsigned_tx.compute_txid();
+        let selected_id = selected.unsigned_tx.compute_txid();
+        panel.draft = Some(ImportedDraft {
+            psbt: selected,
+            signatures_per_input: Vec::new(),
+            final_txid: None,
+            warnings: Vec::new(),
+        });
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::SignedSaved(
+            generation,
+            prior_id,
+            Ok((prior.clone(), vec![], None)),
+        ));
+        assert_eq!(
+            panel
+                .draft
+                .as_ref()
+                .unwrap()
+                .psbt
+                .unsigned_tx
+                .compute_txid(),
+            selected_id
+        );
+        let _ = panel.update_event(ImportEvent::HardwareSigned(
+            generation,
+            prior_id,
+            Ok((prior.clone(), vec![], None)),
+        ));
+        assert_eq!(
+            panel
+                .draft
+                .as_ref()
+                .unwrap()
+                .psbt
+                .unsigned_tx
+                .compute_txid(),
+            selected_id
+        );
+        let _ = panel.update_event(ImportEvent::FileLoaded(
+            generation,
+            prior_id,
+            Ok(Some((prior, vec![], None))),
+        ));
+        assert_eq!(
+            panel
+                .draft
+                .as_ref()
+                .unwrap()
+                .psbt
+                .unsigned_tx
+                .compute_txid(),
+            selected_id
+        );
     }
 }
