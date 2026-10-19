@@ -9,6 +9,10 @@
 //! two-chain flow and its independent final review. `InputProofUnsupported` in
 //! the generic core assessment remains a separate fail-closed boundary: only
 //! the typed, freshly verified ancestry path may reach this gate.
+//!
+//! An explicit `--enable-btcb2-split` launch enables paired live testing for
+//! that process only. Owner authorization for this local testing was given
+//! on 2026-10-19; it is not evidence of completed hardware acceptance.
 
 /// User-facing refusal retained while production ancestry is awaiting approval.
 pub(crate) const CLOSED_MESSAGE: &str = "Bitcoin-only input signing is not available yet.";
@@ -43,7 +47,7 @@ pub(crate) struct Authorization(());
 
 #[allow(dead_code)] // Paired signer and submission remain gated in production.
 pub(crate) fn authorization() -> Option<Authorization> {
-    if ENABLED {
+    if ENABLED || crate::live_split::enabled() {
         return Some(Authorization(()));
     }
     #[cfg(all(test, feature = "regtest-harness"))]

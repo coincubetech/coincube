@@ -493,6 +493,56 @@ fn deposit_instructions_collapse_after_receipt_but_can_be_reopened() {
 }
 
 #[test]
+fn live_split_opt_in_is_process_local_and_still_requires_verified_deposits() {
+    const CHILD: &str = "COINCUBE_LIVE_SPLIT_UNIT_CHILD";
+    if std::env::var(CHILD).as_deref() == Ok("1") {
+        assert!(crate::services::claim_ancestry_gate::authorization().is_none());
+        crate::live_split::enable_for_this_process();
+        assert!(crate::services::claim_ancestry_gate::authorization().is_some());
+        assert!(!crate::services::claim_ancestry_gate::discovery_open(
+            &CoincubeClient::new()
+        ));
+        let mut p = panel(SINGLE_WSH);
+        p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+            bitcoin_deposit: "btc-test-address".into(),
+            btcb2_deposit: "btcb2-test-address".into(),
+            bitcoin_minimum_sats: 1_000,
+            btcb2_minimum_sats: 1_000,
+            bitcoin_rate_sat_vb: 1,
+            btcb2_rate_sat_vb: 1,
+        });
+        let funds = AddressFunds {
+            confirmed_sats: 100_000,
+            mature_sats: 100_000,
+            largest_mature_sats: 100_000,
+            min_confirmations: 6,
+            ..Default::default()
+        };
+        p.deposit_status = Some(DepositStatus {
+            bitcoin: Ok(funds),
+            btcb2: Ok(funds),
+        });
+        let task = p.request_paired_signing(Arc::new(Recording::default()));
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(!p.paired_signing_pending());
+        assert!(matches!(p.stage, Stage::FundingDeposits(_)));
+        return;
+    }
+    let result = std::process::Command::new(std::env::current_exe().unwrap())
+        .args(["--exact", "app::state::vault::claim::tests::live_split_opt_in_is_process_local_and_still_requires_verified_deposits", "--nocapture"])
+        .env(CHILD, "1")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&result.stdout),
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(crate::services::claim_ancestry_gate::authorization().is_none());
+}
+
+#[test]
 fn claim_funding_results_require_the_current_panel_and_session() {
     let (_sender, receiver) = watch::channel(7);
     let (fork_sender, fork_receiver) = watch::channel(1);
@@ -5641,7 +5691,7 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             "Replay protection not yet verified.",
             "Next: transfer the coins back",
             "Funds received at both addresses",
-            "Signing this split is not available in this version",
+            "Split signing is disabled for this launch",
             "Review and sign self-transfers",
             &expected_status,
             "Retry verification now",

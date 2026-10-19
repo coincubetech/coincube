@@ -300,7 +300,7 @@ fn funding_view<'a>(
         .push(p1_regular("Each transfer combines the shared coins with a deposit verified to exist only on that chain. That chain-specific input prevents the transfer from replaying on the other chain. Your funds return to your own Vault, minus the network fee."))
         .push(p2_regular("Depositing funds alone does not split your shared coins. Both deposits must pass replay-protection verification before you can review and sign the self-transfers."))
         .push_maybe((!signing_available).then(|| card::warning(
-            "Signing this split is not available in this version of Tenshu. You can monitor your deposits here, but completing the split requires a version that supports signing both self-transfers.".into())))
+            "Split signing is disabled for this launch. Restart Tenshu with --enable-btcb2-split to enable live testing of signing and broadcast reviews.".into())))
         .push_maybe((signing_available && !verified && !panel.funding_checking()).then(|| p2_regular(
             if !panel.paired_vault_ready() {
                 "Review and sign is waiting for the paired BTCB2 Cube. Open and unlock it under the same Connect account."
