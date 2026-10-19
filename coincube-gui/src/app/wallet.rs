@@ -13,7 +13,10 @@ use coincube_core::{miniscript::bitcoin, signer::MasterSigner};
 use crate::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
+use coincube_core::miniscript::bitcoin::hashes::Hash as _;
 use coincube_core::miniscript::bitcoin::{Network, OutPoint, Transaction, Txid};
+use coincube_core::miniscript::{descriptor::DescriptorPublicKey, ForEachKey};
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 use super::settings::{WalletId, WalletSettings};
 
@@ -130,42 +133,6 @@ pub struct RecentBroadcast {
     pub network: Network,
 }
 
-/// Public Bitcoin wallet imported into a Cube. Deliberately has no Cube seed
-/// signer or inheritance policy; signing is performed by the original wallet's
-/// devices or external PSBT signers.
-#[derive(Debug, Clone)]
-pub struct ImportedWallet {
-    pub cube_id: String,
-    pub name: String,
-    pub chain: ChainId,
-    pub attachment: settings::ImportedWalletAttachment,
-}
-
-impl ImportedWallet {
-    pub fn from_cube(cube: &settings::CubeSettings) -> Result<Self, String> {
-        if cube.vault_wallet_id.is_some() {
-            return Err("This Cube has conflicting Bitcoin wallet attachments.".into());
-        }
-        let attachment = cube
-            .bitcoin_import
-            .as_ref()
-            .and_then(settings::BitcoinImport::active_attachment)
-            .ok_or("Finish importing this wallet before opening it.")?
-            .clone();
-        attachment.validate(cube.network)?;
-        Ok(Self {
-            cube_id: cube.id.clone(),
-            name: cube.name.clone(),
-            chain: cube.network,
-            attachment,
-        })
-    }
-
-    pub fn wallet_id(&self) -> &WalletId {
-        &self.attachment.wallet_id
-    }
-}
-
 #[derive(Debug, Clone)]
 pub struct Wallet {
     pub name: String,
@@ -175,7 +142,9 @@ pub struct Wallet {
     /// and whether the replay-protection model is shown at all. Defaults to
     /// Bitcoin; the loader sets it from `CubeSettings::network`.
     pub chain: ChainId,
-    pub main_descriptor: CoincubeDescriptor,
+    /// The same Bitcoin-wallet model for created Vaults and imported accounts.
+    /// Inheritance and Cube signing are available only for the Vault variant.
+    pub main_descriptor: WalletDescriptor,
     pub descriptor_checksum: String,
     pub pinned_at: Option<i64>,
     // TODO: We could replace these two fields with `keys: HashMap<Fingerprint, settings::KeySetting>`.
@@ -226,17 +195,32 @@ pub struct Wallet {
 }
 
 impl Wallet {
-    pub fn new(main_descriptor: CoincubeDescriptor) -> Self {
+    pub fn new(main_descriptor: impl Into<WalletDescriptor>) -> Self {
+        let main_descriptor = main_descriptor.into();
+        let (name, descriptor_checksum) = match &main_descriptor {
+            WalletDescriptor::Vault(vault) => (
+                wallet_name(vault),
+                vault
+                    .to_string()
+                    .split_once('#')
+                    .map(|(_, checksum)| checksum)
+                    .unwrap_or("")
+                    .to_owned(),
+            ),
+            WalletDescriptor::Imported(imported) => (
+                DEFAULT_WALLET_NAME.to_owned(),
+                WalletId::for_imported(imported, imported.chain())
+                    .expect("validated imported descriptor has an identity")
+                    .descriptor_checksum,
+            ),
+        };
         Self {
-            name: wallet_name(&main_descriptor),
+            name,
             alias: None,
-            chain: ChainId::Bitcoin,
-            descriptor_checksum: main_descriptor
-                .to_string()
-                .split_once('#')
-                .map(|(_, checksum)| checksum)
-                .unwrap()
-                .to_string(),
+            chain: main_descriptor
+                .as_imported()
+                .map_or(ChainId::Bitcoin, |imported| imported.chain()),
+            descriptor_checksum,
             pinned_at: None,
             main_descriptor,
             keys_aliases: HashMap::new(),
@@ -252,6 +236,45 @@ impl Wallet {
             locked_seed_keys: HashSet::new(),
             recently_broadcast: Arc::new(Mutex::new(HashMap::new())),
         }
+    }
+
+    /// Open an installed imported account as this same GUI Bitcoin wallet.
+    /// The attachment is public policy only; no Cube seed becomes its signer.
+    pub fn from_imported_cube(cube: &settings::CubeSettings) -> Result<Self, String> {
+        if cube.vault_wallet_id.is_some() {
+            return Err("This Cube has conflicting Bitcoin wallet attachments.".into());
+        }
+        let attachment = cube
+            .bitcoin_import
+            .as_ref()
+            .and_then(settings::BitcoinImport::active_attachment)
+            .ok_or("Finish importing this wallet before opening it.")?;
+        attachment.validate(cube.network)?;
+        let mut wallet = Self::new(attachment.descriptor.clone());
+        if wallet.id() != attachment.wallet_id {
+            return Err("The imported wallet storage identity changed.".into());
+        }
+        wallet.name = cube.name.clone();
+        wallet.chain = cube.network;
+        Ok(wallet)
+    }
+
+    pub fn is_imported(&self) -> bool {
+        self.main_descriptor.as_imported().is_some()
+    }
+
+    pub fn inheritance_descriptor(&self) -> Option<&CoincubeDescriptor> {
+        self.main_descriptor.as_vault()
+    }
+
+    pub fn supports_inheritance(&self) -> bool {
+        self.inheritance_descriptor().is_some()
+    }
+
+    /// No inheritance clock exists for a public descriptor import.
+    pub fn recovery_timelock(&self) -> Option<u16> {
+        self.inheritance_descriptor()
+            .map(CoincubeDescriptor::first_timelock_value)
     }
 
     /// Acquires the `recently_broadcast` lock, recovering from
@@ -458,11 +481,12 @@ impl Wallet {
     /// exactly like a fresh one would. Never use it for a spend that will be
     /// signed — that spend must let the daemon allocate a fresh index.
     pub fn preview_change_address(&self) -> bitcoin::Address<bitcoin::address::NetworkUnchecked> {
-        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
         self.main_descriptor
             .change_descriptor()
-            .derive(0.into(), &secp)
+            .derive(0)
+            .expect("validated wallet has a derivable change branch")
             .address(self.chain.bitcoin_network())
+            .expect("validated wallet has a standard change address")
             .as_unchecked()
             .clone()
     }
@@ -552,19 +576,47 @@ impl Wallet {
     /// would conflate the wallet with one of its signers — so the
     /// identifier is hashed from the descriptor string itself.
     pub fn id_fingerprint(&self) -> Fingerprint {
-        descriptor_id_fingerprint(&self.main_descriptor)
+        match &self.main_descriptor {
+            WalletDescriptor::Vault(vault) => descriptor_id_fingerprint(vault),
+            WalletDescriptor::Imported(imported) => {
+                let digest = imported
+                    .identity(imported.chain())
+                    .expect("validated imported descriptor retains its chain identity");
+                let mut bytes = [0; 4];
+                bytes.copy_from_slice(&digest.to_byte_array()[..4]);
+                Fingerprint::from(bytes)
+            }
+        }
+    }
+
+    pub fn vault_id_fingerprint(&self) -> Option<Fingerprint> {
+        self.inheritance_descriptor().map(descriptor_id_fingerprint)
     }
 
     pub fn descriptor_keys(&self) -> HashSet<Fingerprint> {
-        let info = self.main_descriptor.policy();
         let mut descriptor_keys = HashSet::new();
-        for fingerprint in info.primary_path().thresh_origins().1.keys() {
-            descriptor_keys.insert(*fingerprint);
-        }
-        for path_info in info.recovery_paths().values() {
-            for fingerprint in path_info.thresh_origins().1.keys() {
+        if let Some(vault) = self.inheritance_descriptor() {
+            let info = vault.policy();
+            for fingerprint in info.primary_path().thresh_origins().1.keys() {
                 descriptor_keys.insert(*fingerprint);
             }
+            for path_info in info.recovery_paths().values() {
+                for fingerprint in path_info.thresh_origins().1.keys() {
+                    descriptor_keys.insert(*fingerprint);
+                }
+            }
+        } else {
+            self.main_descriptor
+                .receive_descriptor()
+                .as_descriptor()
+                .for_each_key(|key| {
+                    if let DescriptorPublicKey::XPub(xpub) = key {
+                        if let Some((fingerprint, _)) = &xpub.origin {
+                            descriptor_keys.insert(*fingerprint);
+                        }
+                    }
+                    true
+                });
         }
         descriptor_keys
     }
@@ -1097,6 +1149,61 @@ mod tests {
         let a = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
         let b = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
         assert_eq!(a.id_fingerprint(), b.id_fingerprint());
+    }
+
+    #[test]
+    fn imported_cube_opens_as_wallet_without_inheritance_or_cube_signer() {
+        use coincube_core::{
+            miniscript::bitcoin::{
+                bip32::{DerivationPath, Xpriv, Xpub},
+                secp256k1::Secp256k1,
+            },
+            wallet_descriptor::ImportedWalletDescriptor,
+        };
+
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Regtest, &[7; 32]).unwrap();
+        let path = DerivationPath::from_str("m/84h/1h/0h").unwrap();
+        let account = master.derive_priv(&secp, &path).unwrap();
+        let key = format!(
+            "[{}/84h/1h/0h]{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Regtest,
+        )
+        .unwrap();
+        let attachment = settings::ImportedWalletAttachment::new(
+            descriptor.clone(), ChainId::Regtest, 0, 40,
+        )
+        .unwrap();
+        let mut cube = settings::CubeSettings::new_with_raw_id(
+            "cube-imported".into(), "Imported savings".into(), ChainId::Regtest,
+        );
+        cube.bitcoin_import = Some(settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: settings::BitcoinImportStage::Ready { wallet: attachment.clone() },
+            last_error: None,
+        });
+
+        let wallet = Wallet::from_imported_cube(&cube).unwrap();
+        assert_eq!(wallet.id(), attachment.wallet_id);
+        assert_eq!(wallet.name, cube.name);
+        assert!(wallet.is_imported());
+        assert!(!wallet.supports_inheritance());
+        assert_eq!(wallet.recovery_timelock(), None);
+        assert!(wallet.signer.is_none());
+        assert!(!wallet.id().is_legacy());
+        assert_eq!(
+            wallet.preview_change_address().script_pubkey(),
+            descriptor.change_descriptor().at_derivation_index(0).unwrap().script_pubkey()
+        );
+
+        cube.vault_wallet_id = Some(WalletId::new("unrelated".into(), None));
+        assert!(Wallet::from_imported_cube(&cube).is_err());
     }
 
     /// Grid-seed provenance is tri-state, and the third state is the one that

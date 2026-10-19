@@ -98,7 +98,9 @@ impl CreateSpendPanel {
         sync_status: SyncStatus,
         bitcoin_unit: BitcoinDisplayUnit,
     ) -> Self {
-        let timelock = wallet.as_ref().main_descriptor.first_timelock_value();
+        let timelock = wallet
+            .recovery_timelock()
+            .expect("recovery spend is Vault-only");
         Self {
             draft: step::TransactionDraft::new(network, Some(timelock)),
             current: 0,

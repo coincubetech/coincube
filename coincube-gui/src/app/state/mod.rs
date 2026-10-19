@@ -97,8 +97,9 @@ pub fn redirect(menu: Menu) -> Task<Message> {
 pub fn coins_summary(
     coins: &[Coin],
     tip_height: u32,
-    timelock: u16,
+    timelock: impl Into<Option<u16>>,
 ) -> (Amount, Amount, Vec<OutPoint>, Option<u32>) {
+    let timelock = timelock.into();
     let mut balance = Amount::from_sat(0);
     let mut unconfirmed_balance = Amount::from_sat(0);
     let mut expiring_coins = Vec::new();
@@ -113,18 +114,19 @@ pub fn coins_summary(
                 if coin.block_height.is_none() {
                     continue;
                 }
-                let seq = remaining_sequence(coin, tip_height, timelock);
-                // Warn user for coins that are expiring in less than 10 percent of
-                // the timelock.
-                if seq <= timelock as u32 * 10 / 100 {
-                    expiring_coins.push(coin.outpoint);
-                }
-                if let Some(last) = &mut remaining_seq {
-                    if seq < *last {
-                        *last = seq
+                if let Some(timelock) = timelock {
+                    let seq = remaining_sequence(coin, tip_height, timelock);
+                    // Only Vault coins have a recovery deadline.
+                    if seq <= timelock as u32 * 10 / 100 {
+                        expiring_coins.push(coin.outpoint);
                     }
-                } else {
-                    remaining_seq = Some(seq);
+                    if let Some(last) = &mut remaining_seq {
+                        if seq < *last {
+                            *last = seq
+                        }
+                    } else {
+                        remaining_seq = Some(seq);
+                    }
                 }
             } else {
                 unconfirmed_balance += coin.amount;

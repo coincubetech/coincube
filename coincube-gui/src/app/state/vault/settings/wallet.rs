@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use iced::{Subscription, Task};
 
-use coincube_core::{descriptors::CoincubeDescriptor, miniscript::bitcoin::bip32::Fingerprint};
+use coincube_core::{miniscript::bitcoin::bip32::Fingerprint, wallet_descriptor::WalletDescriptor};
 
 use coincube_ui::{
     component::form,
@@ -45,7 +45,7 @@ impl Modal {
 pub struct WalletSettingsState {
     data_dir: CoincubeDirectory,
     warning: Option<Error>,
-    descriptor: CoincubeDescriptor,
+    descriptor: WalletDescriptor,
     keys_aliases: Vec<(Fingerprint, form::Value<String>)>,
     wallet: Arc<Wallet>,
     wallet_alias: form::Value<String>,
@@ -109,7 +109,7 @@ impl WalletSettingsState {
     /// build a BTCB2 Vault, and the signing picker sends an unregistered
     /// device here.
     fn hardware_registration_allowed(&self) -> bool {
-        true
+        self.wallet.supports_inheritance()
     }
 }
 
@@ -292,7 +292,9 @@ impl State for WalletSettingsState {
                 view::SettingsMessage::ExportEncryptedDescriptor,
             )) => {
                 if self.modal.is_none() {
-                    let descriptor = self.wallet.main_descriptor.clone();
+                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                        return Task::none();
+                    };
                     let modal = VaultExportModal::new(
                         Some(daemon),
                         ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
@@ -463,8 +465,11 @@ async fn register_wallet(
     wallet: Arc<Wallet>,
     daemon: Arc<dyn Daemon + Sync + Send>,
 ) -> Result<Arc<Wallet>, Error> {
+    let descriptor = wallet.inheritance_descriptor().ok_or_else(|| {
+        Error::Unexpected("This account uses an imported public descriptor.".into())
+    })?;
     let hmac = hw
-        .register_wallet(&wallet.name, &wallet.main_descriptor.to_string())
+        .register_wallet(&wallet.name, &descriptor.to_string())
         .await
         .map_err(Error::from)?;
 
@@ -906,7 +911,10 @@ mod chain_tests {
 
             assert_eq!(
                 *device.calls.lock().unwrap(),
-                vec![(wallet.name.clone(), wallet.main_descriptor.to_string())],
+                vec![(
+                    wallet.name.clone(),
+                    wallet.inheritance_descriptor().unwrap().to_string()
+                )],
                 "{:?}",
                 chain
             );

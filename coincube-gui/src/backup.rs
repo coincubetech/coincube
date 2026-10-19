@@ -71,11 +71,15 @@ pub enum Error {
     Daemon(String),
     TxTimeMissing,
     ChainIdentity,
+    UnsupportedWallet,
 }
 
 impl Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Error::UnsupportedWallet => {
+                write!(f, "Use the imported wallet Recovery Kit for this account")
+            }
             Error::ChainIdentity => write!(f, "Backup chain identity does not match this wallet"),
             Error::DescriptorMissing => write!(f, "Backup: descriptor missing"),
             Error::NotSingleWallet => write!(f, "Backup: Zero or several wallets"),
@@ -171,7 +175,12 @@ impl Backup {
         proprietary.insert(COINCUBE_VERSION_KEY.to_string(), VERSION.0.into());
 
         let name = wallet.name.clone();
-        let descriptor = wallet.main_descriptor.to_string();
+        // This legacy backup format stores one Cube inheritance descriptor.
+        // Imported accounts have two public branches and their own Kit format.
+        let descriptor = wallet
+            .inheritance_descriptor()
+            .ok_or(Error::UnsupportedWallet)?
+            .to_string();
         let keys = wallet.keys();
 
         let network_dir = datadir.network_directory(chain);

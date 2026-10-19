@@ -76,9 +76,10 @@ pub fn view<'a>(
                     (!panel.funding_checking()).then_some(Message::Claim(ClaimMessage::CheckFunding))
                 ))
                 .push_maybe(panel.funding_status().map(|status| p1_regular(status.to_string())))
-                .push_maybe(panel.funding_review().map(|review| {
-                    let (threshold, _) = panel.wallet().main_descriptor.policy().primary_path().thresh_origins();
-                    funding_review_view(review, threshold)
+                .push_maybe(panel.funding_review().and_then(|review| {
+                    let descriptor = panel.wallet().inheritance_descriptor()?;
+                    let (threshold, _) = descriptor.policy().primary_path().thresh_origins();
+                    Some(funding_review_view(review, threshold))
                 }))
                 .push_maybe((crate::services::claim_ancestry_gate::authorization().is_some()
                     && panel.funding_review().is_some())
@@ -709,16 +710,18 @@ fn sign_view<'a>(
                 "Sign with this Vault's keys"
             }))
             .push_maybe(error.map(|reason| card::warning(reason.to_string())))
-            .push(psbt::spend_overview_with_cancel(
-                &state.tx,
-                &state.desc_policy,
-                &state.wallet.keys_aliases,
-                currently_signing,
-                state.saved,
-                None,
-                state.broadcast_ready(cache),
-                (!finalizing).then_some(Message::Claim(ClaimMessage::Cancel)),
-            )),
+            .push_maybe(state.desc_policy.as_ref().map(|policy| {
+                psbt::spend_overview_with_cancel(
+                    &state.tx,
+                    policy,
+                    &state.wallet.keys_aliases,
+                    currently_signing,
+                    state.saved,
+                    None,
+                    state.broadcast_ready(cache),
+                    (!finalizing).then_some(Message::Claim(ClaimMessage::Cancel)),
+                )
+            })),
     );
     match &state.modal {
         Some(modal) => {
@@ -776,16 +779,16 @@ fn paired_sign_view<'a>(
                 "Bitcoin Blake2b — return to the paired Vault"
             }))
             .push_maybe(error.map(|reason| card::warning(reason.to_string())))
-            .push(psbt::spend_overview_with_cancel(
+            .push_maybe(state.desc_policy.as_ref().map(|policy| psbt::spend_overview_with_cancel(
                 &state.tx,
-                &state.desc_policy,
+                policy,
                 &state.wallet.keys_aliases,
                 currently_signing,
                 state.saved,
                 None,
                 false,
                 Some(Message::Claim(ClaimMessage::Cancel)),
-            )),
+            ))),
     );
     let rendered = match &state.modal {
         Some(modal) => {

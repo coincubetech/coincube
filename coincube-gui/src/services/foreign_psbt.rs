@@ -114,15 +114,17 @@ impl TargetAddressEvidence {
         {
             return Err(ForeignPsbtError::TargetChanged);
         }
-        let vault_fingerprint = descriptor_id_fingerprint(&wallet.main_descriptor).to_string();
+        let vault = wallet
+            .inheritance_descriptor()
+            .ok_or(ForeignPsbtError::TargetChanged)?;
+        let vault_fingerprint = descriptor_id_fingerprint(vault).to_string();
         if cube.vault_fingerprint.as_deref() != Some(vault_fingerprint.as_str())
             || reserved.derivation_index.is_hardened()
         {
             return Err(ForeignPsbtError::TargetChanged);
         }
         let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        let derived = wallet
-            .main_descriptor
+        let derived = vault
             .receive_descriptor()
             .derive(reserved.derivation_index, &secp)
             .address(wallet.chain.bitcoin_network());
@@ -176,7 +178,7 @@ fn check_target_fresh(
 ) -> Result<(), ForeignPsbtError> {
     let info = &reservation.info;
     if info.chain_id != Some(ChainId::BitcoinBlake2b)
-        || info.descriptors.main.as_vault() != Some(&wallet.main_descriptor)
+        || info.descriptors.main.as_vault() != wallet.inheritance_descriptor()
     {
         return Err(ForeignPsbtError::TargetChanged);
     }

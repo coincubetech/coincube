@@ -3,8 +3,8 @@ use super::{cache::Cache, wallet::Wallet};
 use crate::services::foreign_scan::known::{KnownOutput, KnownUnspent};
 use coincube_core::{
     chain::ChainId,
-    descriptors::CoincubeDescriptor,
     miniscript::bitcoin::{self, secp256k1},
+    wallet_descriptor::WalletDescriptor,
 };
 use std::time::Instant;
 
@@ -12,11 +12,10 @@ use std::time::Instant;
 pub struct Notice {
     pub proof: KnownUnspent,
     pub generation: u64,
-    pub descriptor: CoincubeDescriptor,
+    pub descriptor: WalletDescriptor,
 }
 
-pub fn owned(cache: &Cache, descriptor: &CoincubeDescriptor) -> Vec<KnownOutput> {
-    let secp = secp256k1::Secp256k1::verification_only();
+pub fn owned(cache: &Cache, descriptor: &WalletDescriptor) -> Vec<KnownOutput> {
     cache
         .coins()
         .iter()
@@ -31,13 +30,14 @@ pub fn owned(cache: &Cache, descriptor: &CoincubeDescriptor) -> Vec<KnownOutput>
             {
                 return None;
             }
-            let script = if coin.is_change {
+            let branch = if coin.is_change {
                 descriptor.change_descriptor()
             } else {
                 descriptor.receive_descriptor()
-            }
-            .derive(coin.derivation_index, &secp)
-            .script_pubkey();
+            };
+            let script = branch
+                .script_pubkey(u32::from(coin.derivation_index))
+                .ok()?;
             if script != coin.address.script_pubkey() {
                 return None;
             }
@@ -128,8 +128,12 @@ mod tests {
             is_from_self: false,
         });
         let (tx, rx) = tokio::sync::watch::channel(7);
-        let proof =
-            KnownUnspent::for_notice_test(owned(&cache, &f.descriptor), 7, rx, Instant::now());
+        let proof = KnownUnspent::for_notice_test(
+            owned(&cache, &f.descriptor.clone().into()),
+            7,
+            rx,
+            Instant::now(),
+        );
         cache.unswept_notice = Some(Notice {
             proof,
             generation: 7,
@@ -304,8 +308,8 @@ mod tests {
         let script = wallet
             .main_descriptor
             .receive_descriptor()
-            .derive(3.into(), &secp256k1::Secp256k1::verification_only())
-            .script_pubkey();
+            .script_pubkey(3)
+            .unwrap();
         app.cache.daemon_cache.coins[0].address =
             Address::from_script(&script, Network::Bitcoin).unwrap();
         app.cache.connect_authenticated = true;

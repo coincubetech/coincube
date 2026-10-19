@@ -279,11 +279,12 @@ impl State for ImportExportSettingsState {
                 view::SettingsMessage::ExportEncryptedDescriptor,
             )) => {
                 if self.modal.is_none() {
+                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                        return Task::none();
+                    };
                     let modal = VaultExportModal::new(
                         Some(daemon),
-                        ImportExportType::ExportEncryptedDescriptor(Box::new(
-                            self.wallet.main_descriptor.clone(),
-                        )),
+                        ImportExportType::ExportEncryptedDescriptor(Box::new(descriptor)),
                     );
                     launch!(self, modal, true);
                 }
@@ -292,9 +293,12 @@ impl State for ImportExportSettingsState {
                 view::SettingsMessage::ExportPlaintextDescriptor,
             )) => {
                 if self.modal.is_none() {
+                    let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                        return Task::none();
+                    };
                     let modal = VaultExportModal::new(
                         Some(daemon),
-                        ImportExportType::Descriptor(self.wallet.main_descriptor.clone()),
+                        ImportExportType::Descriptor(descriptor),
                     );
                     launch!(self, modal, true);
                 }

@@ -142,7 +142,7 @@ pub(crate) fn claim_signing_dispatch(message: &Message) -> bool {
 
 pub struct PsbtState {
     pub wallet: Arc<Wallet>,
-    pub desc_policy: CoincubePolicy,
+    pub desc_policy: Option<CoincubePolicy>,
     pub tx: SpendTx,
     pub saved: bool,
     pub warning: Option<Error>,
@@ -217,15 +217,17 @@ impl PsbtState {
         let replay = wallet.chain.is_blake2b().then(|| {
             // `SpendTx::new` counted `partial_sigs` only; on BTCB2 the unified
             // records count too (see `replay::spend_info_for_chain`).
-            if let Ok(sigs) =
-                replay::spend_info_for_chain(wallet.chain, &wallet.main_descriptor, &tx.psbt)
-            {
-                tx.sigs = sigs;
+            if let Some(descriptor) = wallet.inheritance_descriptor() {
+                if let Ok(sigs) = replay::spend_info_for_chain(wallet.chain, descriptor, &tx.psbt) {
+                    tx.sigs = sigs;
+                }
             }
             ReplayReview::new(&tx.psbt, &secp256k1::Secp256k1::verification_only())
         });
         Self {
-            desc_policy: wallet.main_descriptor.policy(),
+            desc_policy: wallet
+                .inheritance_descriptor()
+                .map(|descriptor| descriptor.policy()),
             wallet,
             labels_edited: LabelsEdited::default(),
             recipient_identities: None,
@@ -588,12 +590,12 @@ impl PsbtState {
     /// sessions drained). Idempotent — safe to call after every signature
     /// merge, decoupled from the persist round-trip.
     fn reconcile_and_maybe_close(&mut self, cache: &Cache) -> Task<Message> {
-        if let Ok(sigs) = replay::spend_info_for_chain(
-            self.wallet.chain,
-            &self.wallet.main_descriptor,
-            &self.tx.psbt,
-        ) {
-            self.tx.sigs = sigs;
+        if let Some(descriptor) = self.wallet.inheritance_descriptor() {
+            if let Ok(sigs) =
+                replay::spend_info_for_chain(self.wallet.chain, descriptor, &self.tx.psbt)
+            {
+                self.tx.sigs = sigs;
+            }
         }
         self.refresh_replay();
         let recheck = self.revalidate_entanglement(cache);
@@ -1091,12 +1093,14 @@ impl PsbtState {
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
-                self.tx.sigs = replay::spend_info_for_chain(
-                    self.wallet.chain,
-                    &self.wallet.main_descriptor,
-                    &self.tx.psbt,
-                )
-                .expect("already check in psbt import logic");
+                let Some(descriptor) = self.wallet.inheritance_descriptor() else {
+                    return Task::done(Message::View(view::Message::ShowError(
+                        "Use the imported wallet signer for this PSBT.".to_string(),
+                    )));
+                };
+                self.tx.sigs =
+                    replay::spend_info_for_chain(self.wallet.chain, descriptor, &self.tx.psbt)
+                        .expect("already checked in PSBT import logic");
                 self.refresh_replay();
             }
             // Final dispatch is gated on the **current** cache, not on the
@@ -1139,11 +1143,15 @@ impl PsbtState {
     }
 
     pub fn view<'a>(&'a self, cache: &'a Cache) -> Element<'a, view::Message> {
+        let Some(policy) = self.desc_policy.as_ref() else {
+            return iced::widget::text("Use the imported wallet signing screen for this PSBT.")
+                .into();
+        };
         let content = view::vault::psbt::psbt_view(
             cache,
             &self.tx,
             self.saved,
-            &self.desc_policy,
+            policy,
             &self.wallet.keys_aliases,
             self.labels_edited.cache(),
             cache.network,
@@ -2033,7 +2041,10 @@ impl SignModal {
     /// vault-creation "Set keys" layout: one card per descriptor path (primary
     /// + each recovery), each listing its keys with per-key signability.
     fn signing_paths(&self) -> Vec<view::vault::psbt::SigningPath> {
-        let policy = self.wallet.main_descriptor.policy();
+        let Some(descriptor) = self.wallet.inheritance_descriptor() else {
+            return Vec::new();
+        };
+        let policy = descriptor.policy();
         let mut paths = Vec::new();
         // The transaction spends through exactly one path: the primary when it
         // has no recovery timelock, else the recovery path matching that
@@ -2714,7 +2725,14 @@ impl Modal for SignModal {
             Message::Updated(res) => match res {
                 Ok(()) => match replay::spend_info_for_chain(
                     self.wallet.chain,
-                    &self.wallet.main_descriptor,
+                    match self.wallet.inheritance_descriptor() {
+                        Some(descriptor) => descriptor,
+                        None => {
+                            return Task::done(Message::View(view::Message::ShowError(
+                                "Use the imported wallet signing screen for this PSBT.".into(),
+                            )));
+                        }
+                    },
                     &tx.psbt,
                 ) {
                     Ok(sigs) => tx.sigs = sigs,
@@ -2998,7 +3016,10 @@ async fn sign_psbt(
     // original PSBT, so its full derivations are preserved in the daemon's
     // stored copy.
     let mut pruned_psbt = wallet
-        .main_descriptor
+        .inheritance_descriptor()
+        .ok_or_else(|| {
+            Error::Unexpected("Use the imported wallet signer for this account.".into())
+        })?
         .prune_bip32_derivs_last_avail(psbt.clone())
         .map_err(Error::Desc)?;
     hw.sign_tx(&mut pruned_psbt).await.map_err(Error::from)?;

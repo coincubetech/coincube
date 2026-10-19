@@ -229,17 +229,25 @@ impl LocalSigningState {
     /// pairing offer would target the wrong vault id.
     pub(crate) fn apply_wallet(&mut self, wallet: &Wallet) {
         self.wallet_chain = Some(wallet.chain);
+        let Some(descriptor) = wallet.inheritance_descriptor() else {
+            // Imported public accounts have no Cube Keychain pairing policy.
+            self.selected_key = None;
+            self.descriptor_sha256.clear();
+            self.vault_key_fingerprints.clear();
+            self.vault_keys.clear();
+            self.wallet_fingerprint = None;
+            self.wallet_signer_fingerprints.clear();
+            self.keychain_keys_recorded = false;
+            return;
+        };
         use coincube_core::miniscript::DescriptorPublicKey;
         use sha2::{Digest, Sha256};
-        let hash = hex::encode(Sha256::digest(
-            wallet.main_descriptor.to_string().as_bytes(),
-        ));
+        let hash = hex::encode(Sha256::digest(descriptor.to_string().as_bytes()));
         if hash != self.descriptor_sha256 {
             self.selected_key = None;
         }
         self.descriptor_sha256 = hash;
-        let spendable: Vec<_> = wallet
-            .main_descriptor
+        let spendable: Vec<_> = descriptor
             .spendable_keys()
             .into_iter()
             .filter_map(|key| {

@@ -76,11 +76,8 @@ impl VaultOverview {
         tip_height: i32,
         show_rescan_prompt: bool,
     ) -> Self {
-        let (balance, unconfirmed_balance, expiring_coins, remaining_seq) = coins_summary(
-            coins,
-            tip_height as u32,
-            wallet.main_descriptor.first_timelock_value(),
-        );
+        let (balance, unconfirmed_balance, expiring_coins, remaining_seq) =
+            coins_summary(coins, tip_height as u32, wallet.recovery_timelock());
 
         Self {
             wallet,
@@ -202,7 +199,7 @@ impl State for VaultOverview {
                     ) = coins_summary(
                         &coins,
                         cache.blockheight() as u32,
-                        self.wallet.main_descriptor.first_timelock_value(),
+                        self.wallet.recovery_timelock(),
                     );
                 }
             },

@@ -1314,7 +1314,8 @@ fn submit_password(
     // Build descriptor blob when we have a live wallet.
     let descriptor_blob = wallet
         .as_ref()
-        .map(|w| RecoveredWalletBlob::Vault(descriptor_blob_from_wallet(w, &cube_uuid, &network)));
+        .and_then(|w| descriptor_blob_from_wallet(w, &cube_uuid, &network))
+        .map(RecoveredWalletBlob::Vault);
 
     rk.flow = RecoveryKitState::Uploading { pending };
 
@@ -1582,7 +1583,8 @@ fn start_phone_seal(
     };
     let descriptor_blob = wallet
         .as_ref()
-        .map(|w| RecoveredWalletBlob::Vault(descriptor_blob_from_wallet(w, &cube_uuid, &network)));
+        .and_then(|w| descriptor_blob_from_wallet(w, &cube_uuid, &network))
+        .map(RecoveredWalletBlob::Vault);
     // Connect blinding (PR D3 / API A3): the recipients list now serves the
     // phone key's xpub as an envelope sealed to this Cube's encryption key, so
     // the seal needs that key to read the recipient before sealing to it.
@@ -1838,7 +1840,8 @@ pub(crate) fn descriptor_blob_from_wallet(
     wallet: &Wallet,
     cube_uuid: &str,
     network: &str,
-) -> DescriptorBlob {
+) -> Option<DescriptorBlob> {
+    let descriptor = wallet.inheritance_descriptor()?;
     // The descriptor string embeds the full signer xpubs inline, so
     // restore is self-contained from `vault.descriptor` alone. The
     // separate `signers` array is metadata the UI can show pre-restore
@@ -1868,7 +1871,7 @@ pub(crate) fn descriptor_blob_from_wallet(
             xpub: String::new(),
         })
         .collect();
-    DescriptorBlob {
+    Some(DescriptorBlob {
         version: BLOB_VERSION,
         cube: DescriptorBlobCube {
             uuid: cube_uuid.to_string(),
@@ -1876,7 +1879,7 @@ pub(crate) fn descriptor_blob_from_wallet(
         },
         vault: DescriptorBlobVault {
             name: wallet.name.clone(),
-            descriptor: wallet.main_descriptor.to_string(),
+            descriptor: descriptor.to_string(),
             change_descriptor: None,
             signers,
             // `pinned_at` is the Vault's `WalletId` timestamp — when it was
@@ -1887,7 +1890,7 @@ pub(crate) fn descriptor_blob_from_wallet(
                 .pinned_at
                 .and_then(|t| <u32 as std::convert::TryFrom<i64>>::try_from(t).ok()),
         },
-    }
+    })
 }
 
 /// SHA-256 over the canonical JSON of the descriptor blob. Used as
@@ -1928,7 +1931,7 @@ pub fn live_descriptor_fingerprint(
     cube_uuid: &str,
     network: &str,
 ) -> Option<String> {
-    let blob = descriptor_blob_from_wallet(wallet, cube_uuid, network);
+    let blob = descriptor_blob_from_wallet(wallet, cube_uuid, network)?;
     descriptor_blob_fingerprint(&blob)
 }
 

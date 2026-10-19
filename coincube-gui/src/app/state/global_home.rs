@@ -2440,17 +2440,23 @@ impl State for GlobalHome {
                         match result {
                             Ok((psbt, wallet, (datadir_path, network))) => {
                                 if let Some(wallet) = wallet {
-                                    let sigs =
-                                        match wallet.main_descriptor.partial_spend_info(&psbt) {
-                                            Ok(info) => info,
-                                            Err(e) => {
-                                                let err_msg =
-                                                    format!("Failed to get signature info: {}", e);
-                                                return Task::done(Message::View(
-                                                    view::Message::ShowError(err_msg),
-                                                ));
-                                            }
-                                        };
+                                    let Some(descriptor) = wallet.inheritance_descriptor() else {
+                                        return Task::done(Message::View(
+                                            view::Message::ShowError(
+                                                "This transfer requires a Cube Vault.".into(),
+                                            ),
+                                        ));
+                                    };
+                                    let sigs = match descriptor.partial_spend_info(&psbt) {
+                                        Ok(info) => info,
+                                        Err(e) => {
+                                            let err_msg =
+                                                format!("Failed to get signature info: {}", e);
+                                            return Task::done(Message::View(
+                                                view::Message::ShowError(err_msg),
+                                            ));
+                                        }
+                                    };
 
                                     let spend_amount =
                                         psbt.unsigned_tx.output.iter().map(|out| out.value).sum();
@@ -2462,7 +2468,7 @@ impl State for GlobalHome {
                                         .iter()
                                         .map(|txin| txin.sequence)
                                         .any(|seq| seq.is_relative_lock_time());
-                                    let max_vbytes = wallet.main_descriptor.unsigned_tx_max_vbytes(
+                                    let max_vbytes = descriptor.unsigned_tx_max_vbytes(
                                         &psbt.unsigned_tx,
                                         use_primary_path,
                                     );
@@ -4037,7 +4043,8 @@ mod tests {
             let secp =
                 coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
             let expected = wallet
-                .main_descriptor
+                .inheritance_descriptor()
+                .unwrap()
                 .change_descriptor()
                 .derive(0.into(), &secp)
                 .address(coincube_core::miniscript::bitcoin::Network::Bitcoin);

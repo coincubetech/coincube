@@ -316,8 +316,11 @@ impl DefineSpend {
     /// Use the first timelock if this is a primary path spend and otherwise the same
     /// timelock as used for the recovery.
     pub fn timelock(&self) -> u16 {
-        self.recovery_timelock
-            .unwrap_or_else(|| self.wallet.main_descriptor.first_timelock_value())
+        self.recovery_timelock.unwrap_or_else(|| {
+            self.wallet
+                .recovery_timelock()
+                .expect("legacy spend is Vault-only")
+        })
     }
 
     // If `is_redraft`, the validation of recipients will take into account
@@ -487,13 +490,7 @@ impl DefineSpend {
                 .as_unchecked()
                 .clone()
         } else {
-            self.wallet
-                .main_descriptor
-                .change_descriptor()
-                .derive(0.into(), &self.curve)
-                .address(self.network)
-                .as_unchecked()
-                .clone()
+            self.wallet.preview_change_address()
         };
 
         let feerate_vb = self.feerate.value.parse::<u64>().expect("Checked before");
@@ -728,7 +725,7 @@ impl Step for DefineSpend {
                 let (balance, unconfirmed_balance, _, _) = crate::app::state::coins_summary(
                     cache.coins(),
                     cache.blockheight().max(0) as u32,
-                    self.wallet.main_descriptor.first_timelock_value(),
+                    self.wallet.recovery_timelock(),
                 );
                 self.balance = balance;
                 self.unconfirmed_balance = unconfirmed_balance;
@@ -871,7 +868,11 @@ impl Step for DefineSpend {
                         self.lookup_ticket = if self.recipients.is_empty() { None } else { branta::begin(self.network) };
                         let ticket = self.lookup_ticket.clone();
                         let recipients = self.recipients.clone();
-                        let descriptor = self.wallet.main_descriptor.clone();
+                        let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+                            return Task::done(Message::View(view::Message::ShowError(
+                                "Use the imported wallet Send screen for this account.".into(),
+                            )));
+                        };
                         let requests: Vec<_> = self.recipients.iter().enumerate().filter_map(|(row, recipient)| {
                             let address = recipient.destination().ok()?.require_network(self.network).ok()?;
                             LookupRequest::bitcoin(&recipient.address.value, &address).map(|request| (row, request))
@@ -1559,11 +1560,15 @@ impl SaveSpend {
 impl Step for SaveSpend {
     fn load(&mut self, _coins: &[Coin], _tip_height: i32, draft: &TransactionDraft) {
         let (psbt, warnings) = draft.generated.clone().unwrap();
+        let Some(descriptor) = self.wallet.inheritance_descriptor() else {
+            self.spend = None;
+            return;
+        };
         let mut tx = SpendTx::new(
             None,
             psbt,
             draft.inputs.clone(),
-            &self.wallet.main_descriptor,
+            descriptor,
             &self.curve,
             draft.network,
         );
@@ -1624,13 +1629,17 @@ impl Step for SaveSpend {
 
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
         let (psbt_state, warnings) = self.spend.as_ref().unwrap();
+        let Some(policy) = psbt_state.desc_policy.as_ref() else {
+            return iced::widget::text("Use the imported wallet Send screen for this account.")
+                .into();
+        };
         let content = view::vault::spend::spend_view(
             menu,
             cache,
             &psbt_state.tx,
             warnings,
             psbt_state.saved,
-            &psbt_state.desc_policy,
+            policy,
             &psbt_state.wallet.keys_aliases,
             psbt_state.labels_edited.cache(),
             cache.network,
@@ -1772,8 +1781,10 @@ pub struct RecoveryPath {
 }
 
 fn recovery_paths(wallet: &Wallet, coins: &[Coin], tip_height: i32) -> Vec<RecoveryPath> {
-    wallet
-        .main_descriptor
+    let Some(descriptor) = wallet.inheritance_descriptor() else {
+        return Vec::new();
+    };
+    descriptor
         .policy()
         .recovery_paths()
         .iter()
@@ -1914,10 +1925,7 @@ mod tests {
         assert_eq!(primary.send_max_to_recipient, None);
         assert!(primary.coins[0].1);
         assert_eq!(primary.coins[0].0.outpoint, coins[1].outpoint);
-        assert_eq!(
-            primary.timelock(),
-            wallet.main_descriptor.first_timelock_value()
-        );
+        assert_eq!(primary.timelock(), wallet.recovery_timelock().unwrap());
 
         let recovery = DefineSpend::new(
             Network::Bitcoin,

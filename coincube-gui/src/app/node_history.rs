@@ -78,6 +78,10 @@ pub enum Start {
 
 impl Context {
     pub async fn run(self, action: Action) -> Result<Outcome, String> {
+        let vault = self
+            .wallet
+            .inheritance_descriptor()
+            .ok_or("Node recovery requires a Cube Vault with inheritance policy")?;
         let config = self
             .daemon
             .config()
@@ -93,7 +97,7 @@ impl Context {
             self.chain,
             &self.config,
             &wallet_path,
-            &self.wallet.main_descriptor.to_string(),
+            &vault.to_string(),
         )?;
         let directory = retention::directory(&self.datadir, self.network);
         let path = history::recovery_path(&directory, &wallet_path);
@@ -284,8 +288,7 @@ impl Context {
                 status.job = Some(job);
                 return Ok(Outcome { status, node });
             }
-            rpc.prepare_wallet(&wallet_path, &self.wallet.main_descriptor, range)
-                .await?;
+            rpc.prepare_wallet(&wallet_path, vault, range).await?;
             job.wallet_ready = true;
             if job.import_requested {
                 let source = match config.bitcoin_backend.as_ref() {

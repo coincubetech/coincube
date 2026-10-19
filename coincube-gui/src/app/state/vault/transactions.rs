@@ -165,6 +165,7 @@ impl State for VaultTransactionsPanel {
                 tx,
                 self.labels_edited.cache(),
                 cache.bitcoin_unit,
+                self.wallet.supports_inheritance(),
             );
             match &self.modal {
                 VaultTransactionsModal::CreateRbf(rbf) => rbf.view(content),
@@ -287,6 +288,9 @@ impl State for VaultTransactionsPanel {
                     self.refresh_displayed();
                 }
             },
+            Message::RbfModal(_, _, _) if !self.wallet.supports_inheritance() => {
+                return Task::none();
+            }
             Message::RbfModal(tx, is_cancel, res) => match res {
                 Ok(descendant_txids) => {
                     let modal = CreateRbfModal::new(*tx, is_cancel, descendant_txids);
@@ -397,6 +401,9 @@ impl State for VaultTransactionsPanel {
                 self.modal = VaultTransactionsModal::None;
             }
             Message::View(view::Message::CreateRbf(view::CreateRbfMessage::New(is_cancel))) => {
+                if !self.wallet.supports_inheritance() {
+                    return Task::none();
+                }
                 if let Some(tx) = &self.selected_tx {
                     if tx.fee_amount.is_some() {
                         let tx = tx.clone();
