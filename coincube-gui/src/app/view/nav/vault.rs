@@ -42,12 +42,6 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             |m| matches!(m, Menu::Vault(VaultSubMenu::PSBTs(_))),
         ),
         SubItem::new(
-            "Recovery",
-            recovery_icon,
-            Menu::Vault(VaultSubMenu::Recovery),
-            |m| matches!(m, Menu::Vault(VaultSubMenu::Recovery)),
-        ),
-        SubItem::new(
             "Settings",
             settings_icon,
             Menu::Vault(VaultSubMenu::Settings(Some(
@@ -56,6 +50,20 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             |m| matches!(m, Menu::Vault(VaultSubMenu::Settings(_))),
         ),
     ];
+    // Imported descriptors retain the original wallet's spending policy and
+    // signers. The Vault inheritance recovery route cannot operate on them.
+    if !ctx.has_imported_bitcoin {
+        let settings_at = items.len().saturating_sub(1);
+        items.insert(
+            settings_at,
+            SubItem::new(
+                "Recovery",
+                recovery_icon,
+                Menu::Vault(VaultSubMenu::Recovery),
+                |m| matches!(m, Menu::Vault(VaultSubMenu::Recovery)),
+            ),
+        );
+    }
     // Bitcoin Blake2b claim entry. Hidden rather than disabled when the
     // account has no fork grant: an account without it has no BTCB2 at all,
     // which is not a per-Cube state the user can act on. Inserted before
@@ -64,7 +72,10 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
         && ctx.has_vault
         && ctx.btcb2_server_enabled
         && ctx.btcb2_claim_resume;
-    if resume_fork || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available() {
+    if !ctx.has_imported_bitcoin
+        && (resume_fork
+            || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available())
+    {
         let settings_at = items.len().saturating_sub(1);
         items.insert(
             settings_at,
@@ -115,6 +126,32 @@ mod tests {
 
     fn labels(items: &[SubItem]) -> Vec<&str> {
         items.iter().map(|i| i.label).collect()
+    }
+
+    #[test]
+    fn imported_wallet_uses_common_vault_routes_without_inheritance_actions() {
+        let status = crate::app::ConnectionStatus::default();
+        let mut context = ctx(&status, crate::chain::ChainId::Bitcoin, true, false);
+        context.has_vault = false;
+        context.has_imported_bitcoin = true;
+        assert_eq!(
+            labels(&items(&context)),
+            [
+                "Overview",
+                "Send",
+                "Receive",
+                "Coins",
+                "Transactions",
+                "PSBTs",
+                "Settings"
+            ]
+        );
+        let settings = crate::app::view::nav::tertiary::items_for(
+            &Menu::Vault(VaultSubMenu::Settings(None)),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(labels(&settings), ["Node", "Wallet", "Import/Export"]);
     }
 
     /// With the account grant the claim entry appears, immediately before

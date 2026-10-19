@@ -38,7 +38,7 @@ use iced::{widget::text_input, Subscription, Task};
 use crate::{
     app::{
         cache::Cache,
-        menu::Menu,
+        menu::{Menu, SettingsOption, VaultSubMenu},
         message::Message,
         settings::{self, BitcoinImport, BitcoinImportStage, ImportedWalletAttachment},
         state::State,
@@ -292,6 +292,9 @@ pub struct ImportedBitcoinPanel {
     review: Option<ImportedWalletAttachment>,
     review_connect_epoch: Option<u64>,
     daemon: Option<Arc<dyn Daemon + Send + Sync>>,
+    /// True only before the App adopts a newly installed daemon. Once bound,
+    /// the App owns shutdown and cache polling for the shared Vault runtime.
+    owns_daemon: bool,
     generation: u64,
     generation_gate: Arc<AtomicU64>,
     busy: bool,
@@ -303,7 +306,6 @@ pub struct ImportedBitcoinPanel {
     address: Option<model::GetAddressResult>,
     show_details: bool,
     abandoned: bool,
-    show_send: bool,
     send_recipient: String,
     send_amount: String,
     send_feerate: String,
@@ -335,6 +337,7 @@ impl ImportedBitcoinPanel {
             review,
             review_connect_epoch: None,
             daemon: None,
+            owns_daemon: false,
             generation,
             generation_gate: Arc::new(AtomicU64::new(generation)),
             busy: false,
@@ -346,7 +349,6 @@ impl ImportedBitcoinPanel {
             address: None,
             show_details: false,
             abandoned: false,
-            show_send: false,
             send_recipient: String::new(),
             send_amount: String::new(),
             send_feerate: "5".into(),
@@ -427,6 +429,101 @@ impl ImportedBitcoinPanel {
     pub fn backup_daemon(&self) -> Option<Arc<dyn Daemon + Send + Sync>> {
         self.import.active_attachment()?;
         self.daemon.clone()
+    }
+
+    pub fn runtime_daemon(&self) -> Option<Arc<dyn Daemon + Send + Sync>> {
+        self.import.active_attachment()?;
+        self.daemon.clone()
+    }
+
+    /// Bind the daemon opened by the ordinary Vault loader. The panel shares
+    /// that handle for import progress and PSBT operations; App owns shutdown.
+    pub fn bind_runtime(&mut self, daemon: Arc<dyn Daemon + Send + Sync>) -> Task<Message> {
+        if self
+            .daemon
+            .as_ref()
+            .is_some_and(|current| !Arc::ptr_eq(current, &daemon))
+        {
+            self.error = Some("A different Bitcoin wallet is already open for this Cube.".into());
+            return Task::none();
+        }
+        self.generation = fresh_generation();
+        self.generation_gate
+            .store(self.generation, Ordering::SeqCst);
+        self.busy = false;
+        self.daemon = Some(daemon);
+        self.owns_daemon = false;
+        if self.import.active_attachment().is_some() {
+            self.refresh()
+        } else {
+            Task::none()
+        }
+    }
+
+    /// Hand the panel-started daemon to App after an exact-Cube attachment is
+    /// validated. Both sides retain an Arc, but only App will stop it.
+    pub fn handoff_runtime(&mut self) -> Option<Arc<dyn Daemon + Send + Sync>> {
+        let daemon = self.runtime_daemon()?;
+        self.owns_daemon = false;
+        Some(daemon)
+    }
+
+    /// Seed the normal Vault cache only from a complete, identity-bound scan.
+    /// A partial scan never becomes a zero balance in the shared dashboard.
+    pub fn sync_cache(&self, cache: &mut Cache) -> bool {
+        if !self.is_ready() {
+            return false;
+        }
+        let (Some(info), Some(coins)) = (&self.info, &self.coins) else {
+            return false;
+        };
+        cache.daemon_cache = crate::app::cache::DaemonCache {
+            blockheight: info.block_height,
+            coins: coins.coins.clone(),
+            rescan_progress: info.rescan_progress,
+            sync_progress: info.sync,
+            last_poll_timestamp: info.last_poll_timestamp,
+            history_sync: info.history_sync.clone(),
+            last_tick: std::time::Instant::now(),
+        };
+        true
+    }
+
+    pub fn handles_route(&self, menu: &Menu) -> bool {
+        match menu {
+            Menu::Vault(VaultSubMenu::Recovery | VaultSubMenu::Claim) => false,
+            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))) => false,
+            Menu::Vault(_) if !self.is_ready() => true,
+            Menu::Vault(
+                VaultSubMenu::Send | VaultSubMenu::PSBTs(_) | VaultSubMenu::Settings(_),
+            ) => true,
+            _ => false,
+        }
+    }
+
+    pub fn enter_route(&mut self, menu: &Menu) -> Task<Message> {
+        if !self.handles_route(menu) {
+            return Task::none();
+        }
+        if !self.is_ready() {
+            return if self.import.active_attachment().is_some() && self.daemon.is_none() {
+                self.open_daemon()
+            } else if self.daemon.is_some() {
+                self.refresh()
+            } else {
+                Task::none()
+            };
+        }
+        match menu {
+            Menu::Vault(VaultSubMenu::Send | VaultSubMenu::PSBTs(_)) => {
+                self.error = self.ensure_hardware_wallets().err();
+                if let Menu::Vault(VaultSubMenu::PSBTs(Some(id))) = menu {
+                    self.select_saved_draft(*id);
+                }
+                self.refresh()
+            }
+            _ => self.refresh(),
+        }
     }
 
     pub fn abandoned(&self) -> bool {
@@ -828,7 +925,14 @@ impl ImportedBitcoinPanel {
                     self.error = Some("The maximum discovery range has been reached.".into());
                     return Task::none();
                 }
-                self.stop();
+                // Expansion requires the daemon to be stopped even when App
+                // owns the shared runtime. Revoke late callbacks first, then
+                // stop it in the task before changing its durable scan target.
+                self.generation = fresh_generation();
+                self.generation_gate
+                    .store(self.generation, Ordering::SeqCst);
+                let daemon = self.daemon.take();
+                self.owns_daemon = false;
                 self.info = None;
                 self.coins = None;
                 self.history.clear();
@@ -844,6 +948,9 @@ impl ImportedBitcoinPanel {
                 let data_dir = self.directory.coincubed_data_directory(&wallet.wallet_id);
                 Task::perform(
                     async move {
+                        if let Some(daemon) = daemon {
+                            daemon.stop().await.map_err(|error| error.to_string())?;
+                        }
                         tokio::task::spawn_blocking(move || {
                             let config =
                                 Config::from_file(Some(data_dir.path().join("daemon.toml")))
@@ -896,16 +1003,19 @@ impl ImportedBitcoinPanel {
                 if !self.is_ready() {
                     self.error =
                         Some("Wait for the complete Bitcoin history scan before sending.".into());
+                    Task::none()
                 } else {
-                    self.show_send = true;
                     self.error = self.ensure_hardware_wallets().err();
+                    Task::done(Message::View(view::Message::Menu(Menu::Vault(
+                        VaultSubMenu::Send,
+                    ))))
                 }
-                Task::none()
             }
             ImportMessage::CloseSend => {
-                self.show_send = false;
                 self.error = None;
-                Task::none()
+                Task::done(Message::View(view::Message::Menu(Menu::Vault(
+                    VaultSubMenu::Overview,
+                ))))
             }
             ImportMessage::RecipientEdited(value) => {
                 self.send_recipient = value;
@@ -1401,6 +1511,7 @@ impl ImportedBitcoinPanel {
                 match result {
                     Ok(daemon) => {
                         self.daemon = Some(daemon);
+                        self.owns_daemon = true;
                         self.sync_failed = false;
                         self.refresh()
                     }
@@ -1617,6 +1728,9 @@ impl ImportedBitcoinPanel {
     }
 
     fn open_daemon(&mut self) -> Task<Message> {
+        if self.daemon.is_some() {
+            return self.refresh();
+        }
         let Some(wallet) = self.import.active_attachment() else {
             return Task::none();
         };
@@ -1743,7 +1857,9 @@ impl ImportedBitcoinPanel {
             .store(self.generation, Ordering::SeqCst);
         self.busy = false;
         self.source.clear_transient();
-        if let Some(daemon) = self.daemon.take() {
+        let owns_daemon = self.owns_daemon;
+        self.owns_daemon = false;
+        if let Some(daemon) = self.daemon.take().filter(|_| owns_daemon) {
             let runtime = tokio::runtime::Handle::try_current().ok();
             let result = std::thread::spawn(move || {
                 if let Some(handle) = runtime {
@@ -1953,9 +2069,6 @@ impl ImportedBitcoinPanel {
     }
 
     fn wallet_view(&self) -> Element<'_, view::Message> {
-        if self.show_send {
-            return self.send_view();
-        }
         let mut content = Column::new().spacing(16).push(h2("Bitcoin wallet"));
         let ready = self.is_ready();
         if let Some(info) = &self.info {
@@ -2060,13 +2173,13 @@ impl ImportedBitcoinPanel {
         content.into()
     }
 
-    fn send_view(&self) -> Element<'_, view::Message> {
+    fn send_view(&self, psbts_only: bool) -> Element<'_, view::Message> {
         let mut content = Column::new()
             .spacing(14)
-            .push(h2("Send Bitcoin"))
+            .push(h2(if psbts_only { "PSBTs" } else { "Send Bitcoin" }))
             .push(p1_regular("Spend from the imported wallet using its original signer or hardware device. Your Cube seed cannot sign this transaction."))
-            .push(button::secondary(None, "Back to wallet")
-                .on_press(view::Message::ImportedBitcoin(ImportMessage::CloseSend)));
+            .push(button::secondary(None, "Back to overview")
+                .on_press(view::Message::Menu(Menu::Vault(VaultSubMenu::Overview))));
         if let Some(txid) = self.last_broadcast_txid {
             content = content.push(p1_bold(format!("Broadcast transaction: {txid}")));
         }
@@ -2183,7 +2296,7 @@ impl ImportedBitcoinPanel {
                     "Waiting for enough valid signatures on every input.",
                 ));
             }
-        } else {
+        } else if !psbts_only {
             content = content
                 .push(p1_bold("New transaction"))
                 .push(
@@ -2222,6 +2335,12 @@ impl ImportedBitcoinPanel {
                     ),
                 );
         }
+        if psbts_only && self.draft.is_none() {
+            content = content.push(
+                button::primary(None, "New transaction")
+                    .on_press(view::Message::Menu(Menu::Vault(VaultSubMenu::Send))),
+            );
+        }
         if !self.spend_drafts.is_empty() {
             content = content.push(p1_bold("Saved transactions"));
             for entry in self.spend_drafts.iter().take(10) {
@@ -2240,14 +2359,96 @@ impl ImportedBitcoinPanel {
         }
         content.into()
     }
+
+    fn settings_view(&self, option: Option<SettingsOption>) -> Element<'_, view::Message> {
+        let mut content = Column::new().spacing(16).push(h2("Vault settings"));
+        match option.unwrap_or(SettingsOption::Node) {
+            SettingsOption::Node => {
+                content = content
+                    .push(p1_bold("Bitcoin server"))
+                    .push(p1_regular(self.provider.label()))
+                    .push(caption(&self.endpoint))
+                    .push(
+                        button::secondary(None, "Retry synchronization").on_press_maybe(
+                            (!self.busy)
+                                .then_some(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
+                        ),
+                    );
+                if let Some(status) = self
+                    .info
+                    .as_ref()
+                    .and_then(|info| info.imported_wallet.as_ref())
+                {
+                    content = content.push(caption(format!(
+                        "History checked: receive {} · change {} · target {} per branch",
+                        status.receive_scanned, status.change_scanned, status.discovery_target
+                    )));
+                    if status.discovery_target < 10_000 {
+                        content = content.push(
+                            button::secondary(None, "Search 200 more addresses").on_press_maybe(
+                                (self.is_ready() && !self.busy).then_some(
+                                    view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery),
+                                ),
+                            ),
+                        );
+                    }
+                }
+            }
+            SettingsOption::Wallet | SettingsOption::ImportExport => {
+                content = content
+                    .push(p1_regular("This Vault uses the imported wallet's original signer keys. The Cube seed unlocks the Cube but cannot sign its Bitcoin transactions."))
+                    .push(p1_regular("Keep the Cube Recovery Kit current after importing this wallet or reserving a new receive address."));
+                if let Some(wallet) = self.import.active_attachment() {
+                    content = content.push(caption(format!(
+                        "Wallet ID: {}",
+                        wallet.wallet_id.descriptor_checksum
+                    )));
+                    if self.show_details {
+                        content = content
+                            .push(caption(format!(
+                                "Receive: {}",
+                                wallet.descriptor.receive_descriptor()
+                            )))
+                            .push(caption(format!(
+                                "Change: {}",
+                                wallet.descriptor.change_descriptor()
+                            )));
+                    }
+                    content = content.push(
+                        button::secondary(
+                            None,
+                            if self.show_details {
+                                "Hide public descriptors"
+                            } else {
+                                "Show public descriptors"
+                            },
+                        )
+                        .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)),
+                    );
+                }
+            }
+            SettingsOption::LocalSigning => {}
+        }
+        if let Some(error) = &self.error {
+            content = content.push(p1_regular(error).style(theme::text::error));
+        }
+        content.into()
+    }
 }
 
 impl State for ImportedBitcoinPanel {
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        let body = if self.import.active_attachment().is_some() {
+        let body = if self.import.active_attachment().is_none() {
+            self.setup_view()
+        } else if !self.is_ready() {
             self.wallet_view()
         } else {
-            self.setup_view()
+            match menu {
+                Menu::Vault(VaultSubMenu::Send) => self.send_view(false),
+                Menu::Vault(VaultSubMenu::PSBTs(_)) => self.send_view(true),
+                Menu::Vault(VaultSubMenu::Settings(option)) => self.settings_view(*option),
+                _ => self.wallet_view(),
+            }
         };
         view::dashboard(menu, cache, body)
     }
@@ -2324,6 +2525,22 @@ mod tests {
             "Retry synchronization"
         );
         assert!(!panel.error.as_deref().unwrap().contains("<!DOCTYPE"));
+    }
+
+    #[test]
+    fn pending_import_uses_vault_routes_but_never_inheritance_actions() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-panel-route-test"));
+        let panel = ImportedBitcoinPanel::new(directory, "cube-1".into(), BitcoinImport::pending());
+        assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Overview)));
+        assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Receive)));
+        assert!(panel.handles_route(&Menu::Vault(VaultSubMenu::Send)));
+        assert!(!panel.handles_route(&Menu::Vault(VaultSubMenu::Recovery)));
+        assert!(!panel.handles_route(&Menu::Vault(VaultSubMenu::Claim)));
+        assert!(
+            !panel.handles_route(&Menu::Vault(VaultSubMenu::Settings(Some(
+                SettingsOption::LocalSigning,
+            ))))
+        );
     }
 
     #[test]

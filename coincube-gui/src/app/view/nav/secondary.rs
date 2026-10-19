@@ -37,12 +37,6 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
         TopLevel::Spark => super::spark::items(ctx),
         TopLevel::Liquid => super::liquid::items(ctx),
         TopLevel::Vault => super::vault::items(ctx),
-        TopLevel::Bitcoin => vec![super::SubItem::new(
-            "Wallet",
-            coincube_ui::icon::home_icon,
-            Menu::ImportedBitcoin,
-            |m| matches!(m, Menu::ImportedBitcoin),
-        )],
         TopLevel::Marketplace => super::marketplace::items(ctx),
     };
 

@@ -112,6 +112,7 @@ fn wallet_card<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     balance_masked: bool,
     has_vault: bool,
+    import_pending: bool,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     pending_vault_incoming: Option<PendingTransfer>,
     pending_send_sats: u64,
@@ -262,6 +263,19 @@ fn wallet_card<'a>(
     }
 
     let content = match wallet_type {
+        WalletType::Vault if import_pending => Column::new().spacing(12).push(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(vault_icon())
+                .push(text("Vault").size(14))
+                .push(text("Wallet import pending").style(theme::text::secondary))
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    button::primary(None, "Finish import")
+                        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
+                ),
+        ),
         WalletType::Vault if !has_vault => Column::new().spacing(12).push(
             Row::new()
                 .spacing(8)
@@ -1720,10 +1734,14 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // Global Total Balance: aggregate across Spark + Liquid (L-BTC + USDt-as-sats) + Vault.
     // Callers pass `has_spark`/`has_vault` to gate visibility, but zero-balance
     // default values for absent wallets don't skew the total.
-    let global_total_sats = spark_balance.to_sat()
-        + total_sats
-        + vault_balance.to_sat()
-        + imported_balance.map_or(0, |balance| balance.to_sat());
+    // An imported Vault can report coins before its bounded history search is
+    // complete. Those coins are not an authoritative balance yet.
+    let display_vault_balance = if has_imported_bitcoin && imported_balance.is_none() {
+        Amount::ZERO
+    } else {
+        vault_balance
+    };
+    let global_total_sats = spark_balance.to_sat() + total_sats + display_vault_balance.to_sat();
     let global_total_amount = Amount::from_sat(global_total_sats);
     let global_total_fiat = fiat_converter
         .as_ref()
@@ -2103,57 +2121,24 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         )))
     });
 
-    let vault_card_element: Element<'a, Message> = if has_imported_bitcoin {
-        Container::new(
-            Row::new()
-                .spacing(12)
-                .align_y(Alignment::Center)
-                .push(coincube_ui::icon::bitcoin_icon())
-                .push(
-                    Column::new()
-                        .spacing(4)
-                        .push(p1_bold("Bitcoin wallet"))
-                        .push(if !imported_installed {
-                            caption("Import pending · Finish wallet setup")
-                        } else if let Some(balance) = imported_balance {
-                            caption(format!(
-                                "Imported wallet · {}",
-                                balance.to_formatted_string_with_unit(bitcoin_unit)
-                            ))
-                        } else {
-                            caption("Scanning wallet history · Balance unavailable until complete")
-                        }),
-                )
-                .push(Space::new().width(Length::Fill))
-                .push(
-                    button::orange_outline(None, "Open wallet")
-                        .on_press(Message::Menu(Menu::ImportedBitcoin)),
-                ),
-        )
-        .padding(20)
-        .style(|t| iced::widget::container::Style {
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 0.2,
-                radius: 25.0.into(),
-            },
-            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-            ..Default::default()
-        })
-        .into()
-    } else {
+    let vault_card_element: Element<'a, Message> = {
         mouse_area(wallet_card(
             WalletType::Vault,
-            &vault_balance,
+            &display_vault_balance,
             fiat_converter,
             balance_masked,
-            has_vault,
+            has_vault || (has_imported_bitcoin && imported_installed),
+            has_imported_bitcoin && !imported_installed,
             bitcoin_unit,
             pending_vault_incoming,
             vault_pending_send_sats,
             vault_pending_receive_sats,
             display_mode,
-            vault_loaded,
+            if has_imported_bitcoin {
+                imported_balance.is_some()
+            } else {
+                vault_loaded
+            },
         ))
         .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
         .into()
