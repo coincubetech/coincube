@@ -24,7 +24,13 @@ use coincube_core::miniscript::{
 };
 
 use super::*;
+use crate::split_hardware::policy::imported_policy;
 use crate::{dir::CoincubeDirectory, hw::HardwareWallets};
+use coincube_core::{
+    chain::ChainId,
+    imported_spend::{finalize_imported_spend, verify_imported_signatures},
+    wallet_descriptor::ImportedWalletDescriptor,
+};
 
 fn secp() -> Secp256k1<secp256k1::All> {
     Secp256k1::new()
@@ -317,6 +323,75 @@ fn no_binder() -> Arc<dyn PolicyBinder> {
 
 fn sig_count(psbt: &Psbt) -> usize {
     psbt.inputs.iter().map(|i| i.partial_sigs.len()).sum()
+}
+
+fn imported(combined: &Descriptor<DescriptorPublicKey>) -> ImportedWalletDescriptor {
+    let mut branches = combined.clone().into_single_descriptors().unwrap();
+    ImportedWalletDescriptor::from_descriptors(
+        branches.remove(0),
+        branches.remove(0),
+        ChainId::Bitcoin,
+    )
+    .unwrap()
+}
+
+#[tokio::test]
+async fn imported_policy_uses_separate_identity_and_mock_devices_verify_signatures() {
+    for combined in [
+        singlesig(SinglesigScript::Pkh, 1),
+        singlesig(SinglesigScript::ShWpkh, 1),
+        singlesig(SinglesigScript::Wpkh, 1),
+        multisig(false),
+        multisig(true),
+    ] {
+        let wallet = imported(&combined);
+        let policy = imported_policy(&wallet).unwrap();
+        let split = DevicePolicy::new(&combined).unwrap();
+        if policy.shape().is_multisig() {
+            assert!(policy.name().starts_with("Import"));
+            assert_eq!(policy.name().len(), 14);
+            assert!(split.name().starts_with("Split"));
+            assert_ne!(policy.name(), split.name());
+        } else {
+            assert_eq!(policy.name(), "");
+        }
+        let original = spend(&combined);
+        let jade = fake(DeviceKind::Jade, 1);
+        let mut session = SigningSession::open(jade.arc(), fp(1), policy.clone(), no_binder())
+            .await
+            .unwrap();
+        session.register().await.unwrap();
+        let first = session.sign(&original).await.unwrap().into_psbt();
+        assert_eq!(
+            verify_imported_signatures(&wallet, &original, &first, &secp()).unwrap(),
+            vec![1]
+        );
+        if policy.shape().is_multisig() {
+            let ledger = fake(DeviceKind::Ledger, 2);
+            let mut session = SigningSession::open(ledger.arc(), fp(2), policy, binder(&ledger))
+                .await
+                .unwrap();
+            session.register().await.unwrap();
+            let second = session.sign(&first).await.unwrap().into_psbt();
+            assert_eq!(
+                verify_imported_signatures(&wallet, &original, &second, &secp()).unwrap(),
+                vec![2]
+            );
+            assert_eq!(
+                finalize_imported_spend(&wallet, &original, &second, &secp())
+                    .unwrap()
+                    .signatures_per_input(),
+                &[2]
+            );
+        } else {
+            assert_eq!(
+                finalize_imported_spend(&wallet, &original, &first, &secp())
+                    .unwrap()
+                    .signatures_per_input(),
+                &[1]
+            );
+        }
+    }
 }
 
 #[tokio::test]

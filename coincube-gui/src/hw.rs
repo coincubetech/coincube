@@ -255,6 +255,12 @@ impl HardwareWallets {
         self
     }
 
+    /// Session-only listing bound to a public wallet policy. Imported
+    /// wallets use the same device transport without acquiring a Split name.
+    pub fn with_public_policy(self, name: String, descriptor: String) -> Self {
+        self.with_split_policy(name, descriptor)
+    }
+
     pub fn split_policy_binding(&self) -> Option<&SplitPolicyBinding> {
         self.split_policy.as_ref()
     }

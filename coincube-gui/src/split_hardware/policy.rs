@@ -30,6 +30,7 @@ use coincube_core::{
         translate_hash_clone, Descriptor, DescriptorPublicKey, ForEachKey, TranslateErr,
         TranslatePk, Translator,
     },
+    wallet_descriptor::ImportedWalletDescriptor,
 };
 
 use super::sign::{DevicePolicy, SignError};
@@ -125,15 +126,15 @@ impl Translator<DescriptorPublicKey, DescriptorPublicKey, PolicyError> for Merge
 
 /// The source's receive and change branches as one origin-tagged `<0;1>`
 /// descriptor: the form a device registers and signs.
-pub fn split_descriptor(
-    source: &SplitSource,
+fn public_descriptor(
+    external: &Descriptor<DescriptorPublicKey>,
+    internal: Option<&Descriptor<DescriptorPublicKey>>,
 ) -> Result<Descriptor<DescriptorPublicKey>, PolicyError> {
-    check_branch(source.external(), RECEIVE)?;
-    if let Some(internal) = source.internal() {
+    check_branch(external, RECEIVE)?;
+    if let Some(internal) = internal {
         check_branch(internal, CHANGE)?;
     }
-    source
-        .external()
+    external
         .translate_pk(&mut Merge)
         .map_err(|error| match error {
             TranslateErr::TranslatorErr(error) => error,
@@ -141,10 +142,31 @@ pub fn split_descriptor(
         })
 }
 
+pub fn split_descriptor(
+    source: &SplitSource,
+) -> Result<Descriptor<DescriptorPublicKey>, PolicyError> {
+    public_descriptor(source.external(), source.internal())
+}
+
+/// The imported wallet's complete pair in the two-branch form expected by
+/// hardware registration. The public account was already validated by core.
+pub fn imported_descriptor(
+    wallet: &ImportedWalletDescriptor,
+) -> Result<Descriptor<DescriptorPublicKey>, PolicyError> {
+    public_descriptor(
+        wallet.receive_descriptor(),
+        Some(wallet.change_descriptor()),
+    )
+}
+
 /// The device policy for `source`: [`split_descriptor`] validated as one of
 /// the five Split shapes by [`DevicePolicy::new`].
 pub fn split_policy(source: &SplitSource) -> Result<DevicePolicy, PolicyError> {
     DevicePolicy::new(&split_descriptor(source)?).map_err(PolicyError::Policy)
+}
+
+pub fn imported_policy(wallet: &ImportedWalletDescriptor) -> Result<DevicePolicy, PolicyError> {
+    DevicePolicy::new_imported(&imported_descriptor(wallet)?, wallet).map_err(PolicyError::Policy)
 }
 
 #[cfg(test)]
