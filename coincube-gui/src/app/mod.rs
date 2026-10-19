@@ -3831,6 +3831,11 @@ impl App {
             settings::network_to_api_string(network),
             cube_settings.bitcoin_import.clone(),
         );
+        panels.global_home.imported_installed = cube_settings
+            .bitcoin_import
+            .as_ref()
+            .and_then(settings::BitcoinImport::active_attachment)
+            .is_some();
         if cube_settings.bitcoin_import_pending() {
             panels.current = Menu::ImportedBitcoin;
         }
@@ -6265,6 +6270,36 @@ impl App {
                     .imported_bitcoin
                     .as_mut()
                     .map_or_else(Task::none, |panel| panel.update_event(event));
+                if self
+                    .panels
+                    .imported_bitcoin
+                    .as_ref()
+                    .is_some_and(|panel| panel.abandoned())
+                {
+                    if let Ok(settings) = settings::Settings::from_file(
+                        &self.datadir.network_directory(self.cube_settings.network),
+                    ) {
+                        if let Some(cube) = settings.cubes.into_iter().find(|cube| {
+                            cube.id == self.cube_settings.id && cube.bitcoin_import.is_none()
+                        }) {
+                            self.cube_settings = cube;
+                            self.cache.has_imported_bitcoin = false;
+                            self.panels.global_home.imported_balance = None;
+                            self.panels.global_home.imported_installed = false;
+                            self.panels.imported_bitcoin = None;
+                            return Task::batch([
+                                task,
+                                self.set_current_panel(Menu::Cube(
+                                    crate::app::menu::CubeSubMenu::Overview,
+                                )),
+                            ]);
+                        }
+                    }
+                    return task;
+                }
+                if let Some(panel) = &self.panels.imported_bitcoin {
+                    self.panels.global_home.imported_balance = panel.authoritative_balance();
+                }
                 if refresh_cube {
                     if let Ok(settings) = settings::Settings::from_file(
                         &self.datadir.network_directory(self.cube_settings.network),
@@ -6283,6 +6318,12 @@ impl App {
                                 .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
                                 .clone();
                             self.cube_settings = cube;
+                            self.panels.global_home.imported_installed = self
+                                .cube_settings
+                                .bitcoin_import
+                                .as_ref()
+                                .and_then(settings::BitcoinImport::active_attachment)
+                                .is_some();
                         }
                     }
                 }
@@ -10228,8 +10269,9 @@ mod tests {
                     block_height: 1_000,
                     sync: 1.0,
                     descriptors: coincubed::commands::GetInfoDescriptors {
-                        main: self.descriptor.clone(),
+                        main: self.descriptor.clone().into(),
                     },
+                    imported_wallet: None,
                     rescan_progress: None,
                     refused_reorg_depth: None,
                     chain_divergence: false,

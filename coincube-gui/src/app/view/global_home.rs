@@ -1466,6 +1466,8 @@ pub struct GlobalViewConfig<'a> {
     pub vault_pending_send_sats: u64,
     pub vault_pending_receive_sats: u64,
     pub vault_balance: Amount,
+    pub imported_balance: Option<Amount>,
+    pub imported_installed: bool,
     pub fiat_converter: Option<FiatAmountConverter>,
     pub balance_masked: bool,
     /// True until every applicable wallet has reported its first balance
@@ -1579,6 +1581,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         vault_pending_send_sats,
         vault_pending_receive_sats,
         vault_balance,
+        imported_balance,
+        imported_installed,
         fiat_converter,
         balance_masked,
         total_balance_loading,
@@ -1716,7 +1720,10 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // Global Total Balance: aggregate across Spark + Liquid (L-BTC + USDt-as-sats) + Vault.
     // Callers pass `has_spark`/`has_vault` to gate visibility, but zero-balance
     // default values for absent wallets don't skew the total.
-    let global_total_sats = spark_balance.to_sat() + total_sats + vault_balance.to_sat();
+    let global_total_sats = spark_balance.to_sat()
+        + total_sats
+        + vault_balance.to_sat()
+        + imported_balance.map_or(0, |balance| balance.to_sat());
     let global_total_amount = Amount::from_sat(global_total_sats);
     let global_total_fiat = fiat_converter
         .as_ref()
@@ -2106,9 +2113,16 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     Column::new()
                         .spacing(4)
                         .push(p1_bold("Bitcoin wallet"))
-                        .push(caption(
-                            "Imported wallet · Open to check scan progress and balance",
-                        )),
+                        .push(if !imported_installed {
+                            caption("Import pending · Finish wallet setup")
+                        } else if let Some(balance) = imported_balance {
+                            caption(format!(
+                                "Imported wallet · {}",
+                                balance.to_formatted_string_with_unit(bitcoin_unit)
+                            ))
+                        } else {
+                            caption("Scanning wallet history · Balance unavailable until complete")
+                        }),
                 )
                 .push(Space::new().width(Length::Fill))
                 .push(
@@ -2365,6 +2379,8 @@ mod tests {
                 vault_pending_send_sats: 5_000,
                 vault_pending_receive_sats: 6_000,
                 vault_balance: Amount::from_sat(375_000),
+                imported_balance: None,
+                imported_installed: false,
                 fiat_converter: Some(self.fiat_converter),
                 balance_masked: false,
                 total_balance_loading: false,

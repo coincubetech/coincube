@@ -3203,6 +3203,7 @@ mod local_start_cancel_tests {
             descriptors: coincubed::commands::GetInfoDescriptors {
                 main: cfg.main_descriptor.clone(),
             },
+            imported_wallet: None,
             rescan_progress: None,
             refused_reorg_depth: None,
             chain_divergence: false,

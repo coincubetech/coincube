@@ -5,6 +5,7 @@
 //! `SpendTx` from the imported descriptors.
 
 use std::{
+    collections::BTreeSet,
     convert::TryFrom,
     sync::{
         atomic::{AtomicU64, Ordering},
@@ -13,7 +14,13 @@ use std::{
     time::Duration,
 };
 
-use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
+use coincube_core::{
+    miniscript::{
+        bitcoin::{Address, Network},
+        DescriptorPublicKey, ForEachKey,
+    },
+    wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
+};
 use coincube_ui::{
     component::{button, text::*},
     theme,
@@ -60,6 +67,48 @@ impl Provider {
     }
 }
 
+fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, String, String) {
+    let receive = descriptor.receive_descriptor().to_string();
+    let script = if receive.starts_with("sh(wpkh(") {
+        "Nested SegWit"
+    } else if receive.starts_with("wpkh(") {
+        "Native SegWit"
+    } else if receive.starts_with("pkh(") {
+        "Legacy"
+    } else {
+        "Multisig SegWit"
+    };
+    let mut fingerprints = BTreeSet::new();
+    descriptor.receive_descriptor().for_each_key(|key| {
+        if let DescriptorPublicKey::XPub(xpub) = key {
+            if let Some((fingerprint, _)) = &xpub.origin {
+                fingerprints.insert(fingerprint.to_string());
+            }
+        }
+        true
+    });
+    let threshold = receive
+        .split_once("multi(")
+        .and_then(|(_, rest)| rest.split_once(','))
+        .map_or_else(
+            || "1 signer".to_string(),
+            |(required, _)| format!("{required} of {} signers", fingerprints.len()),
+        );
+    let fingerprints = fingerprints.into_iter().collect::<Vec<_>>().join(", ");
+    (script, threshold, fingerprints)
+}
+
+fn sample_receive_address(descriptor: &ImportedWalletDescriptor) -> Result<String, String> {
+    let script = descriptor
+        .receive_descriptor()
+        .at_derivation_index(0)
+        .map_err(|error| error.to_string())?
+        .script_pubkey();
+    Address::from_script(&script, Network::Bitcoin)
+        .map(|address| address.to_string())
+        .map_err(|error| error.to_string())
+}
+
 #[derive(Debug, Clone)]
 pub enum ImportMessage {
     Source(wallet_source_form::Message),
@@ -75,6 +124,8 @@ pub enum ImportMessage {
     Refresh,
     Receive,
     CopyAddress,
+    ToggleDetails,
+    Abandon,
 }
 
 #[derive(Debug)]
@@ -96,6 +147,7 @@ pub enum ImportEvent {
         >,
     ),
     Address(u64, Result<model::GetAddressResult, String>),
+    Abandoned(u64, Result<(), String>),
 }
 
 pub struct ImportedBitcoinPanel {
@@ -119,6 +171,8 @@ pub struct ImportedBitcoinPanel {
     coins: Option<model::ListCoinsResult>,
     history: Vec<model::HistoryTransaction>,
     address: Option<model::GetAddressResult>,
+    show_details: bool,
+    abandoned: bool,
 }
 
 impl ImportedBitcoinPanel {
@@ -145,6 +199,8 @@ impl ImportedBitcoinPanel {
             coins: None,
             history: Vec::new(),
             address: None,
+            show_details: false,
+            abandoned: false,
         }
     }
 
@@ -166,6 +222,27 @@ impl ImportedBitcoinPanel {
                         })
                 })
             })
+    }
+
+    pub fn authoritative_balance(&self) -> Option<coincube_core::miniscript::bitcoin::Amount> {
+        self.is_ready()
+            .then(|| {
+                self.coins.as_ref().map(|coins| {
+                    coins
+                        .coins
+                        .iter()
+                        .filter(|coin| coin.spend_info.is_none())
+                        .fold(
+                            coincube_core::miniscript::bitcoin::Amount::ZERO,
+                            |total, coin| total + coin.amount,
+                        )
+                })
+            })
+            .flatten()
+    }
+
+    pub fn abandoned(&self) -> bool {
+        self.abandoned
     }
 
     fn invalidate(&mut self) {
@@ -471,6 +548,30 @@ impl ImportedBitcoinPanel {
                     iced::clipboard::write(address.address.to_string())
                 })
             }
+            ImportMessage::ToggleDetails => {
+                self.show_details = !self.show_details;
+                Task::none()
+            }
+            ImportMessage::Abandon => {
+                if self.import.active_attachment().is_some() {
+                    self.error =
+                        Some("An installed Bitcoin wallet cannot be replaced here.".into());
+                    return Task::none();
+                }
+                self.busy = true;
+                let generation = self.generation;
+                let directory = self.directory.clone();
+                let cube_id = self.cube_id.clone();
+                let operation_id = self.import.operation_id;
+                Task::perform(
+                    async move {
+                        bitcoin_import::abandon_pending(&directory, &cube_id, operation_id).await
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::Abandoned(generation, result))
+                    },
+                )
+            }
         }
     }
 
@@ -568,6 +669,14 @@ impl ImportedBitcoinPanel {
             ImportEvent::Address(generation, result) if generation == self.generation => {
                 match result {
                     Ok(address) => self.address = Some(address),
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
+            ImportEvent::Abandoned(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(()) => self.abandoned = true,
                     Err(error) => self.error = Some(error),
                 }
                 Task::none()
@@ -762,11 +871,15 @@ impl ImportedBitcoinPanel {
             );
         } else if let Some(wallet) = &self.review {
             let retry = matches!(&self.import.stage, BitcoinImportStage::Installing { .. });
+            let (script, threshold, fingerprints) = wallet_summary(&wallet.descriptor);
+            let sample_address = sample_receive_address(&wallet.descriptor)
+                .unwrap_or_else(|_| "Unable to derive a sample address".into());
             content = content
                 .push(p1_bold("Review public wallet"))
-                .push(p1_regular(format!("Wallet identity: {}", wallet.wallet_id.descriptor_checksum)))
-                .push(p1_regular(format!("Receive: {}", wallet.descriptor.receive_descriptor())))
-                .push(p1_regular(format!("Change: {}", wallet.descriptor.change_descriptor())))
+                .push(p1_regular(format!("Bitcoin mainnet · {script} · {threshold}")))
+                .push(p1_regular(format!("Signer fingerprints: {fingerprints}")))
+                .push(p1_regular(format!("First receive address: {sample_address}")))
+                .push(caption("Compare this address with your original wallet before importing."))
                 .push(p1_regular(format!("History starts: {} · Initial window: {} addresses per branch",
                     if wallet.birthday == 0 { "Beginning".to_string() } else {
                         chrono::DateTime::from_timestamp(i64::from(wallet.birthday), 0)
@@ -774,6 +887,24 @@ impl ImportedBitcoinPanel {
                             .unwrap_or_else(|| "Invalid date".into())
                     }, wallet.initial_lookahead)))
                 .push(caption("A full history scan must finish before the balance can be trusted. The Cube backup must be refreshed after this wallet is attached."))
+                .push(button::secondary(None, if self.show_details { "Hide descriptor details" } else { "Show descriptor details" })
+                    .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)));
+            if self.show_details {
+                content = content
+                    .push(caption(format!(
+                        "Wallet identity: {}",
+                        wallet.wallet_id.descriptor_checksum
+                    )))
+                    .push(caption(format!(
+                        "Receive: {}",
+                        wallet.descriptor.receive_descriptor()
+                    )))
+                    .push(caption(format!(
+                        "Change: {}",
+                        wallet.descriptor.change_descriptor()
+                    )));
+            }
+            content = content
                 .push(p1_bold("Bitcoin server"))
                 .push(p1_regular(self.provider.label()));
             if retry {
@@ -843,6 +974,11 @@ impl ImportedBitcoinPanel {
         if let Some(error) = &self.error {
             content = content.push(p1_regular(error).style(theme::text::error));
         }
+        content = content.push(
+            button::secondary(None, "Use a new Vault instead").on_press_maybe(
+                (!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
+            ),
+        );
         content.into()
     }
 
@@ -890,7 +1026,37 @@ impl ImportedBitcoinPanel {
                 content = content.push(caption("No transactions found in the completed scan."));
             } else {
                 for tx in self.history.iter().take(20) {
-                    content = content.push(caption(tx.txid.to_string()));
+                    let (direction, amount) = match tx.kind {
+                        model::TransactionKind::IncomingSinglePayment(_)
+                        | model::TransactionKind::IncomingPaymentBatch(_) => {
+                            ("Received", tx.incoming_amount.to_sat())
+                        }
+                        model::TransactionKind::SendToSelf => {
+                            ("Moved within wallet", tx.incoming_amount.to_sat())
+                        }
+                        model::TransactionKind::OutgoingSinglePayment(_)
+                        | model::TransactionKind::OutgoingPaymentBatch(_) => {
+                            ("Sent", tx.outgoing_amount.to_sat())
+                        }
+                    };
+                    let date = tx
+                        .time
+                        .and_then(|time| {
+                            chrono::DateTime::from_timestamp(i64::from(time), 0)
+                                .map(|date| date.format("%Y-%m-%d").to_string())
+                        })
+                        .unwrap_or_else(|| "Date unknown".into());
+                    let confirmation = match (tx.height, self.info.as_ref()) {
+                        (Some(height), Some(info)) if height > 0 && info.block_height >= height => {
+                            format!("{} confirmations", info.block_height - height + 1)
+                        }
+                        _ => "Unconfirmed".into(),
+                    };
+                    content = content
+                        .push(p1_regular(format!(
+                            "{direction} · {amount} sats · {date} · {confirmation}"
+                        )))
+                        .push(caption(tx.txid.to_string()));
                 }
             }
         } else {

@@ -251,6 +251,9 @@ impl Labelled for ReceiveAddressInfo {
 
 #[derive(Debug)]
 pub struct GlobalHome {
+    /// Only populated after the imported wallet's full discovery is verified.
+    pub(crate) imported_balance: Option<Amount>,
+    pub(crate) imported_installed: bool,
     breez_client: Option<Arc<LiquidBackend>>,
     /// Optional Spark backend handle. `None` when the cube has no
     /// Spark signer or the bridge subprocess failed to spawn — the
@@ -410,6 +413,8 @@ impl GlobalHome {
         balance_masked: bool,
     ) -> Self {
         Self {
+            imported_balance: None,
+            imported_installed: false,
             wallet: Some(wallet),
             liquid_balance: Amount::ZERO,
             liquid_balance_loaded: false,
@@ -478,6 +483,8 @@ impl GlobalHome {
         balance_masked: bool,
     ) -> Self {
         Self {
+            imported_balance: None,
+            imported_installed: false,
             wallet: None,
             liquid_balance: Amount::from_sat(0),
             liquid_balance_loaded: false,
@@ -596,14 +603,15 @@ impl State for GlobalHome {
             crate::app::features::liquid_wallet_usable(cache.chain(), cache.liquid_gate);
         let vault_pending = cache.has_vault
             && vault_balance_pending(cache.blockheight(), cache.history_sync(), vault_balance);
-        let total_balance_loading = total_balance_pending(BalanceReadiness {
-            has_spark,
-            spark_loaded: self.spark_balance_loaded,
-            has_liquid,
-            liquid_loaded: self.liquid_balance_loaded,
-            usdt_loaded: self.usdt_balance_loaded,
-            vault_pending,
-        });
+        let total_balance_loading = (cache.has_imported_bitcoin && self.imported_balance.is_none())
+            || total_balance_pending(BalanceReadiness {
+                has_spark,
+                spark_loaded: self.spark_balance_loaded,
+                has_liquid,
+                liquid_loaded: self.liquid_balance_loaded,
+                usdt_loaded: self.usdt_balance_loaded,
+                vault_pending,
+            });
 
         let content = view::dashboard(
             menu,
@@ -614,6 +622,8 @@ impl State for GlobalHome {
                 usdt_balance,
                 usdt_balance_error,
                 vault_balance,
+                imported_balance: self.imported_balance,
+                imported_installed: self.imported_installed,
                 fiat_converter,
                 balance_masked: self.balance_masked,
                 total_balance_loading,
