@@ -1925,6 +1925,7 @@ mod tests {
         if let Some(BitcoinBackend::Esplora(esplora)) = config.bitcoin_backend.as_mut() {
             esplora.addr = "https://example.com/api".into();
             esplora.fallback_addr = Some(url.clone());
+            esplora.secondary_fallback_addr = Some(url.clone());
         } else {
             panic!("expected Esplora config");
         }
@@ -1942,6 +1943,14 @@ mod tests {
         assert_eq!(esplora.addr, "https://example.com/api");
         assert_eq!(esplora.fallback_addr.as_deref(), Some(url.as_str()));
         assert_eq!(esplora.fallback_token.as_deref(), Some("session-token"));
+        assert_eq!(
+            esplora.secondary_fallback_addr.as_deref(),
+            Some(url.as_str())
+        );
+        assert_eq!(
+            esplora.secondary_fallback_token.as_deref(),
+            Some("session-token")
+        );
     }
 
     /// Write a `daemon.toml` whose backend section is `backend`, returning its
