@@ -4,7 +4,9 @@
 
 pub mod reservation;
 pub mod sqlite;
-use coincube_core::{chain::ChainId, descriptors::CoincubeDescriptor};
+use coincube_core::{
+    chain::ChainId, descriptors::CoincubeDescriptor, wallet_descriptor::ImportedWalletDescriptor,
+};
 pub use reservation::{ChangeReservation, ReservationError};
 
 use crate::{
@@ -57,6 +59,23 @@ pub struct ImportedHistory {
 pub trait DatabaseInterface: Send {
     fn connection(&self) -> Box<dyn DatabaseConnection>;
 
+    fn reserve_imported_receive(
+        &self,
+        _chain: ChainId,
+        _descriptor: &ImportedWalletDescriptor,
+    ) -> Result<(bitcoin::Address, bip32::ChildNumber), ReservationError> {
+        Err(ReservationError::Unsupported)
+    }
+
+    fn commit_imported_change_if_next(
+        &self,
+        _chain: ChainId,
+        _descriptor: &ImportedWalletDescriptor,
+        _index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        Err(ReservationError::Unsupported)
+    }
+
     /// Atomically persist a fresh change allocation before returning. Implementations
     /// without durable allocation refuse; a read followed by set_change_index is unsafe.
     fn reserve_change(
@@ -82,6 +101,26 @@ pub trait DatabaseInterface: Send {
 }
 
 impl DatabaseInterface for SqliteDb {
+    fn reserve_imported_receive(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+    ) -> Result<(bitcoin::Address, bip32::ChildNumber), ReservationError> {
+        self.connection()
+            .map_err(|_| ReservationError::Storage)?
+            .reserve_imported_receive(chain, descriptor)
+    }
+
+    fn commit_imported_change_if_next(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        self.connection()
+            .map_err(|_| ReservationError::Storage)?
+            .commit_imported_change_if_next(chain, descriptor, index)
+    }
     fn reserve_change(
         &self,
         chain: ChainId,
@@ -112,6 +151,26 @@ impl DatabaseInterface for SqliteDb {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl DatabaseInterface for sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
+    fn reserve_imported_receive(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+    ) -> Result<(bitcoin::Address, bip32::ChildNumber), ReservationError> {
+        self.lock()
+            .map_err(|_| ReservationError::Storage)?
+            .reserve_imported_receive(chain, descriptor)
+    }
+
+    fn commit_imported_change_if_next(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        self.lock()
+            .map_err(|_| ReservationError::Storage)?
+            .commit_imported_change_if_next(chain, descriptor, index)
+    }
     fn reserve_change(
         &self,
         chain: ChainId,

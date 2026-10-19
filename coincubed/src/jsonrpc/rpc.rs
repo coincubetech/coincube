@@ -162,6 +162,7 @@ impl From<commands::CommandError> for Error {
             | commands::CommandError::UnifiedSpendFinalization(..)
             | commands::CommandError::UnifiedSignatureMerge(..)
             | commands::CommandError::UnifiedSpendValidation(..)
+            | commands::CommandError::ImportedSpendValidation(..)
             | commands::CommandError::InsaneRescanTimestamp(..)
             | commands::CommandError::AlreadyRescanning
             | commands::CommandError::ChangeReservation(

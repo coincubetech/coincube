@@ -124,7 +124,7 @@ impl BitcoinInterface for DummyBitcoind {
     fn try_received_coins(
         &self,
         _: &BlockChainTip,
-        _: &[descriptors::SinglePathCoincubeDesc],
+        _: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         if self.request_replay_during_received {
             self.record_replay
@@ -198,7 +198,7 @@ impl BitcoinInterface for DummyBitcoind {
     fn received_coins(
         &self,
         _: &BlockChainTip,
-        _: &[descriptors::SinglePathCoincubeDesc],
+        _: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         Vec::new()
     }

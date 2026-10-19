@@ -268,7 +268,18 @@ impl SqliteDb {
         }
 
         // The config and db descriptors must match!
-        let db_wallet = conn.db_wallet();
+        let mut wallets: Vec<DbWallet> = db_query(
+            &mut conn.conn,
+            "SELECT * FROM wallets",
+            rusqlite::params![],
+            |row| row.try_into(),
+        )?;
+        if wallets.len() != 1 {
+            return Err(SqliteDbError::MalformedIdentity(
+                "expected exactly one wallet row".into(),
+            ));
+        }
+        let db_wallet = wallets.pop().expect("checked one wallet row");
         if &db_wallet.main_descriptor != main_descriptor {
             return Err(SqliteDbError::DescriptorMismatch(
                 db_wallet.main_descriptor.into(),
@@ -511,12 +522,17 @@ impl SqliteConn {
                 db_wallet.deposit_derivation_index,
                 db_wallet.change_derivation_index,
             ).into();
+            let lookahead: u32 = db_tx.query_row(
+                "SELECT COALESCE(import_initial_lookahead, ?1) FROM wallets WHERE id = 1",
+                rusqlite::params![LOOK_AHEAD_LIMIT],
+                |row| row.get(0),
+            )?;
             if index_u32 > curr_highest_index {
                 let receive_desc = db_wallet.main_descriptor.receive_descriptor();
                 let change_desc = db_wallet.main_descriptor.change_descriptor();
 
                 for index in curr_highest_index + 1..=index_u32 {
-                    let la_index = index + LOOK_AHEAD_LIMIT - 1;
+                    let la_index = index.checked_add(lookahead - 1).ok_or(rusqlite::Error::InvalidQuery)?;
                     let receive_addr = receive_desc.derive(la_index).map_err(|_| rusqlite::Error::InvalidQuery)?.address(network).map_err(|_| rusqlite::Error::InvalidQuery)?;
                     let change_addr = change_desc.derive(la_index).map_err(|_| rusqlite::Error::InvalidQuery)?.address(network).map_err(|_| rusqlite::Error::InvalidQuery)?;
                     db_tx.execute(

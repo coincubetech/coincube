@@ -96,10 +96,14 @@ pub fn create_imported_storage(
     let serialized = toml::to_string_pretty(&config.for_persistence())
         .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.to_string())))?;
     let path = staged_dir.path().join("daemon.toml");
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
     use std::io::Write;
     file.write_all(serialized.as_bytes())?;
     file.sync_all()?;
@@ -2516,7 +2520,7 @@ mod tests {
                     }
                     "taproot" => config.main_descriptor = CoincubeDescriptor::from_str(
                         "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c"
-                    ).unwrap(),
+                    ).unwrap().into(),
                     "bitcoin" => config.bitcoin_config = BitcoinConfig::new(ChainId::Bitcoin, time::Duration::from_secs(2)),
                     "fallback" => {
                         if let Some(config::BitcoinBackend::Esplora(ref mut selection)) = config.bitcoin_backend {

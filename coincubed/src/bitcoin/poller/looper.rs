@@ -981,8 +981,8 @@ mod tests {
         .unwrap();
         let desc = descriptors::CoincubeDescriptor::new(policy);
         [
-            desc.receive_descriptor().as_descriptor_public_key(),
-            desc.change_descriptor().as_descriptor_public_key(),
+            desc.receive_descriptor().as_descriptor_public_key().clone(),
+            desc.change_descriptor().as_descriptor_public_key().clone(),
         ]
     }
 
@@ -1291,6 +1291,7 @@ mod failure_tests {
                         .at_derivation_index(1500)
                         .unwrap()
                         .address(database.connection().network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 is_immature: false,
@@ -1342,6 +1343,7 @@ mod failure_tests {
                         .at_derivation_index(200)
                         .unwrap()
                         .address(conn.network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 ..first.clone()
@@ -1356,6 +1358,7 @@ mod failure_tests {
                         .at_derivation_index(399)
                         .unwrap()
                         .address(conn.network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 ..first.clone()
@@ -1370,6 +1373,7 @@ mod failure_tests {
                         .at_derivation_index(1000)
                         .unwrap()
                         .address(conn.network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 ..first.clone()
