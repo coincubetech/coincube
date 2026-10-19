@@ -204,6 +204,37 @@ impl Loader {
         )
     }
 
+    /// The ordinary local-wallet loader with the current Connect session
+    /// carried only for an imported wallet whose selected Esplora provider is
+    /// Connect. No token is written to daemon.toml.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_imported(
+        datadir_path: CoincubeDirectory,
+        gui_config: GUIConfig,
+        network: bitcoin::Network,
+        internal_bitcoind: Option<Bitcoind>,
+        backup: Option<Backup>,
+        wallet_settings: WalletSettings,
+        cube_settings: CubeSettings,
+        breez_client: Option<std::sync::Arc<BreezClient>>,
+        spark_backend: Option<std::sync::Arc<app::wallets::SparkBackend>>,
+        connect_client: Option<crate::services::coincube::CoincubeClient>,
+    ) -> (Self, Task<Message>) {
+        Self::build(
+            datadir_path,
+            gui_config,
+            network,
+            internal_bitcoind,
+            backup,
+            Some(wallet_settings),
+            cube_settings,
+            breez_client,
+            spark_backend,
+            connect_client,
+            None,
+        )
+    }
+
     /// Fork startup uses the current authenticated client and the unlocked Cube's
     /// encryption key, without constructing any Lightning SDK or external node.
     #[allow(clippy::too_many_arguments)]
@@ -289,11 +320,12 @@ impl Loader {
             cube_settings.network,
             wallet_settings.as_ref(),
         );
-        let support = if connect_client.is_some() || local_fork {
-            crate::chain::authenticated_connect_support(cube_settings.network)
-        } else {
-            cube_settings.network.runtime_support()
-        };
+        let support =
+            if (cube_settings.network.is_blake2b() && connect_client.is_some()) || local_fork {
+                crate::chain::authenticated_connect_support(cube_settings.network)
+            } else {
+                cube_settings.network.runtime_support()
+            };
         let refusal = match support {
             crate::chain::RuntimeSupport::Dormant { reason } => {
                 Some(Error::ChainUnavailable(reason))
@@ -337,14 +369,19 @@ impl Loader {
                 ))
             }
             crate::chain::RuntimeSupport::Supported
-                if !cube_settings.network.is_blake2b() && connect_client.is_some() =>
+                if !cube_settings.network.is_blake2b()
+                    && connect_client.is_some()
+                    && cube_settings.bitcoin_import.is_none() =>
             {
                 Some(Error::Unexpected(
                     "The authenticated fork loader requires Bitcoin Blake2b".into(),
                 ))
             }
             crate::chain::RuntimeSupport::Supported => None,
-        };
+        }
+        .or_else(|| {
+            validate_imported_open(&datadir_path, &cube_settings, wallet_settings.as_ref()).err()
+        });
 
         let task = if refusal.is_some() {
             Task::none()
@@ -563,11 +600,12 @@ impl Loader {
                     self.daemon_started = true;
                     self.waiting_daemon_bitcoind = true;
                     return Task::perform(
-                        start_bitcoind_and_daemon(
+                        start_bitcoind_and_daemon_with_import_auth(
                             self.datadir_path.clone(),
                             self.start_bitcoind(),
                             self.cube_settings.network,
                             wallet_settings,
+                            self.connect_client.clone(),
                         ),
                         Message::Started,
                     );
@@ -887,29 +925,56 @@ pub async fn load_application(
 > {
     let bitcoin_unit = config.cube_settings.unit_setting.display_unit;
 
-    // The Vault's hot signer ("this computer" key) is encrypted under the same
-    // credential the Cube unlocks with — the session PIN, or for a passkey Cube
-    // the seed-derived password. Without it the seed on disk is unreadable and
-    // the Vault silently loses the ability to sign with a key it holds.
-    let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
-    let descriptor = config
-        .info
-        .descriptors
-        .main
-        .as_vault()
-        .cloned()
-        .ok_or_else(|| {
-            Error::Unexpected("This Cube has an imported Bitcoin wallet, not a Vault.".into())
+    let wallet = if let Some(import) = &config.cube_settings.bitcoin_import {
+        let attachment = import.active_attachment().ok_or_else(|| {
+            Error::Unexpected("Finish importing this wallet before opening it".into())
         })?;
-    let wallet = Wallet::new(descriptor)
-        .with_chain(config.cube_settings.network)
-        .load_from_settings(config.wallet_settings)?
-        .load_hotsigners(
-            &config.datadir_path,
-            config.cube_settings.network,
-            &config.cube_settings.id,
-            seed_password.as_deref().map(|p| p.as_str()),
-        )?;
+        let imported = config.info.descriptors.main.as_imported().ok_or_else(|| {
+            Error::Unexpected("The running Bitcoin wallet is not this Cube's import".into())
+        })?;
+        let status = config.info.imported_wallet.as_ref().ok_or_else(|| {
+            Error::Unexpected("The running Bitcoin wallet has no import identity".into())
+        })?;
+        if config.info.chain_id != Some(config.cube_settings.network)
+            || imported != &attachment.descriptor
+            || status.chain_id != config.cube_settings.network
+            || attachment.wallet_id.descriptor_checksum
+                != format!("imported-v1-{}", status.wallet_identity)
+            || status.birthday != attachment.birthday
+            || status.initial_lookahead != attachment.initial_lookahead
+            || config.wallet_settings.wallet_id() != attachment.wallet_id
+        {
+            return Err(Error::Unexpected(
+                "The running Bitcoin wallet does not match this Cube's imported descriptors".into(),
+            ));
+        }
+        // The Cube's seed secures its Liquid/Spark account and Recovery Kit.
+        // It is never an implicit signer for the imported Bitcoin descriptors.
+        Wallet::from_imported_cube(&config.cube_settings)
+            .map_err(Error::Unexpected)?
+            .load_from_settings(config.wallet_settings)?
+            .with_name(config.cube_settings.name.clone())
+    } else {
+        // A Vault hot signer is encrypted under the same credential the Cube
+        // unlocks with. Only a strict Vault descriptor may load those seeds.
+        let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
+        let descriptor = config
+            .info
+            .descriptors
+            .main
+            .as_vault()
+            .cloned()
+            .ok_or_else(|| Error::Unexpected("The running wallet is not a Vault".into()))?;
+        Wallet::new(descriptor)
+            .with_chain(config.cube_settings.network)
+            .load_from_settings(config.wallet_settings)?
+            .load_hotsigners(
+                &config.datadir_path,
+                config.cube_settings.network,
+                &config.cube_settings.id,
+                seed_password.as_deref().map(|p| p.as_str()),
+            )?
+    };
 
     let coins = coins_to_cache(config.daemon.clone())
         .await
@@ -975,8 +1040,8 @@ pub async fn load_application(
         // Local-daemon launch has no Connect session until the user signs in
         // via the Connect tab; `App::new` flips this on if it restores one.
         has_connect_session: false,
-        has_vault: true,
-        has_imported_bitcoin: false,
+        has_vault: !wallet.is_imported(),
+        has_imported_bitcoin: wallet.is_imported(),
         cube_name: config.cube_settings.name.clone(),
         cube_connect_owner: config.cube_settings.connect_owner.clone(),
         cube_owned_by_other_account: false,
@@ -1347,11 +1412,85 @@ async fn start_fork_daemon(
     Ok((daemon, internal, info))
 }
 
+/// Compare the Cube's durable imported attachment with the wallet row and
+/// daemon config before connecting to an existing socket or starting a node.
+/// A shared Loader must never let a stale local wallet directory stand in for
+/// the descriptor pair the user attached to this Cube.
+fn validate_imported_open(
+    root: &CoincubeDirectory,
+    cube: &CubeSettings,
+    wallet_settings: Option<&WalletSettings>,
+) -> Result<(), Error> {
+    let Some(import) = &cube.bitcoin_import else {
+        return Ok(());
+    };
+    let Some(attachment) = import.active_attachment() else {
+        return if wallet_settings.is_none() {
+            Ok(())
+        } else {
+            Err(Error::Unexpected(
+                "An unfinished Bitcoin import cannot open a wallet yet".into(),
+            ))
+        };
+    };
+    attachment
+        .validate(cube.network)
+        .map_err(Error::Unexpected)?;
+    if cube.vault_wallet_id.is_some() {
+        return Err(Error::Unexpected(
+            "This Cube has conflicting Bitcoin wallet attachments".into(),
+        ));
+    }
+    let wallet_settings = wallet_settings.ok_or_else(|| {
+        Error::Unexpected("The imported wallet's local registration is missing".into())
+    })?;
+    if wallet_settings.wallet_id() != attachment.wallet_id
+        || wallet_settings.remote_backend_auth.is_some()
+    {
+        return Err(Error::Unexpected(
+            "The imported wallet registration does not match this Cube".into(),
+        ));
+    }
+    let expected_directory = root
+        .network_directory(cube.network)
+        .coincubed_data_directory(&attachment.wallet_id);
+    let config = Config::from_file(Some(expected_directory.path().join("daemon.toml")))
+        .map_err(Error::Config)?;
+    if config.bitcoin_config.chain != cube.network
+        || config.data_directory().as_ref().map(|dir| dir.path()) != Some(expected_directory.path())
+        || config.main_descriptor.as_imported() != Some(&attachment.descriptor)
+        || config.import_birthday != Some(attachment.birthday)
+        || config.import_initial_lookahead != Some(attachment.initial_lookahead)
+    {
+        return Err(Error::Unexpected(
+            "The imported wallet's daemon settings do not match this Cube".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub async fn start_bitcoind_and_daemon(
     coincube_datadir_path: CoincubeDirectory,
     start_internal_bitcoind: bool,
     chain: crate::chain::ChainId,
     settings: WalletSettings,
+) -> StartedResult {
+    start_bitcoind_and_daemon_with_import_auth(
+        coincube_datadir_path,
+        start_internal_bitcoind,
+        chain,
+        settings,
+        None,
+    )
+    .await
+}
+
+async fn start_bitcoind_and_daemon_with_import_auth(
+    coincube_datadir_path: CoincubeDirectory,
+    start_internal_bitcoind: bool,
+    chain: crate::chain::ChainId,
+    settings: WalletSettings,
+    connect_client: Option<crate::services::coincube::CoincubeClient>,
 ) -> StartedResult {
     // The last gate before anything runs: no `daemon.toml` is read or
     // migrated, no node is provisioned and no daemon is started for a chain
@@ -1386,19 +1525,28 @@ pub async fn start_bitcoind_and_daemon(
     // here is surfaced as a startup error rather than swallowed
     // — if we can't migrate the file we shouldn't pretend we
     // did.
-    let config = match crate::installer::migration::migrate_esplora_config(&config_path) {
-        // Rewritten: read back what is now on disk.
-        Ok(true) => Config::from_file(Some(config_path)).map_err(Error::Config)?,
-        Ok(false) => found,
-        Err(e) => {
-            tracing::warn!(
+    let mut config = if found.main_descriptor.as_imported().is_some() {
+        // The imported wallet's provider order is an explicit user choice.
+        // The Vault-only legacy migration must never rewrite it.
+        found
+    } else {
+        match crate::installer::migration::migrate_esplora_config(&config_path) {
+            // Rewritten: read back what is now on disk.
+            Ok(true) => Config::from_file(Some(config_path)).map_err(Error::Config)?,
+            Ok(false) => found,
+            Err(e) => {
+                tracing::warn!(
                 "esplora-config migration failed for {}: {} — continuing with the existing daemon.toml",
                 config_path.display(),
                 e,
             );
-            found
+                found
+            }
         }
     };
+    if config.main_descriptor.as_imported().is_some() {
+        authenticate_imported_connect_provider(&mut config, chain, connect_client.as_ref())?;
+    }
     let bitcoind = match (start_internal_bitcoind, &config.bitcoin_backend) {
         (true, Some(BitcoinBackend::Bitcoind(bitcoind_config))) => {
             // The provider the ledger names must serve this chain *before* Tor
@@ -1496,6 +1644,40 @@ pub async fn start_bitcoind_and_daemon(
         },
         info,
     ))
+}
+
+fn authenticate_imported_connect_provider(
+    config: &mut Config,
+    chain: crate::chain::ChainId,
+    connect_client: Option<&crate::services::coincube::CoincubeClient>,
+) -> Result<(), Error> {
+    let Some(BitcoinBackend::Esplora(esplora)) = config.bitcoin_backend.as_mut() else {
+        return Ok(());
+    };
+    let connect_url = crate::installer::connect_url(chain);
+    let uses_connect = esplora.addr == connect_url
+        || esplora.fallback_addr.as_deref() == Some(connect_url.as_str())
+        || esplora.secondary_fallback_addr.as_deref() == Some(connect_url.as_str());
+    if !uses_connect {
+        return Ok(());
+    }
+    let token = connect_client
+        .and_then(|client| client.token())
+        .ok_or_else(|| {
+            Error::Unexpected(
+                "Sign in to Connect from Home to open this imported Bitcoin wallet".into(),
+            )
+        })?;
+    if esplora.addr == connect_url {
+        esplora.token = Some(token.to_owned());
+    }
+    if esplora.fallback_addr.as_deref() == Some(connect_url.as_str()) {
+        esplora.fallback_token = Some(token.to_owned());
+    }
+    if esplora.secondary_fallback_addr.as_deref() == Some(connect_url.as_str()) {
+        esplora.secondary_fallback_token = Some(token.to_owned());
+    }
+    Ok(())
 }
 
 async fn sync(
@@ -1610,6 +1792,154 @@ mod tests {
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn imported_loader_preflights_exact_cube_wallet_and_config() {
+        use coincube_core::miniscript::bitcoin::{
+            bip32::{DerivationPath, Xpriv, Xpub},
+            secp256k1::Secp256k1,
+        };
+        use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
+        use std::str::FromStr;
+
+        let tmp = TempDir::new();
+        let root = CoincubeDirectory::new(tmp.path().to_path_buf());
+        let chain = crate::chain::ChainId::Bitcoin;
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[41; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let key = format!(
+            "[{}/84h/0h/0h]{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            chain,
+        )
+        .unwrap();
+        let attachment =
+            app::settings::ImportedWalletAttachment::new(descriptor.clone(), chain, 0, 20).unwrap();
+        let mut cube = CubeSettings::new("Imported".into(), chain);
+        cube.bitcoin_import = Some(app::settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: app::settings::BitcoinImportStage::Syncing {
+                wallet: attachment.clone(),
+            },
+            last_error: None,
+        });
+        let wallet = WalletSettings {
+            name: "Imported".into(),
+            alias: None,
+            descriptor_checksum: attachment.wallet_id.descriptor_checksum.clone(),
+            pinned_at: None,
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let directory = root
+            .network_directory(chain)
+            .coincubed_data_directory(&attachment.wallet_id);
+        fs::create_dir_all(directory.path()).unwrap();
+        let mut config = Config::new(
+            coincubed::config::BitcoinConfig::new(chain, Duration::from_secs(30)),
+            Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
+                addr: "https://example.com/api".into(),
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            })),
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(descriptor),
+            coincubed::datadir::DataDirectory::new(directory.path().to_path_buf()),
+        );
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(20);
+        let config_path = directory.path().join("daemon.toml");
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+
+        validate_imported_open(&root, &cube, Some(&wallet)).unwrap();
+        config.import_birthday = Some(1);
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        assert!(validate_imported_open(&root, &cube, Some(&wallet)).is_err());
+        config.import_birthday = Some(0);
+        fs::write(&config_path, toml::to_string_pretty(&config).unwrap()).unwrap();
+        let mut wrong_wallet = wallet.clone();
+        wrong_wallet.descriptor_checksum = "different".into();
+        assert!(validate_imported_open(&root, &cube, Some(&wrong_wallet)).is_err());
+        assert!(validate_imported_open(&root, &cube, None).is_err());
+    }
+
+    #[test]
+    fn imported_connect_provider_keeps_configured_priority_and_requires_session() {
+        use coincube_core::miniscript::bitcoin::{
+            bip32::{DerivationPath, Xpriv, Xpub},
+            secp256k1::Secp256k1,
+        };
+        use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
+        use std::str::FromStr;
+
+        let chain = crate::chain::ChainId::Bitcoin;
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[43; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let key = format!(
+            "[{}/84h/0h/0h]{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let imported = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            chain,
+        )
+        .unwrap();
+        let mut config = Config::new(
+            coincubed::config::BitcoinConfig::new(chain, Duration::from_secs(30)),
+            Some(BitcoinBackend::Esplora(coincubed::config::EsploraConfig {
+                addr: "https://example.com/api".into(),
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            })),
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(imported),
+            coincubed::datadir::DataDirectory::new(std::env::temp_dir().join("import-auth-test")),
+        );
+        let url = crate::installer::connect_url(chain);
+        if let Some(BitcoinBackend::Esplora(esplora)) = config.bitcoin_backend.as_mut() {
+            esplora.addr = "https://example.com/api".into();
+            esplora.fallback_addr = Some(url.clone());
+        } else {
+            panic!("expected Esplora config");
+        }
+        let original = config.clone();
+        let error = authenticate_imported_connect_provider(&mut config, chain, None).unwrap_err();
+        assert!(error.to_string().contains("Sign in to Connect"));
+        assert_eq!(format!("{config:?}"), format!("{original:?}"));
+
+        let mut client = crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+        client.set_token("session-token");
+        authenticate_imported_connect_provider(&mut config, chain, Some(&client)).unwrap();
+        let Some(BitcoinBackend::Esplora(esplora)) = config.bitcoin_backend.as_ref() else {
+            panic!("expected Esplora config");
+        };
+        assert_eq!(esplora.addr, "https://example.com/api");
+        assert_eq!(esplora.fallback_addr.as_deref(), Some(url.as_str()));
+        assert_eq!(esplora.fallback_token.as_deref(), Some("session-token"));
     }
 
     /// Write a `daemon.toml` whose backend section is `backend`, returning its
