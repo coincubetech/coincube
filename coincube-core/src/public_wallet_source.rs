@@ -58,6 +58,22 @@ fn keys(descriptor: &Descriptor<DescriptorPublicKey>) -> Vec<DescriptorPublicKey
     keys
 }
 
+/// Repeated account keys cannot be distinguished as independent signers.
+pub fn has_duplicate_key(descriptor: &Descriptor<DescriptorPublicKey>) -> bool {
+    let mut seen = BTreeSet::new();
+    !keys(descriptor).iter().all(|key| {
+        let material = match key {
+            DescriptorPublicKey::XPub(xpub) => xpub.xkey.to_string(),
+            DescriptorPublicKey::MultiXPub(xpub) => xpub.xkey.to_string(),
+            DescriptorPublicKey::Single(single) => match &single.key {
+                miniscript::descriptor::SinglePubKey::FullKey(key) => key.to_string(),
+                miniscript::descriptor::SinglePubKey::XOnly(key) => key.to_string(),
+            },
+        };
+        seen.insert(material)
+    })
+}
+
 /// Preserve Split's exact structural pair rule. Import can impose additional
 /// requirements (a present change branch, ranged keys and explicit /0 and /1)
 /// without changing Split's receive-only or nonstandard-branch acceptance.
