@@ -47,11 +47,28 @@ CREATE TABLE tip (
 CREATE TABLE wallets (
     id INTEGER PRIMARY KEY NOT NULL,
     timestamp INTEGER NOT NULL,
-    main_descriptor TEXT NOT NULL,
+    main_descriptor TEXT,
     deposit_derivation_index INTEGER NOT NULL,
     change_derivation_index INTEGER NOT NULL,
     rescan_timestamp INTEGER,
-    last_poll_timestamp INTEGER
+    last_poll_timestamp INTEGER,
+    wallet_kind TEXT NOT NULL CHECK (wallet_kind IN ('vault', 'imported')),
+    imported_receive_descriptor TEXT,
+    imported_change_descriptor TEXT,
+    import_birthday INTEGER,
+    import_history_complete BOOLEAN CHECK (import_history_complete IN (0,1)),
+    import_initial_lookahead INTEGER,
+    CHECK (
+        (wallet_kind = 'vault' AND main_descriptor IS NOT NULL
+            AND imported_receive_descriptor IS NULL AND imported_change_descriptor IS NULL
+            AND import_birthday IS NULL AND import_history_complete IS NULL
+            AND import_initial_lookahead IS NULL)
+        OR
+        (wallet_kind = 'imported' AND main_descriptor IS NULL
+            AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
+            AND import_birthday IS NOT NULL AND import_history_complete IS NOT NULL
+            AND import_initial_lookahead > 0)
+    )
 );
 
 /* Our (U)TxOs.

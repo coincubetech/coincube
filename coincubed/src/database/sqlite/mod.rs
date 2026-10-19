@@ -47,11 +47,11 @@ use miniscript::bitcoin::{
     secp256k1,
 };
 
-/// Current schema version. v9 (BTCB2 plan, coincube-api#292) added the chain identity column
-/// `tip.chain` next to the encoding column `tip.network`. Older binaries refuse a v9 database
+/// Current schema version. v10 stores either a legacy Vault descriptor or an imported
+/// receive/change pair in a constrained wallet row. Older binaries refuse a v10 database
 /// with [`SqliteDbError::UnsupportedVersion`] — the same shape as every previous bump, so a
 /// downgrade needs the pre-upgrade `coincubed.sqlite3` backup.
-pub const DB_VERSION: i64 = 9;
+pub const DB_VERSION: i64 = 10;
 
 /// Last database version for which Bitcoin transactions were not stored in database. In practice
 /// this meant we relied on the bitcoind watchonly wallet to store them for us.
@@ -3267,7 +3267,7 @@ CREATE TABLE labels (
     }
 
     #[test]
-    fn v0_to_v9_migration() {
+    fn v0_to_v10_migration() {
         let secp = secp256k1::Secp256k1::verification_only();
 
         // Create a database with version 0, using the old schema.
@@ -3373,7 +3373,7 @@ CREATE TABLE labels (
         {
             let mut conn = db.connection().unwrap();
             let version = conn.db_version();
-            assert_eq!(version, 9);
+            assert_eq!(version, 10);
         }
         // We should now be able to insert another PSBT, to query both, and the first PSBT must
         // have no associated timestamp.
@@ -3448,7 +3448,7 @@ CREATE TABLE labels (
     }
 
     #[test]
-    fn v3_to_v9_migration() {
+    fn v3_to_v10_migration() {
         let secp = secp256k1::Secp256k1::verification_only();
 
         // Create a database with version 3, using the old schema.
@@ -3600,10 +3600,10 @@ CREATE TABLE labels (
 
             // Migrate the DB.
             maybe_apply_migration(&db_path, &bitcoin_txs).unwrap();
-            assert_eq!(conn.db_version(), 9);
+            assert_eq!(conn.db_version(), 10);
             // Migrating twice will be a no-op. No need to pass `bitcoin_txs` second time.
             maybe_apply_migration(&db_path, &[]).unwrap();
-            assert!(conn.db_version() == 9);
+            assert!(conn.db_version() == 10);
 
             // Compare the `DbCoin`s with the expected values.
             let coins_post = conn.coins(&[], &[]);
@@ -3793,7 +3793,7 @@ CREATE TABLE labels (
             (tmp_dir, db_path, options)
         }
 
-        fn v9_fixture(chain: ChainId) -> (path::PathBuf, path::PathBuf, FreshDbOptions) {
+        fn v10_fixture(chain: ChainId) -> (path::PathBuf, path::PathBuf, FreshDbOptions) {
             let tmp_dir = tmp_dir();
             fs::create_dir_all(&tmp_dir).unwrap();
             let db_path = tmp_dir.join("coincubed.sqlite3");
@@ -3802,6 +3802,65 @@ CREATE TABLE labels (
             let secp = secp256k1::Secp256k1::verification_only();
             create_fresh_db(&db_path, options.clone(), &secp).unwrap();
             (tmp_dir, db_path, options)
+        }
+
+        fn downgrade_wallet_layout_to_v9(db_path: &path::Path) {
+            let conn = rusqlite::Connection::open(db_path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE wallets_v9 (
+                    id INTEGER PRIMARY KEY NOT NULL,
+                    timestamp INTEGER NOT NULL,
+                    main_descriptor TEXT NOT NULL,
+                    deposit_derivation_index INTEGER NOT NULL,
+                    change_derivation_index INTEGER NOT NULL,
+                    rescan_timestamp INTEGER,
+                    last_poll_timestamp INTEGER
+                );
+                INSERT INTO wallets_v9 SELECT id, timestamp, main_descriptor,
+                    deposit_derivation_index, change_derivation_index,
+                    rescan_timestamp, last_poll_timestamp FROM wallets;
+                DROP TABLE wallets;
+                ALTER TABLE wallets_v9 RENAME TO wallets;
+                UPDATE version SET version = 9;",
+            )
+            .unwrap();
+        }
+
+        #[test]
+        fn v9_to_v10_preserves_wallet_identity_and_foreign_keys() {
+            let (tmp_dir, db_path, options) = v10_fixture(ChainId::Bitcoin);
+            downgrade_wallet_layout_to_v9(&db_path);
+            raw(
+                &db_path,
+                "CREATE TABLE wallet_refs (
+                    wallet_id INTEGER NOT NULL REFERENCES wallets(id));
+                 INSERT INTO wallet_refs VALUES (1);",
+            );
+            maybe_apply_migration(&db_path, &[]).unwrap();
+            let conn = rusqlite::Connection::open(&db_path).unwrap();
+            let (id, desc, kind): (i64, String, String) = conn
+                .query_row(
+                    "SELECT id, main_descriptor, wallet_kind FROM wallets",
+                    [],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .unwrap();
+            assert_eq!(id, 1);
+            assert_eq!(desc, options.main_descriptor.to_string());
+            assert_eq!(kind, "vault");
+            assert_eq!(
+                db_version(&mut rusqlite::Connection::open(&db_path).unwrap()).unwrap(),
+                10
+            );
+            assert_eq!(
+                conn.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                    row.get::<_, i64>(0)
+                })
+                .unwrap(),
+                0
+            );
+            drop(conn);
+            fs::remove_dir_all(tmp_dir).unwrap();
         }
 
         fn sha256_of(path: &path::Path) -> sha256::Hash {
@@ -3879,13 +3938,13 @@ CREATE TABLE labels (
         }
 
         #[test]
-        fn preflight_reads_a_fresh_v9_database_and_its_identity_survives_a_tip_update() {
+        fn preflight_reads_a_fresh_v10_database_and_its_identity_survives_a_tip_update() {
             for (chain, network) in LEGACY {
-                let (tmp_dir, db_path, options) = v9_fixture(chain);
+                let (tmp_dir, db_path, options) = v10_fixture(chain);
                 assert_eq!(
                     read_stored_identity(&db_path).unwrap(),
                     StoredIdentity {
-                        version: 9,
+                        version: 10,
                         chain,
                         network
                     }
@@ -3912,10 +3971,10 @@ CREATE TABLE labels (
         }
 
         #[test]
-        fn v8_to_v9_migration_backfills_the_identity_and_preserves_every_other_row() {
+        fn v8_to_v10_migration_backfills_the_identity_and_preserves_every_other_row() {
             let secp = secp256k1::Secp256k1::verification_only();
-            let (_, fresh_v9_path, _) = v9_fixture(ChainId::Bitcoin);
-            let fresh_tip_layout = table_info(&fresh_v9_path, "tip");
+            let (_, fresh_v10_path, _) = v10_fixture(ChainId::Bitcoin);
+            let fresh_tip_layout = table_info(&fresh_v10_path, "tip");
             assert_eq!(
                 fresh_tip_layout
                     .iter()
@@ -3978,7 +4037,7 @@ CREATE TABLE labels (
                 assert_eq!(
                     read_stored_identity(&db_path).unwrap(),
                     StoredIdentity {
-                        version: 9,
+                        version: 10,
                         chain,
                         network
                     },
@@ -4070,15 +4129,15 @@ CREATE TABLE labels (
         }
 
         #[test]
-        fn v9_identity_rows_are_validated_strictly() {
+        fn v10_identity_rows_are_validated_strictly() {
             // A fork identity row (written here by the test, never by the daemon while the
             // chain is dormant) reads back as what it is …
-            let (tmp_dir, db_path, options) = v9_fixture(ChainId::Bitcoin);
+            let (tmp_dir, db_path, options) = v10_fixture(ChainId::Bitcoin);
             raw(&db_path, "UPDATE tip SET chain = 'bitcoin-blake2b'");
             assert_eq!(
                 read_stored_identity(&db_path).unwrap(),
                 StoredIdentity {
-                    version: 9,
+                    version: 10,
                     chain: ChainId::BitcoinBlake2b,
                     network: bitcoin::Network::Bitcoin,
                 }
@@ -4137,7 +4196,7 @@ CREATE TABLE labels (
             fs::remove_dir_all(tmp_dir).unwrap();
 
             // No tip row (v8 and v9).
-            for fixture in [v8_fixture(ChainId::Bitcoin), v9_fixture(ChainId::Bitcoin)] {
+            for fixture in [v8_fixture(ChainId::Bitcoin), v10_fixture(ChainId::Bitcoin)] {
                 let (tmp_dir, db_path, _) = fixture;
                 raw(&db_path, "DELETE FROM tip");
                 match read_stored_identity(&db_path) {
@@ -4175,7 +4234,7 @@ CREATE TABLE labels (
         #[test]
         fn unsupported_versions_and_foreign_files_are_refused_before_any_write() {
             // Future and negative versions.
-            for version in [10, 9_999, -1] {
+            for version in [11, 9_999, -1] {
                 let (tmp_dir, db_path, _) = v8_fixture(ChainId::Bitcoin);
                 raw(
                     &db_path,
@@ -4384,7 +4443,7 @@ CREATE TABLE labels (
             assert_eq!(read_stored_identity(&db_path).unwrap().version, 8);
             assert_eq!(table_info(&db_path, "tip").len(), 3);
             maybe_apply_migration(&db_path, &[]).unwrap();
-            assert_eq!(read_stored_identity(&db_path).unwrap().version, 9);
+            assert_eq!(read_stored_identity(&db_path).unwrap().version, 10);
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
@@ -4482,7 +4541,7 @@ CREATE TABLE labels (
         #[test]
         fn stored_spends_keep_unified_proprietary_records() {
             use bitcoin::psbt::raw::ProprietaryKey;
-            let (tmp_dir, db_path, _) = v9_fixture(ChainId::Bitcoin);
+            let (tmp_dir, db_path, _) = v10_fixture(ChainId::Bitcoin);
             let secp = secp256k1::Secp256k1::verification_only();
             let db = SqliteDb::new(db_path, None, &secp).unwrap();
             let mut conn = db.connection().unwrap();
