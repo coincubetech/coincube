@@ -2661,7 +2661,8 @@ mod tests {
         let _ = link("https://example.com/docs", "Docs");
         let _ = list(&menu, &cache, false);
         let _ = bitcoind_settings(&menu, &cache, vec![text("child").into()]);
-        let _ = import_export(&menu, &cache);
+        let _ = import_export(&menu, &cache, true);
+        let _ = import_export(&menu, &cache, false);
         let _ = remote_backend_section(&menu, &cache, &valid_email, false, true);
         let _ = remote_backend_section(&menu, &cache, &invalid_email, true, false);
     }

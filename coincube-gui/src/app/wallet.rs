@@ -1201,7 +1201,11 @@ mod tests {
         assert!(wallet.signer.is_none());
         assert!(!wallet.id().is_legacy());
         assert_eq!(
-            wallet.preview_change_address().script_pubkey(),
+            wallet
+                .preview_change_address()
+                .require_network(Network::Regtest)
+                .unwrap()
+                .script_pubkey(),
             descriptor
                 .change_descriptor()
                 .at_derivation_index(0)
