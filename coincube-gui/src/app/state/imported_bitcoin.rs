@@ -784,7 +784,9 @@ impl ImportedBitcoinPanel {
                             .map(|_| ())
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::Installed(generation, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::Installed(
+                            generation, result,
+                        )))
                     },
                 )
             }
@@ -849,7 +851,9 @@ impl ImportedBitcoinPanel {
                         .map_err(|error| error.to_string())?
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::Expanded(generation, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::Expanded(
+                            generation, result,
+                        )))
                     },
                 )
             }
@@ -871,7 +875,7 @@ impl ImportedBitcoinPanel {
                 Task::perform(
                     async move { daemon.get_new_address().await.map_err(|e| e.to_string()) },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::Address(generation, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::Address(generation, result)))
                     },
                 )
             }
@@ -956,7 +960,9 @@ impl ImportedBitcoinPanel {
                         }
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::DraftCreated(generation, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::DraftCreated(
+                            generation, result,
+                        )))
                     },
                 )
             }
@@ -1010,9 +1016,9 @@ impl ImportedBitcoinPanel {
                         Ok((psbt, counts, final_txid))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::SignedSaved(
+                        Message::ImportedBitcoin(Box::new(ImportEvent::SignedSaved(
                             generation, draft_id, result,
-                        ))
+                        )))
                     },
                 )
             }
@@ -1050,7 +1056,9 @@ impl ImportedBitcoinPanel {
                         Ok(true)
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::FileSaved(generation, id, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::FileSaved(
+                            generation, id, result,
+                        )))
                     },
                 )
             }
@@ -1108,9 +1116,9 @@ impl ImportedBitcoinPanel {
                         Ok(Some((psbt, counts, final_txid)))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::FileLoaded(
+                        Message::ImportedBitcoin(Box::new(ImportEvent::FileLoaded(
                             generation, draft_id, result,
-                        ))
+                        )))
                     },
                 )
             }
@@ -1184,7 +1192,9 @@ impl ImportedBitcoinPanel {
                         Ok((actual, actual != final_txid))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::Broadcasted(generation, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::Broadcasted(
+                            generation, result,
+                        )))
                     },
                 )
             }
@@ -1291,9 +1301,9 @@ impl ImportedBitcoinPanel {
                         Ok((psbt, counts, final_txid))
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::HardwareSigned(
+                        Message::ImportedBitcoin(Box::new(ImportEvent::HardwareSigned(
                             generation, draft_id, result,
-                        ))
+                        )))
                     },
                 )
             }
@@ -1313,7 +1323,9 @@ impl ImportedBitcoinPanel {
                         bitcoin_import::abandon_pending(&directory, &cube_id, operation_id).await
                     },
                     move |result| {
-                        Message::ImportedBitcoin(ImportEvent::Abandoned(generation, result))
+                        Message::ImportedBitcoin(Box::new(ImportEvent::Abandoned(
+                            generation, result,
+                        )))
                     },
                 )
             }
@@ -1333,7 +1345,9 @@ impl ImportedBitcoinPanel {
                     Task::perform(
                         async move { bitcoin_import::resume(&directory, &cube_id, operation_id).await },
                         move |result| {
-                            Message::ImportedBitcoin(ImportEvent::Resumed(generation, result))
+                            Message::ImportedBitcoin(Box::new(ImportEvent::Resumed(
+                                generation, result,
+                            )))
                         },
                     )
                 }
@@ -1653,7 +1667,9 @@ impl ImportedBitcoinPanel {
                 .await
                 .map_err(|e| e.to_string())?
             },
-            move |result| Message::ImportedBitcoin(ImportEvent::Opened(generation, result)),
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::Opened(generation, result)))
+            },
         )
     }
 
@@ -1698,7 +1714,9 @@ impl ImportedBitcoinPanel {
                     .spend_txs;
                 Ok((info, coins, history, spend_drafts, stage))
             },
-            move |result| Message::ImportedBitcoin(ImportEvent::Refreshed(generation, result)),
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::Refreshed(generation, result)))
+            },
         )
     }
 

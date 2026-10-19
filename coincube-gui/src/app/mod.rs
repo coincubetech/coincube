@@ -71,7 +71,7 @@ use self::state::vault::settings::SettingsState as VaultSettingsState;
 
 struct Panels {
     current: Menu,
-    imported_bitcoin: Option<state::imported_bitcoin::ImportedBitcoinPanel>,
+    imported_bitcoin: Option<Box<state::imported_bitcoin::ImportedBitcoinPanel>>,
     // Always available panels
     global_home: GlobalHome,
     liquid_overview: Option<LiquidOverview>,
@@ -204,7 +204,7 @@ impl Panels {
                     import,
                 );
                 panel.set_hardware_root(datadir.clone());
-                panel
+                Box::new(panel)
             }),
             // Liquid panels always available (use LiquidBackend, not Vault wallet)
             global_home: if let Some(w) = &wallet {
@@ -584,7 +584,10 @@ impl Panels {
 
     fn current(&self) -> Option<&dyn State> {
         match &self.current {
-            Menu::ImportedBitcoin => self.imported_bitcoin.as_ref().map(|p| p as &dyn State),
+            Menu::ImportedBitcoin => self
+                .imported_bitcoin
+                .as_ref()
+                .map(|p| p.as_ref() as &dyn State),
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&self.global_home),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&self.global_settings as &dyn State)
@@ -671,7 +674,10 @@ impl Panels {
 
     fn current_mut(&mut self) -> Option<&mut dyn State> {
         match &self.current {
-            Menu::ImportedBitcoin => self.imported_bitcoin.as_mut().map(|p| p as &mut dyn State),
+            Menu::ImportedBitcoin => self
+                .imported_bitcoin
+                .as_mut()
+                .map(|p| p.as_mut() as &mut dyn State),
             Menu::Cube(crate::app::menu::CubeSubMenu::Overview) => Some(&mut self.global_home),
             Menu::Cube(crate::app::menu::CubeSubMenu::Settings(_)) => {
                 Some(&mut self.global_settings as &mut dyn State)
@@ -3873,9 +3879,9 @@ impl App {
         let cmd = iced::Task::batch([
             panels.connect.ensure_session_check(),
             panels.global_home.reload(None, None),
-            Task::done(Message::ImportedBitcoin(
+            Task::done(Message::ImportedBitcoin(Box::new(
                 state::imported_bitcoin::ImportEvent::Start,
-            )),
+            ))),
         ]);
 
         Ok((
@@ -6268,7 +6274,7 @@ impl App {
         match message {
             Message::ImportedBitcoin(event) => {
                 if self.panels.imported_bitcoin.is_none() {
-                    if let state::imported_bitcoin::ImportEvent::Opened(_, Ok(daemon)) = event {
+                    if let state::imported_bitcoin::ImportEvent::Opened(_, Ok(daemon)) = *event {
                         return Task::perform(
                             async move {
                                 if let Err(error) = daemon.stop().await {
@@ -6283,7 +6289,7 @@ impl App {
                     return Task::none();
                 }
                 let refresh_cube = matches!(
-                    &event,
+                    event.as_ref(),
                     state::imported_bitcoin::ImportEvent::Installed(_, Ok(()))
                         | state::imported_bitcoin::ImportEvent::Resumed(_, Ok(Some(_)))
                         | state::imported_bitcoin::ImportEvent::Refreshed(_, Ok(_))
@@ -6295,7 +6301,7 @@ impl App {
                     .as_mut()
                     .map_or_else(Task::none, |panel| {
                         panel.set_connect_client(import_client.as_ref());
-                        panel.update_event(event)
+                        panel.update_event(*event)
                     });
                 if self
                     .panels
