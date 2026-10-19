@@ -5,8 +5,9 @@
 //! `SpendTx` from the imported descriptors.
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     convert::TryFrom,
+    str::FromStr,
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc,
@@ -15,8 +16,10 @@ use std::{
 };
 
 use coincube_core::{
+    foreign_split::FinalizeError,
+    imported_spend::{finalize_imported_spend, verify_imported_signatures, ImportedFinalizeError},
     miniscript::{
-        bitcoin::{Address, Network},
+        bitcoin::{address, psbt::Psbt, secp256k1, Address, Network, Txid},
         DescriptorPublicKey, ForEachKey,
     },
     wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
@@ -27,7 +30,7 @@ use coincube_ui::{
     widget::{Column, ColumnExt, Element, Row},
 };
 use coincubed::{
-    commands::CoinStatus,
+    commands::{CoinStatus, CreateSpendResult, ListSpendEntry},
     config::{BitcoinBackend, BitcoinConfig, Config, ElectrumConfig, EsploraConfig},
 };
 use iced::{widget::text_input, Subscription, Task};
@@ -79,7 +82,9 @@ fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, Strin
         "Multisig SegWit"
     };
     let mut fingerprints = BTreeSet::new();
+    let mut signer_keys = 0usize;
     descriptor.receive_descriptor().for_each_key(|key| {
+        signer_keys += 1;
         if let DescriptorPublicKey::XPub(xpub) = key {
             if let Some((fingerprint, _)) = &xpub.origin {
                 fingerprints.insert(fingerprint.to_string());
@@ -92,7 +97,7 @@ fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, Strin
         .and_then(|(_, rest)| rest.split_once(','))
         .map_or_else(
             || "1 signer".to_string(),
-            |(required, _)| format!("{required} of {} signers", fingerprints.len()),
+            |(required, _)| format!("{required} of {signer_keys} signers"),
         );
     let fingerprints = fingerprints.into_iter().collect::<Vec<_>>().join(", ");
     (script, threshold, fingerprints)
@@ -107,6 +112,85 @@ fn sample_receive_address(descriptor: &ImportedWalletDescriptor) -> Result<Strin
     Address::from_script(&script, Network::Bitcoin)
         .map(|address| address.to_string())
         .map_err(|error| error.to_string())
+}
+
+fn unsigned_construction(psbt: &Psbt) -> Psbt {
+    let mut original = psbt.clone();
+    for input in &mut original.inputs {
+        input.partial_sigs.clear();
+        input.tap_key_sig = None;
+        input.tap_script_sigs.clear();
+        input.final_script_sig = None;
+        input.final_script_witness = None;
+    }
+    original
+}
+
+fn checked_draft(
+    wallet: &ImportedWalletDescriptor,
+    psbt: Psbt,
+    warnings: Vec<String>,
+) -> Result<ImportedDraft, String> {
+    let original = unsigned_construction(&psbt);
+    let secp = secp256k1::Secp256k1::verification_only();
+    let signatures_per_input =
+        verify_imported_signatures(wallet, &original, &psbt, &secp).map_err(|e| e.to_string())?;
+    let final_txid = match finalize_imported_spend(wallet, &original, &psbt, &secp) {
+        Ok(verified) => Some(verified.transaction().compute_txid()),
+        Err(ImportedFinalizeError::Signatures(FinalizeError::Unsatisfied)) => None,
+        Err(error) => return Err(error.to_string()),
+    };
+    Ok(ImportedDraft {
+        psbt,
+        signatures_per_input,
+        final_txid,
+        warnings,
+    })
+}
+
+fn import_signed_psbt(
+    wallet: &ImportedWalletDescriptor,
+    current: &Psbt,
+    text: &str,
+) -> Result<(Psbt, Vec<usize>, Option<Txid>), String> {
+    if text.len() > crate::services::psbt_file::MAX_FILE_BYTES as usize * 2 {
+        return Err("The signed PSBT is too large.".into());
+    }
+    let signed = Psbt::from_str(text.trim()).map_err(|_| "Paste a base64 Bitcoin PSBT.")?;
+    if signed.inputs.iter().any(|input| {
+        input.final_script_sig.is_some()
+            || input.final_script_witness.is_some()
+            || input.tap_key_sig.is_some()
+            || !input.tap_script_sigs.is_empty()
+    }) {
+        return Err("Import an unfinalized Bitcoin PSBT containing only signer signatures.".into());
+    }
+    let original = unsigned_construction(current);
+    let secp = secp256k1::Secp256k1::verification_only();
+    let incoming = verify_imported_signatures(wallet, &original, &signed, &secp)
+        .map_err(|error| error.to_string())?;
+    if incoming.iter().all(|count| *count == 0) {
+        return Err("The PSBT has no valid signer signatures.".into());
+    }
+    let mut combined = current.clone();
+    for (target, source) in combined.inputs.iter_mut().zip(&signed.inputs) {
+        for (key, signature) in &source.partial_sigs {
+            if target
+                .partial_sigs
+                .get(key)
+                .is_some_and(|previous| previous != signature)
+            {
+                return Err("A signer returned a conflicting signature for this wallet.".into());
+            }
+            target.partial_sigs.insert(*key, *signature);
+        }
+    }
+    let checked = checked_draft(wallet, combined, Vec::new())?;
+    Ok((
+        checked.psbt,
+        checked.signatures_per_input,
+        checked.final_txid,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -126,6 +210,17 @@ pub enum ImportMessage {
     CopyAddress,
     ToggleDetails,
     Abandon,
+    ShowSend,
+    CloseSend,
+    RecipientEdited(String),
+    AmountEdited(String),
+    FeerateEdited(String),
+    CreateDraft,
+    SelectDraft(usize),
+    CopyPsbt,
+    SignedPsbtEdited(String),
+    ImportSignedPsbt,
+    Broadcast,
 }
 
 #[derive(Debug)]
@@ -141,6 +236,7 @@ pub enum ImportEvent {
                 model::GetInfoResult,
                 model::ListCoinsResult,
                 Vec<model::HistoryTransaction>,
+                Vec<ListSpendEntry>,
                 BitcoinImportStage,
             ),
             String,
@@ -148,6 +244,16 @@ pub enum ImportEvent {
     ),
     Address(u64, Result<model::GetAddressResult, String>),
     Abandoned(u64, Result<(), String>),
+    DraftCreated(u64, Result<(Psbt, Vec<String>), String>),
+    SignedSaved(u64, Result<(Psbt, Vec<usize>, Option<Txid>), String>),
+    Broadcasted(u64, Result<Txid, String>),
+}
+
+struct ImportedDraft {
+    psbt: Psbt,
+    signatures_per_input: Vec<usize>,
+    final_txid: Option<Txid>,
+    warnings: Vec<String>,
 }
 
 pub struct ImportedBitcoinPanel {
@@ -173,6 +279,14 @@ pub struct ImportedBitcoinPanel {
     address: Option<model::GetAddressResult>,
     show_details: bool,
     abandoned: bool,
+    show_send: bool,
+    send_recipient: String,
+    send_amount: String,
+    send_feerate: String,
+    signed_psbt_text: String,
+    spend_drafts: Vec<ListSpendEntry>,
+    draft: Option<ImportedDraft>,
+    last_broadcast_txid: Option<Txid>,
 }
 
 impl ImportedBitcoinPanel {
@@ -201,6 +315,14 @@ impl ImportedBitcoinPanel {
             address: None,
             show_details: false,
             abandoned: false,
+            show_send: false,
+            send_recipient: String::new(),
+            send_amount: String::new(),
+            send_feerate: "5".into(),
+            signed_psbt_text: String::new(),
+            spend_drafts: Vec::new(),
+            draft: None,
+            last_broadcast_txid: None,
         }
     }
 
@@ -243,6 +365,57 @@ impl ImportedBitcoinPanel {
 
     pub fn abandoned(&self) -> bool {
         self.abandoned
+    }
+
+    fn import_descriptor(&self) -> Result<ImportedWalletDescriptor, String> {
+        self.import
+            .active_attachment()
+            .map(|wallet| wallet.descriptor.clone())
+            .ok_or_else(|| "The imported wallet is not installed yet.".into())
+    }
+
+    fn send_request(&self) -> Result<(Address<address::NetworkUnchecked>, u64, u64), String> {
+        let unchecked = Address::from_str(self.send_recipient.trim())
+            .map_err(|_| "Enter a valid Bitcoin address.".to_string())?;
+        unchecked
+            .clone()
+            .require_network(Network::Bitcoin)
+            .map_err(|_| "The recipient address belongs to another Bitcoin network.".to_string())?;
+        let amount = self
+            .send_amount
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Enter the amount in satoshis.".to_string())?;
+        if amount == 0 {
+            return Err("The amount must be greater than zero.".into());
+        }
+        let feerate = self
+            .send_feerate
+            .trim()
+            .parse::<u64>()
+            .map_err(|_| "Enter a fee rate in sat/vB.".to_string())?;
+        if feerate == 0 {
+            return Err("The fee rate must be at least 1 sat/vB.".into());
+        }
+        Ok((unchecked, amount, feerate))
+    }
+
+    fn select_saved_draft(&mut self, index: usize) {
+        let Some(entry) = self.spend_drafts.get(index) else {
+            self.error = Some("This PSBT is no longer available.".into());
+            return;
+        };
+        match self
+            .import_descriptor()
+            .and_then(|wallet| checked_draft(&wallet, entry.psbt.clone(), Vec::new()))
+        {
+            Ok(draft) => {
+                self.draft = Some(draft);
+                self.signed_psbt_text.clear();
+                self.error = None;
+            }
+            Err(error) => self.error = Some(error),
+        }
     }
 
     fn invalidate(&mut self) {
@@ -552,6 +725,178 @@ impl ImportedBitcoinPanel {
                 self.show_details = !self.show_details;
                 Task::none()
             }
+            ImportMessage::ShowSend => {
+                if !self.is_ready() {
+                    self.error =
+                        Some("Wait for the complete Bitcoin history scan before sending.".into());
+                } else {
+                    self.show_send = true;
+                    self.error = None;
+                }
+                Task::none()
+            }
+            ImportMessage::CloseSend => {
+                self.show_send = false;
+                self.error = None;
+                Task::none()
+            }
+            ImportMessage::RecipientEdited(value) => {
+                self.send_recipient = value;
+                self.error = None;
+                Task::none()
+            }
+            ImportMessage::AmountEdited(value) => {
+                self.send_amount = value;
+                self.error = None;
+                Task::none()
+            }
+            ImportMessage::FeerateEdited(value) => {
+                self.send_feerate = value;
+                self.error = None;
+                Task::none()
+            }
+            ImportMessage::CreateDraft => {
+                if !self.is_ready() {
+                    self.error = Some(
+                        "The complete history scan must finish before a spend can be drafted."
+                            .into(),
+                    );
+                    return Task::none();
+                }
+                let (address, amount, feerate) = match self.send_request() {
+                    Ok(request) => request,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return Task::none();
+                    }
+                };
+                let Some(daemon) = self.daemon.clone() else {
+                    return Task::none();
+                };
+                self.busy = true;
+                self.error = None;
+                let generation = self.generation;
+                Task::perform(
+                    async move {
+                        let destinations = HashMap::from([(address, amount)]);
+                        match daemon
+                            .create_spend_tx(&[], &destinations, feerate, None)
+                            .await
+                            .map_err(|error| error.to_string())?
+                        {
+                            CreateSpendResult::Success { psbt, warnings } => {
+                                daemon
+                                    .update_spend_tx(&psbt)
+                                    .await
+                                    .map_err(|error| error.to_string())?;
+                                Ok((psbt, warnings))
+                            }
+                            CreateSpendResult::InsufficientFunds { missing } => Err(format!(
+                                "Insufficient funds: {missing} more satoshis are needed."
+                            )),
+                        }
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::DraftCreated(generation, result))
+                    },
+                )
+            }
+            ImportMessage::SelectDraft(index) => {
+                self.select_saved_draft(index);
+                Task::none()
+            }
+            ImportMessage::CopyPsbt => self.draft.as_ref().map_or_else(Task::none, |draft| {
+                iced::clipboard::write(draft.psbt.to_string())
+            }),
+            ImportMessage::SignedPsbtEdited(value) => {
+                self.signed_psbt_text = value;
+                self.error = None;
+                Task::none()
+            }
+            ImportMessage::ImportSignedPsbt => {
+                let Some(draft) = &self.draft else {
+                    self.error =
+                        Some("Create or select a spend before importing signatures.".into());
+                    return Task::none();
+                };
+                let wallet = match self.import_descriptor() {
+                    Ok(wallet) => wallet,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return Task::none();
+                    }
+                };
+                let Some(daemon) = self.daemon.clone() else {
+                    return Task::none();
+                };
+                let current = draft.psbt.clone();
+                let text = self.signed_psbt_text.clone();
+                self.busy = true;
+                let generation = self.generation;
+                Task::perform(
+                    async move {
+                        let (psbt, counts, final_txid) =
+                            import_signed_psbt(&wallet, &current, &text)?;
+                        daemon
+                            .update_spend_tx(&psbt)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Ok((psbt, counts, final_txid))
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::SignedSaved(generation, result))
+                    },
+                )
+            }
+            ImportMessage::Broadcast => {
+                if !self.is_ready() {
+                    self.error =
+                        Some("Refresh the complete wallet history before broadcasting.".into());
+                    return Task::none();
+                }
+                let Some(draft) = &self.draft else {
+                    return Task::none();
+                };
+                let Some(final_txid) = draft.final_txid else {
+                    self.error = Some("More signer signatures are needed before broadcast.".into());
+                    return Task::none();
+                };
+                let wallet = match self.import_descriptor() {
+                    Ok(wallet) => wallet,
+                    Err(error) => {
+                        self.error = Some(error);
+                        return Task::none();
+                    }
+                };
+                let Some(daemon) = self.daemon.clone() else {
+                    return Task::none();
+                };
+                let signed = draft.psbt.clone();
+                let draft_id = signed.unsigned_tx.compute_txid();
+                self.busy = true;
+                let generation = self.generation;
+                Task::perform(
+                    async move {
+                        let original = unsigned_construction(&signed);
+                        let secp = secp256k1::Secp256k1::verification_only();
+                        let verified = finalize_imported_spend(&wallet, &original, &signed, &secp)
+                            .map_err(|error| error.to_string())?;
+                        if verified.transaction().compute_txid() != final_txid {
+                            return Err(
+                                "The finalized transaction changed. Review the spend again.".into(),
+                            );
+                        }
+                        daemon
+                            .broadcast_spend_tx(&draft_id)
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        Ok(final_txid)
+                    },
+                    move |result| {
+                        Message::ImportedBitcoin(ImportEvent::Broadcasted(generation, result))
+                    },
+                )
+            }
             ImportMessage::Abandon => {
                 if self.import.active_attachment().is_some() {
                     self.error =
@@ -649,12 +994,32 @@ impl ImportedBitcoinPanel {
             ImportEvent::Refreshed(generation, result) if generation == self.generation => {
                 self.busy = false;
                 match result {
-                    Ok((info, coins, history, stage)) => {
+                    Ok((info, coins, history, spend_drafts, stage)) => {
                         self.info = Some(info);
                         self.coins = Some(coins);
                         self.history = history;
+                        self.spend_drafts = spend_drafts;
                         self.import.stage = stage;
                         self.error = None;
+                        if let Some(selected) = &self.draft {
+                            let id = selected.psbt.unsigned_tx.compute_txid();
+                            if let Some(entry) = self
+                                .spend_drafts
+                                .iter()
+                                .find(|entry| entry.psbt.unsigned_tx.compute_txid() == id)
+                            {
+                                if let Ok(wallet) = self.import_descriptor() {
+                                    match checked_draft(
+                                        &wallet,
+                                        entry.psbt.clone(),
+                                        selected.warnings.clone(),
+                                    ) {
+                                        Ok(draft) => self.draft = Some(draft),
+                                        Err(error) => self.error = Some(error),
+                                    }
+                                }
+                            }
+                        }
                     }
                     Err(error) => {
                         self.info = None;
@@ -677,6 +1042,59 @@ impl ImportedBitcoinPanel {
                 self.busy = false;
                 match result {
                     Ok(()) => self.abandoned = true,
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
+            ImportEvent::DraftCreated(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok((psbt, warnings)) => match self
+                        .import_descriptor()
+                        .and_then(|wallet| checked_draft(&wallet, psbt, warnings))
+                    {
+                        Ok(draft) => {
+                            self.draft = Some(draft);
+                            self.signed_psbt_text.clear();
+                            self.error = None;
+                            return self.refresh();
+                        }
+                        Err(error) => self.error = Some(error),
+                    },
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
+            ImportEvent::SignedSaved(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok((psbt, counts, final_txid)) => {
+                        let warnings = self
+                            .draft
+                            .as_ref()
+                            .map_or_else(Vec::new, |draft| draft.warnings.clone());
+                        self.draft = Some(ImportedDraft {
+                            psbt,
+                            signatures_per_input: counts,
+                            final_txid,
+                            warnings,
+                        });
+                        self.signed_psbt_text.clear();
+                        self.error = None;
+                        return self.refresh();
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
+            ImportEvent::Broadcasted(generation, result) if generation == self.generation => {
+                self.busy = false;
+                match result {
+                    Ok(txid) => {
+                        self.last_broadcast_txid = Some(txid);
+                        self.error = None;
+                        return self.refresh();
+                    }
                     Err(error) => self.error = Some(error),
                 }
                 Task::none()
@@ -761,7 +1179,12 @@ impl ImportedBitcoinPanel {
                     .list_history_txs(0, u32::MAX, 20)
                     .await
                     .map_err(|e| e.to_string())?;
-                Ok((info, coins, history, stage))
+                let spend_drafts = daemon
+                    .list_spend_txs()
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .spend_txs;
+                Ok((info, coins, history, spend_drafts, stage))
             },
             move |result| Message::ImportedBitcoin(ImportEvent::Refreshed(generation, result)),
         )
@@ -983,6 +1406,9 @@ impl ImportedBitcoinPanel {
     }
 
     fn wallet_view(&self) -> Element<'_, view::Message> {
+        if self.show_send {
+            return self.send_view();
+        }
         let mut content = Column::new().spacing(16).push(h2("Bitcoin wallet"));
         let ready = self.is_ready();
         if let Some(info) = &self.info {
@@ -1013,6 +1439,7 @@ impl ImportedBitcoinPanel {
                 .push(p1_regular("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet."))
                 .push(p1_regular("Update the Cube Recovery Kit now that this wallet is attached."))
                 .push(Row::new().spacing(10)
+                    .push(button::primary(None, "Send").on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend)))
                     .push(button::primary(None, "Receive").on_press(view::Message::ImportedBitcoin(ImportMessage::Receive)))
                     .push(button::secondary(None, "Refresh").on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh))));
             if let Some(address) = &self.address {
@@ -1068,6 +1495,131 @@ impl ImportedBitcoinPanel {
                     button::secondary(None, "Check progress")
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
                 );
+        }
+        if let Some(error) = &self.error {
+            content = content.push(p1_regular(error).style(theme::text::error));
+        }
+        content.into()
+    }
+
+    fn send_view(&self) -> Element<'_, view::Message> {
+        let mut content = Column::new()
+            .spacing(14)
+            .push(h2("Send Bitcoin"))
+            .push(p1_regular("Spend from the imported wallet using its original signer or hardware device. Your Cube seed cannot sign this transaction."))
+            .push(button::secondary(None, "Back to wallet")
+                .on_press(view::Message::ImportedBitcoin(ImportMessage::CloseSend)));
+        if let Some(txid) = self.last_broadcast_txid {
+            content = content.push(p1_bold(format!("Broadcast transaction: {txid}")));
+        }
+        if let Some(draft) = &self.draft {
+            content = content
+                .push(p1_bold("Review transaction"))
+                .push(caption(format!(
+                    "Draft ID: {}",
+                    draft.psbt.unsigned_tx.compute_txid()
+                )));
+            for output in &draft.psbt.unsigned_tx.output {
+                let address = Address::from_script(&output.script_pubkey, Network::Bitcoin)
+                    .map(|address| address.to_string())
+                    .unwrap_or_else(|_| "Unsupported output script".into());
+                content = content.push(p1_regular(format!(
+                    "{} sats → {address}",
+                    output.value.to_sat()
+                )));
+            }
+            if let Ok(fee) = draft.psbt.fee() {
+                content = content.push(p1_regular(format!("Network fee: {} sats", fee.to_sat())));
+            }
+            for warning in &draft.warnings {
+                content = content.push(caption(warning));
+            }
+            content = content
+                .push(caption(format!("Valid signer signatures per input: {}",
+                    draft.signatures_per_input.iter().map(|count| count.to_string()).collect::<Vec<_>>().join(", "))))
+                .push(p1_regular("Copy this PSBT into the original signing wallet, then paste the signed PSBT below. For multisig, repeat with each signer."))
+                .push(button::secondary(None, "Copy PSBT")
+                    .on_press(view::Message::ImportedBitcoin(ImportMessage::CopyPsbt)))
+                .push(text_input("Paste signed PSBT (base64)", &self.signed_psbt_text)
+                    .on_input(|value| view::Message::ImportedBitcoin(ImportMessage::SignedPsbtEdited(value)))
+                    .padding(10))
+                .push(button::secondary(None, "Import signatures")
+                    .on_press_maybe((!self.busy && !self.signed_psbt_text.trim().is_empty())
+                        .then_some(view::Message::ImportedBitcoin(ImportMessage::ImportSignedPsbt))));
+            if let Some(final_txid) = draft.final_txid {
+                content = content
+                    .push(p1_bold(format!(
+                        "Ready to broadcast · Final transaction ID: {final_txid}"
+                    )))
+                    .push(
+                        button::primary(
+                            None,
+                            if self.busy {
+                                "Broadcasting…"
+                            } else {
+                                "Broadcast transaction"
+                            },
+                        )
+                        .on_press_maybe(
+                            (!self.busy && self.is_ready()).then_some(
+                                view::Message::ImportedBitcoin(ImportMessage::Broadcast),
+                            ),
+                        ),
+                    );
+            } else {
+                content = content.push(caption(
+                    "Waiting for enough valid signatures on every input.",
+                ));
+            }
+        } else {
+            content = content
+                .push(p1_bold("New transaction"))
+                .push(
+                    text_input("Bitcoin recipient address", &self.send_recipient)
+                        .on_input(|value| {
+                            view::Message::ImportedBitcoin(ImportMessage::RecipientEdited(value))
+                        })
+                        .padding(10),
+                )
+                .push(
+                    text_input("Amount in satoshis", &self.send_amount)
+                        .on_input(|value| {
+                            view::Message::ImportedBitcoin(ImportMessage::AmountEdited(value))
+                        })
+                        .padding(10),
+                )
+                .push(
+                    text_input("Fee rate in sat/vB", &self.send_feerate)
+                        .on_input(|value| {
+                            view::Message::ImportedBitcoin(ImportMessage::FeerateEdited(value))
+                        })
+                        .padding(10),
+                )
+                .push(
+                    button::primary(
+                        None,
+                        if self.busy {
+                            "Preparing…"
+                        } else {
+                            "Review PSBT"
+                        },
+                    )
+                    .on_press_maybe(
+                        (!self.busy && self.is_ready())
+                            .then_some(view::Message::ImportedBitcoin(ImportMessage::CreateDraft)),
+                    ),
+                );
+        }
+        if !self.spend_drafts.is_empty() {
+            content = content.push(p1_bold("Saved transactions"));
+            for (index, entry) in self.spend_drafts.iter().enumerate().take(10) {
+                let id = entry.psbt.unsigned_tx.compute_txid();
+                content = content.push(caption(format!("Draft {id}"))).push(
+                    button::secondary(None, "Open saved PSBT").on_press(
+                        view::Message::ImportedBitcoin(ImportMessage::SelectDraft(index)),
+                    ),
+                );
+            }
         }
         if let Some(error) = &self.error {
             content = content.push(p1_regular(error).style(theme::text::error));
