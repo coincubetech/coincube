@@ -34,7 +34,7 @@ use crate::{
     config::{Config, ConfigError},
     database::{
         sqlite::{preflight, FreshDbOptions, SqliteDb, SqliteDbError, MAX_DB_VERSION_NO_TX_DB},
-        DatabaseInterface,
+        DatabaseConnection, DatabaseInterface,
     },
 };
 pub use database::sqlite::preflight::{PreflightError, StoredIdentity};
@@ -181,6 +181,50 @@ pub fn expand_imported_discovery(
             .expect("validated imported lookahead"),
         target,
     )?)
+}
+
+/// Inspect a published or staged imported database without starting a backend.
+/// Recovery uses this to verify the exact stored wallet and its durable
+/// address high-water marks before declaring an interrupted attach complete.
+pub fn read_imported_address_state(
+    config: &Config,
+    data_dir: &DataDirectory,
+) -> Result<(u32, u32), StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "address-state lookup requires an imported wallet".into(),
+        ))
+    })?;
+    let expected = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if expected.path() != data_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "address-state directory does not match imported wallet config".into(),
+        )));
+    }
+    let secp = secp256k1::Secp256k1::verification_only();
+    let db = SqliteDb::new(data_dir.sqlite_db_file_path(), None, &secp)?;
+    db.sanity_check_wallet(
+        config.bitcoin_config.chain,
+        &coincube_core::wallet_descriptor::WalletDescriptor::Imported(imported.clone()),
+    )?;
+    let mut conn = db.connection()?;
+    let history = conn
+        .imported_history()
+        .map_err(SqliteDbError::Rusqlite)?
+        .ok_or_else(|| {
+            SqliteDbError::MalformedIdentity("imported wallet has no historical scan state".into())
+        })?;
+    if Some(history.birthday) != config.import_birthday
+        || Some(history.initial_lookahead) != config.import_initial_lookahead
+    {
+        return Err(StartupError::Database(SqliteDbError::MalformedIdentity(
+            "imported scan settings do not match persisted wallet".into(),
+        )));
+    }
+    Ok((conn.receive_index().into(), conn.change_index().into()))
 }
 
 #[cfg(not(test))]
