@@ -139,12 +139,28 @@ fn check_duress(directory: &NetworkDirectory) -> Result<(), String> {
     Ok(())
 }
 
-fn check_cube(settings: &Settings, journal: &Journal, allow_attached: bool) -> Result<(), String> {
+fn check_directory_chain(
+    directory: &NetworkDirectory,
+    chain: crate::chain::ChainId,
+) -> Result<(), String> {
+    if directory.path().file_name() != Some(std::ffi::OsStr::new(chain.dir_name())) {
+        return Err("The import storage directory belongs to a different chain.".into());
+    }
+    Ok(())
+}
+
+fn check_cube(
+    directory: &NetworkDirectory,
+    settings: &Settings,
+    journal: &Journal,
+    allow_attached: bool,
+) -> Result<(), String> {
     let cube = settings
         .cubes
         .iter()
         .find(|c| c.id == journal.cube_id)
         .ok_or("The Cube for this import no longer exists.")?;
+    check_directory_chain(directory, cube.network)?;
     journal.wallet.validate(cube.network)?;
     if cube.vault_wallet_id.is_some() {
         return Err("This Cube already has a Vault.".into());
@@ -183,7 +199,7 @@ async fn set_stage(
     stage: BitcoinImportStage,
 ) -> Result<(), String> {
     settings::update_settings_file_checked(directory, |mut settings| {
-        check_cube(&settings, journal, true).map_err(SettingsError::WritingFile)?;
+        check_cube(directory, &settings, journal, true).map_err(SettingsError::WritingFile)?;
         let cube = settings
             .cubes
             .iter_mut()
@@ -235,6 +251,7 @@ fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(
 async fn finish(directory: &NetworkDirectory, journal: &mut Journal) -> Result<WalletId, String> {
     check_duress(directory)?;
     check_cube(
+        directory,
         &Settings::from_file(directory).map_err(|e| e.to_string())?,
         journal,
         true,
@@ -268,7 +285,7 @@ async fn finish(directory: &NetworkDirectory, journal: &mut Journal) -> Result<W
     // One settings transaction attaches the exact Cube and registers the local
     // wallet. This never uses the legacy 'first empty Cube' fallback.
     settings::update_settings_file_checked(directory, |mut settings| {
-        check_cube(&settings, journal, true).map_err(SettingsError::WritingFile)?;
+        check_cube(directory, &settings, journal, true).map_err(SettingsError::WritingFile)?;
         let cube = settings
             .cubes
             .iter_mut()
@@ -348,6 +365,7 @@ pub async fn install(
         phase: Phase::Prepared,
     };
     check_cube(
+        directory,
         &Settings::from_file(directory).map_err(|e| e.to_string())?,
         &journal,
         true,
@@ -478,7 +496,7 @@ pub async fn abandon_pending(
     }
     let path = journal_path(directory, operation_id);
     if let Some(journal) = read_journal(&path)? {
-        check_cube(&current, &journal, false)?;
+        check_cube(directory, &current, &journal, false)?;
         if journal.cube_id != cube_id || journal.final_path(directory).exists() {
             return Err(
                 "This wallet has already been installed. Resume it before changing its attachment."
@@ -559,37 +577,36 @@ pub async fn reconcile_sync(
                 .into(),
         );
     }
-    settings::update_settings_file_checked(directory, |mut settings| {
+    check_directory_chain(directory, status.chain_id)?;
+    let update = |settings: &mut Settings| -> Result<bool, String> {
         let cube = settings
             .cubes
             .iter_mut()
             .find(|c| c.id == cube_id)
-            .ok_or_else(|| {
-                SettingsError::WritingFile("The import Cube no longer exists.".into())
-            })?;
-        let intent = cube.bitcoin_import.as_mut().ok_or_else(|| {
-            SettingsError::WritingFile("The import operation no longer exists.".into())
-        })?;
+            .ok_or("The import Cube no longer exists.")?;
+        if cube.vault_wallet_id.is_some() {
+            return Err("This Cube already has a Vault.".into());
+        }
+        let intent = cube
+            .bitcoin_import
+            .as_mut()
+            .ok_or("The import operation no longer exists.")?;
         let wallet = intent
             .active_attachment()
-            .ok_or_else(|| {
-                SettingsError::WritingFile("The imported wallet is not installed yet.".into())
-            })?
+            .ok_or("The imported wallet is not installed yet.")?
             .clone();
-        wallet
-            .validate(cube.network)
-            .map_err(SettingsError::WritingFile)?;
+        wallet.validate(cube.network)?;
         if intent.operation_id != operation_id
             || cube.network != status.chain_id
             || wallet.descriptor != *imported
             || status.birthday != wallet.birthday
             || status.initial_lookahead < wallet.initial_lookahead
         {
-            return Err(SettingsError::WritingFile(
+            return Err(
                 "This synchronization result belongs to another wallet or setup operation.".into(),
-            ));
+            );
         }
-        if status.history_complete
+        let stage = if status.history_complete
             && status.receive_scanned >= status.initial_lookahead
             && status.change_scanned >= status.initial_lookahead
             && info.sync.is_finite()
@@ -600,10 +617,24 @@ pub async fn reconcile_sync(
             && !info.chain_divergence
             && info.refused_reorg_depth.is_none()
         {
-            intent.stage = BitcoinImportStage::Ready { wallet };
+            BitcoinImportStage::Ready { wallet }
         } else {
-            intent.stage = BitcoinImportStage::Syncing { wallet };
-        }
+            BitcoinImportStage::Syncing { wallet }
+        };
+        let changed = intent.stage != stage;
+        intent.stage = stage;
+        Ok(changed)
+    };
+    // A refresh with unchanged readiness should not rewrite settings. Validate
+    // identity even on this fast path; returning None from the settings writer
+    // would delete the settings file, not skip a write.
+    let mut snapshot = Settings::from_file(directory).map_err(|e| e.to_string())?;
+    if !update(&mut snapshot)? {
+        return Ok(());
+    }
+    settings::update_settings_file_checked(directory, |mut settings| {
+        // Revalidate against the state held under the settings write lock.
+        update(&mut settings).map_err(SettingsError::WritingFile)?;
         Ok(Some(settings))
     })
     .await

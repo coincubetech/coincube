@@ -339,6 +339,24 @@ async fn readiness_requires_matching_identity_complete_history_and_actual_covera
         .await
         .unwrap();
     assert!(f.stored().bitcoin_import.unwrap().is_ready());
+    let settings_path = f.directory.path().join(settings::SETTINGS_FILE_NAME);
+    let before = fs::metadata(&settings_path).unwrap();
+    reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
+        .await
+        .unwrap();
+    let after = fs::metadata(&settings_path).unwrap();
+    assert_eq!(before.modified().unwrap(), after.modified().unwrap());
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        assert_eq!(before.ino(), after.ino());
+    }
+    // Identity validation still runs when readiness would be unchanged.
+    assert!(
+        reconcile_sync(&f.directory, &f.cube.id, Uuid::new_v4(), &info)
+            .await
+            .is_err()
+    );
     info.imported_wallet.as_mut().unwrap().wallet_identity = "0".repeat(64);
     assert!(
         reconcile_sync(&f.directory, &f.cube.id, f.operation(), &info)
@@ -366,4 +384,30 @@ async fn explicit_abandon_clears_only_unpublished_setup() {
         .coincubed_data_directory(&f.wallet.wallet_id)
         .sqlite_db_file_path()
         .is_file());
+}
+
+#[tokio::test]
+async fn copied_settings_cannot_install_under_another_chain_directory() {
+    let f = Fixture::new().await;
+    let wrong = NetworkDirectory::new(f.root.join("bitcoin"));
+    wrong.init().unwrap();
+    let wrong_settings = wrong.path().join(settings::SETTINGS_FILE_NAME);
+    fs::copy(
+        f.directory.path().join(settings::SETTINGS_FILE_NAME),
+        &wrong_settings,
+    )
+    .unwrap();
+    let before = fs::read(&wrong_settings).unwrap();
+    assert!(install(
+        &wrong,
+        &f.cube.id,
+        f.operation(),
+        f.wallet.clone(),
+        f.config.clone()
+    )
+    .await
+    .unwrap_err()
+    .contains("different chain"));
+    assert_eq!(fs::read(&wrong_settings).unwrap(), before);
+    assert!(!wrong.coincubed_data_directory(&f.wallet.wallet_id).exists());
 }
