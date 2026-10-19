@@ -151,10 +151,11 @@ fn recovery_section<'a>(
                     .as_deref(),
             );
             col = col.push(recovery_kit_card(
-                cache.has_vault,
+                cache.has_vault || cache.has_imported_bitcoin,
                 rk.status.as_ref(),
                 rk.status_loading,
                 drift,
+                cache.has_imported_bitcoin && cache.current_descriptor_fingerprint.is_none(),
             ));
         }
     }
@@ -998,6 +999,7 @@ fn recovery_kit_card<'a>(
     status: Option<&RecoveryKitStatus>,
     loading: bool,
     drift: DescriptorDrift,
+    imported_state_unknown: bool,
 ) -> Element<'a, Message> {
     // One source of truth for what's backed up, by which method (master
     // §definitions). Drives the card state, the pills, and Remove visibility.
@@ -1014,7 +1016,14 @@ fn recovery_kit_card<'a>(
     // (per-method drift, PR 3). Each method is judged independently, so a
     // keychain-only kit can now drift (unlike PR 1, which kept drift
     // password-scoped); re-sealing one method clears only its warning.
-    let (subtitle, primary_label, primary_mode) = if drift.any() {
+    let (subtitle, primary_label, primary_mode) = if imported_state_unknown {
+        (
+            "Connect and refresh this Bitcoin wallet before checking or updating its Recovery Kit."
+                .to_string(),
+            primary_label,
+            primary_mode,
+        )
+    } else if drift.any() {
         (
             drift_subtitle(&drift).to_string(),
             "Update now",
@@ -1030,7 +1039,9 @@ fn recovery_kit_card<'a>(
         button::primary(None, primary_label)
             .padding([8, 16])
             .width(Length::Fixed(220.0))
-            .on_press(SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into()),
+            .on_press_maybe((!imported_state_unknown).then_some(
+                SettingsMessage::RecoveryKit(RecoveryKitMessage::Start(primary_mode)).into(),
+            )),
     );
     if has_kit {
         actions = actions.push(
