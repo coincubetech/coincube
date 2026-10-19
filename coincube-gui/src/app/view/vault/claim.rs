@@ -440,9 +440,12 @@ fn deposit_heading(status: Option<&DepositStatus>, verified: bool) -> &'static s
                 .is_ok_and(|funds| funds.confirmed_sats > 0 || funds.pending_sats > 0)
         })
         .count();
-    if results.iter().any(|result| result.is_err()) {
+    let failed = results.iter().filter(|result| result.is_err()).count();
+    if failed > 0 {
         return if received > 0 {
             "Funds received at one address; the other could not be checked"
+        } else if failed == 1 {
+            "One deposit address could not be checked; no funds found at the other"
         } else {
             "Unable to check both deposit addresses"
         };
@@ -1280,7 +1283,22 @@ mod tests {
             (
                 Err(ScanError::Unavailable),
                 Ok(empty),
+                "One deposit address could not be checked; no funds found at the other",
+            ),
+            (
+                Ok(empty),
+                Err(ScanError::Unavailable),
+                "One deposit address could not be checked; no funds found at the other",
+            ),
+            (
+                Err(ScanError::Unavailable),
+                Err(ScanError::Unavailable),
                 "Unable to check both deposit addresses",
+            ),
+            (
+                Err(ScanError::Unavailable),
+                Ok(pending),
+                "Funds received at one address; the other could not be checked",
             ),
             (
                 Ok(confirmed),
