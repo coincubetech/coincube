@@ -375,7 +375,12 @@ impl Daemon for EmbeddedDaemon {
     }
 
     async fn get_new_address(&self) -> Result<GetAddressResult, DaemonError> {
-        self.command(|daemon| Ok(daemon.get_new_address())).await
+        self.command(|daemon| {
+            daemon
+                .try_get_new_address()
+                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+        })
+        .await
     }
 
     async fn list_revealed_addresses(
