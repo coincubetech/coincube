@@ -3133,10 +3133,6 @@ impl ConnectAccountPanel {
 
             // ── Enrollment wizard (Phases 2 & 8) ──
             DuressMessage::StartEnrollment => {
-                if let Err(error) = crate::app::check_import_duress_compatibility() {
-                    self.error = Some(error);
-                    return iced::Task::none();
-                }
                 // Duress is a paid (Pro/Estate) feature behind a launch
                 // kill-switch. The nav hides the surface and the CTA for anyone
                 // who fails the show-rule (entitlement AND the launch gate);
@@ -3162,6 +3158,10 @@ impl ConnectAccountPanel {
                     // No-op: gate blocked (or fleet not yet verified). A fresh
                     // reload keeps the checklist current.
                     return self.reload_duress_cubes();
+                }
+                if let Err(error) = crate::app::check_import_duress_compatibility() {
+                    self.error = Some(error);
+                    return iced::Task::none();
                 }
                 self.open_enroll_wizard();
                 // Kick a fresh checklist fetch as the user commits to enrolling.
@@ -3234,10 +3234,6 @@ impl ConnectAccountPanel {
                 }
             }
             DuressMessage::SubmitEnrollment => {
-                if let Err(error) = crate::app::check_import_duress_compatibility() {
-                    self.error = Some(error);
-                    return iced::Task::none();
-                }
                 // Vault gate backstop (PLAN-duress-vault-gate). The gate is
                 // enforced at StartEnrollment, but Cube state can change while
                 // the wizard is open — a mid-session Vault creation calls
@@ -3277,6 +3273,9 @@ impl ConnectAccountPanel {
                     e.error = Some(msg);
                     return iced::Task::none();
                 }
+                // The blocking preflight also rejects pending/imported wallets
+                // before server enrollment. Keep this filesystem check there so
+                // the wizard receives the error without blocking the UI thread.
                 // Pre-flight: reject a duress PIN that collides with any Cube's
                 // real unlock PIN BEFORE anything irreversible. Connect tiers
                 // enroll on the server first, so catching the collision only in
