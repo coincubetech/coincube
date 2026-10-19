@@ -17,6 +17,7 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use coincube_core::miniscript::bitcoin::Network;
+use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
 use iced::Task;
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
@@ -31,6 +32,8 @@ use crate::app::view::{
     RecoveryProtectionMode, RemoveFailure,
 };
 use crate::app::wallet::Wallet;
+use crate::chain::ChainId;
+use crate::daemon::Daemon;
 use crate::feature_flags;
 use crate::pin_input::PinInput;
 use crate::services::coincube::{
@@ -42,9 +45,59 @@ use crate::services::inheritance::{
     find_owner_self_recipient, seal_and_upload_owner_self, OwnerSelfError,
 };
 use crate::services::recovery::{
-    self, DescriptorBlob, DescriptorBlobCube, DescriptorBlobSigner, DescriptorBlobVault, KdfParams,
-    SeedBlob, SeedBlobCube, SeedBlobMnemonic, BLOB_VERSION, MIN_PASSWORD_LEN,
+    self, DescriptorBlob, DescriptorBlobCube, DescriptorBlobSigner, DescriptorBlobVault,
+    ImportedDescriptorBlob, ImportedDescriptorBlobWallet, KdfParams, RecoveredWalletBlob, SeedBlob,
+    SeedBlobCube, SeedBlobMnemonic, BLOB_VERSION, MIN_PASSWORD_LEN,
 };
+
+/// Live source for the imported half of a Recovery Kit. The daemon is queried
+/// when the upload starts so a just-issued address cannot be omitted from the
+/// backed-up allocation high-water mark.
+#[derive(Clone)]
+pub struct ImportedBackupSource {
+    pub descriptor: ImportedWalletDescriptor,
+    pub name: String,
+    pub birthday: u32,
+    pub initial_lookahead: u32,
+    pub chain: ChainId,
+    pub daemon: Arc<dyn Daemon + Send + Sync>,
+}
+
+impl ImportedBackupSource {
+    async fn snapshot(&self, cube_uuid: &str) -> Result<ImportedDescriptorBlob, String> {
+        let info = self.daemon.get_info().await.map_err(|e| e.to_string())?;
+        let expected_identity = self
+            .descriptor
+            .identity(self.chain)
+            .map_err(|e| e.to_string())?
+            .to_string();
+        let status = info.imported_wallet.ok_or_else(|| {
+            "Imported wallet status is unavailable; reopen this Cube and retry".to_string()
+        })?;
+        if info.chain_id != Some(self.chain)
+            || status.chain_id != self.chain
+            || status.wallet_identity != expected_identity
+            || status.birthday != self.birthday
+            || status.initial_lookahead != self.initial_lookahead
+        {
+            return Err(
+                "Imported wallet identity changed; reopen this Cube before backing it up".into(),
+            );
+        }
+        ImportedDescriptorBlob::new(
+            cube_uuid.to_string(),
+            self.chain,
+            ImportedDescriptorBlobWallet {
+                name: self.name.clone(),
+                descriptor: self.descriptor.clone(),
+                birthday: self.birthday,
+                initial_lookahead: self.initial_lookahead,
+                receive_index: info.receive_index,
+                change_index: info.change_index,
+            },
+        )
+    }
+}
 
 /// How this Cube's seed is re-obtained for the Kit. Both shapes can produce
 /// it; they differ only in the ceremony that unlocks it — a PIN and an Argon2id
@@ -335,6 +388,39 @@ pub fn update(
     server_cube_id: Option<u64>,
     wallet: Option<Arc<Wallet>>,
 ) -> Task<Message> {
+    update_with_imported(
+        rk,
+        msg,
+        cache,
+        local_cube_id,
+        seed_source,
+        client,
+        server_cube_id,
+        wallet,
+        None,
+    )
+}
+
+/// Imported-wallet variant used by the App dispatcher. `wallet` remains the
+/// strict Vault path; `imported` is an independent descriptor-backed source.
+#[allow(clippy::too_many_arguments)]
+pub fn update_with_imported(
+    rk: &mut RecoveryKit,
+    msg: RecoveryKitMessage,
+    cache: &Cache,
+    local_cube_id: &str,
+    seed_source: SeedSource,
+    client: Option<CoincubeClient>,
+    server_cube_id: Option<u64>,
+    wallet: Option<Arc<Wallet>>,
+    imported: Option<ImportedBackupSource>,
+) -> Task<Message> {
+    if wallet.is_some() && imported.is_some() {
+        rk.flow = RecoveryKitState::Error {
+            message: "This Cube has conflicting wallet sources; reopen it before backing up".into(),
+        };
+        return Task::none();
+    }
     match msg {
         RecoveryKitMessage::LoadStatus => load_status(rk, client, server_cube_id),
 
@@ -606,6 +692,7 @@ pub fn update(
                         client,
                         server_cube_id,
                         wallet,
+                        imported,
                         mode,
                         mnemonic,
                     )
@@ -707,9 +794,15 @@ pub fn update(
             }
         }
 
-        RecoveryKitMessage::SubmitPassword => {
-            submit_password(rk, cache, local_cube_id, client, server_cube_id, wallet)
-        }
+        RecoveryKitMessage::SubmitPassword => submit_password(
+            rk,
+            cache,
+            local_cube_id,
+            client,
+            server_cube_id,
+            wallet,
+            imported,
+        ),
 
         RecoveryKitMessage::UploadResult(res) => {
             match res {
@@ -749,6 +842,7 @@ pub fn update(
                             client,
                             server_cube_id,
                             wallet,
+                            imported,
                             mode,
                             mnemonic,
                         );
@@ -1046,6 +1140,7 @@ fn submit_password(
     client: Option<CoincubeClient>,
     server_cube_id: Option<u64>,
     wallet: Option<Arc<Wallet>>,
+    imported: Option<ImportedBackupSource>,
 ) -> Task<Message> {
     // Pull validation + cloneable inputs out of the state without
     // moving fields — we'll set `rk.flow = Uploading { pending }`
@@ -1140,18 +1235,19 @@ fn submit_password(
     // Build descriptor blob when we have a live wallet.
     let descriptor_blob = wallet
         .as_ref()
-        .map(|w| descriptor_blob_from_wallet(w, &cube_uuid, &network));
+        .map(|w| RecoveredWalletBlob::Vault(descriptor_blob_from_wallet(w, &cube_uuid, &network)));
 
     rk.flow = RecoveryKitState::Uploading { pending };
 
     let mnemonic = mnemonic_clone_opt;
     Task::perform(
         async move {
-            encrypt_and_upload(
+            encrypt_and_upload_wallet(
                 client,
                 cube_id_num,
                 mnemonic,
                 descriptor_blob,
+                imported,
                 SeedBlobCube {
                     uuid: cube_uuid,
                     name: cube_name,
@@ -1389,6 +1485,7 @@ fn start_phone_seal(
     client: Option<CoincubeClient>,
     server_cube_id: Option<u64>,
     wallet: Option<Arc<Wallet>>,
+    imported: Option<ImportedBackupSource>,
     mode: RecoveryKitMode,
     mnemonic: Option<Zeroizing<Vec<String>>>,
 ) -> Task<Message> {
@@ -1403,7 +1500,7 @@ fn start_phone_seal(
     };
     let descriptor_blob = wallet
         .as_ref()
-        .map(|w| descriptor_blob_from_wallet(w, &cube_uuid, &network));
+        .map(|w| RecoveredWalletBlob::Vault(descriptor_blob_from_wallet(w, &cube_uuid, &network)));
     // Connect blinding (PR D3 / API A3): the recipients list now serves the
     // phone key's xpub as an envelope sealed to this Cube's encryption key, so
     // the seal needs that key to read the recipient before sealing to it.
@@ -1412,12 +1509,13 @@ fn start_phone_seal(
     rk.flow = RecoveryKitState::PhoneSealing { mode };
     Task::perform(
         async move {
-            seal_phone(
+            seal_phone_wallet(
                 client,
                 cube_id,
                 cube_enc_key.as_deref(),
                 cube_network,
                 descriptor_blob,
+                imported,
                 mnemonic,
                 cube_meta,
             )
@@ -1456,6 +1554,7 @@ fn start_phone_seal(
 /// the keychain drift slot (per-method drift, PR 3). `None` when no descriptor
 /// was sealed (vaultless Cube) or the fingerprint couldn't be computed; the
 /// handler treats `None` as "leave the drift slot untouched".
+#[cfg(test)]
 async fn seal_phone(
     client: CoincubeClient,
     cube_id: u64,
@@ -1465,22 +1564,79 @@ async fn seal_phone(
     mnemonic: Option<Zeroizing<Vec<String>>>,
     cube_meta: SeedBlobCube,
 ) -> Result<Option<String>, String> {
+    seal_phone_wallet(
+        client,
+        cube_id,
+        cube_enc_key,
+        network,
+        descriptor_blob.map(RecoveredWalletBlob::Vault),
+        None,
+        mnemonic,
+        cube_meta,
+    )
+    .await
+}
+
+async fn resolve_wallet_blob(
+    existing: Option<RecoveredWalletBlob>,
+    imported: Option<ImportedBackupSource>,
+    cube_uuid: &str,
+    chain: ChainId,
+) -> Result<Option<RecoveredWalletBlob>, String> {
+    match (existing, imported) {
+        (Some(_), Some(_)) => Err("This Cube has conflicting wallet sources".into()),
+        (Some(blob), None) => Ok(Some(blob)),
+        (None, Some(source)) => {
+            if source.chain != chain {
+                return Err("Imported wallet chain differs from this Cube".into());
+            }
+            Ok(Some(RecoveredWalletBlob::Imported(
+                source.snapshot(cube_uuid).await?,
+            )))
+        }
+        (None, None) => Ok(None),
+    }
+}
+
+fn wallet_blob_fingerprint(blob: &RecoveredWalletBlob) -> Option<String> {
+    match blob {
+        RecoveredWalletBlob::Vault(blob) => descriptor_blob_fingerprint(blob),
+        RecoveredWalletBlob::Imported(blob) => recovery::imported_descriptor_blob_fingerprint(blob),
+    }
+}
+
+fn serialize_wallet_blob(blob: &RecoveredWalletBlob) -> Result<Zeroizing<Vec<u8>>, String> {
+    let bytes = match blob {
+        RecoveredWalletBlob::Vault(blob) => serde_json::to_vec(blob),
+        RecoveredWalletBlob::Imported(blob) => serde_json::to_vec(blob),
+    }
+    .map_err(|e| format!("serialize descriptor: {e}"))?;
+    Ok(Zeroizing::new(bytes))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn seal_phone_wallet(
+    client: CoincubeClient,
+    cube_id: u64,
+    cube_enc_key: Option<&CubeEncryptionKey>,
+    network: impl Into<crate::chain::ChainId>,
+    descriptor_blob: Option<RecoveredWalletBlob>,
+    imported: Option<ImportedBackupSource>,
+    mnemonic: Option<Zeroizing<Vec<String>>>,
+    cube_meta: SeedBlobCube,
+) -> Result<Option<String>, String> {
     let network = network.into();
+    let descriptor_blob =
+        resolve_wallet_blob(descriptor_blob, imported, &cube_meta.uuid, network).await?;
     let recipient = find_owner_self_recipient(&client, cube_id)
         .await
         .map_err(|e| e.to_string())?;
     // Fingerprint the exact descriptor being sealed, before it's serialized into
     // the envelope, so the keychain drift slot reflects what the phone now holds.
-    let descriptor_fingerprint = descriptor_blob
-        .as_ref()
-        .and_then(descriptor_blob_fingerprint);
+    let descriptor_fingerprint = descriptor_blob.as_ref().and_then(wallet_blob_fingerprint);
     let descriptor_json: Option<Zeroizing<Vec<u8>>> = descriptor_blob
         .as_ref()
-        .map(|blob| {
-            serde_json::to_vec(blob)
-                .map(Zeroizing::new)
-                .map_err(|e| format!("serialize descriptor: {}", e))
-        })
+        .map(serialize_wallet_blob)
         .transpose()?;
     let include_seed = recipient.tier.map(|t| t.includes_seed()).unwrap_or(false);
     let seed_json = if include_seed {
@@ -1708,6 +1864,7 @@ pub fn live_descriptor_fingerprint(
 ///   never populate `mnemonic` in state.
 /// - `descriptor_blob.is_some()` → a live Vault exists on this
 ///   device. Cubes without a Vault legitimately upload seed-only.
+#[cfg(test)]
 fn include_halves(
     mnemonic: &Option<Zeroizing<Vec<String>>>,
     descriptor_blob: &Option<DescriptorBlob>,
@@ -1946,7 +2103,34 @@ pub(crate) async fn encrypt_and_upload(
     cube_meta: SeedBlobCube,
     password: Zeroizing<String>,
 ) -> Result<RecoveryKitUploadOutcome, String> {
-    let (include_seed, include_descriptor) = include_halves(&mnemonic, &descriptor_blob);
+    encrypt_and_upload_wallet(
+        client,
+        cube_id_num,
+        mnemonic,
+        descriptor_blob.map(RecoveredWalletBlob::Vault),
+        None,
+        cube_meta,
+        password,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn encrypt_and_upload_wallet(
+    client: CoincubeClient,
+    cube_id_num: u64,
+    mnemonic: Option<Zeroizing<Vec<String>>>,
+    descriptor_blob: Option<RecoveredWalletBlob>,
+    imported: Option<ImportedBackupSource>,
+    cube_meta: SeedBlobCube,
+    password: Zeroizing<String>,
+) -> Result<RecoveryKitUploadOutcome, String> {
+    let chain = ChainId::from_api_str(&cube_meta.network)
+        .ok_or_else(|| "This Cube has an unsupported Recovery Kit network".to_string())?;
+    let descriptor_blob =
+        resolve_wallet_blob(descriptor_blob, imported, &cube_meta.uuid, chain).await?;
+    let include_seed = mnemonic.is_some();
+    let include_descriptor = descriptor_blob.is_some();
 
     if !include_seed && !include_descriptor {
         return Err(
@@ -2000,12 +2184,10 @@ pub(crate) async fn encrypt_and_upload(
     // to `DescriptorBlob`'s redacting Debug impl.
     let (desc_ct, desc_fp) = if include_descriptor {
         let blob = descriptor_blob.as_ref().unwrap();
-        let bytes: Zeroizing<Vec<u8>> = Zeroizing::new(
-            serde_json::to_vec(blob).map_err(|e| format!("serialize descriptor: {}", e))?,
-        );
+        let bytes = serialize_wallet_blob(blob)?;
         let ct = recovery::encrypt(&bytes, &password, KdfParams::DEFAULT_V1)
             .map_err(|e| format!("encrypt descriptor: {}", e))?;
-        let fp = descriptor_blob_fingerprint(blob);
+        let fp = wallet_blob_fingerprint(blob);
         (Some(ct), fp)
     } else {
         (None, None)
