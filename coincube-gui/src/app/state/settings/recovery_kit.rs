@@ -74,12 +74,14 @@ impl ImportedBackupSource {
         let status = info.imported_wallet.ok_or_else(|| {
             "Imported wallet status is unavailable; reopen this Cube and retry".to_string()
         })?;
-        if info.chain_id != Some(self.chain)
-            || status.chain_id != self.chain
-            || status.wallet_identity != expected_identity
-            || status.birthday != self.birthday
-            || status.initial_lookahead != self.initial_lookahead
-        {
+        if !imported_snapshot_matches(
+            &status,
+            info.chain_id,
+            &expected_identity,
+            self.chain,
+            self.birthday,
+            self.initial_lookahead,
+        ) {
             return Err(
                 "Imported wallet identity changed; reopen this Cube before backing it up".into(),
             );
@@ -99,25 +101,36 @@ impl ImportedBackupSource {
     }
 }
 
-fn imported_backup_source_error(
-    cache: &Cache,
-    local_cube_id: &str,
-    imported: Option<&ImportedBackupSource>,
+fn imported_snapshot_matches(
+    status: &coincubed::commands::ImportedWalletSync,
+    reported_chain: Option<ChainId>,
+    expected_identity: &str,
+    chain: ChainId,
+    birthday: u32,
+    initial_lookahead: u32,
+) -> bool {
+    reported_chain == Some(chain)
+        && status.chain_id == chain
+        && status.wallet_identity == expected_identity
+        && status.birthday == birthday
+        && status.initial_lookahead == initial_lookahead
+}
+
+fn imported_attachment_error(
+    cube: &settings::CubeSettings,
+    source: Option<(&ImportedWalletDescriptor, u32, u32, ChainId)>,
 ) -> Option<&'static str> {
-    let Some(cube) = lookup_cube(cache, local_cube_id) else {
-        return imported.map(|_| "Could not verify this Cube's imported wallet attachment.");
-    };
     let attachment = cube
         .bitcoin_import
         .as_ref()
         .and_then(|intent| intent.active_attachment());
-    match (attachment, imported) {
+    match (attachment, source) {
         (Some(_), None) => Some(IMPORTED_BACKUP_SOURCE_UNAVAILABLE),
-        (Some(attachment), Some(source))
-            if cube.network == source.chain
-                && attachment.descriptor == source.descriptor
-                && attachment.birthday == source.birthday
-                && attachment.initial_lookahead == source.initial_lookahead =>
+        (Some(attachment), Some((descriptor, birthday, lookahead, chain)))
+            if cube.network == chain
+                && &attachment.descriptor == descriptor
+                && attachment.birthday == birthday
+                && attachment.initial_lookahead == lookahead =>
         {
             None
         }
@@ -126,6 +139,27 @@ fn imported_backup_source_error(
         }
         (None, None) => None,
     }
+}
+
+fn imported_backup_source_error(
+    cache: &Cache,
+    local_cube_id: &str,
+    imported: Option<&ImportedBackupSource>,
+) -> Option<&'static str> {
+    let Some(cube) = lookup_cube(cache, local_cube_id) else {
+        return imported.map(|_| "Could not verify this Cube's imported wallet attachment.");
+    };
+    imported_attachment_error(
+        &cube,
+        imported.map(|source| {
+            (
+                &source.descriptor,
+                source.birthday,
+                source.initial_lookahead,
+                source.chain,
+            )
+        }),
+    )
 }
 
 const IMPORTED_BACKUP_SOURCE_UNAVAILABLE: &str =
@@ -2415,6 +2449,115 @@ fn clear_recovery_kit_state(cache: &Cache, local_cube_id: &str) -> Task<Message>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn imported_test_descriptor() -> ImportedWalletDescriptor {
+        use coincube_core::miniscript::bitcoin::{
+            bip32::{DerivationPath, Xpriv, Xpub},
+            secp256k1::Secp256k1,
+        };
+        use std::str::FromStr;
+
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[29; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let xpub = Xpub::from_priv(&secp, &account);
+        let key = format!("[{}/84h/0h/0h]{xpub}", master.fingerprint(&secp));
+        ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn imported_backup_requires_exact_persisted_cube_attachment() {
+        let descriptor = imported_test_descriptor();
+        let wallet =
+            settings::ImportedWalletAttachment::new(descriptor.clone(), ChainId::Bitcoin, 123, 200)
+                .unwrap();
+        let mut cube = settings::CubeSettings::new_with_raw_id(
+            "import-cube".into(),
+            "Import Cube".into(),
+            ChainId::Bitcoin,
+        );
+        cube.bitcoin_import = Some(settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: settings::BitcoinImportStage::Syncing { wallet },
+            last_error: None,
+        });
+        assert_eq!(
+            imported_attachment_error(&cube, None),
+            Some(IMPORTED_BACKUP_SOURCE_UNAVAILABLE)
+        );
+        assert_eq!(
+            imported_attachment_error(&cube, Some((&descriptor, 123, 200, ChainId::Bitcoin))),
+            None
+        );
+        for stale in [
+            (&descriptor, 124, 200, ChainId::Bitcoin),
+            (&descriptor, 123, 201, ChainId::Bitcoin),
+            (&descriptor, 123, 200, ChainId::Testnet),
+        ] {
+            assert!(imported_attachment_error(&cube, Some(stale)).is_some());
+        }
+        cube.bitcoin_import = None;
+        assert!(
+            imported_attachment_error(&cube, Some((&descriptor, 123, 200, ChainId::Bitcoin)))
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn imported_backup_snapshot_rejects_missing_or_changed_daemon_identity() {
+        let descriptor = imported_test_descriptor();
+        let identity = descriptor.identity(ChainId::Bitcoin).unwrap().to_string();
+        let status = coincubed::commands::ImportedWalletSync {
+            wallet_identity: identity.clone(),
+            chain_id: ChainId::Bitcoin,
+            birthday: 123,
+            initial_lookahead: 200,
+            discovery_target: 200,
+            receive_scanned: 400,
+            change_scanned: 400,
+            history_complete: true,
+        };
+        assert!(imported_snapshot_matches(
+            &status,
+            Some(ChainId::Bitcoin),
+            &identity,
+            ChainId::Bitcoin,
+            123,
+            200,
+        ));
+        assert!(!imported_snapshot_matches(
+            &status,
+            None,
+            &identity,
+            ChainId::Bitcoin,
+            123,
+            200,
+        ));
+        assert!(!imported_snapshot_matches(
+            &status,
+            Some(ChainId::Bitcoin),
+            "other",
+            ChainId::Bitcoin,
+            123,
+            200,
+        ));
+        assert!(!imported_snapshot_matches(
+            &status,
+            Some(ChainId::Bitcoin),
+            &identity,
+            ChainId::Bitcoin,
+            123,
+            300,
+        ));
+    }
+
     #[tokio::test]
     async fn backup_metadata_keeps_twin_cubes_separate() {
         use crate::{chain::ChainId, dir::CoincubeDirectory};
