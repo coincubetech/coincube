@@ -608,18 +608,25 @@ fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbErro
             import_birthday INTEGER,
             import_history_complete BOOLEAN CHECK (import_history_complete IN (0,1)),
             import_initial_lookahead INTEGER,
+            import_receive_scanned INTEGER,
+            import_change_scanned INTEGER,
             CHECK (
                 (wallet_kind = 'vault' AND main_descriptor IS NOT NULL
                     AND imported_receive_descriptor IS NULL AND imported_change_descriptor IS NULL
                     AND import_birthday IS NULL AND import_history_complete IS NULL
-                    AND import_initial_lookahead IS NULL)
+                    AND import_initial_lookahead IS NULL AND import_receive_scanned IS NULL
+                    AND import_change_scanned IS NULL)
                 OR
                 (wallet_kind = 'imported' AND main_descriptor IS NULL
                     AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
                     AND import_birthday IS NOT NULL AND import_birthday BETWEEN 0 AND 4294967295
                     AND import_history_complete IS NOT NULL
                     AND import_initial_lookahead IS NOT NULL
-                    AND import_initial_lookahead BETWEEN 1 AND 10000)
+                    AND import_initial_lookahead BETWEEN 1 AND 10000
+                    AND import_receive_scanned IS NOT NULL
+                    AND import_receive_scanned BETWEEN 0 AND 2147483647
+                    AND import_change_scanned IS NOT NULL
+                    AND import_change_scanned BETWEEN 0 AND 2147483647)
             )
         );
         INSERT INTO wallets_v10 (

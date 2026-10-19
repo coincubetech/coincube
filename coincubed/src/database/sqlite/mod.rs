@@ -3881,7 +3881,8 @@ CREATE TABLE labels (
                             imported_receive_descriptor = 'receive',
                             imported_change_descriptor = 'change',
                             import_birthday = ?1, import_history_complete = 0,
-                            import_initial_lookahead = ?2",
+                            import_initial_lookahead = ?2,
+                            import_receive_scanned = 0, import_change_scanned = 0",
                         rusqlite::params![birthday, lookahead],
                     )
                     .is_err());
