@@ -906,7 +906,10 @@ pub fn verify_split_step1_transaction<C: secp256k1::Verification>(
 /// The signed PSBT must be the exact construction plus `partial_sigs`, with
 /// every input request absent or `SIGHASH_ALL` and every signature byte
 /// `SIGHASH_ALL`. Shared by both steps.
-fn check_signed_construction(original: &Psbt, signed: &Psbt) -> Result<(), FinalizeError> {
+pub(crate) fn check_signed_construction(
+    original: &Psbt,
+    signed: &Psbt,
+) -> Result<(), FinalizeError> {
     if signed.unsigned_tx != original.unsigned_tx
         || signed.inputs.len() != original.inputs.len()
         || signed.outputs.len() != original.outputs.len()
@@ -944,6 +947,25 @@ fn verify_partial_signatures<C: secp256k1::Verification>(
     signed: &Psbt,
     secp: &secp256k1::Secp256k1<C>,
 ) -> Result<Vec<TxOut>, FinalizeError> {
+    verify_partial_signatures_for(signed, secp, |index, _, _| {
+        let (branch, derivation) = derivations[index];
+        source.derive(branch, derivation).ok()
+    })
+}
+
+/// Shared, shape-independent signature verification for public descriptor
+/// sources. The caller supplies the expected derived descriptor for each
+/// authenticated input; Split and ordinary imported spends impose their own
+/// construction and economic rules around it.
+pub(crate) fn verify_partial_signatures_for<C, F>(
+    signed: &Psbt,
+    secp: &secp256k1::Secp256k1<C>,
+    mut derive: F,
+) -> Result<Vec<TxOut>, FinalizeError>
+where
+    C: secp256k1::Verification,
+    F: FnMut(usize, &bitcoin::psbt::Input, &TxOut) -> Option<Descriptor<DefiniteDescriptorKey>>,
+{
     let mut prevouts = Vec::with_capacity(signed.inputs.len());
     let mut cache = SighashCache::new(&signed.unsigned_tx);
     for (index, input) in signed.inputs.iter().enumerate() {
@@ -953,10 +975,7 @@ fn verify_partial_signatures<C: secp256k1::Verification>(
             input.witness_utxo.as_ref(),
         )
         .map_err(|_| FinalizeError::InputAuthentication)?;
-        let (branch, derivation) = derivations[index];
-        let definite = source
-            .derive(branch, derivation)
-            .map_err(|_| FinalizeError::InputAuthentication)?;
+        let definite = derive(index, input, &output).ok_or(FinalizeError::InputAuthentication)?;
         if definite.script_pubkey() != output.script_pubkey {
             return Err(FinalizeError::InputAuthentication);
         }
@@ -981,7 +1000,7 @@ fn verify_partial_signatures<C: secp256k1::Verification>(
 
 /// Miniscript's finalizer and extractor, then an interpreter replay of every
 /// retained witness. Returns the transaction and signatures per input.
-fn finalize_and_replay<C: secp256k1::Verification>(
+pub(crate) fn finalize_and_replay<C: secp256k1::Verification>(
     original: &Psbt,
     signed: &Psbt,
     prevouts: &[TxOut],

@@ -579,6 +579,82 @@ mod tests {
     }
 
     #[test]
+    fn every_supported_shape_roundtrips_exact_scripts_at_multiple_indexes() {
+        let key = key(1, "m/84h/1h/0h", Network::Regtest, true);
+        let cases = [
+            (format!("pkh({key}/0/*)"), format!("pkh({key}/1/*)")),
+            (format!("wpkh({key}/0/*)"), format!("wpkh({key}/1/*)")),
+            (
+                format!("sh(wpkh({key}/0/*))"),
+                format!("sh(wpkh({key}/1/*))"),
+            ),
+            (
+                multi("multi", [0, 1, 2], 0, None),
+                multi("multi", [0, 1, 2], 1, None),
+            ),
+            (
+                multi("sortedmulti", [0, 1, 2], 0, None),
+                multi("sortedmulti", [0, 1, 2], 1, None),
+            ),
+        ];
+        for (receive, change) in cases {
+            let chain = if receive.starts_with("wsh") {
+                ChainId::Bitcoin
+            } else {
+                ChainId::Regtest
+            };
+            let imported = ImportedWalletDescriptor::parse(&receive, Some(&change), chain).unwrap();
+            let encoded = serde_json::to_value(&imported).unwrap();
+            let restored: ImportedWalletDescriptor = serde_json::from_value(encoded).unwrap();
+            assert_eq!(restored.identity(chain), imported.identity(chain));
+            for index in [0, 1, 1_000] {
+                assert_eq!(
+                    restored
+                        .receive_descriptor()
+                        .at_derivation_index(index)
+                        .unwrap()
+                        .script_pubkey(),
+                    imported
+                        .receive_descriptor()
+                        .at_derivation_index(index)
+                        .unwrap()
+                        .script_pubkey(),
+                );
+                assert_eq!(
+                    restored
+                        .change_descriptor()
+                        .at_derivation_index(index)
+                        .unwrap()
+                        .script_pubkey(),
+                    imported
+                        .change_descriptor()
+                        .at_derivation_index(index)
+                        .unwrap()
+                        .script_pubkey(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn full_identity_binds_both_branches_and_exact_chain() {
+        let receive = single(0, Network::Regtest, true);
+        let change = single(1, Network::Regtest, true);
+        let regtest =
+            ImportedWalletDescriptor::parse(&receive, Some(&change), ChainId::Regtest).unwrap();
+        let testnet4 =
+            ImportedWalletDescriptor::parse(&receive, Some(&change), ChainId::Testnet4).unwrap();
+        assert_ne!(
+            regtest.identity(ChainId::Regtest).unwrap(),
+            testnet4.identity(ChainId::Testnet4).unwrap()
+        );
+        assert_eq!(
+            regtest.identity(ChainId::Regtest).unwrap().to_string(),
+            "01b5fac36b1f4772dfdd17edbf238b83b076b3b6b9901b2fca92279f1750f641",
+        );
+    }
+
+    #[test]
     fn vault_serde_stays_the_legacy_object_and_rejects_inconsistent_branches() {
         let vault = CoincubeDescriptor::from_str("wsh(andor(pk([abcdef01]tpubDEN9WSToTyy9ZQfaYqSKfmVqmq1VVLNtYfj3Vkqh67et57eJ5sTKZQBkHqSwPUsoSskJeaYnPttHe2VrkCsKA27kUaN9SDc5zhqeLzKa1rr/<0;1>/*),older(1),pk([abcdef01]tpubD8LYfn6njiA2inCoxwM7EuN3cuLVcaHAwLYeups13dpevd3nHLRdK9NdQksWXrhLQVxcUZRpnp5CkJ1FhE61WRAsHxDNAkvGkoQkAeWDYjV/<0;1>/*)))").unwrap();
         let legacy = serde_json::to_value(&vault).unwrap();
