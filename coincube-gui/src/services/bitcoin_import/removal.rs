@@ -175,7 +175,7 @@ pub async fn remove_cube_import(
         staged_owner.as_ref(),
         final_owner.as_ref(),
     ]
-    .into_iter()
+    .iter()
     .flatten()
     {
         check_journal(owner, expected, expected_attachment)?;

@@ -25,6 +25,9 @@ use crate::{
     services::duress::DuressLocalState,
 };
 
+mod removal;
+pub use removal::remove_cube_import;
+
 const OWNER_FILE: &str = "import-owner.json";
 const CONFIG_FILE: &str = "daemon.toml";
 

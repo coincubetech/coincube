@@ -240,7 +240,7 @@ mod tests {
             let RecoveredWalletBlob::Imported(restored) =
                 decrypt_wallet_descriptor_blob(&ciphertext, &password).unwrap()
             else {
-                panic!("{shape}: expected imported Kit");
+                panic!("{}: expected imported Kit", shape);
             };
             assert_eq!(restored.cube.uuid, "same-cube");
             assert_eq!(restored.wallet.birthday, 0);
