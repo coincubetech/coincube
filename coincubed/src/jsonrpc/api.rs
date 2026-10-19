@@ -29,7 +29,8 @@ fn reserve_claim_change(
         .and_then(serde_json::Value::as_str)
         .and_then(|value| coincube_core::descriptors::CoincubeDescriptor::from_str(value).ok())
         .ok_or_else(|| Error::invalid_params("Invalid 'descriptor' parameter."))?;
-    if control.config.bitcoin_config.chain != chain || control.config.main_descriptor != descriptor
+    if control.config.bitcoin_config.chain != chain
+        || control.config.main_descriptor.as_vault() != Some(&descriptor)
     {
         return Err(Error::invalid_params(
             "Claim wallet identity does not match this daemon.",

@@ -688,7 +688,8 @@ impl DaemonControl {
                     .config
                     .main_descriptor
                     .receive_descriptor()
-                    .derive(target_index, &self.secp)
+                    .derive(u32::from(target_index))
+                    .map_err(|_| SubmissionError::OutputMismatch)?
                     .script_pubkey()
         {
             return Err(SubmissionError::OutputMismatch);
@@ -782,7 +783,7 @@ impl DaemonControl {
         if chain != ChainId::Bitcoin || self.config.bitcoin_config.chain != chain {
             return Err(SubmissionError::UnsupportedChain);
         }
-        if &self.config.main_descriptor != descriptor {
+        if self.config.main_descriptor.as_vault() != Some(descriptor) {
             return Err(SubmissionError::DescriptorMismatch);
         }
         let txid = transaction.compute_txid();
@@ -841,7 +842,7 @@ impl DaemonControl {
         transaction: &Transaction,
         gate: &SubmissionGate,
     ) -> Result<SubmissionOutcome, SubmissionError> {
-        if &self.config.main_descriptor != descriptor {
+        if self.config.main_descriptor.as_vault() != Some(descriptor) {
             return Err(SubmissionError::DescriptorMismatch);
         }
         let txid = transaction.compute_txid();

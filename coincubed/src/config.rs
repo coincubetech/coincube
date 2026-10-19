@@ -1,5 +1,6 @@
 use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
 
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
@@ -24,6 +25,35 @@ pub fn serialize_to_string<T: std::fmt::Display, S: Serializer>(
     s: S,
 ) -> Result<S::Ok, S::Error> {
     s.serialize_str(&field.to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredWalletDescriptor {
+    /// Every pre-import daemon.toml stores one strict Vault descriptor string.
+    Vault(String),
+    Imported(ImportedWalletDescriptor),
+}
+
+fn deserialize_wallet_descriptor<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<WalletDescriptor, D::Error> {
+    match StoredWalletDescriptor::deserialize(deserializer)? {
+        StoredWalletDescriptor::Vault(value) => CoincubeDescriptor::from_str(&value)
+            .map(WalletDescriptor::Vault)
+            .map_err(de::Error::custom),
+        StoredWalletDescriptor::Imported(value) => Ok(WalletDescriptor::Imported(value)),
+    }
+}
+
+fn serialize_wallet_descriptor<S: Serializer>(
+    descriptor: &WalletDescriptor,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match descriptor {
+        WalletDescriptor::Vault(value) => serializer.serialize_str(&value.to_string()),
+        WalletDescriptor::Imported(value) => value.serialize(serializer),
+    }
 }
 
 fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -356,10 +386,16 @@ pub struct Config {
     pub log_level: log::LevelFilter,
     /// The descriptor to use for sending/receiving coins
     #[serde(
-        deserialize_with = "deserialize_fromstr",
-        serialize_with = "serialize_to_string"
+        deserialize_with = "deserialize_wallet_descriptor",
+        serialize_with = "serialize_wallet_descriptor"
     )]
-    pub main_descriptor: CoincubeDescriptor,
+    pub main_descriptor: WalletDescriptor,
+    /// Imported history lower bound; absent for strict Vaults. The database is
+    /// authoritative after initialization and these values must match it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_birthday: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_initial_lookahead: Option<u32>,
     /// Settings for the Bitcoin interface
     pub bitcoin_config: BitcoinConfig,
     /// Settings specific to the Bitcoin backend.
@@ -423,14 +459,16 @@ impl Config {
         bitcoin_config: BitcoinConfig,
         bitcoin_backend: Option<BitcoinBackend>,
         log_level: log::LevelFilter,
-        main_descriptor: CoincubeDescriptor,
+        main_descriptor: impl Into<WalletDescriptor>,
         data_directory: DataDirectory,
     ) -> Self {
         Self {
             bitcoin_config,
             bitcoin_backend,
             log_level,
-            main_descriptor,
+            main_descriptor: main_descriptor.into(),
+            import_birthday: None,
+            import_initial_lookahead: None,
             data_directory: Some(data_directory.path().to_path_buf()),
             data_dir: None,
             fallback_esplora: None,
@@ -555,11 +593,41 @@ impl Config {
             Network::Bitcoin => Network::Bitcoin,
             _ => Network::Testnet,
         };
-        if !self.main_descriptor.all_xpubs_net_is(expected_network) {
-            return Err(ConfigError::Unexpected(format!(
-                "Our bitcoin network is {} but one xpub is not for network {}",
-                self.bitcoin_config.network, expected_network
-            )));
+        match &self.main_descriptor {
+            WalletDescriptor::Vault(vault) => {
+                if self.import_birthday.is_some() || self.import_initial_lookahead.is_some() {
+                    return Err(ConfigError::Unexpected(
+                        "Vault config cannot set imported scan options".into(),
+                    ));
+                }
+                if !vault.all_xpubs_net_is(expected_network) {
+                    return Err(ConfigError::Unexpected(format!(
+                        "Our bitcoin network is {} but one xpub is not for network {}",
+                        self.bitcoin_config.network, expected_network
+                    )));
+                }
+            }
+            WalletDescriptor::Imported(imported) => {
+                if self.import_birthday.is_none()
+                    || !self
+                        .import_initial_lookahead
+                        .is_some_and(|value| (1..=10_000).contains(&value))
+                {
+                    return Err(ConfigError::Unexpected(
+                        "Imported wallet requires birthday and initial lookahead (1..10000)".into(),
+                    ));
+                }
+                if imported.chain() != self.bitcoin_config.chain {
+                    return Err(ConfigError::Unexpected(
+                        "Imported wallet descriptor belongs to another chain".into(),
+                    ));
+                }
+                if self.bitcoin_config.chain.is_blake2b() {
+                    return Err(ConfigError::Unexpected(
+                        "Imported wallets require a Bitcoin chain".into(),
+                    ));
+                }
+            }
         }
 
         // Validate Esplora endpoint pairs wherever they appear:

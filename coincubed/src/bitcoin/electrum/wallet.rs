@@ -19,6 +19,7 @@ use super::utils::{
 };
 use crate::bitcoin::{Block, BlockChainTip, Coin, COINBASE_MATURITY};
 use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 // We don't want to overload the server (each SPK is separate call).
 const LOOK_AHEAD_LIMIT: u32 = 30;
@@ -78,13 +79,61 @@ impl BdkWallet {
         change_index: ChildNumber,
         lookahead: u32,
     ) -> Self {
-        let local_chain = LocalChain::from_genesis_hash(genesis_hash).0;
         let receive_desc = main_descriptor
             .receive_descriptor()
             .as_descriptor_public_key();
         let change_desc = main_descriptor
             .change_descriptor()
             .as_descriptor_public_key();
+        Self::new_with_descriptors(
+            receive_desc.clone(),
+            change_desc.clone(),
+            genesis_hash,
+            tip,
+            coins,
+            txs,
+            receive_index,
+            change_index,
+            lookahead,
+        )
+    }
+
+    pub fn new_for_wallet(
+        wallet: &WalletDescriptor,
+        genesis_hash: BlockHash,
+        tip: Option<BlockChainTip>,
+        coins: &[Coin],
+        txs: &[bitcoin::Transaction],
+        receive_index: ChildNumber,
+        change_index: ChildNumber,
+        lookahead: u32,
+    ) -> Self {
+        let (receive_desc, change_desc) = wallet.branches_public();
+        Self::new_with_descriptors(
+            receive_desc.clone(),
+            change_desc.clone(),
+            genesis_hash,
+            tip,
+            coins,
+            txs,
+            receive_index,
+            change_index,
+            lookahead,
+        )
+    }
+
+    fn new_with_descriptors(
+        receive_desc: Descriptor<DescriptorPublicKey>,
+        change_desc: Descriptor<DescriptorPublicKey>,
+        genesis_hash: BlockHash,
+        tip: Option<BlockChainTip>,
+        coins: &[Coin],
+        txs: &[bitcoin::Transaction],
+        receive_index: ChildNumber,
+        change_index: ChildNumber,
+        lookahead: u32,
+    ) -> Self {
+        let local_chain = LocalChain::from_genesis_hash(genesis_hash).0;
 
         let mut bdk_wallet = BdkWallet {
             graph: {

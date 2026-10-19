@@ -18,7 +18,7 @@ pub struct ClaimBackendBinding {
     backend: Weak<Mutex<dyn BitcoinInterface>>,
     chain: ChainId,
     network: Network,
-    descriptor: CoincubeDescriptor,
+    descriptor: Option<CoincubeDescriptor>,
     selection: Option<BitcoinBackend>,
     fallback: Option<EsploraConfig>,
 }
@@ -56,7 +56,7 @@ impl ClaimBackendBinding {
             backend,
             chain: config.bitcoin_config.chain,
             network: config.bitcoin_config.network,
-            descriptor: config.main_descriptor.clone(),
+            descriptor: config.main_descriptor.as_vault().cloned(),
             selection: config.bitcoin_backend.clone(),
             fallback: config.fallback_esplora.clone(),
         }
@@ -71,7 +71,7 @@ impl DaemonControl {
             backend: Arc::downgrade(&self.bitcoin),
             chain: self.config.bitcoin_config.chain,
             network: self.config.bitcoin_config.network,
-            descriptor: self.config.main_descriptor.clone(),
+            descriptor: self.config.main_descriptor.as_vault().cloned(),
             selection: self.config.bitcoin_backend.clone(),
             fallback: self.config.fallback_esplora.clone(),
         }

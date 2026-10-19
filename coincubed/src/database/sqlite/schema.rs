@@ -1,6 +1,7 @@
 use bip329::Label;
 use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
 
 use std::{convert::TryFrom, str::FromStr};
 
@@ -53,6 +54,7 @@ CREATE TABLE wallets (
     rescan_timestamp INTEGER,
     last_poll_timestamp INTEGER,
     wallet_kind TEXT NOT NULL CHECK (wallet_kind IN ('vault', 'imported')),
+    import_chain TEXT,
     imported_receive_descriptor TEXT,
     imported_change_descriptor TEXT,
     import_birthday INTEGER,
@@ -62,12 +64,15 @@ CREATE TABLE wallets (
     import_change_scanned INTEGER,
     CHECK (
         (wallet_kind = 'vault' AND main_descriptor IS NOT NULL
-            AND imported_receive_descriptor IS NULL AND imported_change_descriptor IS NULL
+            AND import_chain IS NULL AND imported_receive_descriptor IS NULL
+            AND imported_change_descriptor IS NULL
             AND import_birthday IS NULL AND import_history_complete IS NULL
             AND import_initial_lookahead IS NULL AND import_receive_scanned IS NULL
             AND import_change_scanned IS NULL)
         OR
         (wallet_kind = 'imported' AND main_descriptor IS NULL
+            AND import_chain IS NOT NULL
+            AND import_chain IN ('bitcoin', 'testnet', 'testnet4', 'signet', 'regtest')
             AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
             AND import_birthday IS NOT NULL AND import_birthday BETWEEN 0 AND 4294967295
             AND import_history_complete IS NOT NULL
@@ -221,7 +226,7 @@ pub struct DbWallet {
     #[allow(dead_code)]
     pub id: i64,
     pub timestamp: u32,
-    pub main_descriptor: CoincubeDescriptor,
+    pub main_descriptor: WalletDescriptor,
     pub deposit_derivation_index: bip32::ChildNumber,
     pub change_derivation_index: bip32::ChildNumber,
     pub rescan_timestamp: Option<u32>,
@@ -235,9 +240,26 @@ impl TryFrom<&rusqlite::Row<'_>> for DbWallet {
         let id = row.get(0)?;
         let timestamp = row.get(1)?;
 
-        let desc_str: String = row.get(2)?;
-        let main_descriptor = CoincubeDescriptor::from_str(&desc_str)
-            .expect("Insane database: can't parse deposit descriptor");
+        let wallet_kind: String = row.get(7)?;
+        let main_descriptor = match wallet_kind.as_str() {
+            "vault" => {
+                let desc_str: String = row.get(2)?;
+                CoincubeDescriptor::from_str(&desc_str)
+                    .map(WalletDescriptor::Vault)
+                    .map_err(|_| insane_column(2, "Vault descriptor", &desc_str))?
+            }
+            "imported" => {
+                let chain_text: String = row.get(8)?;
+                let chain = ChainId::from_dir_name(&chain_text)
+                    .ok_or_else(|| insane_column(8, "imported chain", &chain_text))?;
+                let receive: String = row.get(9)?;
+                let change: String = row.get(10)?;
+                ImportedWalletDescriptor::parse(&receive, Some(&change), chain)
+                    .map(WalletDescriptor::Imported)
+                    .map_err(|error| insane_column(9, "imported descriptor pair", error))?
+            }
+            _ => return Err(insane_column(7, "wallet kind", wallet_kind)),
+        };
 
         let der_idx: u32 = row.get(3)?;
         let deposit_derivation_index = bip32::ChildNumber::from(der_idx);

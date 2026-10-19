@@ -640,7 +640,7 @@ pub trait BitcoinInterface: Send {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO>;
 
     /// Get all coins that were confirmed, and at what height and time. Along with "expired"
@@ -695,7 +695,7 @@ pub trait BitcoinInterface: Send {
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         Ok(self.received_coins(tip, descs))
     }
@@ -855,7 +855,7 @@ impl BitcoinInterface for d::BitcoinD {
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         // Core keeps recovered transaction records even after their bodies are
         // pruned. Replay those records once on startup and after explicit scans.
@@ -1060,7 +1060,7 @@ impl BitcoinInterface for d::BitcoinD {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         let lsb_res = self.list_since_block(&tip.hash);
 
@@ -1441,7 +1441,7 @@ impl BitcoinInterface for electrum::Electrum {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        _descs: &[descriptors::SinglePathCoincubeDesc],
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         received_coins_from(&self.wallet_coins(None), tip)
     }
@@ -1611,7 +1611,7 @@ impl BitcoinInterface for esplora::Esplora {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        _descs: &[descriptors::SinglePathCoincubeDesc],
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         received_coins_from(&self.wallet_coins(None), tip)
     }
@@ -1754,7 +1754,7 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         self.lock().unwrap().try_received_coins(tip, descs)
     }
@@ -1845,7 +1845,7 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         self.lock().unwrap().received_coins(tip, descs)
     }

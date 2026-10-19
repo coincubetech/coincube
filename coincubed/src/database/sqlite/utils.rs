@@ -603,6 +603,7 @@ fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbErro
             rescan_timestamp INTEGER,
             last_poll_timestamp INTEGER,
             wallet_kind TEXT NOT NULL CHECK (wallet_kind IN ('vault', 'imported')),
+            import_chain TEXT,
             imported_receive_descriptor TEXT,
             imported_change_descriptor TEXT,
             import_birthday INTEGER,
@@ -612,12 +613,15 @@ fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbErro
             import_change_scanned INTEGER,
             CHECK (
                 (wallet_kind = 'vault' AND main_descriptor IS NOT NULL
-                    AND imported_receive_descriptor IS NULL AND imported_change_descriptor IS NULL
+                    AND import_chain IS NULL AND imported_receive_descriptor IS NULL
+                    AND imported_change_descriptor IS NULL
                     AND import_birthday IS NULL AND import_history_complete IS NULL
                     AND import_initial_lookahead IS NULL AND import_receive_scanned IS NULL
                     AND import_change_scanned IS NULL)
                 OR
                 (wallet_kind = 'imported' AND main_descriptor IS NULL
+                    AND import_chain IS NOT NULL
+                    AND import_chain IN ('bitcoin', 'testnet', 'testnet4', 'signet', 'regtest')
                     AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
                     AND import_birthday IS NOT NULL AND import_birthday BETWEEN 0 AND 4294967295
                     AND import_history_complete IS NOT NULL

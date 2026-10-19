@@ -537,13 +537,17 @@ fn coin_to_candidate(
 
 impl DaemonControl {
     // Get the derived descriptor for this coin
-    fn derived_desc(&self, coin: &Coin) -> descriptors::DerivedSinglePathCoincubeDesc {
+    fn derived_desc(
+        &self,
+        coin: &Coin,
+    ) -> miniscript::Descriptor<miniscript::DefiniteDescriptorKey> {
         let desc = if coin.is_change {
             self.config.main_descriptor.change_descriptor()
         } else {
             self.config.main_descriptor.receive_descriptor()
         };
-        desc.derive(coin.derivation_index, &self.secp)
+        desc.derive(u32::from(coin.derivation_index))
+            .expect("stored wallet derivation index is valid")
     }
 
     // Check whether this address is valid for the network we are operating on.
@@ -586,7 +590,10 @@ impl DaemonControl {
         self.db
             .reserve_change(
                 self.config.bitcoin_config.chain,
-                &self.config.main_descriptor,
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
                 &self.secp,
             )
             .map_err(CommandError::ChangeReservation)
@@ -597,9 +604,12 @@ impl DaemonControl {
             .config
             .main_descriptor
             .change_descriptor()
-            .derive(index, &self.secp);
+            .derive(u32::from(index))
+            .expect("change derivation index is valid");
         SpendOutputAddress {
-            addr: desc.address(self.config.bitcoin_config.network),
+            addr: desc
+                .address(self.config.bitcoin_config.network)
+                .expect("supported wallet address"),
             info: Some(AddrInfo {
                 index,
                 is_change: true,
@@ -635,7 +645,10 @@ impl DaemonControl {
         self.db
             .commit_change_if_next(
                 self.config.bitcoin_config.chain,
-                &self.config.main_descriptor,
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
                 &self.secp,
                 index,
             )
@@ -966,7 +979,26 @@ impl DaemonControl {
             descriptors: GetInfoDescriptors {
                 main: self.config.main_descriptor.clone(),
             },
-            imported_wallet: None,
+            imported_wallet: self
+                .config
+                .main_descriptor
+                .as_imported()
+                .and_then(|imported| {
+                    let state = db_conn.imported_history()?;
+                    let wallet_identity = imported
+                        .identity(self.config.bitcoin_config.chain)
+                        .ok()?
+                        .to_string();
+                    Some(ImportedWalletSync {
+                        wallet_identity,
+                        chain_id: self.config.bitcoin_config.chain,
+                        birthday: state.birthday,
+                        initial_lookahead: state.initial_lookahead,
+                        receive_scanned: state.receive_scanned,
+                        change_scanned: state.change_scanned,
+                        history_complete: state.history_complete,
+                    })
+                }),
             rescan_progress,
             refused_reorg_depth,
             chain_divergence,
@@ -991,8 +1023,10 @@ impl DaemonControl {
             .config
             .main_descriptor
             .receive_descriptor()
-            .derive(new_index, &self.secp)
-            .address(self.config.bitcoin_config.network);
+            .derive(u32::from(new_index))
+            .expect("receive derivation index is valid")
+            .address(self.config.bitcoin_config.network)
+            .expect("supported wallet address");
         GetAddressResult::new(address, new_index)
     }
 
@@ -1091,15 +1125,19 @@ impl DaemonControl {
                     .config
                     .main_descriptor
                     .receive_descriptor()
-                    .derive(child, &self.secp)
-                    .address(self.config.bitcoin_config.network);
+                    .derive(u32::from(child))
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?
+                    .address(self.config.bitcoin_config.network)
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?;
 
                 let change = self
                     .config
                     .main_descriptor
                     .change_descriptor()
-                    .derive(child, &self.secp)
-                    .address(self.config.bitcoin_config.network);
+                    .derive(u32::from(child))
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?
+                    .address(self.config.bitcoin_config.network)
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?;
 
                 Ok(AddressInfo {
                     index,
@@ -1175,8 +1213,10 @@ impl DaemonControl {
             }
             if !exclude_used || !used_counts.contains_key(&index) {
                 let addr = desc
-                    .derive(index, &self.secp)
-                    .address(self.config.bitcoin_config.network);
+                    .derive(u32::from(index))
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?
+                    .address(self.config.bitcoin_config.network)
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?;
                 derived_addresses.push((index, addr));
             }
         }
@@ -1235,7 +1275,8 @@ impl DaemonControl {
                 let block_height = block_info.map(|b| b.height);
                 let address = self
                     .derived_desc(&coin)
-                    .address(self.config.bitcoin_config.network);
+                    .address(self.config.bitcoin_config.network)
+                    .expect("supported wallet address");
                 ListCoinsEntry {
                     address,
                     amount,
@@ -1367,7 +1408,10 @@ impl DaemonControl {
                 has_change,
                 warnings,
             } = match create_spend(
-                &self.config.main_descriptor,
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
                 &self.secp,
                 &mut tx_getter,
                 &destinations_checked,
@@ -1526,7 +1570,9 @@ impl DaemonControl {
         // same checks run at spend-creation time, but re-running them here — on
         // the pre-finalization PSBT — means a PSBT mutated in-flight between
         // creation and broadcast is rejected before it can hit the network.
-        spend::reverify_spend_before_broadcast(&self.config.main_descriptor, &spend_psbt)?;
+        if let Some(vault) = self.config.main_descriptor.as_vault() {
+            spend::reverify_spend_before_broadcast(vault, &spend_psbt)?;
+        }
 
         // Then, broadcast it (or try to, we never know if we are not going to hit an
         // error at broadcast time).
@@ -1787,7 +1833,10 @@ impl DaemonControl {
         let mut change_commit_conflicts = 0;
         loop {
             match create_spend(
-                &self.config.main_descriptor,
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
                 &self.secp,
                 &mut tx_getter,
                 &destinations,
@@ -1881,7 +1930,13 @@ impl DaemonControl {
         // rescanning. This could make us crash with the bitcoind backend if someone triggered a
         // rescan of the wallet just after we checked above and did now.
         self.bitcoin
-            .start_rescan(&self.config.main_descriptor, timestamp)
+            .start_rescan(
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
+                timestamp,
+            )
             .map_err(CommandError::RescanTrigger)?;
         db_conn.set_rescan(timestamp);
 
@@ -1971,8 +2026,12 @@ impl DaemonControl {
             .chain_tip_result()
             .map_err(CommandError::ChainTipUnavailable)?
             .height;
-        let timelock =
-            timelock.unwrap_or_else(|| self.config.main_descriptor.first_timelock_value());
+        let vault = self
+            .config
+            .main_descriptor
+            .as_vault()
+            .ok_or(CommandError::RecoveryNotAvailable)?;
+        let timelock = timelock.unwrap_or_else(|| vault.first_timelock_value());
         let height_delta: i32 = timelock.into();
         let coins = if coins_outpoints.is_empty() {
             db_conn.coins(&[CoinStatus::Confirmed], &[])
@@ -2019,7 +2078,7 @@ impl DaemonControl {
         let CreateSpendRes {
             psbt, has_change, ..
         } = create_spend(
-            &self.config.main_descriptor,
+            vault,
             &self.secp,
             &mut tx_getter,
             &[], // No destination, only the change address.
@@ -2038,7 +2097,7 @@ impl DaemonControl {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetInfoDescriptors {
-    pub main: descriptors::CoincubeDescriptor,
+    pub main: coincube_core::wallet_descriptor::WalletDescriptor,
 }
 
 /// Durable discovery status for a descriptor-imported Bitcoin wallet. Scanned

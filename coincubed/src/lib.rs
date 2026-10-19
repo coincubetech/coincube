@@ -49,6 +49,65 @@ use std::{
 
 use miniscript::bitcoin::{constants::ChainHash, hashes::Hash, secp256k1, BlockHash};
 
+/// Prepare an imported wallet without starting a backend or publishing it as a
+/// Cube. `config` must already name the final data directory; `staged_dir` is
+/// where the caller builds the private database and daemon.toml before rename.
+pub fn create_imported_storage(
+    config: &Config,
+    staged_dir: &DataDirectory,
+    birthday: u32,
+    initial_lookahead: u32,
+) -> Result<(), StartupError> {
+    let mut config = config.clone();
+    config.import_birthday = Some(birthday);
+    config.import_initial_lookahead = Some(initial_lookahead);
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "import storage requires an imported wallet".into(),
+        ))
+    })?;
+    let final_dir = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if final_dir.path() == staged_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "import staging directory must differ from final data directory".into(),
+        )));
+    }
+    if matches!(
+        config.bitcoin_backend,
+        Some(config::BitcoinBackend::Bitcoind(_))
+    ) {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
+        )));
+    }
+    staged_dir
+        .init()
+        .map_err(|error| StartupError::DatadirCreation(staged_dir.path().to_path_buf(), error))?;
+    database::sqlite::create_imported_db(
+        &staged_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        birthday,
+        initial_lookahead,
+    )?;
+    let serialized = toml::to_string_pretty(&config.for_persistence())
+        .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.to_string())))?;
+    let path = staged_dir.path().join("daemon.toml");
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&path)?;
+    use std::io::Write;
+    file.write_all(serialized.as_bytes())?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    std::fs::File::open(staged_dir.path())?.sync_all()?;
+    Ok(())
+}
+
 #[cfg(not(test))]
 use std::panic;
 // A panic in any thread should stop the main thread, and print the panic.
@@ -289,10 +348,27 @@ fn setup_sqlite(
 ) -> Result<SqliteDb, StartupError> {
     let db_path = data_dir.sqlite_db_file_path();
     let options = if fresh_data_dir {
-        Some(FreshDbOptions::new(
-            config.bitcoin_config.chain,
-            config.main_descriptor.clone(),
-        ))
+        if let Some(vault) = config.main_descriptor.as_vault() {
+            Some(FreshDbOptions::new(
+                config.bitcoin_config.chain,
+                vault.clone(),
+            ))
+        } else {
+            let imported = config
+                .main_descriptor
+                .as_imported()
+                .expect("wallet is imported");
+            database::sqlite::create_imported_db(
+                &db_path,
+                config.bitcoin_config.chain,
+                imported,
+                config.import_birthday.expect("checked imported birthday"),
+                config
+                    .import_initial_lookahead
+                    .expect("checked imported lookahead"),
+            )?;
+            None
+        }
     } else {
         None
     };
@@ -320,7 +396,25 @@ fn setup_sqlite(
         sqlite.maybe_apply_migrations(&wallet_txs)?;
     }
 
-    sqlite.sanity_check(config.bitcoin_config.chain, &config.main_descriptor)?;
+    sqlite.sanity_check_wallet(config.bitcoin_config.chain, &config.main_descriptor)?;
+    if config.main_descriptor.as_imported().is_some() {
+        let history = sqlite
+            .connection()?
+            .imported_history()
+            .map_err(SqliteDbError::Rusqlite)?
+            .ok_or_else(|| {
+                StartupError::Config(ConfigError::Unexpected(
+                    "import history state missing".into(),
+                ))
+            })?;
+        if Some(history.birthday) != config.import_birthday
+            || Some(history.initial_lookahead) != config.import_initial_lookahead
+        {
+            return Err(StartupError::Config(ConfigError::Unexpected(
+                "Imported scan settings differ from the installed wallet".into(),
+            )));
+        }
+    }
     log::info!("Database initialized and checked.");
 
     Ok(sqlite)
@@ -606,6 +700,10 @@ fn setup_bitcoind(
     fresh_data_dir: bool,
     admitted: Option<BitcoinD>,
 ) -> Result<BitcoinD, StartupError> {
+    let vault = config.main_descriptor.as_vault().ok_or_else(||
+        StartupError::Config(ConfigError::Unexpected(
+            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
+        )))?;
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
     let wo_path_str = bitcoind_watchonly_wallet_path(data_dir);
 
@@ -617,18 +715,15 @@ fn setup_bitcoind(
         Some(bitcoind) => bitcoind,
         None => BitcoinD::new(bitcoind_config, wo_path_str)?,
     };
-    bitcoind.node_sanity_checks(
-        config.bitcoin_config.network,
-        config.main_descriptor.is_taproot(),
-    )?;
+    bitcoind.node_sanity_checks(config.bitcoin_config.network, vault.is_taproot())?;
     if fresh_data_dir || !wo_path.exists() {
         log::info!("Creating a new watchonly wallet on bitcoind.");
-        bitcoind.create_watchonly_wallet(&config.main_descriptor)?;
+        bitcoind.create_watchonly_wallet(vault)?;
         log::info!("Watchonly wallet created.");
     }
     log::info!("Loading our watchonly wallet on bitcoind.");
     bitcoind.maybe_load_watchonly_wallet()?;
-    bitcoind.wallet_sanity_checks(&config.main_descriptor)?;
+    bitcoind.wallet_sanity_checks(vault)?;
     log::info!("Watchonly wallet loaded on bitcoind and sanity checked.");
 
     Ok(bitcoind)
@@ -682,7 +777,8 @@ fn setup_electrum(
         let chain_hash = ChainHash::using_genesis_block(config.bitcoin_config.network);
         BlockHash::from_byte_array(*chain_hash.as_bytes())
     };
-    let bdk_wallet = electrum::wallet::BdkWallet::new(
+    let imported_history = db_conn.imported_history();
+    let bdk_wallet = electrum::wallet::BdkWallet::new_for_wallet(
         &config.main_descriptor,
         genesis_hash,
         tip,
@@ -690,9 +786,21 @@ fn setup_electrum(
         &txs,
         receive_index,
         change_index,
+        imported_history
+            .as_ref()
+            .map_or(30, |state| state.initial_lookahead),
     );
-    let full_scan = db_conn.rescan_timestamp().is_some();
-    let electrum = Electrum::new(client, bdk_wallet, full_scan).map_err(StartupError::Electrum)?;
+    let full_scan = db_conn.rescan_timestamp().is_some()
+        || imported_history
+            .as_ref()
+            .is_some_and(|state| !state.history_complete);
+    let mut electrum =
+        Electrum::new(client, bdk_wallet, full_scan).map_err(StartupError::Electrum)?;
+    if let Some(history) = imported_history {
+        electrum
+            .set_full_scan_gap(history.initial_lookahead as usize)
+            .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
+    }
     electrum
         .sanity_checks(&genesis_hash)
         .map_err(StartupError::Electrum)?;
@@ -749,7 +857,8 @@ fn setup_esplora(
         .map(|(tx, _, _)| tx)
         .collect();
     let (receive_index, change_index) = (db_conn.receive_index(), db_conn.change_index());
-    let bdk_wallet = electrum::wallet::BdkWallet::new(
+    let imported_history = db_conn.imported_history();
+    let bdk_wallet = electrum::wallet::BdkWallet::new_for_wallet(
         &config.main_descriptor,
         genesis_hash,
         tip,
@@ -757,9 +866,20 @@ fn setup_esplora(
         &txs,
         receive_index,
         change_index,
+        imported_history
+            .as_ref()
+            .map_or(30, |state| state.initial_lookahead),
     );
-    let full_scan = db_conn.rescan_timestamp().is_some();
-    let esplora = Esplora::new(client, bdk_wallet, full_scan).map_err(StartupError::Esplora)?;
+    let full_scan = db_conn.rescan_timestamp().is_some()
+        || imported_history
+            .as_ref()
+            .is_some_and(|state| !state.history_complete);
+    let mut esplora = Esplora::new(client, bdk_wallet, full_scan).map_err(StartupError::Esplora)?;
+    if let Some(history) = imported_history {
+        esplora
+            .set_full_scan_gap(history.initial_lookahead as usize)
+            .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
+    }
     esplora
         .sanity_checks(&genesis_hash)
         .map_err(StartupError::Esplora)?;
@@ -880,7 +1000,13 @@ impl DaemonHandle {
             || with_rpc_server
             || config.pending_bitcoind.is_some()
             || !matches!(
-                config.main_descriptor.descriptor(),
+                config
+                    .main_descriptor
+                    .as_vault()
+                    .map(|vault| vault.descriptor())
+                    .ok_or(StartupError::ConnectAdmission(
+                        connect::AdmissionError::InvalidBackend
+                    ))?,
                 miniscript::Descriptor::Wsh(_)
             )
         {
@@ -912,7 +1038,13 @@ impl DaemonHandle {
                 Some(config::BitcoinBackend::Bitcoind(node)) if node.addr.ip().is_loopback()
             )
             || !matches!(
-                config.main_descriptor.descriptor(),
+                config
+                    .main_descriptor
+                    .as_vault()
+                    .map(|vault| vault.descriptor())
+                    .ok_or(StartupError::ConnectAdmission(
+                        connect::AdmissionError::InvalidBackend
+                    ))?,
                 miniscript::Descriptor::Wsh(_)
             )
         {
@@ -947,10 +1079,17 @@ impl DaemonHandle {
 
         // Before touching anything: the configuration must be self-consistent, and this build
         // must be able to run the chain it names. Neither check does any I/O.
-        config
-            .bitcoin_config
-            .check_chain_encoding()
-            .map_err(StartupError::Config)?;
+        config.check().map_err(StartupError::Config)?;
+        if config.main_descriptor.as_imported().is_some()
+            && matches!(
+                config.bitcoin_backend,
+                Some(config::BitcoinBackend::Bitcoind(_))
+            )
+        {
+            return Err(StartupError::Config(ConfigError::Unexpected(
+                "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
+            )));
+        }
         if let Some(backend) = connect.as_ref() {
             if backend.chain() != config.bitcoin_config.chain
                 || bitcoin.is_some()
@@ -1049,7 +1188,9 @@ impl DaemonHandle {
         // A wallet whose scan window starts after the coins we already know about
         // cannot track them, and nothing else notices — see `heal_scan_window`.
         if let Some(bitcoind) = bitcoind.as_mut() {
-            heal_scan_window(bitcoind, &db, &config.main_descriptor);
+            if let Some(vault) = config.main_descriptor.as_vault() {
+                heal_scan_window(bitcoind, &db, vault);
+            }
         }
 
         // Shared abort flag: `stop` flips it so an in-flight Esplora scan stops

@@ -65,7 +65,7 @@ fn update_coins(
     bit: &impl BitcoinInterface,
     db_conn: &mut Box<dyn DatabaseConnection>,
     previous_tip: &BlockChainTip,
-    descs: &[descriptors::SinglePathCoincubeDesc],
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
 ) -> Result<UpdatedCoins, String> {
     let network = db_conn.network();
@@ -122,7 +122,13 @@ fn update_coins(
                             let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
                                 .map_err(|_| "Derivation range exhausted")?;
                             for (branch, desc) in descs.iter().enumerate().take(2) {
-                                if desc.derive(child, secp).address(network) == address {
+                                if desc
+                                    .at_derivation_index(u32::from(child))
+                                    .map_err(|error| error.to_string())?
+                                    .address(network)
+                                    .map_err(|error| error.to_string())?
+                                    == address
+                                {
                                     found = Some((child, branch == 1));
                                     break;
                                 }
@@ -481,7 +487,7 @@ fn report_divergence(
 fn updates(
     db_conn: &mut Box<dyn DatabaseConnection>,
     bit: &mut impl BitcoinInterface,
-    descs: &[descriptors::SinglePathCoincubeDesc],
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     reorg_alert: &ReorgAlertCache,
 ) -> Result<(), String> {
@@ -647,7 +653,7 @@ pub fn poll(
     bit: &mut sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
     db: &sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-    descs: &[descriptors::SinglePathCoincubeDesc],
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     reorg_alert: &ReorgAlertCache,
     history_sync: &HistorySyncCache,
 ) {
@@ -965,7 +971,7 @@ mod tests {
         assert!(!managed_node_maintenance());
     }
 
-    pub(super) fn test_descs() -> [descriptors::SinglePathCoincubeDesc; 2] {
+    pub(super) fn test_descs() -> [miniscript::Descriptor<miniscript::DescriptorPublicKey>; 2] {
         let owner_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
         let heir_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
         let policy = descriptors::CoincubePolicy::new_legacy(
@@ -975,8 +981,8 @@ mod tests {
         .unwrap();
         let desc = descriptors::CoincubeDescriptor::new(policy);
         [
-            desc.receive_descriptor().clone(),
-            desc.change_descriptor().clone(),
+            desc.receive_descriptor().as_descriptor_public_key(),
+            desc.change_descriptor().as_descriptor_public_key(),
         ]
     }
 
@@ -1282,7 +1288,8 @@ mod failure_tests {
                 block_height: Some(99),
                 address: UTxOAddress::Address(
                     descs[0]
-                        .derive(1500.into(), &secp)
+                        .at_derivation_index(1500)
+                        .unwrap()
                         .address(database.connection().network())
                         .into_unchecked(),
                 ),
@@ -1332,7 +1339,8 @@ mod failure_tests {
                 },
                 address: UTxOAddress::Address(
                     descs[branch]
-                        .derive(200.into(), &secp)
+                        .at_derivation_index(200)
+                        .unwrap()
                         .address(conn.network())
                         .into_unchecked(),
                 ),
@@ -1345,7 +1353,8 @@ mod failure_tests {
                 },
                 address: UTxOAddress::Address(
                     descs[branch]
-                        .derive(399.into(), &secp)
+                        .at_derivation_index(399)
+                        .unwrap()
                         .address(conn.network())
                         .into_unchecked(),
                 ),
@@ -1358,7 +1367,8 @@ mod failure_tests {
                 },
                 address: UTxOAddress::Address(
                     descs[branch]
-                        .derive(1000.into(), &secp)
+                        .at_derivation_index(1000)
+                        .unwrap()
                         .address(conn.network())
                         .into_unchecked(),
                 ),
@@ -1487,7 +1497,7 @@ mod history_sync_tests {
         bit: sync::Arc<sync::Mutex<DummyBitcoind>>,
         backend: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
         database: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
-        descs: Vec<descriptors::SinglePathCoincubeDesc>,
+        descs: Vec<miniscript::Descriptor<miniscript::DescriptorPublicKey>>,
         secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
         alert: ReorgAlertCache,
         history: HistorySyncCache,

@@ -31,6 +31,8 @@ use crate::{
 };
 use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 use rusqlite::OptionalExtension;
 
 use std::{
@@ -78,7 +80,7 @@ pub enum SqliteDbError {
     /// The identity rows are not what a Coincube database must hold (zero/several rows, or an
     /// identity whose encoding disagrees with its `network` column).
     MalformedIdentity(String),
-    DescriptorMismatch(Box<CoincubeDescriptor>),
+    DescriptorMismatch(Box<WalletDescriptor>),
     Rusqlite(rusqlite::Error),
 }
 
@@ -109,7 +111,7 @@ impl std::fmt::Display for SqliteDbError {
                 write!(f, "Database identity is malformed: {}.", msg)
             }
             SqliteDbError::DescriptorMismatch(desc) => {
-                write!(f, "Database descriptor mismatch: '{}'.", desc)
+                write!(f, "Database descriptor mismatch: '{:?}'.", desc)
             }
             SqliteDbError::Rusqlite(e) => write!(f, "SQLite error: '{}'", e),
         }
@@ -236,6 +238,14 @@ impl SqliteDb {
         chain: ChainId,
         main_descriptor: &CoincubeDescriptor,
     ) -> Result<(), SqliteDbError> {
+        self.sanity_check_wallet(chain, &WalletDescriptor::Vault(main_descriptor.clone()))
+    }
+
+    pub fn sanity_check_wallet(
+        &self,
+        chain: ChainId,
+        main_descriptor: &WalletDescriptor,
+    ) -> Result<(), SqliteDbError> {
         let mut conn = self.connection()?;
 
         // At this point any migration must have been applied.
@@ -267,6 +277,77 @@ impl SqliteDb {
 
         Ok(())
     }
+}
+
+/// Build a separate imported-wallet database in a staging directory. The caller
+/// publishes the complete directory only after this function returns.
+pub fn create_imported_db(
+    db_path: &path::Path,
+    chain: ChainId,
+    descriptor: &ImportedWalletDescriptor,
+    birthday: u32,
+    initial_lookahead: u32,
+) -> Result<(), SqliteDbError> {
+    if descriptor.chain() != chain || chain.is_blake2b() {
+        return Err(SqliteDbError::ChainMismatch {
+            expected: chain,
+            found: descriptor.chain(),
+        });
+    }
+    if !(1..=10_000).contains(&initial_lookahead) {
+        return Err(SqliteDbError::MalformedIdentity(
+            "import lookahead must be 1..10000".into(),
+        ));
+    }
+    utils::create_db_file(db_path)?;
+    let network = chain.bitcoin_network();
+    let mut conn = rusqlite::Connection::open(db_path)?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    tx.execute_batch(SCHEMA)?;
+    tx.execute(
+        "INSERT INTO version (version) VALUES (?1)",
+        rusqlite::params![DB_VERSION],
+    )?;
+    tx.execute(
+        "INSERT INTO tip (network, chain, blockheight, blockhash) VALUES (?1, ?2, NULL, NULL)",
+        rusqlite::params![network.to_string(), chain.dir_name()],
+    )?;
+    tx.execute(
+        "INSERT INTO wallets (timestamp, main_descriptor, deposit_derivation_index, change_derivation_index,
+            wallet_kind, import_chain, imported_receive_descriptor, imported_change_descriptor,
+            import_birthday, import_history_complete, import_initial_lookahead,
+            import_receive_scanned, import_change_scanned)
+         VALUES (?1, NULL, 0, 0, 'imported', ?2, ?3, ?4, ?1, 0, ?5, 0, 0)",
+        rusqlite::params![birthday, chain.dir_name(), descriptor.receive_descriptor().to_string(),
+            descriptor.change_descriptor().to_string(), initial_lookahead],
+    )?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO addresses (receive_address, change_address, derivation_index) VALUES (?1, ?2, ?3)",
+        )?;
+        for index in 0..initial_lookahead {
+            let receive = descriptor
+                .receive_descriptor()
+                .at_derivation_index(index)
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?
+                .address(network)
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?;
+            let change = descriptor
+                .change_descriptor()
+                .at_derivation_index(index)
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?
+                .address(network)
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?;
+            insert.execute(rusqlite::params![
+                receive.to_string(),
+                change.to_string(),
+                index
+            ])?;
+        }
+    }
+    tx.commit()?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    Ok(())
 }
 
 // We only support single wallet. The id of the wallet row is always 1.
@@ -436,8 +517,8 @@ impl SqliteConn {
 
                 for index in curr_highest_index + 1..=index_u32 {
                     let la_index = index + LOOK_AHEAD_LIMIT - 1;
-                    let receive_addr = receive_desc.derive(la_index.into(), secp).address(network);
-                    let change_addr = change_desc.derive(la_index.into(), secp).address(network);
+                    let receive_addr = receive_desc.derive(la_index).map_err(|_| rusqlite::Error::InvalidQuery)?.address(network).map_err(|_| rusqlite::Error::InvalidQuery)?;
+                    let change_addr = change_desc.derive(la_index).map_err(|_| rusqlite::Error::InvalidQuery)?.address(network).map_err(|_| rusqlite::Error::InvalidQuery)?;
                     db_tx.execute(
                         "INSERT INTO addresses (receive_address, change_address, derivation_index) VALUES (?1, ?2, ?3)",
                         rusqlite::params![receive_addr.to_string(), change_addr.to_string(), la_index],
@@ -3940,12 +4021,27 @@ CREATE TABLE labels (
                 assert!(conn
                     .execute(
                         "UPDATE wallets SET main_descriptor = NULL, wallet_kind = 'imported',
+                            import_chain = 'bitcoin',
                             imported_receive_descriptor = 'receive',
                             imported_change_descriptor = 'change',
                             import_birthday = ?1, import_history_complete = 0,
                             import_initial_lookahead = ?2,
                             import_receive_scanned = 0, import_change_scanned = 0",
                         rusqlite::params![birthday, lookahead],
+                    )
+                    .is_err());
+            }
+            for chain in [None, Some("bitcoin-blake2b"), Some("unknown")] {
+                assert!(conn
+                    .execute(
+                        "UPDATE wallets SET main_descriptor = NULL, wallet_kind = 'imported',
+                            import_chain = ?1,
+                            imported_receive_descriptor = 'receive',
+                            imported_change_descriptor = 'change',
+                            import_birthday = 0, import_history_complete = 0,
+                            import_initial_lookahead = 200,
+                            import_receive_scanned = 0, import_change_scanned = 0",
+                        [chain],
                     )
                     .is_err());
             }
@@ -3965,6 +4061,7 @@ CREATE TABLE labels (
             raw(
                 &db_path,
                 "UPDATE wallets SET main_descriptor = NULL, wallet_kind = 'imported',
+                    import_chain = 'bitcoin',
                     imported_receive_descriptor = 'receive',
                     imported_change_descriptor = 'change',
                     import_birthday = 1231006505,
