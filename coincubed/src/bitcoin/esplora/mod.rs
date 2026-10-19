@@ -95,6 +95,7 @@ pub struct Esplora {
     /// Set to `true` to force a full scan from the genesis block regardless of
     /// the wallet's local chain height.
     full_scan: bool,
+    full_scan_gap: usize,
     /// Chain tip observed at the end of the most recent successful
     /// full sync. The smart-poll guard in [`Self::sync_wallet`]
     /// fetches the current tip on every call and compares it here:
@@ -135,11 +136,20 @@ impl Esplora {
             bdk_wallet,
             sync_count: 0,
             full_scan,
+            full_scan_gap: 200,
             last_synced_tip: None,
             polls_since_full_sync: 0,
             eager_sync_requested: false,
             history_sync: None,
         })
+    }
+
+    pub fn set_full_scan_gap(&mut self, gap: usize) -> Result<(), &'static str> {
+        if !(1..=10_000).contains(&gap) {
+            return Err("full scan gap must be between 1 and 10000");
+        }
+        self.full_scan_gap = gap;
+        Ok(())
     }
 
     /// Report full-scan progress into `cache` from now on.
@@ -328,7 +338,6 @@ impl Esplora {
         // per-second budget more often, so the happy path stays
         // happy.
         const PARALLEL_REQUESTS: usize = 2;
-        const STOP_GAP: usize = 200;
 
         // SPK lists are rebuilt per attempt so the request closure can be
         // re-invoked if the primary Esplora endpoint fails and the client
@@ -368,7 +377,7 @@ impl Esplora {
             let expected_addresses = crate::bitcoin::expected_full_scan_addresses(
                 bdk_wallet.index().all_unbounded_spk_iters().len(),
                 bdk_wallet.index().last_revealed_indices().into_values(),
-                STOP_GAP,
+                self.full_scan_gap,
             );
             let scan_result = self
                 .client
@@ -395,7 +404,7 @@ impl Esplora {
                         }
                         request
                     },
-                    STOP_GAP,
+                    self.full_scan_gap,
                     PARALLEL_REQUESTS,
                 )
                 .map_err(EsploraError::Client)?;

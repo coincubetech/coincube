@@ -54,6 +54,30 @@ impl BdkWallet {
         receive_index: ChildNumber,
         change_index: ChildNumber,
     ) -> Self {
+        Self::new_with_lookahead(
+            main_descriptor,
+            genesis_hash,
+            tip,
+            coins,
+            txs,
+            receive_index,
+            change_index,
+            LOOK_AHEAD_LIMIT,
+        )
+    }
+
+    /// Use a wider persistent script window for an imported wallet whose
+    /// existing activity may be beyond the normal newly-created Vault gap.
+    pub fn new_with_lookahead(
+        main_descriptor: &CoincubeDescriptor,
+        genesis_hash: BlockHash,
+        tip: Option<BlockChainTip>,
+        coins: &[Coin],
+        txs: &[bitcoin::Transaction],
+        receive_index: ChildNumber,
+        change_index: ChildNumber,
+        lookahead: u32,
+    ) -> Self {
         let local_chain = LocalChain::from_genesis_hash(genesis_hash).0;
         let receive_desc = main_descriptor
             .receive_descriptor()
@@ -64,7 +88,7 @@ impl BdkWallet {
 
         let mut bdk_wallet = BdkWallet {
             graph: {
-                let mut indexer = KeychainTxOutIndex::<KeychainType>::new(LOOK_AHEAD_LIMIT);
+                let mut indexer = KeychainTxOutIndex::<KeychainType>::new(lookahead);
                 let _ = indexer.insert_descriptor(KeychainType::Receive, receive_desc.clone());
                 let _ = indexer.insert_descriptor(KeychainType::Change, change_desc.clone());
                 IndexedTxGraph::new(indexer)
@@ -382,9 +406,32 @@ pub fn divergence_height(previous_tip: &CheckPoint, changeset: &ChainChangeSet) 
 mod tests {
     use super::*;
     use bdk_electrum::bdk_chain::{bitcoin::hashes::Hash, BlockId};
+    use std::str::FromStr;
 
     fn hash(seed: u8) -> BlockHash {
         BlockHash::from_byte_array([seed; 32])
+    }
+
+    #[test]
+    fn configured_lookahead_tracks_addresses_beyond_the_default_gap() {
+        let descriptor = CoincubeDescriptor::from_str(super::super::tests::DESCRIPTOR).unwrap();
+        let wallet = BdkWallet::new_with_lookahead(
+            &descriptor,
+            BlockHash::all_zeros(),
+            None,
+            &[],
+            &[],
+            ChildNumber::from(0),
+            ChildNumber::from(0),
+            300,
+        );
+        let distant = wallet.get_spk(ChildNumber::from(250), false);
+        assert!(wallet
+            .index()
+            .inner()
+            .all_spks()
+            .values()
+            .any(|spk| *spk == distant));
     }
 
     /// A sparse chain, as these backends actually keep one: genesis, an old block
