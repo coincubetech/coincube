@@ -112,6 +112,43 @@ pub fn create_imported_storage(
     Ok(())
 }
 
+/// Apply restored address high-water marks to unpublished imported storage.
+/// The config must still point at its eventual final directory; only the
+/// staged database is opened here, with no backend or network access.
+pub fn restore_imported_address_state(
+    config: &Config,
+    staged_dir: &DataDirectory,
+    receive_index: u32,
+    change_index: u32,
+) -> Result<(), StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "address-state restore requires an imported wallet".into(),
+        ))
+    })?;
+    let final_dir = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if final_dir.path() == staged_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "restore storage must remain staged until address state is complete".into(),
+        )));
+    }
+    database::sqlite::restore_imported_address_state(
+        &staged_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        config.import_birthday.expect("validated imported birthday"),
+        config
+            .import_initial_lookahead
+            .expect("validated imported lookahead"),
+        receive_index,
+        change_index,
+    )?;
+    Ok(())
+}
+
 #[cfg(not(test))]
 use std::panic;
 // A panic in any thread should stop the main thread, and print the panic.

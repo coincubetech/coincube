@@ -362,6 +362,126 @@ pub fn create_imported_db(
     Ok(())
 }
 
+/// Restore last-allocated branch indices in an unpublished imported database.
+/// The identity check and address-cache expansion commit together, so a crash
+/// can never publish high-water marks without the scripts needed to recognize
+/// addresses handed out before this device existed.
+pub fn restore_imported_address_state(
+    db_path: &path::Path,
+    chain: ChainId,
+    descriptor: &ImportedWalletDescriptor,
+    birthday: u32,
+    initial_lookahead: u32,
+    receive_index: u32,
+    change_index: u32,
+) -> Result<(), SqliteDbError> {
+    const MAX_RESTORED_INDEX: u32 = 1_000_000;
+    if descriptor.chain() != chain || chain.is_blake2b() {
+        return Err(SqliteDbError::ChainMismatch {
+            expected: chain,
+            found: descriptor.chain(),
+        });
+    }
+    if receive_index > MAX_RESTORED_INDEX || change_index > MAX_RESTORED_INDEX {
+        return Err(SqliteDbError::MalformedIdentity(
+            "imported address index exceeds the supported restore bound".into(),
+        ));
+    }
+    let target = receive_index
+        .max(change_index)
+        .checked_add(initial_lookahead.saturating_sub(1))
+        .ok_or_else(|| {
+            SqliteDbError::MalformedIdentity("imported address index overflow".into())
+        })?;
+    if target >= (1 << 31) {
+        return Err(SqliteDbError::MalformedIdentity(
+            "imported address index exceeds normal derivation range".into(),
+        ));
+    }
+    let mut conn = rusqlite::Connection::open(db_path)?;
+    conn.pragma_update(None, "synchronous", "FULL")?;
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+    let tip: (String, String) = tx.query_row("SELECT chain, network FROM tip", [], |row| {
+        Ok((row.get(0)?, row.get(1)?))
+    })?;
+    let row: (String, String, String, String, u32, u32, u32, u32) = tx.query_row(
+        "SELECT wallet_kind, import_chain, imported_receive_descriptor,
+                imported_change_descriptor, import_birthday, import_initial_lookahead,
+                deposit_derivation_index, change_derivation_index
+         FROM wallets WHERE id = 1",
+        [],
+        |row| {
+            Ok((
+                row.get(0)?,
+                row.get(1)?,
+                row.get(2)?,
+                row.get(3)?,
+                row.get(4)?,
+                row.get(5)?,
+                row.get(6)?,
+                row.get(7)?,
+            ))
+        },
+    )?;
+    if tip != (chain.dir_name().into(), chain.bitcoin_network().to_string())
+        || row.0 != "imported"
+        || row.1 != chain.dir_name()
+        || row.2 != descriptor.receive_descriptor().to_string()
+        || row.3 != descriptor.change_descriptor().to_string()
+        || row.4 != birthday
+        || row.5 != initial_lookahead
+    {
+        return Err(SqliteDbError::MalformedIdentity(
+            "imported restore storage does not match the wallet attachment".into(),
+        ));
+    }
+    let final_receive = row.6.max(receive_index);
+    let final_change = row.7.max(change_index);
+    let final_target = final_receive
+        .max(final_change)
+        .checked_add(initial_lookahead - 1)
+        .ok_or_else(|| {
+            SqliteDbError::MalformedIdentity("imported address index overflow".into())
+        })?;
+    let existing_max: Option<u32> =
+        tx.query_row("SELECT MAX(derivation_index) FROM addresses", [], |row| {
+            row.get(0)
+        })?;
+    {
+        let mut insert = tx.prepare(
+            "INSERT INTO addresses (receive_address, change_address, derivation_index)
+             VALUES (?1, ?2, ?3)",
+        )?;
+        for index in existing_max.map_or(0, |last| last.saturating_add(1))..=final_target {
+            let receive = descriptor
+                .receive_descriptor()
+                .at_derivation_index(index)
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?
+                .address(chain.bitcoin_network())
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?;
+            let change = descriptor
+                .change_descriptor()
+                .at_derivation_index(index)
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?
+                .address(chain.bitcoin_network())
+                .map_err(|error| SqliteDbError::MalformedIdentity(error.to_string()))?;
+            insert.execute(rusqlite::params![
+                receive.to_string(),
+                change.to_string(),
+                index
+            ])?;
+        }
+    }
+    tx.execute(
+        "UPDATE wallets SET deposit_derivation_index = ?1,
+                            change_derivation_index = ?2 WHERE id = 1",
+        rusqlite::params![final_receive, final_change],
+    )?;
+    tx.commit()?;
+    conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE)")?;
+    Ok(())
+}
+
 // We only support single wallet. The id of the wallet row is always 1.
 const WALLET_ID: i64 = 1;
 
@@ -4927,6 +5047,81 @@ CREATE TABLE labels (
             assert!(conn.store_imported_construction(&changed).is_err());
             assert_eq!(conn.db_spend(&draft_txid).unwrap().psbt, signed);
             fs::remove_dir_all(tmp_dir).unwrap();
+        }
+
+        #[test]
+        fn imported_restore_state_is_atomic_monotonic_and_identity_bound() {
+            use crate::database::DatabaseConnection;
+            use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+            use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+
+            let secp = secp256k1::Secp256k1::new();
+            let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[42; 32]).unwrap();
+            let account = master
+                .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+                .unwrap();
+            let key = format!(
+                "[{}/84h/0h/0h]{}/",
+                master.fingerprint(&secp),
+                Xpub::from_priv(&secp, &account)
+            );
+            let descriptor = ImportedWalletDescriptor::parse(
+                &format!("wpkh({key}0/*)"),
+                Some(&format!("wpkh({key}1/*)")),
+                ChainId::Bitcoin,
+            )
+            .unwrap();
+            let dir = tmp_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let db_path = dir.join("coincubed.sqlite3");
+            create_imported_db(&db_path, ChainId::Bitcoin, &descriptor, 0, 20).unwrap();
+
+            restore_imported_address_state(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 45, 32)
+                .unwrap();
+            let verify = secp256k1::Secp256k1::verification_only();
+            let db = SqliteDb::new(db_path.clone(), None, &verify).unwrap();
+            let mut conn = db.connection().unwrap();
+            assert_eq!(u32::from(conn.receive_index()), 45);
+            assert_eq!(u32::from(conn.change_index()), 32);
+            let mapped: u32 = conn
+                .conn
+                .query_row("SELECT MAX(derivation_index) FROM addresses", [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(mapped, 64);
+            let address = descriptor
+                .receive_descriptor()
+                .at_derivation_index(45)
+                .unwrap()
+                .address(bitcoin::Network::Bitcoin)
+                .unwrap();
+            assert_eq!(
+                u32::from(conn.db_address(&address).unwrap().derivation_index),
+                45
+            );
+            drop(conn);
+            restore_imported_address_state(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 2, 3)
+                .unwrap();
+            let mut conn = db.connection().unwrap();
+            assert_eq!(u32::from(conn.receive_index()), 45);
+            assert_eq!(u32::from(conn.change_index()), 32);
+            drop(conn);
+            assert!(restore_imported_address_state(
+                &db_path,
+                ChainId::Bitcoin,
+                &descriptor,
+                1,
+                20,
+                99,
+                99,
+            )
+            .is_err());
+            let mut conn = db.connection().unwrap();
+            assert_eq!(u32::from(conn.receive_index()), 45);
+            assert_eq!(u32::from(conn.change_index()), 32);
+            drop(conn);
+            fs::remove_dir_all(dir).unwrap();
         }
 
         #[test]
