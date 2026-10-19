@@ -235,13 +235,16 @@ pub struct Cache {
     pub btcb2_already_claimed: bool,
     /// A local paired Claim can be resumed from this fork Vault; not authority.
     pub btcb2_claim_resume: bool,
-    /// Entangled-deposit answers for a Bitcoin Blake2b Cube (`#276` I13),
+    /// Display-only evidence from the open Claim panel. Never spend authority;
+    /// removed when that panel no longer has a current paired review.
+    pub split_deposit: Option<(coincube_core::miniscript::bitcoin::OutPoint, Instant)>,
+    /// Other-chain transaction presence for either side of the fork,
     /// keyed by the deposit's txid: whether the same transaction exists on
     /// the twin Bitcoin chain, and when that was resolved. Only *resolved*
     /// answers are stored — a deposit absent from the map has not been
     /// checked (or the check failed) and is retried after the next sync; a
     /// negative older than `NEGATIVE_ANSWER_TTL` is re-queried; a positive is
-    /// terminal. In-memory only. Always empty on a Bitcoin-family Cube. Every
+    /// terminal. In-memory only; absence is not replay-protection proof. Every
     /// lookup reply enters through [`Self::accept_entanglement`], every write
     /// through [`Self::record_entanglement`].
     pub entangled: std::collections::HashMap<
@@ -401,6 +404,7 @@ impl std::default::Default for Cache {
             btcb2_claim_resume: false,
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
+            split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             btc_usd_price: None,
             show_direction_badges: true,

@@ -1015,6 +1015,7 @@ pub async fn load_application(
         // server half when `/connect/features` loads.
         liquid_gate: crate::app::features::LiquidGate::HIDDEN,
         entangled: std::collections::HashMap::new(),
+        split_deposit: None,
         last_poll_at_startup: config.info.last_poll_timestamp,
         daemon_cache: DaemonCache {
             blockheight: config.info.block_height,

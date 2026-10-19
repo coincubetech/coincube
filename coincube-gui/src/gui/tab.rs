@@ -4398,6 +4398,7 @@ pub fn create_app_with_remote_backend(
             // connected), the server half when `/connect/features` loads.
             liquid_gate: crate::app::features::LiquidGate::HIDDEN,
             entangled: std::collections::HashMap::new(),
+            split_deposit: None,
             // We ignore last poll fields for remote backend.
             last_poll_at_startup: None,
             daemon_cache: DaemonCache {

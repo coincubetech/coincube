@@ -99,18 +99,14 @@ pub struct LookupAnswer {
     pub observed_at: Instant,
 }
 
-/// The Bitcoin-family chain a Bitcoin Blake2b chain forked from, on which a
-/// BTCB2 deposit may have a twin. `None` for every non-BTCB2 chain: there is
-/// nothing to look up.
+/// The other side of a supported fork, for display-only presence lookups.
 pub fn twin_chain(chain: ChainId) -> Option<ChainId> {
     match chain {
+        ChainId::Bitcoin => Some(ChainId::BitcoinBlake2b),
+        ChainId::Testnet4 => Some(ChainId::BitcoinBlake2bTestnet4),
         ChainId::BitcoinBlake2b => Some(ChainId::Bitcoin),
         ChainId::BitcoinBlake2bTestnet4 => Some(ChainId::Testnet4),
-        ChainId::Bitcoin
-        | ChainId::Testnet
-        | ChainId::Testnet4
-        | ChainId::Signet
-        | ChainId::Regtest => None,
+        ChainId::Testnet | ChainId::Signet | ChainId::Regtest => None,
     }
 }
 
@@ -250,19 +246,18 @@ mod tests {
     }
 
     #[test]
-    fn only_blake2b_chains_have_a_twin() {
+    fn both_sides_of_supported_forks_have_a_twin() {
+        assert_eq!(twin_chain(ChainId::Bitcoin), Some(ChainId::BitcoinBlake2b));
+        assert_eq!(
+            twin_chain(ChainId::Testnet4),
+            Some(ChainId::BitcoinBlake2bTestnet4)
+        );
         assert_eq!(twin_chain(ChainId::BitcoinBlake2b), Some(ChainId::Bitcoin));
         assert_eq!(
             twin_chain(ChainId::BitcoinBlake2bTestnet4),
             Some(ChainId::Testnet4)
         );
-        for chain in [
-            ChainId::Bitcoin,
-            ChainId::Testnet,
-            ChainId::Testnet4,
-            ChainId::Signet,
-            ChainId::Regtest,
-        ] {
+        for chain in [ChainId::Testnet, ChainId::Signet, ChainId::Regtest] {
             assert_eq!(twin_chain(chain), None, "{:?}", chain);
         }
     }
@@ -280,6 +275,25 @@ mod tests {
             format!("https://api.example/api/v1/esplora/bitcoin/testnet4/tx/{TXID}")
         );
         assert!(!url.contains("mempool.space") && !url.contains("blockstream"));
+    }
+
+    #[tokio::test]
+    async fn bitcoin_deposits_are_checked_on_btcb2() {
+        let server = httpmock::MockServer::start_async().await;
+        let route = format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{TXID}");
+        let mock = server
+            .mock_async(|when, then| {
+                when.method(httpmock::Method::GET).path(route);
+                then.status(200)
+                    .json_body(serde_json::json!({"txid": TXID}));
+            })
+            .await;
+        let client = CoincubeClient::for_test(server.base_url());
+        assert_eq!(
+            lookup(&client, ChainId::Bitcoin, txid()).await.answer,
+            Entanglement::Entangled
+        );
+        mock.assert_async().await;
     }
 
     #[tokio::test]
@@ -365,9 +379,9 @@ mod tests {
                 .answer,
             Entanglement::Unknown
         );
-        // A non-BTCB2 chain has nothing to look up.
+        // A chain without a supported fork has nothing to look up.
         assert_eq!(
-            lookup(&client, ChainId::Bitcoin, txid()).await.answer,
+            lookup(&client, ChainId::Signet, txid()).await.answer,
             Entanglement::Unknown
         );
     }
