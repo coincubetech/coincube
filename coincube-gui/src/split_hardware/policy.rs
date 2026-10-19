@@ -251,7 +251,13 @@ mod tests {
                 let policy = split_policy(src).unwrap();
                 assert_eq!(policy.shape(), expected, "{shape:?}");
                 if expected.is_multisig() {
-                    assert!(policy.name().starts_with("Split") && policy.name().len() == 13);
+                    let stable_name = match (shape, src.internal().is_some()) {
+                        (Shape::WshSortedMulti, true) => "Splitb969ea7b",
+                        (Shape::WshSortedMulti, false) => "Splitcb7ead5a",
+                        (Shape::WshMulti, _) => "Splite53d7bc7",
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(policy.name(), stable_name);
                 } else {
                     assert_eq!(policy.name(), "");
                 }

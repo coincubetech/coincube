@@ -1813,6 +1813,10 @@ fn split_source_digest_is_canonical_and_pinned() {
     }
     let paired = wallet(Shape::Wpkh).source;
     let receive_only = SplitSource::new(paired.external().clone(), None).unwrap();
+    assert_eq!(
+        receive_only.digest().to_string(),
+        "62f89beb8dcc74d7746d2471cda8db031f195c30dd6115e4c271b568d38dbac4"
+    );
     assert_ne!(paired.digest(), receive_only.digest());
     assert_eq!(paired.digest(), wallet(Shape::Wpkh).source.digest());
     assert_eq!(

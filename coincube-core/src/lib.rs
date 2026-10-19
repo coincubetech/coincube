@@ -7,6 +7,7 @@ pub mod claim_spend;
 pub mod descriptors;
 pub mod foreign_split;
 pub mod psbt_unified;
+pub mod public_wallet_source;
 pub mod random;
 pub mod seed_crypt;
 pub mod signer;
