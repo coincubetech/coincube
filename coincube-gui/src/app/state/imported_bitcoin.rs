@@ -78,6 +78,19 @@ impl Provider {
     }
 }
 
+fn public_server_label(endpoint: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(endpoint) else {
+        return "Configured server".into();
+    };
+    let Some(host) = url.host_str() else {
+        return "Configured server".into();
+    };
+    let port = url
+        .port()
+        .map_or_else(String::new, |port| format!(":{port}"));
+    format!("{}://{host}{port}", url.scheme())
+}
+
 fn wallet_summary(descriptor: &ImportedWalletDescriptor) -> (&'static str, String, String) {
     let receive = descriptor.receive_descriptor().to_string();
     let script = if receive.starts_with("sh(wpkh(") {
@@ -288,6 +301,7 @@ pub struct ImportedBitcoinPanel {
     scan_from_beginning: bool,
     lookahead: String,
     provider: Provider,
+    provider_known: bool,
     endpoint: String,
     review: Option<ImportedWalletAttachment>,
     review_connect_epoch: Option<u64>,
@@ -333,6 +347,7 @@ impl ImportedBitcoinPanel {
             scan_from_beginning: true,
             lookahead: "200".into(),
             provider: Provider::Public,
+            provider_known: true,
             endpoint: String::new(),
             review,
             review_connect_epoch: None,
@@ -458,6 +473,30 @@ impl ImportedBitcoinPanel {
         {
             self.error = Some("A different Bitcoin wallet is already open for this Cube.".into());
             return Task::none();
+        }
+        // An external daemon does not expose Config. Its installed attachment
+        // still has the exact persisted settings used by the loader.
+        let persisted_config = if daemon.config().is_none() {
+            self.import.active_attachment().and_then(|wallet| {
+                let path = self
+                    .directory
+                    .coincubed_data_directory(&wallet.wallet_id)
+                    .path()
+                    .join("daemon.toml");
+                Config::from_file(Some(path)).ok()
+            })
+        } else {
+            None
+        };
+        if let Some(config) = daemon.config().or(persisted_config.as_ref()) {
+            if let Err(error) = self.hydrate_provider_from_config(config) {
+                log::warn!("Imported Bitcoin provider metadata unavailable: {error}");
+                self.provider_known = false;
+                self.endpoint.clear();
+            }
+        } else {
+            self.provider_known = false;
+            self.endpoint.clear();
         }
         self.generation = fresh_generation();
         self.generation_gate
@@ -823,6 +862,7 @@ impl ImportedBitcoinPanel {
             }
             ImportMessage::ProviderSelected(value) => {
                 self.provider = value;
+                self.provider_known = true;
                 if matches!(&self.import.stage, BitcoinImportStage::Installing { .. }) {
                     self.review_connect_epoch =
                         (value == Provider::Connect).then_some(connect_epoch);
@@ -1769,31 +1809,10 @@ impl ImportedBitcoinPanel {
             self.error = Some(error.to_string());
             return Task::none();
         }
-        match config.bitcoin_backend.as_mut() {
-            Some(BitcoinBackend::Esplora(esplora))
-                if esplora.addr == crate::installer::connect_url(ChainId::Bitcoin) =>
-            {
-                self.provider = Provider::Connect;
-                self.endpoint = esplora.addr.clone();
-            }
-            Some(BitcoinBackend::Esplora(esplora))
-                if esplora.addr == crate::installer::public_esplora_url(Network::Bitcoin) =>
-            {
-                self.provider = Provider::Public;
-                self.endpoint = esplora.addr.clone();
-            }
-            Some(BitcoinBackend::Esplora(esplora)) => {
-                self.provider = Provider::Esplora;
-                self.endpoint = esplora.addr.clone();
-            }
-            Some(BitcoinBackend::Electrum(electrum)) => {
-                self.provider = Provider::Electrum;
-                self.endpoint = electrum.addr.clone();
-            }
-            _ => {
-                self.error = Some("This imported wallet's Bitcoin server is unsupported.".into());
-                return Task::none();
-            }
+        if let Err(error) = self.hydrate_provider_from_config(&config) {
+            self.sync_failed = true;
+            self.error = Some(error.into());
+            return Task::none();
         }
         let generation = self.generation;
         let gate = self.generation_gate.clone();
@@ -1820,6 +1839,34 @@ impl ImportedBitcoinPanel {
                 Message::ImportedBitcoin(Box::new(ImportEvent::Opened(generation, result)))
             },
         )
+    }
+
+    fn hydrate_provider_from_config(&mut self, config: &Config) -> Result<(), &'static str> {
+        match config.bitcoin_backend.as_ref() {
+            Some(BitcoinBackend::Esplora(esplora))
+                if esplora.addr == crate::installer::connect_url(ChainId::Bitcoin) =>
+            {
+                self.provider = Provider::Connect;
+                self.endpoint = esplora.addr.clone();
+            }
+            Some(BitcoinBackend::Esplora(esplora))
+                if esplora.addr == crate::installer::public_esplora_url(Network::Bitcoin) =>
+            {
+                self.provider = Provider::Public;
+                self.endpoint = esplora.addr.clone();
+            }
+            Some(BitcoinBackend::Esplora(esplora)) => {
+                self.provider = Provider::Esplora;
+                self.endpoint = esplora.addr.clone();
+            }
+            Some(BitcoinBackend::Electrum(electrum)) => {
+                self.provider = Provider::Electrum;
+                self.endpoint = electrum.addr.clone();
+            }
+            _ => return Err("This imported wallet's Bitcoin server is unsupported."),
+        }
+        self.provider_known = true;
+        Ok(())
     }
 
     fn refresh(&mut self) -> Task<Message> {
@@ -2041,7 +2088,7 @@ impl ImportedBitcoinPanel {
                 }
             }
             if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
-                content = content.push(caption(&self.endpoint));
+                content = content.push(caption(public_server_label(&self.endpoint)));
             }
             if self.provider == Provider::Public {
                 content = content.push(caption("Public server: mempool.space, with blockstream.info fallback. This reveals wallet addresses to those providers."));
@@ -2087,7 +2134,7 @@ impl ImportedBitcoinPanel {
     }
 
     fn wallet_view(&self) -> Element<'_, view::Message> {
-        let mut content = Column::new().spacing(16).push(h2("Bitcoin wallet"));
+        let mut content = Column::new().spacing(16).push(h2("Vault"));
         let ready = self.is_ready();
         if let Some(info) = &self.info {
             if let Some(status) = &info.imported_wallet {
@@ -2384,8 +2431,12 @@ impl ImportedBitcoinPanel {
             SettingsOption::Node => {
                 content = content
                     .push(p1_bold("Bitcoin server"))
-                    .push(p1_regular(self.provider.label()))
-                    .push(caption(&self.endpoint))
+                    .push(p1_regular(if self.provider_known {
+                        self.provider.label()
+                    } else {
+                        "Server settings unavailable"
+                    }))
+                    .push(caption(public_server_label(&self.endpoint)))
                     .push(
                         button::secondary(None, "Retry synchronization").on_press_maybe(
                             (!self.busy)
@@ -2511,6 +2562,115 @@ mod tests {
         transaction, Transaction,
     };
     use coincubed::commands::{GetInfoDescriptors, ImportedWalletSync};
+    use serde::{de::DeserializeOwned, Serialize};
+
+    #[derive(Debug)]
+    struct NoRpcClient;
+
+    impl crate::daemon::client::Client for NoRpcClient {
+        type Error = crate::daemon::DaemonError;
+
+        fn request<S: Serialize + std::fmt::Debug, D: DeserializeOwned + std::fmt::Debug>(
+            &self,
+            _method: &str,
+            _params: Option<S>,
+        ) -> Result<D, Self::Error> {
+            unreachable!("binding a daemon must not make an RPC request")
+        }
+    }
+
+    #[test]
+    fn shared_runtime_provider_metadata_labels_custom_esplora() {
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[44; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84'/0'/0'").unwrap())
+            .unwrap();
+        let key = format!(
+            "[{}/84'/0'/0']{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        let directory = NetworkDirectory::new(
+            std::env::temp_dir().join(format!("import-provider-test-{}", uuid::Uuid::new_v4())),
+        );
+        let wallet =
+            ImportedWalletAttachment::new(descriptor.clone(), ChainId::Bitcoin, 0, 200).unwrap();
+        let mut import = BitcoinImport::pending();
+        import.stage = BitcoinImportStage::Ready {
+            wallet: wallet.clone(),
+        };
+        let mut panel =
+            ImportedBitcoinPanel::new(directory.clone(), "cube-1".into(), import.clone());
+        let mut config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30)),
+            Some(BitcoinBackend::Esplora(EsploraConfig {
+                addr: "http://localhost:18184".into(),
+                token: None,
+                fallback_addr: None,
+                fallback_token: None,
+                secondary_fallback_addr: None,
+                secondary_fallback_token: None,
+            })),
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(descriptor.clone()),
+            directory.coincubed_data_directory(&wallet.wallet_id),
+        );
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(200);
+
+        // A loader-owned daemon shares its handle without starting a second
+        // daemon, while the Vault settings still reflect its actual server.
+        let daemon: Arc<dyn Daemon + Send + Sync> =
+            Arc::new(EmbeddedDaemon::unstarted_for_test(config.clone(), None));
+        let _refresh = panel.bind_runtime(daemon.clone());
+        assert!(Arc::ptr_eq(panel.daemon.as_ref().unwrap(), &daemon));
+        assert!(!panel.owns_daemon);
+        assert_eq!(panel.provider, Provider::Esplora);
+        assert_eq!(
+            public_server_label(&panel.endpoint),
+            "http://localhost:18184"
+        );
+        assert_eq!(panel.provider.label(), "My Esplora server");
+
+        // The external daemon exposes no Config. Binding reads the same
+        // installed metadata without starting another daemon or making RPCs.
+        let path = directory
+            .coincubed_data_directory(&wallet.wallet_id)
+            .path()
+            .join("daemon.toml");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, toml::to_string(&config.for_persistence()).unwrap()).unwrap();
+        let mut external_panel =
+            ImportedBitcoinPanel::new(directory.clone(), "cube-1".into(), import);
+        let external: Arc<dyn Daemon + Send + Sync> =
+            Arc::new(crate::daemon::client::Coincubed::new(NoRpcClient));
+        let _refresh = external_panel.bind_runtime(external.clone());
+        assert!(Arc::ptr_eq(
+            external_panel.daemon.as_ref().unwrap(),
+            &external
+        ));
+        assert_eq!(external_panel.provider, Provider::Esplora);
+        assert_eq!(
+            public_server_label(&external_panel.endpoint),
+            "http://localhost:18184"
+        );
+        std::fs::remove_dir_all(directory.path()).unwrap();
+    }
+
+    #[test]
+    fn server_caption_omits_credentials_path_and_query() {
+        assert_eq!(
+            public_server_label("https://name:secret@example.com:8443/token-path?api_key=secret"),
+            "https://example.com:8443"
+        );
+    }
 
     #[test]
     fn completed_import_stays_ready_after_receive_or_change_allocation() {
