@@ -52,8 +52,7 @@ pub struct CoinsPanel {
     warning: Option<Error>,
     /// timelock value to pass for the heir to consume a coin.
     timelock: u16,
-    /// The Cube's chain: on Bitcoin Blake2b each coin carries its
-    /// entangled-deposit badge (`#276` I13); elsewhere the list is unchanged.
+    /// The Cube's chain, for other-chain deposit status on the fork pair.
     chain: crate::chain::ChainId,
 }
 
@@ -108,7 +107,8 @@ impl State for CoinsPanel {
                 &self.coins.labels,
                 self.labels_edited.cache(),
                 cache.bitcoin_unit,
-                self.chain.is_blake2b(),
+                self.chain.is_blake2b()
+                    || (self.chain == crate::chain::ChainId::Bitcoin && cache.btcb2_server_enabled),
             ),
         )
     }

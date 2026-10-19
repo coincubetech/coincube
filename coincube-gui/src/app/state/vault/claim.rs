@@ -781,6 +781,7 @@ pub struct ClaimStep1Panel {
     deposit_status: Option<DepositStatus>,
     deposit_polling: bool,
     deposit_poll_seq: u64,
+    deposit_details_override: Option<bool>,
     last_full_check: Option<Instant>,
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
@@ -840,6 +841,7 @@ impl ClaimStep1Panel {
             deposit_status: None,
             deposit_polling: false,
             deposit_poll_seq: 0,
+            deposit_details_override: None,
             last_full_check: None,
             funding_review: None,
             prepared_pair: None,
@@ -952,6 +954,18 @@ impl ClaimStep1Panel {
         self.deposit_polling
     }
 
+    pub fn deposit_details_expanded(&self) -> bool {
+        self.deposit_details_override.unwrap_or_else(|| {
+            !self.deposit_status.as_ref().is_some_and(|status| {
+                [&status.bitcoin, &status.btcb2].iter().all(|funds| {
+                    funds
+                        .as_ref()
+                        .is_ok_and(|funds| funds.confirmed_sats > 0 || funds.pending_sats > 0)
+                })
+            })
+        })
+    }
+
     pub fn paired_vault_ready(&self) -> bool {
         self.fork_pair_current()
     }
@@ -975,6 +989,20 @@ impl ClaimStep1Panel {
 
     pub fn paired_signing_pending(&self) -> bool {
         self.paired_signing_pending
+    }
+
+    /// A short-lived display hint for both coin lists, never signing authority.
+    pub(crate) fn verified_deposit_display(&self) -> Option<(OutPoint, OutPoint, Instant)> {
+        if !matches!(self.stage, Stage::FundingDeposits(_)) || !self.backend_ready() {
+            return None;
+        }
+        let review = self.funding_review()?;
+        let expires = self.last_full_check? + Duration::from_secs(30);
+        (Instant::now() < expires).then_some((
+            review.bitcoin.funding.outpoint,
+            review.fork.funding.outpoint,
+            expires,
+        ))
     }
 
     fn fork_pair_current(&self) -> bool {
@@ -4246,6 +4274,10 @@ impl State for ClaimStep1Panel {
                     self.handoff_pending = false;
                 }
                 match intent {
+                    view::ClaimMessage::ToggleDepositDetails => {
+                        self.deposit_details_override = Some(!self.deposit_details_expanded());
+                        Task::none()
+                    }
                     view::ClaimMessage::ReviewPairedBitcoin => match daemon {
                         Some(daemon) => self.review_paired_bitcoin(daemon),
                         None => node_unavailable(),

@@ -20,22 +20,21 @@ use crate::{
     services::entangled::Entanglement,
 };
 
-/// The entangled-deposit badge of a Bitcoin Blake2b coin (`#276` I13). A
-/// definite "not entangled" shows nothing; an unresolved lookup is shown as
-/// such rather than passed off as safe.
+/// Presence is not ancestry proof: a missing transaction may still replay.
 pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, T>> {
     match status {
         Entanglement::Entangled => Some(badge::badge_pill(
-            "  Entangled  ",
-            "This deposit also exists on Bitcoin. Spending it without a replay-capable \
-             signature (or a poison split first) also spends the Bitcoin.",
+            "  Seen on both chains  ",
+            "This deposit transaction has been seen on both Bitcoin and BTCB2. It may be replayable. Use the split wizard to verify and separate shared coins.",
         )),
         Entanglement::Unknown => Some(badge::badge_pill(
-            "  Not yet checked  ",
-            "Whether this deposit also exists on Bitcoin has not been checked yet; the \
-             lookup runs after the next sync.",
+            "  Replay status not checked  ",
+            "The other-chain lookup has not completed. It retries after sync. This coin has not been verified for replay protection.",
         )),
-        Entanglement::NotEntangled => None,
+        Entanglement::NotEntangled => Some(badge::badge_pill(
+            "  Replay protection unverified  ",
+            "This transaction was not found on the other chain. That alone does not prove it cannot replay. The split wizard checks its ancestry before using it as a chain-specific deposit.",
+        )),
     }
 }
 
@@ -75,6 +74,9 @@ pub fn coins_view<'a>(
                             labels_editing,
                             bitcoin_unit,
                             blake2b.then(|| cache.entanglement_of(&coin.outpoint.txid)),
+                            cache.split_deposit.is_some_and(|(outpoint, expires)| {
+                                outpoint == coin.outpoint && std::time::Instant::now() < expires
+                            }),
                         ))
                     },
                 )),
@@ -96,6 +98,7 @@ fn coin_list_view<'a>(
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
     entangled: Option<Entanglement>,
+    verified_deposit: bool,
 ) -> Container<'a, Message> {
     let outpoint = coin.outpoint.to_string();
     let address = coin.address.to_string();
@@ -160,7 +163,12 @@ fn coin_list_view<'a>(
                                 } else {
                                     coin_sequence_label(seq, timelock as u32)
                                 })
-                                .push_maybe(entangled.and_then(entangled_badge))
+                                .push_maybe(if verified_deposit {
+                                    Some(badge::badge_pill("  Replay-protected split deposit  ",
+                                        "The open split wizard verified this exact coin's chain-specific ancestry. It will be combined with the shared coins in a self-transfer. The app rechecks it before signing."))
+                                } else {
+                                    entangled.and_then(entangled_badge)
+                                })
                                 .spacing(10)
                                 .align_y(Alignment::Center)
                                 .width(Length::Fill),
@@ -447,10 +455,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn entangled_badge_shows_for_entangled_and_unchecked_never_for_a_definite_no() {
+    fn presence_badges_never_treat_a_missing_transaction_as_replay_protection() {
         assert!(entangled_badge::<Message>(Entanglement::Entangled).is_some());
         assert!(entangled_badge::<Message>(Entanglement::Unknown).is_some());
-        assert!(entangled_badge::<Message>(Entanglement::NotEntangled).is_none());
+        assert!(entangled_badge::<Message>(Entanglement::NotEntangled).is_some());
     }
 
     #[test]

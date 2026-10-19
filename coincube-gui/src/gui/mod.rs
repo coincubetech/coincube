@@ -40,6 +40,26 @@ use crate::{
 
 use iced::window::Id;
 
+/// Both automatic polling and explicit signing actions need the current
+/// cross-tab binding. A poll completion can arrive after the fork tab opens.
+fn refreshes_claim_pair(message: &AppMessage) -> bool {
+    use crate::app::{
+        state::vault::claim::ClaimEvent,
+        view::{ClaimMessage, Message},
+    };
+    matches!(
+        message,
+        AppMessage::View(Message::Claim(
+            ClaimMessage::CheckFunding
+                | ClaimMessage::SignPair
+                | ClaimMessage::ReviewPairedBitcoin
+                | ClaimMessage::ConfirmPairedBitcoin
+                | ClaimMessage::ReviewPairedFork
+                | ClaimMessage::ConfirmPairedFork
+        )) | AppMessage::Claim(ClaimEvent::DepositPoll | ClaimEvent::DepositStatusChecked(..))
+    )
+}
+
 pub struct GUI {
     panes: pane_grid::State<pane::Pane>,
     focus: Option<pane_grid::Pane>,
@@ -390,7 +410,30 @@ impl GUI {
         // Dispatch may return early (notably for in-App account messages).
         // Keep those returns inside the helper so invalidation tasks always run.
         auth_tasks.push(self.update_message(message));
+        self.refresh_claim_deposit_display();
         Task::batch(auth_tasks)
+    }
+
+    fn refresh_claim_deposit_display(&mut self) {
+        let displays: Vec<_> = self
+            .panes
+            .iter()
+            .flat_map(|(_, pane)| &pane.tabs)
+            .filter_map(|tab| match &tab.state {
+                tab::State::App(app) => app.claim_deposit_display(),
+                _ => None,
+            })
+            .collect();
+        for (_, pane) in self.panes.iter_mut() {
+            for tab in &mut pane.tabs {
+                if let tab::State::App(app) = &mut tab.state {
+                    app.clear_claim_deposit_display();
+                    for (request, bitcoin, fork, expires) in &displays {
+                        app.apply_claim_deposit_display(request, *bitcoin, *fork, *expires);
+                    }
+                }
+            }
+        }
     }
 
     fn update_message(&mut self, message: Message) -> Task<Message> {
@@ -709,17 +752,14 @@ impl GUI {
                 // broadcast check. Fork Cubes
                 // intentionally have no generic JSON-RPC socket; borrowing
                 // their in-process daemon keeps that restriction intact.
-                if let pane::Message::Tab(
-                    tab_id,
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::Claim(
-                        crate::app::view::ClaimMessage::CheckFunding
-                        | crate::app::view::ClaimMessage::ReviewPairedBitcoin
-                        | crate::app::view::ClaimMessage::ConfirmPairedBitcoin
-                        | crate::app::view::ClaimMessage::ReviewPairedFork
-                        | crate::app::view::ClaimMessage::ConfirmPairedFork,
-                    ))),
-                ) = &msg
-                {
+                if let Some(tab_id) = match &msg {
+                    pane::Message::Tab(tab_id, tab::Message::Run(message))
+                        if refreshes_claim_pair(message) =>
+                    {
+                        Some(tab_id)
+                    }
+                    _ => None,
+                } {
                     let request = self
                         .panes
                         .get(i)
@@ -1671,6 +1711,32 @@ mod claim_return_routing_tests {
         view,
     };
     use iced::futures::StreamExt;
+
+    #[test]
+    fn automatic_deposit_checks_refresh_the_paired_cube_binding() {
+        use crate::app::state::vault::claim::{ClaimEvent, DepositStatus};
+        use crate::services::foreign_scan::AddressFunds;
+        assert!(refreshes_claim_pair(&AppMessage::Claim(
+            ClaimEvent::DepositPoll
+        )));
+        assert!(refreshes_claim_pair(&AppMessage::Claim(
+            ClaimEvent::DepositStatusChecked(
+                1,
+                1,
+                0,
+                DepositStatus {
+                    bitcoin: Ok(AddressFunds::default()),
+                    btcb2: Ok(AddressFunds::default())
+                },
+            )
+        )));
+        assert!(refreshes_claim_pair(&AppMessage::View(
+            view::Message::Claim(view::ClaimMessage::SignPair)
+        )));
+        assert!(!refreshes_claim_pair(&AppMessage::View(
+            view::Message::Claim(view::ClaimMessage::Cancel)
+        )));
+    }
 
     #[test]
     fn claim_return_routes_to_existing_tab_across_panes_and_refuses_wrong_wallet() {
