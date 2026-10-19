@@ -584,11 +584,12 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     .width(Length::Fill);
 
     let source_button = |label, source| {
-        if panel.source == source {
+        let button = if panel.source == source {
             button::primary(None, label)
         } else {
-            button::secondary(None, label).on_press(Message::SourceSelected(source))
-        }
+            button::secondary(None, label)
+        };
+        button.on_press(Message::SourceSelected(source))
     };
     let form = Column::new()
         .spacing(12)
