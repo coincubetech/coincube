@@ -397,12 +397,49 @@ fn verified_partial_outputs<C: secp256k1::Verification>(
 ) -> Result<Vec<TxOut>, ImportedFinalizeError> {
     verify_imported_spend_before_broadcast(wallet, construction)
         .map_err(ImportedFinalizeError::Construction)?;
-    foreign_split::check_signed_construction(construction, signed)
+    check_imported_signed_construction(construction, signed)
         .map_err(ImportedFinalizeError::Signatures)?;
     foreign_split::verify_partial_signatures_for(signed, secp, |_, input, output| {
         locate_input(wallet, input, &output.script_pubkey)
     })
     .map_err(ImportedFinalizeError::Signatures)
+}
+
+/// Bitcoin Core may return the funding transaction in a signed PSBT without
+/// its witnesses. Those witnesses are not part of its txid and do not affect
+/// the output being spent. Permit only that difference for imported wallets;
+/// Split's construction check remains byte-exact. Signature verification still
+/// authenticates the actual funding transaction supplied by the signer.
+fn check_imported_signed_construction(
+    construction: &Psbt,
+    signed: &Psbt,
+) -> Result<(), FinalizeError> {
+    if construction.inputs.len() != signed.inputs.len() {
+        return Err(FinalizeError::ConstructionChanged);
+    }
+    let mut normalized = signed.clone();
+    for (index, (original, incoming)) in construction.inputs.iter().zip(&signed.inputs).enumerate()
+    {
+        match (&original.non_witness_utxo, &incoming.non_witness_utxo) {
+            (Some(expected), Some(actual)) => {
+                let mut expected_base = expected.clone();
+                let mut actual_base = actual.clone();
+                for input in &mut expected_base.input {
+                    input.witness.clear();
+                }
+                for input in &mut actual_base.input {
+                    input.witness.clear();
+                }
+                if expected_base != actual_base {
+                    return Err(FinalizeError::ConstructionChanged);
+                }
+                normalized.inputs[index].non_witness_utxo = Some(expected.clone());
+            }
+            (None, None) => {}
+            _ => return Err(FinalizeError::ConstructionChanged),
+        }
+    }
+    foreign_split::check_signed_construction(construction, &normalized)
 }
 
 /// Number of cryptographically valid signatures per input on an exact partial
@@ -725,6 +762,60 @@ mod tests {
                 "{}",
                 kind
             );
+        }
+    }
+
+    #[test]
+    fn signed_psbt_may_strip_only_previous_transaction_witnesses() {
+        let secp = secp256k1::Secp256k1::new();
+        for kind in ["pkh", "sh(wpkh)", "wpkh", "wsh(multi)", "wsh(sortedmulti)"] {
+            let (wallet, signers, created) = draft(kind);
+            let mut construction = created.psbt;
+            construction.inputs[0]
+                .non_witness_utxo
+                .as_mut()
+                .unwrap()
+                .input[0]
+                .witness
+                .push([1, 2, 3]);
+            let mut signed = construction.clone();
+            signed.inputs[0].non_witness_utxo.as_mut().unwrap().input[0]
+                .witness
+                .clear();
+            for signer in signers
+                .iter()
+                .take(if kind.starts_with("wsh") { 2 } else { 1 })
+            {
+                add_signature(&mut signed, signer);
+            }
+            assert!(
+                finalize_imported_spend(&wallet, &construction, &signed, &secp).is_ok(),
+                "{}",
+                kind
+            );
+
+            let mut altered_base = signed.clone();
+            altered_base.inputs[0]
+                .non_witness_utxo
+                .as_mut()
+                .unwrap()
+                .output[0]
+                .value -= Amount::from_sat(1);
+            assert!(matches!(
+                finalize_imported_spend(&wallet, &construction, &altered_base, &secp),
+                Err(ImportedFinalizeError::Signatures(
+                    FinalizeError::ConstructionChanged
+                ))
+            ));
+
+            let mut altered_metadata = signed;
+            altered_metadata.inputs[0].redeem_script = Some(ScriptBuf::new());
+            assert!(matches!(
+                finalize_imported_spend(&wallet, &construction, &altered_metadata, &secp),
+                Err(ImportedFinalizeError::Signatures(
+                    FinalizeError::ConstructionChanged
+                ))
+            ));
         }
     }
 
