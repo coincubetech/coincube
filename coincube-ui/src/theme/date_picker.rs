@@ -1,4 +1,4 @@
-use iced::Background;
+use iced::{theme, widget, Background};
 use iced_aw::style::{
     date_picker::{Catalog, Style},
     Status, StyleFn,
@@ -49,6 +49,96 @@ pub fn primary(theme: &Theme, status: Status) -> Style {
         Status::Active => {}
     }
     style
+}
+
+/// Theme scoped to the calendar's always-enabled footer buttons.
+///
+/// iced_aw 0.13 rebuilds these Buttons when constructing its overlay, losing
+/// iced 0.14's cached redraw status. Their draw then falls back to Disabled even
+/// though both have on_press handlers. Keep this compatibility fix local to the
+/// picker; truly disabled application buttons must retain their usual styling.
+#[derive(Clone, Copy)]
+pub(crate) struct CalendarTheme(Theme);
+
+impl theme::Base for CalendarTheme {
+    fn default(preference: theme::Mode) -> Self {
+        Self(match preference {
+            theme::Mode::Light => Theme::light(),
+            _ => Theme::dark(),
+        })
+    }
+
+    fn mode(&self) -> theme::Mode {
+        self.0.mode()
+    }
+
+    fn base(&self) -> theme::Style {
+        self.0.base()
+    }
+
+    fn palette(&self) -> Option<theme::Palette> {
+        self.0.palette()
+    }
+
+    fn name(&self) -> &str {
+        "CoincubeCalendarTheme"
+    }
+}
+
+impl Catalog for CalendarTheme {
+    type Class<'a> = <Theme as Catalog>::Class<'a>;
+
+    fn default<'a>() -> Self::Class<'a> {
+        <Theme as Catalog>::default()
+    }
+
+    fn style(&self, class: &Self::Class<'_>, status: Status) -> Style {
+        class(&self.0, status)
+    }
+}
+
+impl widget::button::Catalog for CalendarTheme {
+    type Class<'a> = <Theme as widget::button::Catalog>::Class<'a>;
+
+    fn default<'a>() -> Self::Class<'a> {
+        <Theme as widget::button::Catalog>::default()
+    }
+
+    fn style(
+        &self,
+        class: &Self::Class<'_>,
+        status: widget::button::Status,
+    ) -> widget::button::Style {
+        let status = match status {
+            widget::button::Status::Disabled => widget::button::Status::Active,
+            status => status,
+        };
+        class(&self.0, status)
+    }
+}
+
+impl widget::text::Catalog for CalendarTheme {
+    type Class<'a> = <Theme as widget::text::Catalog>::Class<'a>;
+
+    fn default<'a>() -> Self::Class<'a> {
+        <Theme as widget::text::Catalog>::default()
+    }
+
+    fn style(&self, class: &Self::Class<'_>) -> widget::text::Style {
+        class(&self.0)
+    }
+}
+
+impl widget::container::Catalog for CalendarTheme {
+    type Class<'a> = <Theme as widget::container::Catalog>::Class<'a>;
+
+    fn default<'a>() -> Self::Class<'a> {
+        <Theme as widget::container::Catalog>::default()
+    }
+
+    fn style(&self, class: &Self::Class<'_>) -> widget::container::Style {
+        class(&self.0)
+    }
 }
 
 #[cfg(test)]
