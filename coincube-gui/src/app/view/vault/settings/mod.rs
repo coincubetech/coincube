@@ -21,7 +21,7 @@ use coincubed::config::BitcoindRpcAuth;
 use super::super::{dashboard, message::*};
 
 use coincube_ui::{
-    component::{badge, button, card, form, separation, text::*},
+    component::{badge, button, card, date_picker, form, separation, text::*},
     icon,
     theme::{self},
     widget::{Button, ColumnExt, Container, Element, ProgressBar, Row, RowExt, TextInput},
@@ -2326,6 +2326,7 @@ pub fn wallet_history_section<'a>(
     start: &'a form::Value<String>,
     status: &'a crate::app::node_history::Status,
     advanced: bool,
+    date_picker_open: bool,
 ) -> Element<'a, NodeSettingsMessage> {
     use crate::node::history::Phase;
     let mut content = Column::new().spacing(15)
@@ -2356,6 +2357,24 @@ pub fn wallet_history_section<'a>(
         .on_press(NodeSettingsMessage::RecoveryAdvancedToggled),
     );
     if advanced {
+        let initial_date = chrono::NaiveDate::parse_from_str(start.value.trim(), "%Y-%m-%d")
+            .unwrap_or_else(|_| chrono::Local::now().date_naive());
+        let start_entry = Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .width(Length::Fill)
+            .push(form::Form::new_trimmed(
+                "Block height or YYYY-MM-DD",
+                start,
+                NodeSettingsMessage::RecoveryStartEdited,
+            ))
+            .push(date_picker::calendar_button(
+                date_picker_open,
+                initial_date,
+                NodeSettingsMessage::RecoveryDateOpen,
+                NodeSettingsMessage::RecoveryDateCancel,
+                NodeSettingsMessage::RecoveryDateSelected,
+            ));
         let mut recover = button::secondary(None, "Recover from this height or date");
         if !status.busy
             && status.job.as_ref().is_none_or(|job| {
@@ -2368,7 +2387,7 @@ pub fn wallet_history_section<'a>(
             recover = recover.on_press(NodeSettingsMessage::RecoveryStart);
         }
         content = content
-            .push(form::Form::new_trimmed("Block height or YYYY-MM-DD", start, NodeSettingsMessage::RecoveryStartEdited))
+            .push(start_entry)
             .push(recover)
             .push(text("Downloads and scans blocks from your chosen point. Keep Tenshu open while it runs; progress is saved if interrupted.").size(12).style(theme::text::secondary));
     }

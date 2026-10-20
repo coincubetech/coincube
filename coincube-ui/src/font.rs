@@ -49,5 +49,7 @@ pub fn load() -> Vec<Cow<'static, [u8]>> {
         REGULAR_BYTES.into(),
         SPACE_GROTESK_BOLD_BYTES.into(),
         BOOTSTRAP_ICONS_BYTE.into(),
+        // DatePicker navigation, cancel, and confirm use iced_aw's icon font.
+        iced_aw::ICED_AW_FONT_BYTES.into(),
     ]
 }

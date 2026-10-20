@@ -137,7 +137,7 @@ impl SourceFormCopy {
     pub const fn import() -> Self {
         Self {
             internal_label: "Internal / change descriptor",
-            descriptor_help: "Import public Bitcoin mainnet descriptors for the receive and change branches. A combined descriptor with /<0;1>/* can be entered in the first field. Include every signer origin for hardware and PSBT signing. Only public keys are accepted; this Cube's recovery seed is separate from the wallet's signing keys.",
+            descriptor_help: "Use public Bitcoin mainnet descriptors with signer origins for hardware and PSBT signing. For a combined descriptor ending in /<0;1>/*, use the receive field and leave change empty.",
             hardware_help: "Read one standard Bitcoin mainnet singlesig account from a connected hardware wallet (BIP84, BIP49 or BIP44). The device stays responsible for signing; its seed is never copied into this Cube.",
         }
     }

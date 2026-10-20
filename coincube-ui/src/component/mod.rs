@@ -3,6 +3,7 @@ pub mod badge;
 pub mod button;
 pub mod card;
 pub mod collapse;
+pub mod date_picker;
 pub mod form;
 pub mod hw;
 pub mod modal;
