@@ -538,7 +538,7 @@ impl Home {
 
     pub(crate) fn adopt_connect_client(&mut self, client: CoincubeClient) -> Task<Message> {
         self.connect_account.invalidate_auth();
-        self.connect_account.install_admitted_client(client);
+        self.connect_account.install_shared_client(client);
         map_connect_task(
             self.connect_account
                 .update_message(ConnectAccountMessage::Init),
@@ -3200,6 +3200,9 @@ impl Home {
                         HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling);
                 }
                 let explicit_logout = matches!(&msg, ConnectAccountMessage::LogOut);
+                if explicit_logout {
+                    self.connect_account.forget_shared_session_for_logout();
+                }
                 let was_authenticated = self.connect_account.is_authenticated();
                 let task = map_connect_task(self.connect_account.update_message(msg));
                 let now_authenticated = self.connect_account.is_authenticated();

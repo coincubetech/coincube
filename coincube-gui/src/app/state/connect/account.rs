@@ -803,6 +803,9 @@ pub struct ConnectAccountPanel {
     // An admitted fork startup carries its exact client instead of restoring
     // potentially unrelated saved credentials from the global keyring.
     admitted_client: bool,
+    // Home may borrow a sibling tab's accepted session without binding a
+    // Cube backend to it. It still does not own the shared keyring entry.
+    shared_client: bool,
     admitted_user_loading: bool,
     admitted_reopen_required: bool,
 
@@ -904,6 +907,7 @@ impl ConnectAccountPanel {
         ConnectAccountPanel {
             bitcoin_blake2b_opt_in: false,
             admitted_client: false,
+            shared_client: false,
             admitted_user_loading: false,
             admitted_reopen_required: false,
             step: ConnectFlowStep::CheckingSession,
@@ -1104,6 +1108,7 @@ impl ConnectAccountPanel {
     /// A local node does not bind its lifetime to the admitted Connect bearer.
     pub(crate) fn use_local_backend(&mut self) {
         self.admitted_client = false;
+        self.shared_client = false;
         self.admitted_reopen_required = false;
     }
 
@@ -1136,12 +1141,28 @@ impl ConnectAccountPanel {
         self.session_generation = self.session_generation.wrapping_add(1);
         self.client = client;
         self.admitted_client = true;
+        self.shared_client = false;
         self.admitted_reopen_required = false;
         self.admitted_user_loading = false;
         self.user = None;
         self.plan = None;
         self.features = None;
         self.step = ConnectFlowStep::CheckingSession;
+    }
+
+    /// Home accepts this session from another tab. It must avoid a second
+    /// keyring refresh, but signing out must leave Home free to sign in again.
+    pub(crate) fn install_shared_client(&mut self, client: CoincubeClient) {
+        self.install_admitted_client(client);
+        self.shared_client = true;
+    }
+
+    /// The Home tab where the user pressed Sign out clears the global saved
+    /// session. Other tabs only detach, since they might see a newer login.
+    pub(crate) fn forget_shared_session_for_logout(&self) {
+        if self.shared_client {
+            self.clear_keyring_session();
+        }
     }
 
     /// Returns a clone of the authenticated client (with JWT set).
@@ -1372,6 +1393,11 @@ impl ConnectAccountPanel {
         if self.admitted_reopen_required {
             return iced::Task::none();
         }
+        // This failure belongs to a keyring refresh queued before Home
+        // accepted a sibling's bearer. It has no epoch, so drop it here.
+        if self.shared_client && matches!(msg, ConnectAccountMessage::RefreshFailed(_)) {
+            return iced::Task::none();
+        }
         if self.admitted_client
             && matches!(
                 &msg,
@@ -1389,6 +1415,18 @@ impl ConnectAccountPanel {
                     | ConnectAccountMessage::EmailNotVerified { .. }
             )
         {
+            // An auth operation queued before a sibling session was adopted
+            // must never revoke that newer session (or replace its token).
+            let completion_epoch = match &msg {
+                ConnectAccountMessage::SetSession(_, epoch)
+                | ConnectAccountMessage::SessionLoaded { epoch, .. } => Some(*epoch),
+                _ => None,
+            };
+            if completion_epoch.is_some_and(|epoch| self.stale_completion(epoch, "auth completion"))
+                || self.shared_client
+            {
+                return iced::Task::none();
+            }
             // A replacement login needs backend admission, not merely a new
             // panel token. Refuse before OTP I/O or global keyring persistence.
             self.revoke_admitted_client();
@@ -2718,6 +2756,7 @@ impl ConnectAccountPanel {
             self.clear_keyring_session();
         }
         self.admitted_client = false;
+        self.shared_client = false;
         self.admitted_user_loading = false;
         self.client = CoincubeClient::new();
     }
@@ -8122,6 +8161,127 @@ mod retry_card_tests {
 #[cfg(test)]
 mod admitted_session_tests {
     use super::*;
+
+    fn fixture_client(token: &str) -> CoincubeClient {
+        let mut client = CoincubeClient::new();
+        client.base_url = "http://127.0.0.1:1".into();
+        client.set_token(token);
+        client
+    }
+
+    fn fixture_login(token: &str) -> crate::services::coincube::LoginResponse {
+        crate::services::coincube::LoginResponse {
+            requires_2fa: false,
+            token: token.into(),
+            refresh_token: "synthetic-refresh".into(),
+            user: crate::services::coincube::User {
+                id: 1,
+                email: "fixture@example.invalid".into(),
+                email_verified: Some(true),
+            },
+        }
+    }
+
+    #[test]
+    fn home_shared_session_ignores_queued_auth_then_can_log_out_and_log_in() {
+        let mut panel = ConnectAccountPanel::new();
+        // Home advances its epoch before accepting a sibling's bearer.
+        panel.invalidate_auth();
+        panel.install_shared_client(fixture_client("accepted-bearer"));
+        let generation = panel.session_generation();
+
+        // A RefreshSession already queued by Home's startup has no epoch on
+        // its message. Its SetSession/SessionLoaded completions do have one.
+        let _ = panel.update_message(ConnectAccountMessage::RefreshSession {
+            refresh_token: "old-refresh".into(),
+        });
+        let _ = panel.update_message(ConnectAccountMessage::RefreshFailed(UserError::new(
+            "Temporary failure",
+            "Try again later.",
+            crate::user_error::CC_NET_TIMEOUT,
+            true,
+        )));
+        let _ = panel.update_message(ConnectAccountMessage::SetSession(
+            fixture_login("late-bearer"),
+            0,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
+            user: fixture_login("late-bearer").user,
+            plan: None,
+            epoch: 0,
+        });
+        assert!(!panel.requires_authenticated_reopen());
+        assert_eq!(panel.session_generation(), generation);
+        assert_eq!(panel.client.token(), Some("accepted-bearer"));
+        assert!(matches!(panel.step, ConnectFlowStep::CheckingSession));
+
+        panel.invalidate_auth(); // global sign-out invalidates late completions
+        let _ = panel.update_message(ConnectAccountMessage::LogOut);
+        assert!(!panel.requires_authenticated_reopen());
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::Login { loading: false, .. }
+        ));
+        assert_eq!(panel.client.token(), None);
+        let _ = panel.update_message(ConnectAccountMessage::SetSession(
+            fixture_login("late-bearer"),
+            0,
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
+            user: fixture_login("late-bearer").user,
+            plan: None,
+            epoch: 0,
+        });
+        assert_eq!(panel.client.token(), None);
+        assert!(!panel.has_stored_session());
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::Login { loading: false, .. }
+        ));
+
+        let _ = panel.update_message(ConnectAccountMessage::EmailChanged(
+            "next@example.invalid".into(),
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::SubmitLogin);
+        assert!(matches!(
+            &panel.step,
+            ConnectFlowStep::Login { email, loading: true }
+                if email == "next@example.invalid"
+        ));
+        assert!(!panel.requires_authenticated_reopen());
+    }
+
+    #[test]
+    fn only_origin_home_logout_forgets_a_shared_saved_session() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.save_session_to_keyring(&StoredSession {
+            login: fixture_login("saved-bearer"),
+        });
+        panel.install_shared_client(fixture_client("saved-bearer"));
+        assert!(panel.has_stored_session());
+
+        // A sibling's broadcast only detaches this tab; it cannot delete a
+        // newer session another tab may have saved in the meantime.
+        let _ = panel.update_message(ConnectAccountMessage::LogOut);
+        assert!(panel.has_stored_session());
+
+        panel.install_shared_client(fixture_client("saved-bearer"));
+        panel.forget_shared_session_for_logout();
+        let _ = panel.update_message(ConnectAccountMessage::LogOut);
+        assert!(!panel.has_stored_session());
+    }
+
+    #[test]
+    fn cube_admitted_session_still_rejects_replacement_login() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.install_admitted_client(fixture_client("cube-bearer"));
+        let _ = panel.update_message(ConnectAccountMessage::SetSession(
+            fixture_login("replacement-bearer"),
+            panel.auth_epoch(),
+        ));
+        assert!(panel.requires_authenticated_reopen());
+        assert!(panel.authenticated_client().is_none());
+    }
 
     #[test]
     fn a_late_admitted_user_cannot_replace_a_new_session() {
