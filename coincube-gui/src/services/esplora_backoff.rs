@@ -44,3 +44,33 @@ pub(crate) fn record(base: &str, headers: &reqwest::header::HeaderMap) -> Durati
     }
     delay
 }
+
+/// Keep process-global cooldowns from leaking into the next test that leases
+/// the same pooled HTTP server. Only this origin is cleared, even on panic.
+#[cfg(test)]
+pub(crate) struct TestCooldownGuard(String);
+
+#[cfg(test)]
+impl TestCooldownGuard {
+    pub(crate) fn new(base: &str) -> Self {
+        let guard = Self(base.to_owned());
+        guard.clear();
+        guard
+    }
+
+    fn clear(&self) {
+        if let (Some(key), Ok(mut entries)) = (
+            origin(&self.0),
+            COOLDOWNS.get_or_init(Default::default).lock(),
+        ) {
+            entries.remove(&key);
+        }
+    }
+}
+
+#[cfg(test)]
+impl Drop for TestCooldownGuard {
+    fn drop(&mut self) {
+        self.clear();
+    }
+}

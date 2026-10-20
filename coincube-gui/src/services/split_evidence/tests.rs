@@ -680,6 +680,54 @@ mod http {
     }
 
     #[tokio::test]
+    async fn address_history_rate_limit_is_shared_and_cancellation_still_wins() {
+        let server = MockServer::start();
+        let _cooldown =
+            crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
+        let limited = server.mock(|when, then| {
+            when.method(GET)
+                .path("/api/v1/esplora/bitcoin/mainnet/address/abc");
+            then.status(429).header("Retry-After", "3090");
+        });
+        let (sender, generation) = watch::channel(3);
+        let source = ConnectEsplora::new(
+            &client(&server),
+            CollectionContext {
+                expected_generation: 3,
+                generation: generation.clone(),
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            source.address_used(ChainId::Bitcoin, "abc").await,
+            Err(FailureKind::Http(429))
+        ));
+        assert!(source.rate_limit_retry_after().unwrap() > Duration::from_secs(3000));
+        let another = ConnectEsplora::new(
+            &client(&server),
+            CollectionContext {
+                expected_generation: 3,
+                generation,
+            },
+        )
+        .unwrap();
+        assert!(matches!(
+            another.address_used(ChainId::BitcoinBlake2b, "abc").await,
+            Err(FailureKind::Http(429))
+        ));
+        assert!(matches!(
+            another.address_used(ChainId::Bitcoin, "abc").await,
+            Err(FailureKind::Http(429))
+        ));
+        sender.send(4).unwrap();
+        assert!(matches!(
+            another.address_used(ChainId::Bitcoin, "abc").await,
+            Err(FailureKind::Cancelled)
+        ));
+        limited.assert_hits(1);
+    }
+
+    #[tokio::test]
     async fn split_unspent_outputs_are_fresh_anonymous_reads() {
         let wallet = fixture::wallet(Shape::Wpkh);
         let coin = &fixture::shared_coins(&wallet)[0];

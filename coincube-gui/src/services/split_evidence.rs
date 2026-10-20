@@ -334,6 +334,10 @@ impl ConnectEsplora {
         })
     }
 
+    pub(crate) fn rate_limit_retry_after(&self) -> Option<Duration> {
+        crate::services::esplora_backoff::remaining(&self.base)
+    }
+
     fn now() -> i64 {
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -368,6 +372,9 @@ impl ConnectEsplora {
             }
         };
         let read = async {
+            if self.rate_limit_retry_after().is_some() {
+                return Err(FailureKind::Http(429));
+            }
             let stamp = Self::now();
             let mut response = self
                 .anonymous
@@ -378,6 +385,9 @@ impl ConnectEsplora {
                 .await
                 .map_err(|_| FailureKind::Unavailable)?;
             let status = response.status().as_u16();
+            if status == 429 {
+                crate::services::esplora_backoff::record(&self.base, response.headers());
+            }
             if status != 200 {
                 return Err(FailureKind::Http(status));
             }
