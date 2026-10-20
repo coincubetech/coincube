@@ -148,6 +148,7 @@ pub struct BitcoindSettingsState {
     node_prune_mb: form::Value<String>,
     node_max_mempool_mb: form::Value<String>,
     recovery_start: form::Value<String>,
+    recovery_date_picker_open: bool,
     retention_days: form::Value<String>,
     recovery_requested: bool,
     recovery_advanced: bool,
@@ -267,6 +268,7 @@ impl BitcoindSettingsState {
             recovery_advanced: false,
             node_advanced: false,
             recovery_start: form::Value::default(),
+            recovery_date_picker_open: false,
             retention_days: form::Value {
                 value: crate::node::retention::load(&cache.datadir_path, cache.network)
                     .ok()
@@ -609,15 +611,33 @@ impl State for BitcoindSettingsState {
                 match msg {
                     NodeSettingsMessage::RecoveryAdvancedToggled => {
                         self.recovery_advanced = !self.recovery_advanced;
+                        if !self.recovery_advanced {
+                            self.recovery_date_picker_open = false;
+                        }
                     }
                     NodeSettingsMessage::NodeAdvancedToggled => {
                         self.node_advanced = !self.node_advanced;
                     }
                     NodeSettingsMessage::RecoveryDismiss => {
                         self.recovery_requested = false;
+                        self.recovery_date_picker_open = false;
                         self.warning = None;
                     }
                     NodeSettingsMessage::RecoveryStartEdited(value) => {
+                        self.recovery_date_picker_open = false;
+                        self.recovery_start.valid =
+                            crate::app::node_history::parse_start(&value).is_ok();
+                        self.recovery_start.value = value;
+                    }
+                    NodeSettingsMessage::RecoveryDateOpen => {
+                        self.recovery_date_picker_open = self.recovery_advanced;
+                    }
+                    NodeSettingsMessage::RecoveryDateCancel => {
+                        self.recovery_date_picker_open = false;
+                    }
+                    NodeSettingsMessage::RecoveryDateSelected(date) => {
+                        self.recovery_date_picker_open = false;
+                        let value = date.format("%Y-%m-%d").to_string();
                         self.recovery_start.valid =
                             crate::app::node_history::parse_start(&value).is_ok();
                         self.recovery_start.value = value;
@@ -1445,6 +1465,7 @@ impl State for BitcoindSettingsState {
                             &self.recovery_start,
                             &cache.node_history,
                             self.recovery_advanced,
+                            self.recovery_date_picker_open,
                         )
                         .map(map_node_msg),
                     );
@@ -2768,6 +2789,53 @@ mod tests {
         Message::View(view::Message::Settings(
             view::SettingsMessage::NodeSettings(message),
         ))
+    }
+
+    #[test]
+    fn recovery_calendar_only_commits_a_selected_date() {
+        let cache = Cache::default();
+        let daemon = daemon(None);
+        let mut state = BitcoindSettingsState::new(None, &cache, false, false);
+
+        macro_rules! send {
+            ($message:expr) => {
+                let _ = state.update(Some(daemon.clone()), &cache, node_message($message));
+            };
+        }
+        send!(view::NodeSettingsMessage::RecoveryAdvancedToggled);
+        send!(view::NodeSettingsMessage::RecoveryStartEdited(
+            "840000".into()
+        ));
+        assert_eq!(state.recovery_start.value, "840000");
+        assert!(state.recovery_start.valid);
+
+        send!(view::NodeSettingsMessage::RecoveryDateOpen);
+        assert!(state.recovery_date_picker_open);
+        send!(view::NodeSettingsMessage::RecoveryDateCancel);
+        assert!(!state.recovery_date_picker_open);
+        assert_eq!(state.recovery_start.value, "840000");
+
+        send!(view::NodeSettingsMessage::RecoveryStartEdited(
+            "2024-02-".into()
+        ));
+        assert!(!state.recovery_start.valid);
+        send!(view::NodeSettingsMessage::RecoveryDateOpen);
+        send!(view::NodeSettingsMessage::RecoveryDateCancel);
+        assert_eq!(state.recovery_start.value, "2024-02-");
+
+        send!(view::NodeSettingsMessage::RecoveryDateOpen);
+        send!(view::NodeSettingsMessage::RecoveryDateSelected(
+            NaiveDate::from_ymd_opt(2024, 2, 29).unwrap(),
+        ));
+        assert!(!state.recovery_date_picker_open);
+        assert_eq!(state.recovery_start.value, "2024-02-29");
+        assert!(state.recovery_start.valid);
+
+        send!(view::NodeSettingsMessage::RecoveryDateOpen);
+        send!(view::NodeSettingsMessage::RecoveryAdvancedToggled);
+        assert!(!state.recovery_advanced);
+        assert!(!state.recovery_date_picker_open);
+        assert_eq!(state.recovery_start.value, "2024-02-29");
     }
 
     #[test]

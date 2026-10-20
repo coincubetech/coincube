@@ -250,6 +250,10 @@ impl HistorySync {
 /// the poll carrying it succeeds — that is when its transactions reach the database.
 #[derive(Debug, Default)]
 pub struct HistorySyncCache {
+    // User-requested eager polls must be recorded without waiting for the
+    // backend mutex held by a long historical scan. The poller consumes this
+    // immediately before its next poll, even if its wake-up channel was full.
+    eager_sync_requested: sync::atomic::AtomicBool,
     scanning: sync::atomic::AtomicBool,
     checked: sync::atomic::AtomicU64,
     receive_checked: sync::atomic::AtomicU64,
@@ -264,6 +268,16 @@ pub struct HistorySyncCache {
 }
 
 impl HistorySyncCache {
+    pub fn request_eager_sync(&self) {
+        self.eager_sync_requested
+            .store(true, sync::atomic::Ordering::Release);
+    }
+
+    pub fn take_eager_sync_request(&self) -> bool {
+        self.eager_sync_requested
+            .swap(false, sync::atomic::Ordering::AcqRel)
+    }
+
     /// A full scan expected to look up `expected` addresses is starting. Restarts the
     /// count, so a scan that is retried against another server counts from zero.
     pub fn begin_full_scan(&self, expected: u64) {
@@ -2110,6 +2124,15 @@ mod genesis_tests {
 #[cfg(test)]
 mod history_sync_cache_tests {
     use super::*;
+
+    #[test]
+    fn eager_request_survives_a_full_queue_until_the_poller_consumes_it() {
+        let cache = HistorySyncCache::default();
+        cache.request_eager_sync();
+        cache.request_eager_sync();
+        assert!(cache.take_eager_sync_request());
+        assert!(!cache.take_eager_sync_request());
+    }
 
     #[test]
     fn progress_counts_addresses_and_stays_below_complete() {

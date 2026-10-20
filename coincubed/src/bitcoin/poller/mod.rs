@@ -122,6 +122,7 @@ impl Poller {
         // don't attempt another poll too soon.
         *last_poll = Some(time::Instant::now());
         if *synced {
+            self.apply_eager_request();
             looper::poll(
                 &mut self.bit,
                 &self.db,
@@ -132,6 +133,12 @@ impl Poller {
             );
         } else {
             log::warn!("Skipped poll as block chain is still synchronizing.");
+        }
+    }
+
+    fn apply_eager_request(&mut self) {
+        if self.history_sync.take_eager_sync_request() {
+            self.bit.lock().unwrap().request_eager_sync();
         }
     }
 
@@ -226,6 +233,7 @@ impl Poller {
                 }
             }
 
+            self.apply_eager_request();
             looper::poll(
                 &mut self.bit,
                 &self.db,

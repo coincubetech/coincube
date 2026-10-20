@@ -25,7 +25,7 @@ use coincube_core::{
     wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
 };
 use coincube_ui::{
-    component::{button, text::*},
+    component::{button, date_picker, spinner, text::*},
     theme,
     widget::{Column, ColumnExt, Element, Row},
 };
@@ -33,7 +33,10 @@ use coincubed::{
     commands::{CoinStatus, CreateSpendResult, ListSpendEntry},
     config::{BitcoinBackend, BitcoinConfig, Config, ElectrumConfig, EsploraConfig},
 };
-use iced::{widget::text_input, Subscription, Task};
+use iced::{
+    widget::{progress_bar, text_input},
+    Subscription, Task,
+};
 
 use crate::{
     app::{
@@ -52,6 +55,18 @@ use crate::{
     split_hardware::{bind::ProductionBinder, policy::imported_policy, sign::SigningSession},
     wallet_source_form::{self, Source, SourceFormCopy, WalletSourceForm},
 };
+
+fn birthday_timestamp(date: chrono::NaiveDate) -> Result<u32, String> {
+    if date < chrono::NaiveDate::from_ymd_opt(2009, 1, 3).unwrap()
+        || date > chrono::Utc::now().date_naive()
+    {
+        return Err(
+            "Choose a date from January 3, 2009 through today, or scan from the beginning.".into(),
+        );
+    }
+    let timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
+    u32::try_from(timestamp).map_err(|_| "The wallet creation date is out of range.".into())
+}
 
 static NEXT_PANEL_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -226,6 +241,9 @@ fn import_signed_psbt_value(
 pub enum ImportMessage {
     Source(wallet_source_form::Message),
     BirthdayEdited(String),
+    BirthdayCalendarOpen,
+    BirthdayCalendarCancel,
+    BirthdaySelected(chrono::NaiveDate),
     ScanFromBeginning(bool),
     LookaheadEdited(String),
     ProviderSelected(Provider),
@@ -235,6 +253,8 @@ pub enum ImportMessage {
     Confirm,
     Retry,
     Refresh,
+    RetrySynchronization,
+    PollProgress,
     ExpandDiscovery,
     Receive,
     CopyAddress,
@@ -274,6 +294,8 @@ pub enum ImportEvent {
     Resumed(u64, Result<Option<settings::WalletId>, String>),
     Opened(u64, Result<Arc<dyn Daemon + Send + Sync>, String>),
     Refreshed(u64, Result<RefreshSnapshot, String>),
+    SynchronizationRequested(u64, Result<(), String>),
+    ProgressChecked(u64, Result<model::GetInfoResult, String>),
     Address(u64, Result<model::GetAddressResult, String>),
     Abandoned(u64, Result<(), String>),
     DraftCreated(u64, Result<(Psbt, Vec<String>), String>),
@@ -292,12 +314,64 @@ struct ImportedDraft {
     warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ScanDisplay {
+    Starting,
+    Scanning {
+        checked: u64,
+        expected: u64,
+        progress: f64,
+    },
+    Saving,
+    Retrying,
+    NeedsAttention,
+}
+
+impl ScanDisplay {
+    fn from_info(info: Option<&model::GetInfoResult>, sync_failed: bool) -> Self {
+        if sync_failed {
+            return Self::Retrying;
+        }
+        let Some(info) = info else {
+            return Self::Starting;
+        };
+        if info.chain_divergence || info.refused_reorg_depth.is_some() {
+            return Self::NeedsAttention;
+        }
+        if info.history_sync.full_scan_in_progress {
+            let history = &info.history_sync;
+            if history.addresses_expected > 0 {
+                return Self::Scanning {
+                    checked: history.addresses_checked,
+                    expected: history.addresses_expected,
+                    progress: history.full_scan_progress().unwrap_or(0.0),
+                };
+            }
+            return Self::Starting;
+        }
+        if info.history_sync.last_failure.is_some() {
+            return Self::Retrying;
+        }
+        if info.history_sync.full_scan_completed_at.is_some()
+            || info
+                .imported_wallet
+                .as_ref()
+                .is_some_and(|status| status.history_complete)
+        {
+            Self::Saving
+        } else {
+            Self::Starting
+        }
+    }
+}
+
 pub struct ImportedBitcoinPanel {
     directory: NetworkDirectory,
     cube_id: String,
     import: BitcoinImport,
     source: WalletSourceForm,
     birthday: String,
+    birthday_calendar_open: bool,
     scan_from_beginning: bool,
     lookahead: String,
     provider: Provider,
@@ -312,6 +386,10 @@ pub struct ImportedBitcoinPanel {
     generation: u64,
     generation_gate: Arc<AtomicU64>,
     busy: bool,
+    address_reserving: bool,
+    sync_requesting: bool,
+    progress_polling: bool,
+    snapshot_failed: bool,
     error: Option<String>,
     sync_failed: bool,
     info: Option<model::GetInfoResult>,
@@ -344,6 +422,7 @@ impl ImportedBitcoinPanel {
             import,
             source: WalletSourceForm::default(),
             birthday: String::new(),
+            birthday_calendar_open: false,
             scan_from_beginning: true,
             lookahead: "200".into(),
             provider: Provider::Public,
@@ -356,6 +435,10 @@ impl ImportedBitcoinPanel {
             generation,
             generation_gate: Arc::new(AtomicU64::new(generation)),
             busy: false,
+            address_reserving: false,
+            sync_requesting: false,
+            progress_polling: false,
+            snapshot_failed: false,
             error: None,
             sync_failed: false,
             info: None,
@@ -390,6 +473,7 @@ impl ImportedBitcoinPanel {
 
     pub fn is_ready(&self) -> bool {
         self.import.is_ready()
+            && self.coins.is_some()
             && self.info.as_ref().is_some_and(|info| {
                 info.imported_wallet.as_ref().is_some_and(|status| {
                     status.history_complete
@@ -448,6 +532,25 @@ impl ImportedBitcoinPanel {
             .then_some((info.receive_index, info.change_index))
     }
 
+    fn info_matches_attachment(&self, info: &model::GetInfoResult) -> bool {
+        let (Some(wallet), Some(status)) = (
+            self.import.active_attachment(),
+            info.imported_wallet.as_ref(),
+        ) else {
+            return false;
+        };
+        matches!(&info.descriptors.main, WalletDescriptor::Imported(descriptor) if descriptor == &wallet.descriptor)
+            && info.network == Network::Bitcoin
+            && info.chain_id == Some(ChainId::Bitcoin)
+            && status.chain_id == ChainId::Bitcoin
+            && wallet.wallet_id.descriptor_checksum
+                == format!("imported-v1-{}", status.wallet_identity)
+            && status.birthday == wallet.birthday
+            && status.initial_lookahead >= wallet.initial_lookahead
+            && status.discovery_target >= status.initial_lookahead
+            && status.discovery_target <= 10_000
+    }
+
     pub fn backup_daemon(&self) -> Option<Arc<dyn Daemon + Send + Sync>> {
         self.import.active_attachment()?;
         self.daemon.clone()
@@ -497,6 +600,10 @@ impl ImportedBitcoinPanel {
         self.generation_gate
             .store(self.generation, Ordering::SeqCst);
         self.busy = false;
+        self.address_reserving = false;
+        self.sync_requesting = false;
+        self.progress_polling = false;
+        self.snapshot_failed = false;
         self.daemon = Some(daemon);
         self.owns_daemon = false;
         if self.import.active_attachment().is_some() {
@@ -577,10 +684,13 @@ impl ImportedBitcoinPanel {
     }
 
     fn synchronization_action_label(&self) -> &'static str {
-        if self.sync_failed {
+        if matches!(
+            ScanDisplay::from_info(self.info.as_ref(), self.sync_failed),
+            ScanDisplay::Retrying | ScanDisplay::NeedsAttention
+        ) {
             "Retry synchronization"
         } else {
-            "Check progress"
+            "Refresh status"
         }
     }
 
@@ -663,9 +773,14 @@ impl ImportedBitcoinPanel {
     }
 
     fn invalidate(&mut self) {
+        self.birthday_calendar_open = false;
         self.generation = fresh_generation();
         self.generation_gate
             .store(self.generation, Ordering::SeqCst);
+        self.progress_polling = false;
+        self.sync_requesting = false;
+        self.snapshot_failed = false;
+        self.address_reserving = false;
         self.review = None;
         self.review_connect_epoch = None;
         self.error = None;
@@ -696,16 +811,7 @@ impl ImportedBitcoinPanel {
         } else {
             let date = chrono::NaiveDate::parse_from_str(self.birthday.trim(), "%Y-%m-%d")
                 .map_err(|_| "Enter the wallet creation date in YYYY-MM-DD format.".to_string())?;
-            if date < chrono::NaiveDate::from_ymd_opt(2009, 1, 3).unwrap()
-                || date > chrono::Utc::now().date_naive()
-            {
-                return Err(
-                    "Choose a date from January 3, 2009 through today, or scan from the beginning."
-                        .into(),
-                );
-            }
-            let timestamp = date.and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp();
-            u32::try_from(timestamp).map_err(|_| "The wallet creation date is out of range.")?
+            birthday_timestamp(date)?
         };
         let lookahead = self.lookahead.trim().parse::<u32>().map_err(|_| {
             "Enter an initial discovery window between 1 and 10,000 addresses per branch."
@@ -792,7 +898,8 @@ impl ImportedBitcoinPanel {
         connect_epoch: u64,
     ) -> Task<Message> {
         self.set_connect_client(client.as_ref());
-        if self.busy {
+        if self.busy && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
+        {
             return Task::none();
         }
         if matches!(&self.import.stage, BitcoinImportStage::Installing { .. })
@@ -800,6 +907,9 @@ impl ImportedBitcoinPanel {
                 &message,
                 ImportMessage::Source(_)
                     | ImportMessage::BirthdayEdited(_)
+                    | ImportMessage::BirthdayCalendarOpen
+                    | ImportMessage::BirthdayCalendarCancel
+                    | ImportMessage::BirthdaySelected(_)
                     | ImportMessage::ScanFromBeginning(_)
                     | ImportMessage::LookaheadEdited(_)
                     | ImportMessage::Edit
@@ -845,6 +955,30 @@ impl ImportedBitcoinPanel {
                 self.invalidate();
                 Task::none()
             }
+            ImportMessage::BirthdayCalendarOpen => {
+                self.birthday_calendar_open = !self.scan_from_beginning
+                    && self.review.is_none()
+                    && self.import.active_attachment().is_none();
+                Task::none()
+            }
+            ImportMessage::BirthdayCalendarCancel => {
+                self.birthday_calendar_open = false;
+                Task::none()
+            }
+            ImportMessage::BirthdaySelected(date) => {
+                if !self.birthday_calendar_open {
+                    return Task::none();
+                }
+                self.birthday_calendar_open = false;
+                match birthday_timestamp(date) {
+                    Ok(_) => {
+                        self.birthday = date.format("%Y-%m-%d").to_string();
+                        self.invalidate();
+                    }
+                    Err(error) => self.error = Some(error),
+                }
+                Task::none()
+            }
             ImportMessage::ScanFromBeginning(value) => {
                 self.scan_from_beginning = value;
                 self.invalidate();
@@ -877,6 +1011,7 @@ impl ImportedBitcoinPanel {
                 Task::none()
             }
             ImportMessage::Review => {
+                self.birthday_calendar_open = false;
                 match self.parse_review().and_then(|wallet| {
                     self.backend(client.as_ref())?;
                     Ok(wallet)
@@ -891,6 +1026,7 @@ impl ImportedBitcoinPanel {
                 Task::none()
             }
             ImportMessage::Edit => {
+                self.birthday_calendar_open = false;
                 self.review = None;
                 self.error = None;
                 Task::none()
@@ -941,12 +1077,19 @@ impl ImportedBitcoinPanel {
             ImportMessage::Refresh => {
                 if self.busy {
                     Task::none()
-                } else if self.daemon.is_some() {
-                    self.refresh()
                 } else {
-                    self.open_daemon()
+                    // This is the deliberate/slow refresh path. A failed full
+                    // snapshot must not be retried by each 2-second status tick.
+                    self.snapshot_failed = false;
+                    if self.daemon.is_some() {
+                        self.refresh()
+                    } else {
+                        self.open_daemon()
+                    }
                 }
             }
+            ImportMessage::RetrySynchronization => self.retry_synchronization(),
+            ImportMessage::PollProgress => self.poll_progress(),
             ImportMessage::ExpandDiscovery => {
                 let Some(wallet) = self.import.active_attachment().cloned() else {
                     return Task::none();
@@ -978,6 +1121,9 @@ impl ImportedBitcoinPanel {
                 self.generation = fresh_generation();
                 self.generation_gate
                     .store(self.generation, Ordering::SeqCst);
+                self.progress_polling = false;
+                self.sync_requesting = false;
+                self.address_reserving = false;
                 let daemon = self.daemon.take();
                 self.owns_daemon = false;
                 self.info = None;
@@ -1027,7 +1173,13 @@ impl ImportedBitcoinPanel {
                 // A successful reservation changes the Kit fingerprint. Hide
                 // the previous daemon snapshot until its new durable index is
                 // read back, even if the address request fails midway.
+                self.generation = fresh_generation();
+                self.generation_gate
+                    .store(self.generation, Ordering::SeqCst);
+                self.progress_polling = false;
+                self.sync_requesting = false;
                 self.info = None;
+                self.address_reserving = true;
                 self.busy = true;
                 let generation = self.generation;
                 Task::perform(
@@ -1578,6 +1730,7 @@ impl ImportedBitcoinPanel {
                 self.busy = false;
                 match result {
                     Ok((info, coins, history, spend_drafts, stage)) => {
+                        self.snapshot_failed = false;
                         self.info = Some(info);
                         self.coins = Some(coins);
                         self.history = history;
@@ -1609,6 +1762,7 @@ impl ImportedBitcoinPanel {
                     }
                     Err(_) => {
                         log::warn!("Imported Bitcoin synchronization failed");
+                        self.snapshot_failed = true;
                         self.info = None;
                         self.coins = None;
                         self.history.clear();
@@ -1619,8 +1773,75 @@ impl ImportedBitcoinPanel {
                 }
                 Task::none()
             }
+            ImportEvent::SynchronizationRequested(generation, result)
+                if generation == self.generation =>
+            {
+                self.sync_requesting = false;
+                match result {
+                    Ok(()) => self.poll_progress(),
+                    Err(_) => {
+                        self.snapshot_failed = true;
+                        self.sync_failed = true;
+                        self.error = Some("Could not retry this wallet's Bitcoin server. Check your connection and try again.".into());
+                        Task::none()
+                    }
+                }
+            }
+            ImportEvent::ProgressChecked(generation, result) if generation == self.generation => {
+                self.progress_polling = false;
+                // A receive reservation deliberately clears the old address
+                // snapshot until its new high-water index is read back.
+                if self.is_ready() || self.address_reserving {
+                    return Task::none();
+                }
+                // A status-only response cannot reauthorize coins from an
+                // earlier scan. The full refresh must pair completed history
+                // with a fresh authoritative coin snapshot.
+                self.coins = None;
+                match result {
+                    Ok(info) => {
+                        if !self.info_matches_attachment(&info) {
+                            self.info = None;
+                            self.sync_failed = true;
+                            self.error = Some("This Bitcoin server reported a different wallet or chain. Check the wallet setup and retry synchronization.".into());
+                            return Task::none();
+                        }
+                        let history_complete = info
+                            .imported_wallet
+                            .as_ref()
+                            .is_some_and(|status| status.history_complete);
+                        self.info = Some(info);
+                        if self.snapshot_failed {
+                            // Keep the full-snapshot error actionable until a
+                            // user retry or the normal 20-second refresh.
+                            return Task::none();
+                        }
+                        self.sync_failed = false;
+                        if self.error.as_deref().is_some_and(|error| {
+                            error.starts_with("Could not synchronize this Bitcoin wallet")
+                                || error
+                                    .starts_with("This Bitcoin server reported a different wallet")
+                        }) {
+                            self.error = None;
+                        }
+                        // Only the full refresh may mark the Cube ready: it also
+                        // obtains the authoritative coin and transaction snapshot.
+                        if history_complete && !self.busy && self.verified_address_state().is_some()
+                        {
+                            return self.refresh();
+                        }
+                    }
+                    Err(_) => {
+                        log::warn!("Imported Bitcoin scan status could not be refreshed");
+                        self.sync_failed = true;
+                        self.error = Some("Could not synchronize this Bitcoin wallet. Check the Bitcoin server and your connection, then retry synchronization.".into());
+                    }
+                }
+                Task::none()
+            }
             ImportEvent::Address(generation, result) if generation == self.generation => {
                 self.busy = false;
+                self.address_reserving = false;
                 match result {
                     Ok(address) => {
                         self.address = Some(address);
@@ -1878,7 +2099,6 @@ impl ImportedBitcoinPanel {
         self.busy = true;
         Task::perform(
             async move {
-                daemon.request_sync().await.map_err(|e| e.to_string())?;
                 let info = daemon.get_info().await.map_err(|e| e.to_string())?;
                 bitcoin_import::reconcile_sync(&directory, &cube_id, operation_id, &info).await?;
                 let stage = settings::Settings::from_file(&directory)
@@ -1911,11 +2131,58 @@ impl ImportedBitcoinPanel {
         )
     }
 
+    fn poll_progress(&mut self) -> Task<Message> {
+        if self.progress_polling || self.is_ready() {
+            return Task::none();
+        }
+        let Some(daemon) = self.daemon.clone() else {
+            return Task::none();
+        };
+        self.progress_polling = true;
+        let generation = self.generation;
+        Task::perform(
+            async move { daemon.get_info().await.map_err(|error| error.to_string()) },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::ProgressChecked(generation, result)))
+            },
+        )
+    }
+
+    fn retry_synchronization(&mut self) -> Task<Message> {
+        if self.sync_requesting || self.import.active_attachment().is_none() {
+            return Task::none();
+        }
+        self.snapshot_failed = false;
+        let Some(daemon) = self.daemon.clone() else {
+            return self.open_daemon();
+        };
+        self.sync_requesting = true;
+        let generation = self.generation;
+        Task::perform(
+            async move {
+                daemon
+                    .request_sync()
+                    .await
+                    .map_err(|error| error.to_string())
+            },
+            move |result| {
+                Message::ImportedBitcoin(Box::new(ImportEvent::SynchronizationRequested(
+                    generation, result,
+                )))
+            },
+        )
+    }
+
     pub fn stop(&mut self) {
+        self.birthday_calendar_open = false;
         self.generation = fresh_generation();
         self.generation_gate
             .store(self.generation, Ordering::SeqCst);
         self.busy = false;
+        self.address_reserving = false;
+        self.sync_requesting = false;
+        self.progress_polling = false;
+        self.snapshot_failed = false;
         self.source.clear_transient();
         let owns_daemon = self.owns_daemon;
         self.owns_daemon = false;
@@ -1947,45 +2214,64 @@ impl ImportedBitcoinPanel {
     fn setup_view(&self) -> Element<'_, view::Message> {
         let mut content = Column::new()
             .spacing(16)
-            .push(h2("Import a Bitcoin wallet"))
-            .push(p1_regular("This Cube keeps its own unlock and backup. The imported wallet's signing keys stay with their original seed or devices."));
+            .max_width(800)
+            .push(h2(if self.review.is_none() { "Import a Bitcoin wallet" } else { "Review Bitcoin wallet" }))
+            .push(p1_regular("Use your existing Bitcoin wallet in this Cube. Signing stays with your original wallet or hardware device.").style(theme::text::secondary));
         if self.review.is_none() {
             let beginning = if self.scan_from_beginning {
-                button::primary(None, "Scan from beginning")
+                button::primary(None, "From the beginning")
             } else {
-                button::secondary(None, "Scan from beginning")
+                button::secondary(None, "From the beginning")
             };
             let dated = if self.scan_from_beginning {
-                button::secondary(None, "Use wallet creation date")
+                button::secondary(None, "From a creation date")
             } else {
-                button::primary(None, "Use wallet creation date")
+                button::primary(None, "From a creation date")
             };
             content = content
                 .push(wallet_source_form::view(&self.source, &SourceFormCopy::import()).map(|m| {
                     view::Message::ImportedBitcoin(ImportMessage::Source(m))
                 }))
-                .push(p1_bold("Wallet history starts"))
+                .push(iced::widget::Space::new().height(8))
+                .push(p1_bold("Where should the history scan start?"))
                 .push(Row::new().spacing(10)
                     .push(beginning
+                        .width(iced::Length::Fill)
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::ScanFromBeginning(true))))
                     .push(dated
+                        .width(iced::Length::Fill)
                         .on_press(view::Message::ImportedBitcoin(ImportMessage::ScanFromBeginning(false)))))
                 .push_maybe((!self.scan_from_beginning).then(|| {
-                    text_input("YYYY-MM-DD", &self.birthday)
-                        .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::BirthdayEdited(s)))
-                        .padding(10)
+                    Row::new()
+                        .spacing(10)
+                        .align_y(iced::Alignment::Center)
+                        .push(text_input("YYYY-MM-DD", &self.birthday)
+                            .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::BirthdayEdited(s)))
+                            .padding(10))
+                        .push(date_picker::calendar_button(
+                            self.birthday_calendar_open,
+                            chrono::NaiveDate::parse_from_str(self.birthday.trim(), "%Y-%m-%d")
+                                .unwrap_or_else(|_| chrono::Utc::now().date_naive()),
+                            ImportMessage::BirthdayCalendarOpen,
+                            ImportMessage::BirthdayCalendarCancel,
+                            ImportMessage::BirthdaySelected,
+                        ).map(view::Message::ImportedBitcoin))
                 }))
                 .push(caption(if self.scan_from_beginning {
-                    "Scanning from the beginning includes all Bitcoin history and can take longer."
+                    "Starts at Bitcoin's first block. Choose this if you do not know when the wallet was created; it may take longer."
                 } else {
-                    "Choose the date the original wallet was created. An incorrect later date can miss older funds."
-                }))
-                .push(p1_bold("Initial address window per branch"))
+                    "Choose the original wallet's creation date or an earlier date so older transactions are included."
+                }).style(theme::text::secondary))
+                .push(iced::widget::Space::new().height(8))
+                .push(p1_bold("Addresses to search per branch"))
                 .push(text_input("200", &self.lookahead)
                     .on_input(|s| view::Message::ImportedBitcoin(ImportMessage::LookaheadEdited(s)))
                     .padding(10))
+                .push(caption("Start with 200 receive and 200 change addresses. You can search further after the scan finishes.").style(theme::text::secondary))
+                .push(iced::widget::Space::new().height(8))
                 .push(p1_bold("Bitcoin server"));
-            let mut providers = Row::new().spacing(8);
+            let mut providers = Column::new().spacing(8);
+            let mut provider_row = Row::new().spacing(8);
             for provider in [
                 Provider::Connect,
                 Provider::Public,
@@ -1997,9 +2283,13 @@ impl ImportedBitcoinPanel {
                 } else {
                     button::secondary(None, provider.label())
                 };
-                providers = providers.push(button.on_press(view::Message::ImportedBitcoin(
-                    ImportMessage::ProviderSelected(provider),
-                )));
+                provider_row = provider_row.push(button.width(iced::Length::Fill).on_press(
+                    view::Message::ImportedBitcoin(ImportMessage::ProviderSelected(provider)),
+                ));
+                if matches!(provider, Provider::Public | Provider::Electrum) {
+                    providers = providers.push(provider_row);
+                    provider_row = Row::new().spacing(8);
+                }
             }
             content = content.push(providers);
             if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
@@ -2021,19 +2311,23 @@ impl ImportedBitcoinPanel {
             let sample_address = sample_receive_address(&wallet.descriptor)
                 .unwrap_or_else(|_| "Unable to derive a sample address".into());
             content = content
-                .push(p1_bold("Review public wallet"))
+                .push(p1_bold("Wallet details"))
                 .push(p1_regular(format!("Bitcoin mainnet · {script} · {threshold}")))
-                .push(p1_regular(format!("Signer fingerprints: {fingerprints}")))
-                .push(p1_regular(format!("First receive address: {sample_address}")))
-                .push(caption("Compare this address with your original wallet before importing."))
-                .push(p1_regular(format!("History starts: {} · Initial window: {} addresses per branch",
+                .push(p1_regular(format!("Signer fingerprints: {}", if fingerprints.is_empty() { "Not provided" } else { &fingerprints })))
+                .push(p1_bold("First receive address"))
+                .push(p1_regular(sample_address.clone()).wrapping(iced::widget::text::Wrapping::WordOrGlyph))
+                .push(button::secondary_compact(None, "Copy address")
+                    .on_press(view::Message::CopyWithToast(sample_address, "Address copied".into())))
+                .push(caption("Compare this address with your original wallet before importing.").style(theme::text::secondary))
+                .push(p1_regular(format!("History starts: {}",
                     if wallet.birthday == 0 { "Beginning".to_string() } else {
                         chrono::DateTime::from_timestamp(i64::from(wallet.birthday), 0)
                             .map(|date| date.format("%Y-%m-%d").to_string())
                             .unwrap_or_else(|| "Invalid date".into())
-                    }, wallet.initial_lookahead)))
-                .push(caption("A full history scan must finish before the balance can be trusted. The Cube backup must be refreshed after this wallet is attached."))
-                .push(button::secondary(None, if self.show_details { "Hide descriptor details" } else { "Show descriptor details" })
+                    })))
+                .push(p1_regular(format!("Address search: {} receive and {} change addresses", wallet.initial_lookahead, wallet.initial_lookahead)))
+                .push(caption("Your balance and transactions will appear after the scan finishes. Then update the Cube Recovery Kit to include this wallet.").style(theme::text::secondary))
+                .push(button::secondary_compact(None, if self.show_details { "Hide descriptor details" } else { "Show descriptor details" })
                     .on_press(view::Message::ImportedBitcoin(ImportMessage::ToggleDetails)));
             if self.show_details {
                 content = content
@@ -2041,21 +2335,27 @@ impl ImportedBitcoinPanel {
                         "Wallet identity: {}",
                         wallet.wallet_id.descriptor_checksum
                     )))
-                    .push(caption(format!(
-                        "Receive: {}",
-                        wallet.descriptor.receive_descriptor()
-                    )))
-                    .push(caption(format!(
-                        "Change: {}",
-                        wallet.descriptor.change_descriptor()
-                    )));
+                    .push(
+                        caption(format!(
+                            "Receive: {}",
+                            wallet.descriptor.receive_descriptor()
+                        ))
+                        .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                        .style(theme::text::secondary),
+                    )
+                    .push(
+                        caption(format!("Change: {}", wallet.descriptor.change_descriptor()))
+                            .wrapping(iced::widget::text::Wrapping::WordOrGlyph)
+                            .style(theme::text::secondary),
+                    );
             }
             content = content
                 .push(p1_bold("Bitcoin server"))
                 .push(p1_regular(self.provider.label()));
             if retry {
                 content = content.push(caption("The wallet identity is locked to this Cube. Choose the Bitcoin server to finish an interrupted import."));
-                let mut providers = Row::new().spacing(8);
+                let mut providers = Column::new().spacing(8);
+                let mut provider_row = Row::new().spacing(8);
                 for provider in [
                     Provider::Connect,
                     Provider::Public,
@@ -2067,9 +2367,16 @@ impl ImportedBitcoinPanel {
                     } else {
                         button::secondary(None, provider.label())
                     };
-                    providers = providers.push(option.on_press_maybe((!self.busy).then_some(
-                        view::Message::ImportedBitcoin(ImportMessage::ProviderSelected(provider)),
-                    )));
+                    provider_row =
+                        provider_row.push(option.width(iced::Length::Fill).on_press_maybe(
+                            (!self.busy).then_some(view::Message::ImportedBitcoin(
+                                ImportMessage::ProviderSelected(provider),
+                            )),
+                        ));
+                    if matches!(provider, Provider::Public | Provider::Electrum) {
+                        providers = providers.push(provider_row);
+                        provider_row = Row::new().spacing(8);
+                    }
                 }
                 content = content.push(providers);
                 if matches!(self.provider, Provider::Esplora | Provider::Electrum) {
@@ -2106,7 +2413,7 @@ impl ImportedBitcoinPanel {
                                 if retry {
                                     "Retry import"
                                 } else {
-                                    "Confirm import"
+                                    "Import and scan wallet"
                                 }
                             },
                         )
@@ -2121,7 +2428,7 @@ impl ImportedBitcoinPanel {
             content = content.push(p1_regular(error).style(theme::text::error));
         }
         content = content.push(
-            button::secondary(None, "Use a new Vault instead").on_press_maybe(
+            button::secondary_compact(None, "Use a new Vault instead").on_press_maybe(
                 (!self.busy).then_some(view::Message::ImportedBitcoin(ImportMessage::Abandon)),
             ),
         );
@@ -2129,40 +2436,14 @@ impl ImportedBitcoinPanel {
     }
 
     fn wallet_view(&self) -> Element<'_, view::Message> {
-        let mut content = Column::new().spacing(16).push(h2("Vault"));
         let ready = self.is_ready();
-        if let Some(info) = &self.info {
-            if let Some(status) = &info.imported_wallet {
-                content = content.push(p1_regular(format!(
-                    "{} · receive {} · change {} addresses checked · target {} per branch",
-                    if ready {
-                        "History complete"
-                    } else {
-                        "Scanning history"
-                    },
-                    status.receive_scanned,
-                    status.change_scanned,
-                    status.discovery_target,
-                )));
-                if status.discovery_target < 10_000 {
-                    content = content
-                        .push(caption("If an older transaction is missing, search another 200 addresses on both branches. This restarts the history scan."))
-                        .push(button::secondary(None, "Search 200 more addresses")
-                            .on_press_maybe((ready && !self.busy).then_some(
-                                view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery)
-                            )));
-                }
-            }
-        }
+        let mut content = Column::new()
+            .spacing(16)
+            .max_width(if ready { 1500 } else { 800 })
+            .push(h2("Vault"));
         if ready {
-            if let Some(coins) = &self.coins {
-                let balance: u64 = coins
-                    .coins
-                    .iter()
-                    .filter(|coin| coin.spend_info.is_none())
-                    .map(|coin| coin.amount.to_sat())
-                    .sum();
-                content = content.push(h3(format!("{} sats", balance)));
+            if let Some(balance) = self.authoritative_balance() {
+                content = content.push(h3(format!("{} sats available", balance.to_sat())));
             }
             content = content
                 .push(p1_regular("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet."))
@@ -2215,17 +2496,103 @@ impl ImportedBitcoinPanel {
                         .push(caption(tx.txid.to_string()));
                 }
             }
+            if let Some(status) = self
+                .info
+                .as_ref()
+                .and_then(|info| info.imported_wallet.as_ref())
+            {
+                if status.discovery_target < 10_000 {
+                    content = content
+                        .push(iced::widget::Space::new().height(8))
+                        .push(p1_bold("Missing an older transaction?"))
+                        .push(caption("Search 200 more receive and change addresses. This starts another history scan.").style(theme::text::secondary))
+                        .push(button::secondary_compact(None, "Search more addresses")
+                            .on_press_maybe((!self.busy).then_some(
+                                view::Message::ImportedBitcoin(ImportMessage::ExpandDiscovery)
+                            )));
+                }
+            }
         } else {
-            content = content
-                .push(p1_regular(
-                    "Checking Bitcoin history. A partial scan is not a zero balance.",
-                ))
-                .push(
-                    button::secondary(None, self.synchronization_action_label()).on_press_maybe(
-                        (!self.busy)
-                            .then_some(view::Message::ImportedBitcoin(ImportMessage::Refresh)),
-                    ),
+            let scan = ScanDisplay::from_info(self.info.as_ref(), self.sync_failed);
+            let label = match scan {
+                ScanDisplay::Starting => "Finding your wallet's Bitcoin history",
+                ScanDisplay::Scanning { .. } => "Scanning your Bitcoin wallet history",
+                ScanDisplay::Saving => "Finishing your Bitcoin history scan",
+                ScanDisplay::Retrying => "Bitcoin history scan was interrupted",
+                ScanDisplay::NeedsAttention => "Bitcoin history needs attention",
+            };
+            content = content.push(h3(label));
+            if matches!(
+                scan,
+                ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
+            ) {
+                content = content.push(
+                    p1_regular("Your balance and transactions will appear when the scan finishes.")
+                        .style(theme::text::secondary),
                 );
+            }
+            match scan {
+                ScanDisplay::Scanning {
+                    checked,
+                    expected,
+                    progress,
+                } => {
+                    content = content
+                        .push(
+                            progress_bar(0.0..=1.0, progress as f32)
+                                .style(theme::progress_bar::primary),
+                        )
+                        .push(
+                            caption(format!(
+                                "{:.0}% · {checked} addresses checked (about {expected} expected)",
+                                progress * 100.0
+                            ))
+                            .style(theme::text::secondary),
+                        );
+                }
+                ScanDisplay::Starting | ScanDisplay::Saving => {
+                    content = content.push(spinner::typing_text_carousel(
+                        "...",
+                        true,
+                        Duration::from_millis(2000),
+                        |value| caption(value).style(theme::text::secondary),
+                    ));
+                }
+                ScanDisplay::Retrying | ScanDisplay::NeedsAttention => {
+                    if self.error.is_none() {
+                        content = content.push(
+                            p1_regular(
+                                "Check your connection and Bitcoin server, then retry the scan.",
+                            )
+                            .style(theme::text::secondary),
+                        );
+                    }
+                    content = content.push(
+                        button::secondary_compact(
+                            None,
+                            if self.sync_requesting {
+                                "Retrying…"
+                            } else {
+                                self.synchronization_action_label()
+                            },
+                        )
+                        .on_press_maybe(
+                            (!self.busy && !self.sync_requesting).then_some(
+                                view::Message::ImportedBitcoin(ImportMessage::RetrySynchronization),
+                            ),
+                        ),
+                    );
+                }
+            }
+            if matches!(
+                scan,
+                ScanDisplay::Starting | ScanDisplay::Scanning { .. } | ScanDisplay::Saving
+            ) {
+                content = content.push(
+                    caption("Progress updates automatically. Keep Tenshu open while it scans.")
+                        .style(theme::text::secondary),
+                );
+            }
         }
         if let Some(error) = &self.error {
             content = content.push(p1_regular(error).style(theme::text::error));
@@ -2532,6 +2899,11 @@ impl State for ImportedBitcoinPanel {
                 .push(iced::time::every(Duration::from_secs(interval)).map(|_| {
                     Message::View(view::Message::ImportedBitcoin(ImportMessage::Refresh))
                 }));
+            if !self.is_ready() && self.daemon.is_some() {
+                subscriptions.push(iced::time::every(Duration::from_secs(2)).map(|_| {
+                    Message::View(view::Message::ImportedBitcoin(ImportMessage::PollProgress))
+                }));
+            }
         }
         if let Some(hardware_wallets) = &self.hardware_wallets {
             subscriptions.push(hardware_wallets.refresh().map(|m| {
@@ -2574,6 +2946,54 @@ mod tests {
         ) -> Result<D, Self::Error> {
             unreachable!("binding a daemon must not make an RPC request")
         }
+    }
+
+    #[test]
+    fn import_calendar_preserves_text_until_selection_and_validates_dates() {
+        let directory = NetworkDirectory::new(std::env::temp_dir().join("import-calendar-test"));
+        let mut panel =
+            ImportedBitcoinPanel::new(directory, "calendar".into(), BitcoinImport::pending());
+        macro_rules! send {
+            ($message:expr) => {
+                let _ = panel.update_view($message, None, 0);
+            };
+        }
+        send!(ImportMessage::ScanFromBeginning(false));
+        send!(ImportMessage::BirthdayEdited("2024-02-".into()));
+        send!(ImportMessage::BirthdayCalendarOpen);
+        assert!(panel.birthday_calendar_open);
+        send!(ImportMessage::BirthdayCalendarCancel);
+        assert_eq!(panel.birthday, "2024-02-");
+        assert!(!panel.birthday_calendar_open);
+        send!(ImportMessage::BirthdayCalendarOpen);
+        let leap_day = chrono::NaiveDate::from_ymd_opt(2024, 2, 29).unwrap();
+        send!(ImportMessage::BirthdaySelected(leap_day));
+        assert_eq!(panel.birthday, "2024-02-29");
+        assert!(!panel.birthday_calendar_open);
+        let timestamp = birthday_timestamp(leap_day).unwrap();
+        assert_eq!(
+            chrono::DateTime::from_timestamp(i64::from(timestamp), 0)
+                .unwrap()
+                .date_naive(),
+            leap_day
+        );
+        assert!(birthday_timestamp(chrono::NaiveDate::from_ymd_opt(2009, 1, 3).unwrap()).is_ok());
+        send!(ImportMessage::BirthdayCalendarOpen);
+        send!(ImportMessage::BirthdaySelected(
+            chrono::Utc::now().date_naive().succ_opt().unwrap()
+        ));
+        assert_eq!(panel.birthday, "2024-02-29");
+        assert!(panel.error.is_some());
+        assert!(birthday_timestamp(chrono::NaiveDate::from_ymd_opt(2008, 1, 1).unwrap()).is_err());
+        send!(ImportMessage::BirthdayCalendarOpen);
+        send!(ImportMessage::ScanFromBeginning(true));
+        assert!(!panel.birthday_calendar_open);
+        send!(ImportMessage::BirthdaySelected(
+            chrono::NaiveDate::from_ymd_opt(2020, 1, 1).unwrap()
+        ));
+        assert_eq!(panel.birthday, "2024-02-29");
+        send!(ImportMessage::BirthdayCalendarOpen);
+        assert!(!panel.birthday_calendar_open);
     }
 
     #[test]
@@ -2720,7 +3140,270 @@ mod tests {
             receive_index: 0,
             change_index: 0,
         });
+        panel.coins = Some(ListCoinsResult { coins: Vec::new() });
         panel
+    }
+
+    #[test]
+    fn scan_display_uses_only_reported_progress_and_never_claims_completion_early() {
+        let mut info = ready_import_panel().info.unwrap();
+        info.history_sync = coincubed::commands::HistorySync {
+            full_scan_in_progress: true,
+            addresses_checked: 100,
+            addresses_expected: 400,
+            ..Default::default()
+        };
+        assert_eq!(
+            ScanDisplay::from_info(Some(&info), false),
+            ScanDisplay::Scanning {
+                checked: 100,
+                expected: 400,
+                progress: 0.25
+            }
+        );
+        info.history_sync.addresses_checked = 600;
+        assert_eq!(
+            ScanDisplay::from_info(Some(&info), false),
+            ScanDisplay::Scanning {
+                checked: 600,
+                expected: 400,
+                progress: 0.99
+            }
+        );
+        info.history_sync.addresses_expected = 0;
+        assert_eq!(
+            ScanDisplay::from_info(Some(&info), false),
+            ScanDisplay::Starting
+        );
+        info.history_sync.full_scan_in_progress = false;
+        info.history_sync.full_scan_completed_at = Some(1);
+        assert_eq!(
+            ScanDisplay::from_info(Some(&info), false),
+            ScanDisplay::Saving
+        );
+        assert_eq!(
+            ScanDisplay::from_info(Some(&info), true),
+            ScanDisplay::Retrying
+        );
+    }
+
+    #[test]
+    fn progress_poll_keeps_partial_balance_unknown_and_recovers_after_error() {
+        let mut panel = ready_import_panel();
+        panel.coins = None;
+        let mut scanning = panel.info.take().unwrap();
+        scanning.imported_wallet.as_mut().unwrap().history_complete = false;
+        scanning.history_sync = coincubed::commands::HistorySync {
+            full_scan_in_progress: true,
+            addresses_checked: 20,
+            addresses_expected: 400,
+            ..Default::default()
+        };
+        panel.progress_polling = true;
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(
+            generation,
+            Ok(scanning.clone()),
+        ));
+        assert!(!panel.progress_polling);
+        assert!(!panel.is_ready());
+        assert!(panel.authoritative_balance().is_none());
+        assert!(matches!(
+            ScanDisplay::from_info(panel.info.as_ref(), panel.sync_failed),
+            ScanDisplay::Scanning { progress, .. } if (progress - 0.05).abs() < f64::EPSILON
+        ));
+
+        panel.progress_polling = true;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(
+            generation,
+            Err("server error".into()),
+        ));
+        assert!(panel.sync_failed);
+        assert!(!panel.progress_polling);
+        assert_eq!(
+            panel.synchronization_action_label(),
+            "Retry synchronization"
+        );
+        assert!(panel
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("retry synchronization"));
+
+        panel.progress_polling = true;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(generation, Ok(scanning)));
+        assert!(!panel.sync_failed);
+        assert!(panel.error.is_none());
+        assert!(!panel.is_ready());
+    }
+
+    #[test]
+    fn progress_status_from_another_wallet_keeps_retry_actionable() {
+        let mut panel = ready_import_panel();
+        panel.info = None;
+        panel.coins = None;
+        let mut wrong = ready_import_panel().info.unwrap();
+        wrong.imported_wallet.as_mut().unwrap().wallet_identity = "another-wallet".into();
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(generation, Ok(wrong)));
+        assert!(panel.sync_failed);
+        assert!(panel.info.is_none());
+        assert!(panel.error.as_deref().unwrap().contains("different wallet"));
+        assert_eq!(
+            panel.synchronization_action_label(),
+            "Retry synchronization"
+        );
+
+        let mut correct = ready_import_panel().info.unwrap();
+        correct.imported_wallet.as_mut().unwrap().history_complete = false;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(generation, Ok(correct)));
+        assert!(!panel.sync_failed);
+        assert!(panel.error.is_none());
+        assert!(!panel.is_ready());
+        panel.progress_polling = true;
+        panel.invalidate();
+        assert!(!panel.progress_polling);
+    }
+
+    #[test]
+    fn completed_status_alone_cannot_reuse_an_old_coin_snapshot() {
+        let mut panel = ready_import_panel();
+        let complete = panel.info.take().unwrap();
+        assert!(panel.coins.is_some());
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(generation, Ok(complete)));
+        assert!(panel.coins.is_none());
+        assert!(!panel.is_ready());
+        assert!(panel.authoritative_balance().is_none());
+    }
+
+    #[test]
+    fn explicit_retry_wakes_sync_without_blocking_live_status_polling() {
+        let mut panel = ready_import_panel();
+        panel.info.as_mut().unwrap().history_sync.last_failure =
+            Some(coincubed::commands::PollFailure {
+                message: "server unavailable".into(),
+                since: 1,
+                last_at: 1,
+                consecutive: 1,
+            });
+        let wallet = panel.import.active_attachment().unwrap();
+        let config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(600)),
+            None,
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(wallet.descriptor.clone()),
+            panel.directory.coincubed_data_directory(&wallet.wallet_id),
+        );
+        panel.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(config, None)));
+
+        let _ = panel.update_view(ImportMessage::RetrySynchronization, None, 0);
+        assert!(panel.sync_requesting);
+        assert!(!panel.busy);
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::SynchronizationRequested(generation, Ok(())));
+        assert!(!panel.sync_requesting);
+        assert!(panel.progress_polling);
+    }
+
+    #[test]
+    fn failed_full_snapshot_waits_for_retry_or_normal_refresh() {
+        let mut panel = ready_import_panel();
+        let complete = panel.info.as_ref().unwrap().clone();
+        let wallet = panel.import.active_attachment().unwrap();
+        let config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(600)),
+            None,
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(wallet.descriptor.clone()),
+            panel.directory.coincubed_data_directory(&wallet.wallet_id),
+        );
+        panel.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(config, None)));
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::Refreshed(generation, Err("disk error".into())));
+        assert!(panel.snapshot_failed);
+        let failure = panel.error.clone();
+
+        for _ in 0..2 {
+            let _ = panel.update_event(ImportEvent::ProgressChecked(
+                generation,
+                Ok(complete.clone()),
+            ));
+            assert!(
+                !panel.busy,
+                "status polling must not requeue a full snapshot"
+            );
+            assert!(panel.snapshot_failed);
+            assert_eq!(panel.error, failure);
+            assert!(panel.coins.is_none());
+        }
+
+        let _ = panel.update_view(ImportMessage::RetrySynchronization, None, 0);
+        assert!(!panel.snapshot_failed);
+        let _ = panel.update_event(ImportEvent::SynchronizationRequested(generation, Ok(())));
+        let _ = panel.update_event(ImportEvent::ProgressChecked(generation, Ok(complete)));
+        assert!(
+            panel.busy,
+            "explicit retry may start the full snapshot again"
+        );
+
+        let _ = panel.update_event(ImportEvent::Refreshed(generation, Err("disk error".into())));
+        assert!(panel.snapshot_failed);
+        let _ = panel.update_view(ImportMessage::Refresh, None, 0);
+        assert!(!panel.snapshot_failed);
+        assert!(
+            panel.busy,
+            "the normal slower refresh may retry the snapshot"
+        );
+    }
+
+    #[test]
+    fn busy_ready_startup_tracks_scan_but_old_status_cannot_undo_receive_reservation() {
+        let mut panel = ready_import_panel();
+        let mut scanning = panel.info.take().unwrap();
+        scanning.imported_wallet.as_mut().unwrap().history_complete = false;
+        scanning.history_sync = coincubed::commands::HistorySync {
+            full_scan_in_progress: true,
+            addresses_checked: 50,
+            addresses_expected: 400,
+            ..Default::default()
+        };
+        panel.busy = true;
+        let generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::ProgressChecked(generation, Ok(scanning)));
+        assert_eq!(
+            panel.info.as_ref().unwrap().history_sync.addresses_checked,
+            50
+        );
+
+        panel.busy = false;
+        let wallet = panel.import.active_attachment().unwrap();
+        let config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(600)),
+            None,
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(wallet.descriptor.clone()),
+            panel.directory.coincubed_data_directory(&wallet.wallet_id),
+        );
+        panel.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(config, None)));
+        // The real Receive action is available only after history is complete.
+        let completed = ready_import_panel().info.unwrap();
+        panel.info = Some(completed.clone());
+        panel.coins = Some(ListCoinsResult { coins: Vec::new() });
+        let old_generation = panel.generation;
+        panel.progress_polling = true;
+        panel.sync_requesting = true;
+        let _ = panel.update_view(ImportMessage::Receive, None, 0);
+        assert!(panel.address_reserving);
+        assert!(!panel.sync_requesting);
+        assert_ne!(panel.generation, old_generation);
+        assert!(panel.info.is_none());
+        let new_generation = panel.generation;
+        let _ = panel.update_event(ImportEvent::Address(new_generation, Err("retry".into())));
+        assert!(!panel.address_reserving);
+        let _ = panel.update_event(ImportEvent::ProgressChecked(old_generation, Ok(completed)));
+        assert!(panel.info.is_none());
+        assert!(panel.verified_address_state().is_none());
     }
 
     #[test]

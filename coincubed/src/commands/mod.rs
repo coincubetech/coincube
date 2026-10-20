@@ -913,13 +913,11 @@ impl DaemonControl {
     /// inside the free-tier hourly budget at the current 10-min
     /// poll interval.
     pub fn request_sync(&self) {
-        // Set the eager flag on the backend FIRST so it's already
-        // armed by the time the poller wakes — whether via the
-        // message we're about to enqueue or via whatever message
-        // happens to already be queued. The flag lives on `Esplora`,
-        // not on the channel payload, so a dropped wake-up signal
-        // doesn't lose the user's request.
-        self.bitcoin.lock().unwrap().request_eager_sync();
+        // Record the eager request outside the backend mutex. The poller holds
+        // that mutex for the full history scan, so taking it here would make
+        // this fire-and-forget RPC block and starve live get_info calls.
+        // The poller transfers the flag to the backend before its next poll.
+        self.history_sync_cache.request_eager_sync();
         // Non-blocking send: the poller channel is a `sync_channel(1)`,
         // so a plain `send` would block under burst pressure (e.g.
         // user opens Receive twice in rapid succession while a sync
@@ -5177,6 +5175,42 @@ mod tests {
         assert_eq!(info.history_sync.addresses_checked, 100);
         assert_eq!(info.history_sync.addresses_expected, 400);
         assert_eq!(info.history_sync.full_scan_completed_at, None);
+    }
+
+    #[test]
+    fn eager_retry_returns_while_backend_is_scanning_and_queue_is_full() {
+        let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let config = dummy.control().config.clone();
+        let backend: std::sync::Arc<std::sync::Mutex<dyn BitcoinInterface>> =
+            std::sync::Arc::new(std::sync::Mutex::new(DummyBitcoind::new()));
+        let history = std::sync::Arc::new(crate::bitcoin::HistorySyncCache::default());
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        sender.try_send(PollerMessage::PollNowNoAck).unwrap();
+        let control = DaemonControl::new(
+            config,
+            backend.clone(),
+            sender,
+            std::sync::Arc::new(std::sync::Mutex::new(DummyDatabase::new())),
+            bitcoin::secp256k1::Secp256k1::verification_only(),
+            Default::default(),
+            Default::default(),
+            history.clone(),
+        );
+
+        let _scanning = backend.lock().unwrap();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            control.request_sync();
+            done_tx.send(()).unwrap();
+        });
+        done_rx
+            .recv_timeout(std::time::Duration::from_secs(1))
+            .expect("retry must not wait for the full scan's backend mutex");
+        assert!(history.take_eager_sync_request());
+        assert!(matches!(
+            receiver.try_recv(),
+            Ok(PollerMessage::PollNowNoAck)
+        ));
     }
 
     /// The daemon must hand its backend the very record `get_info` reports from:

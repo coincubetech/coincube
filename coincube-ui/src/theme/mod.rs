@@ -5,6 +5,7 @@ pub mod card;
 pub mod checkbox;
 pub mod container;
 pub mod context_menu;
+pub mod date_picker;
 pub mod notification;
 pub mod overlay;
 pub mod palette;
