@@ -880,7 +880,15 @@ against the deployed node and indexer builds.
   assertions do not replace visual and accessibility review. Deployed
   recovery, realistic Connect scan latency, physical device round trips and
   independent review remain outstanding.
-- Keep the production gate closed until these checks and an independent review
+- Local live-testing update (2026-10-19): the owner explicitly requested
+  testing with actual funds. Launching Tenshu with `--enable-btcb2-split`
+  enables paired Claim and Split signing and both broadcast reviews for that
+  process only, using the normal wallet directory. This is an opt-in for live
+  testing, not evidence that hardware acceptance is complete. It does not
+  persist to subsequent launches or enable the retired OP_RETURN route.
+  Two-chain ancestry, confirmation, ownership, unspent-input, fee, session,
+  exact-transaction and separate broadcast-confirmation checks remain active.
+- Keep the default production gate closed until these checks and an independent review
   pass. Then enable discovery, signing and durable completion together. Confirm
   Connect serves the block, transaction, UTXO and tip endpoints needed for
   both chain-specific proof collectors under one account session. Measure the

@@ -16,6 +16,7 @@ pub mod hw_advisory;
 pub mod installer;
 #[cfg(target_os = "linux")]
 pub mod linux_backend;
+pub mod live_split;
 pub mod loader;
 pub mod loading;
 pub mod logger;
