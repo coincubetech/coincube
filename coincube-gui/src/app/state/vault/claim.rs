@@ -806,6 +806,7 @@ pub struct ClaimStep1Panel {
     deposit_polling: bool,
     deposit_poll_seq: u64,
     deposit_details_override: Option<bool>,
+    setup_details_expanded: bool,
     last_full_check: Option<Instant>,
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
@@ -867,6 +868,7 @@ impl ClaimStep1Panel {
             deposit_polling: false,
             deposit_poll_seq: 0,
             deposit_details_override: None,
+            setup_details_expanded: false,
             last_full_check: None,
             funding_review: None,
             prepared_pair: None,
@@ -1035,6 +1037,10 @@ impl ClaimStep1Panel {
         self.fork_daemon
             .as_ref()
             .is_some_and(ClaimForkBinding::current)
+    }
+
+    pub fn setup_details_expanded(&self) -> bool {
+        self.setup_details_expanded
     }
 
     pub fn funding_checking(&self) -> bool {
@@ -1452,11 +1458,9 @@ impl ClaimStep1Panel {
             .and_then(|c| c.feerate_vb.as_ref().ok().copied())
     }
 
-    /// The first precondition that fails, in the order a user can act on
-    /// them: target, Vault shape, Connect session, node backend, the fork's
-    /// observation validity, coins, fee rate. `None` when construction may
-    /// attempt positive ancestry.
-    pub fn refusal(&self) -> Option<Refusal> {
+    /// Blockers shared by read-only deposit setup and the recorded-claim flow.
+    /// Coin classification and the retired single-transfer gate are not deposit blockers.
+    pub fn funding_setup_refusal(&self) -> Option<Refusal> {
         let refuse = |reason: &str, retry: bool| {
             Some(Refusal {
                 reason: reason.to_string(),
@@ -1489,12 +1493,25 @@ impl ClaimStep1Panel {
                 true,
             );
         }
-        let Some(checked) = &self.pre.checked else {
-            return None;
-        };
-        if let Err(reason) = &checked.backend {
+        if let Some(Err(reason)) = self.pre.checked.as_ref().map(|checked| &checked.backend) {
             return refuse(reason, false);
         }
+        None
+    }
+
+    /// The first precondition that fails, in the order a user can act on
+    /// them. The paired deposit wizard uses only `funding_setup_refusal`.
+    pub fn refusal(&self) -> Option<Refusal> {
+        if let Some(refusal) = self.funding_setup_refusal() {
+            return Some(refusal);
+        }
+        let refuse = |reason: &str, retry: bool| {
+            Some(Refusal {
+                reason: reason.to_string(),
+                retry,
+            })
+        };
+        let checked = self.pre.checked.as_ref()?;
         if let Err(reason) = &checked.window {
             return refuse(
                 &format!("Couldn't read Bitcoin Blake2b's status: {reason}"),
@@ -3911,7 +3928,15 @@ impl ClaimStep1Panel {
                 }
                 self.pre.checking = false;
                 self.pre.checked = Some(*checked);
-                Task::none()
+                if self.can_prepare_funding() {
+                    // Entering Claim opens the deposit step in place. This
+                    // only reserves/loads addresses; signing stays explicit.
+                    Task::done(Message::View(view::Message::Claim(
+                        view::ClaimMessage::StartFunding,
+                    )))
+                } else {
+                    Task::none()
+                }
             }
             ClaimEvent::SigningChecked(id, built, result) => {
                 let Stage::CheckingSign(attempt) = self.stage else {
@@ -4377,6 +4402,10 @@ impl State for ClaimStep1Panel {
                     self.handoff_pending = false;
                 }
                 match intent {
+                    view::ClaimMessage::ToggleSetupDetails => {
+                        self.setup_details_expanded = !self.setup_details_expanded;
+                        Task::none()
+                    }
                     view::ClaimMessage::ToggleDepositDetails => {
                         self.deposit_details_override = Some(!self.deposit_details_expanded());
                         Task::none()

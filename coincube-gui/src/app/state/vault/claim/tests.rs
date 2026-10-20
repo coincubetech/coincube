@@ -862,6 +862,41 @@ async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
     }
 }
 
+#[tokio::test]
+async fn healthy_claim_entry_loads_deposits_inline_without_a_continue_button() {
+    use iced::futures::StreamExt;
+    let (_sender, receiver) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = receiver;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    p.pre.target = Some("fork-cube".into());
+    p.pre.shape = None;
+    p.pre.checking = true;
+    p.check_seq = 3;
+    let task = p.apply(ClaimEvent::Checked(3, Box::new(checked_ok(1_000_000))));
+    let mut stream =
+        iced_runtime::task::into_stream(task).expect("entry prepares deposits automatically");
+    assert!(matches!(
+        stream.next().await,
+        Some(iced_runtime::Action::Output(Message::View(
+            view::Message::Claim(view::ClaimMessage::StartFunding)
+        )))
+    ));
+    assert!(!p.setup_details_expanded());
+    drop(p.update(
+        None,
+        &Cache::default(),
+        Message::View(view::Message::Claim(view::ClaimMessage::ToggleSetupDetails)),
+    ));
+    assert!(p.setup_details_expanded());
+    // An outdated precondition result cannot reopen the deposit loader.
+    let task = p.apply(ClaimEvent::Checked(2, Box::new(checked_ok(1_000_000))));
+    assert!(iced_runtime::task::into_stream(task).is_none());
+}
+
 #[test]
 fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
     let (_sender, receiver) = watch::channel(7);
@@ -5813,13 +5848,16 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         Layout,
     };
     #[derive(Default)]
-    struct Labels(Vec<String>);
+    struct Labels(Vec<String>, Option<iced::Point>);
     impl Operation for Labels {
         fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
             f(self);
         }
-        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
             self.0.push(value.to_owned());
+            if value == "Check again" {
+                self.1 = Some(bounds.center());
+            }
         }
     }
     for bytes in [
@@ -5858,7 +5896,59 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
     });
     let cache = Cache::default();
     let menu = crate::app::menu::Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
-    for (width, expanded) in [(1400, false), (900, true)] {
+    let addresses = match &p.stage {
+        Stage::FundingDeposits(addresses) => addresses.clone(),
+        _ => unreachable!(),
+    };
+    for (width, expanded, scenario) in [
+        (1400, false, "deposits"),
+        (900, true, "deposits"),
+        (1400, false, "setup"),
+        (1400, false, "loading"),
+        (1400, false, "error"),
+        (1400, false, "signed-out"),
+        (1400, false, "switching"),
+        (1400, false, "unavailable"),
+        (1400, false, "unknown"),
+        (1400, false, "recorded"),
+        (1400, false, "unchecked"),
+        (1400, false, "ready"),
+    ] {
+        p.stage = match scenario {
+            "deposits" => Stage::FundingDeposits(addresses.clone()),
+            "loading" => Stage::FundingChecking,
+            _ => Stage::Preconditions,
+        };
+        p.connect = (scenario != "signed-out").then(|| ConnectSession {
+            client: CoincubeClient::new(),
+            account: "test-account".into(),
+        });
+        p.backend = match scenario {
+            "switching" => BackendState::Switching,
+            "unavailable" => BackendState::Unavailable,
+            "unknown" => BackendState::Unknown,
+            _ => BackendState::Ready,
+        };
+        p.restart_pending = scenario == "recorded";
+        p.pre.target = Some("fork-cube".into());
+        p.pre.shape = None;
+        p.pre.checked = (scenario != "unchecked").then(|| checked_ok(1_000_000));
+        p.pre.checking = scenario == "setup";
+        p.funding_error = (scenario == "error")
+            .then(|| {
+                "Bitcoin indexer unavailable. Retry loading deposits when it recovers.".to_owned()
+            })
+            .or_else(|| {
+                [
+                    "signed-out",
+                    "switching",
+                    "unavailable",
+                    "unknown",
+                    "recorded",
+                ]
+                .contains(&scenario)
+                .then(|| "An older deposit check failed.".to_owned())
+            });
         p.deposit_details_override = Some(expanded);
         if expanded {
             drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
@@ -5866,7 +5956,6 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         } else {
             p.funding_status = Some("Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into());
         }
-        let expected_status = p.funding_status().unwrap().to_owned();
         let mut renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
             iced::Pixels(16.0),
@@ -5890,16 +5979,9 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             "1. Deposits",
             "2. Review and sign",
             "3. Broadcast and confirm",
-            "Replay protection not yet verified.",
-            "Next: transfer the coins back",
-            "Funds received at both addresses",
-            "Split signing is disabled for this launch",
-            "Review and sign self-transfers",
-            &expected_status,
-            "Retry verification now",
         ] {
             assert!(
-                labels.0.iter().any(|label| label.contains(expected)),
+                labels.0.iter().any(|label| label == expected),
                 "Missing {expected}: {:?}",
                 labels.0
             );
@@ -5908,9 +5990,106 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             labels
                 .0
                 .iter()
-                .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
-            expanded
+                .filter(|label| label.as_str() == "Claim Bitcoin Blake2b")
+                .count(),
+            1
         );
+        assert!(!labels.0.iter().any(|label| label == "Continue split"));
+        assert!(!labels
+            .0
+            .iter()
+            .any(|label| label.contains("post-fork candidate")));
+        if scenario == "deposits" {
+            for expected in [
+                "verifying replay protection",
+                "Funds received at both addresses",
+                "Available after both deposits are verified.",
+            ] {
+                assert!(
+                    labels.0.iter().any(|label| label.contains(expected)),
+                    "Missing {expected}: {:?}",
+                    labels.0
+                );
+            }
+            assert_eq!(
+                labels
+                    .0
+                    .iter()
+                    .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
+                expanded
+            );
+        } else if scenario == "error" {
+            assert!(labels
+                .0
+                .iter()
+                .any(|label| label.contains("Bitcoin indexer unavailable")));
+            assert!(labels
+                .0
+                .iter()
+                .any(|label| label == "Retry loading deposits"));
+        } else if scenario == "setup" {
+            assert!(labels.0.iter().any(|label| label == "Wallet details"));
+            assert!(!labels.0.iter().any(|label| label == "Node backend"));
+        }
+        if [
+            "signed-out",
+            "switching",
+            "unavailable",
+            "unknown",
+            "recorded",
+            "unchecked",
+        ]
+        .contains(&scenario)
+        {
+            if scenario != "unchecked" {
+                let refusal = p.funding_setup_refusal().expect("setup blocker");
+                assert!(
+                    labels.0.contains(&refusal.reason),
+                    "Hidden blocker for {}",
+                    scenario
+                );
+                assert!(!labels
+                    .0
+                    .iter()
+                    .any(|label| label.starts_with("Load your deposit")));
+            }
+            let cursor =
+                iced::mouse::Cursor::Available(labels.1.expect("visible Check again action"));
+            let mut messages = Vec::new();
+            for event in [
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    Layout::new(&node),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &iced::Rectangle::with_size(size),
+                );
+            }
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [crate::app::view::Message::Claim(
+                        crate::app::view::ClaimMessage::Recheck
+                    )]
+                ),
+                "Missing recovery action for {}: {:?}",
+                scenario,
+                messages
+            );
+        } else if scenario == "ready" {
+            assert!(p.funding_setup_refusal().is_none());
+            assert!(labels.0.iter().any(|label| label == "Load deposits"));
+            assert!(!labels
+                .0
+                .iter()
+                .any(|label| label == crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE));
+        }
         assert!(p.funding_review().is_none());
         assert!(crate::services::claim_ancestry_gate::authorization().is_none());
         if let Ok(directory) = std::env::var("CLAIM_PREVIEW_DIR") {
@@ -5942,7 +6121,7 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                 iced::Color::from_rgb8(22, 22, 22),
             );
             image::save_buffer(
-                std::path::Path::new(&directory).join(format!("claim-{width}.png")),
+                std::path::Path::new(&directory).join(format!("claim-{scenario}-{width}.png")),
                 &pixels,
                 width,
                 1500,
