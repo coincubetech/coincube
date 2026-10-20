@@ -5148,7 +5148,9 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
             .width(Length::Fill),
     );
 
-    if !is_authenticated {
+    if is_authenticated || home.connect_account.is_checking_session() {
+        bottom_col = bottom_col.push(connect_status_row(&home.connect_account));
+    } else {
         bottom_col = bottom_col.push(
             Container::new(
                 btn::primary(None, "Sign In")
@@ -5162,8 +5164,6 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         );
     }
 
-    bottom_col = bottom_col.push(connect_status_row(&home.connect_account));
-
     // Outer layout: scrollable menu fills, bottom section pinned
     Column::new()
         .push(scrollable(col).height(Length::Fill))
@@ -5172,22 +5172,17 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
         .into()
 }
 
-/// Connect session indicator, pinned as the sidebar's last row in every state
-/// so it never moves. Display-only — the Sign In button owns the action. The
-/// label is not optional: red/green alone is unreadable for the most common
-/// colour-vision deficiencies.
+/// Connect session indicator for an authenticated or pending session. It
+/// replaces the Sign In button; a signed-out session needs only that action.
 fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message> {
     use coincube_ui::component::text as txt;
 
-    // A pending check must not read as signed out, or every launch with a
-    // stored session flashes red before turning green.
+    // A pending check must not read as signed out during session restoration.
     let (label, dot_style): (_, fn(&theme::Theme) -> iced::widget::text::Style) =
         if account.is_checking_session() {
             ("Checking…", theme::text::warning)
-        } else if account.is_authenticated() {
-            ("Signed in", theme::text::success)
         } else {
-            ("Not signed in", theme::text::error)
+            ("Signed in", theme::text::success)
         };
 
     // Same geometry as `component::button::menu` (10 button + 10 content
