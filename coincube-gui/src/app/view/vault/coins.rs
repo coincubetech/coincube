@@ -42,7 +42,7 @@ pub fn entangled_badge<'a, T: 'a>(status: Entanglement) -> Option<Container<'a, 
 pub fn coins_view<'a>(
     cache: &Cache,
     coins: &'a [Coin],
-    timelock: u16,
+    timelock: Option<u16>,
     selected: &[usize],
     labels: &'a HashMap<String, String>,
     labels_editing: &'a HashMap<String, form::Value<String>>,
@@ -90,7 +90,7 @@ pub fn coins_view<'a>(
 #[allow(clippy::too_many_arguments)]
 fn coin_list_view<'a>(
     coin: &'a Coin,
-    timelock: u16,
+    timelock: Option<u16>,
     blockheight: u32,
     index: usize,
     collapsed: bool,
@@ -103,7 +103,6 @@ fn coin_list_view<'a>(
     let outpoint = coin.outpoint.to_string();
     let address = coin.address.to_string();
     let txid = coin.outpoint.txid.to_string();
-    let seq = remaining_sequence(coin, blockheight, timelock);
     Container::new(
         Column::new()
             .push(
@@ -156,12 +155,17 @@ fn coin_list_view<'a>(
                                     Container::new(Space::new().width(Length::Fill))
                                         .width(Length::Fill)
                                 })
-                                .push(if coin.spend_info.is_some() {
-                                    badge::spent()
+                                .push_maybe(if coin.spend_info.is_some() {
+                                    Some(badge::spent())
                                 } else if coin.block_height.is_none() {
-                                    badge::unconfirmed()
+                                    Some(badge::unconfirmed())
                                 } else {
-                                    coin_sequence_label(seq, timelock as u32)
+                                    timelock.map(|timelock| {
+                                        coin_sequence_label(
+                                            remaining_sequence(coin, blockheight, timelock),
+                                            timelock as u32,
+                                        )
+                                    })
                                 })
                                 .push_maybe(if verified_deposit {
                                     Some(badge::badge_pill("  Replay-protected split deposit  ",
@@ -199,7 +203,7 @@ fn coin_list_view<'a>(
                             .width(Length::Fill),
                         )
                         .push(if coin.spend_info.is_none() {
-                            if let Some(b) = coin.block_height {
+                            if let (Some(b), Some(timelock)) = (coin.block_height, timelock) {
                                 if blockheight > b as u32 + timelock as u32 {
                                     Some(Container::new(
                                         p1_bold("One or more recovery paths are available")
@@ -347,7 +351,9 @@ fn coin_list_view<'a>(
                                 Row::new().push(Space::new().width(Length::Fill)).push({
                                     let (icon, label) =
                                         (Some(icon::arrow_repeat()), "Refresh coin");
-                                    let refresh_btn = if seq == 0 {
+                                    let refresh_btn = if timelock.is_some_and(|timelock| {
+                                        remaining_sequence(coin, blockheight, timelock) == 0
+                                    }) {
                                         button::primary(icon, label)
                                     } else {
                                         button::secondary(icon, label)

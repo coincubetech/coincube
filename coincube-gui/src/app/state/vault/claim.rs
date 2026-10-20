@@ -91,6 +91,12 @@ use crate::{
     },
 };
 
+fn require_vault_descriptor(wallet: &Wallet) -> Result<&CoincubeDescriptor, String> {
+    wallet.inheritance_descriptor().ok_or_else(|| {
+        "This imported Bitcoin wallet has no Vault inheritance policy for a Claim.".to_string()
+    })
+}
+
 /// Legacy deployment margin retained for authenticating recorded claims.
 /// New chain-specific input proofs do not depend on the OP_RETURN window.
 pub const EXPIRY_MARGIN_SECONDS: i64 = 36 * 60 * 60;
@@ -1667,7 +1673,10 @@ impl ClaimStep1Panel {
         let expected = *self.generation.borrow();
         let revocations = self.revocations;
         let generation = self.generation.clone();
-        let descriptor = self.wallet.main_descriptor.clone();
+        let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+            self.funding_error = Some("This imported wallet has no Vault Claim policy.".into());
+            return Task::none();
+        };
         let bitcoin_cube = self.bitcoin_cube.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_error = None;
@@ -1780,7 +1789,10 @@ impl ClaimStep1Panel {
         let expected = *self.generation.borrow();
         let revocations = self.revocations;
         let generation = self.generation.clone();
-        let descriptor = self.wallet.main_descriptor.clone();
+        let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+            self.funding_error = Some("This imported wallet has no Vault Claim policy.".into());
+            return Task::none();
+        };
         let bitcoin_cube = self.bitcoin_cube.clone();
         let fork_cube = self.pre.target.clone();
         let fork_binding = self.fork_daemon.clone();
@@ -1930,7 +1942,7 @@ impl ClaimStep1Panel {
                             .to_string()
                     })?;
                     if fork_wallet.chain != ChainId::BitcoinBlake2b
-                        || fork_wallet.main_descriptor != descriptor
+                        || fork_wallet.inheritance_descriptor() != Some(&descriptor)
                     {
                         return Err("The paired BTCB2 Vault no longer matches this Claim. Reopen both Cubes and check deposits again.".into());
                     }
@@ -2512,6 +2524,7 @@ impl ClaimStep1Panel {
     }
 
     fn install_paired_signing(&mut self) -> Result<(), String> {
+        let descriptor = require_vault_descriptor(&self.wallet)?;
         let fork_wallet = self
             .fork_daemon
             .as_ref()
@@ -2520,7 +2533,7 @@ impl ClaimStep1Panel {
                 "The paired BTCB2 Vault closed. Reopen it and check deposits again.".to_string()
             })?;
         if fork_wallet.chain != ChainId::BitcoinBlake2b
-            || fork_wallet.main_descriptor != self.wallet.main_descriptor
+            || fork_wallet.inheritance_descriptor() != Some(descriptor)
         {
             return Err("The paired BTCB2 Vault changed. Check both deposits again.".into());
         }
@@ -2532,7 +2545,7 @@ impl ClaimStep1Panel {
             None,
             pair.bitcoin.psbt().clone(),
             Vec::new(),
-            &self.wallet.main_descriptor,
+            descriptor,
             &secp,
             self.wallet.chain.bitcoin_network(),
         );
@@ -2540,7 +2553,7 @@ impl ClaimStep1Panel {
             None,
             pair.fork.psbt().clone(),
             Vec::new(),
-            &fork_wallet.main_descriptor,
+            require_vault_descriptor(&fork_wallet)?,
             &secp,
             fork_wallet.chain.bitcoin_network(),
         );
@@ -2912,12 +2925,17 @@ impl ClaimStep1Panel {
     }
 
     fn install_signing(&mut self, built: Box<Construction>, coins: Vec<Coin>) {
+        let Some(descriptor) = self.wallet.inheritance_descriptor() else {
+            self.pre.shape = Some("This imported wallet has no Vault Claim policy.".into());
+            self.stage = Stage::Preconditions;
+            return;
+        };
         let secp = secp256k1::Secp256k1::verification_only();
         let tx = SpendTx::new(
             None,
             built.psbt().clone(),
             coins,
-            &self.wallet.main_descriptor,
+            descriptor,
             &secp,
             self.wallet.chain.bitcoin_network(),
         );
@@ -4505,7 +4523,9 @@ impl From<ClaimStep1Panel> for Box<dyn State> {
 /// The coordinator refuses these itself (`Coordinator::open`), before any
 /// journal write; saying so here saves the user a build and a signature.
 pub fn vault_shape_refusal(wallet: &Wallet) -> Option<String> {
-    let descriptor = &wallet.main_descriptor;
+    let Some(descriptor) = wallet.inheritance_descriptor() else {
+        return Some("An imported Bitcoin wallet has no Vault Claim policy.".into());
+    };
     if claim_coordinator::admits_descriptor(descriptor) {
         return None;
     }
@@ -4629,7 +4649,7 @@ fn bitcoin_funding_wallet_ready(
 ) -> bool {
     info.network == Network::Bitcoin
         && info.chain_id == Some(ChainId::Bitcoin)
-        && &info.descriptors.main == descriptor
+        && info.descriptors.main.as_vault() == Some(descriptor)
         && info.block_height > 0
         && info.sync.is_finite()
         && info.sync >= 0.9999
@@ -4698,7 +4718,7 @@ async fn probe(
     };
     let (window, coins, feerate_vb) = tokio::join!(window, coins, feerate);
     let backend = funding_context.and_then(|_| match &coins {
-        Ok((_, info)) if bitcoin_funding_wallet_ready(info, &wallet.main_descriptor) => Ok(()),
+        Ok((_, info)) if wallet.inheritance_descriptor().is_some_and(|descriptor| bitcoin_funding_wallet_ready(info, descriptor)) => Ok(()),
         _ => Err("The Bitcoin Vault must identify its chain and be fully synchronized before preparing deposits.".into()),
     });
     // Without the fork height these coins cannot be classified. Reporting
@@ -4781,7 +4801,7 @@ async fn build_legacy_for_test(
         .unwrap_or(LockTime::ZERO);
     create_poison_self_transfer(
         wallet.chain,
-        &wallet.main_descriptor,
+        require_vault_descriptor(&wallet)?,
         &secp256k1::Secp256k1::verification_only(),
         &mut getter,
         &candidates,
@@ -4819,6 +4839,7 @@ async fn restore_recorded_claim(
     if wallet.chain != ChainId::Bitcoin {
         return Err("The recorded claim does not match this Bitcoin Vault.".into());
     }
+    let descriptor = require_vault_descriptor(&wallet)?;
     // A version-10 pair has no legacy Coincubed construction or submission
     // path. Reopen its journal under the authenticated two-chain identity and
     // reconcile exact saved witnesses before consulting the old coordinator.
@@ -4826,7 +4847,7 @@ async fn restore_recorded_claim(
     let identity = claim_workflow::WalletIdentity {
         bitcoin_cube: bitcoin_cube.clone(),
         fork_cube: fork_cube.clone(),
-        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
     };
     let mut controller =
         claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
@@ -4838,7 +4859,7 @@ async fn restore_recorded_claim(
             drop(controller);
             let addresses = claim_workflow::prepare_claim_deposit_instructions(
                 directory,
-                wallet.main_descriptor.clone(),
+                descriptor.clone(),
                 identity,
                 context.clone(),
                 connect.client,
@@ -4937,7 +4958,7 @@ async fn restore_recorded_claim(
     drop(controller);
     if daemon
         .config()
-        .is_none_or(|c| c.main_descriptor != wallet.main_descriptor)
+        .is_none_or(|c| c.main_descriptor.as_vault() != Some(descriptor))
     {
         return Err("The recorded claim does not match this Bitcoin Vault.".into());
     }
@@ -4953,7 +4974,7 @@ async fn restore_recorded_claim(
     let identity = claim_workflow::WalletIdentity {
         bitcoin_cube: bitcoin_cube.clone(),
         fork_cube: fork_cube.clone(),
-        descriptor_digest: sha256::Hash::hash(wallet.main_descriptor.to_string().as_bytes()),
+        descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
     };
     let mut controller =
         claim_workflow::Controller::reopen_settling(&directory, &identity, context.clone())
@@ -5154,7 +5175,7 @@ async fn reconstruct_recorded_claim(
     }
     reconstruct_poison_self_transfer(
         wallet.chain,
-        &wallet.main_descriptor,
+        require_vault_descriptor(wallet)?,
         &secp256k1::Secp256k1::verification_only(),
         &mut getter,
         &candidates,

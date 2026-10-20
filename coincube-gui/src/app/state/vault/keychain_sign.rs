@@ -666,6 +666,11 @@ impl KeychainSignModal {
     /// Kick off the fetch+classify task. Yields
     /// `KeychainSignMessage::Classified` with the joined signer list.
     pub fn launch(&self) -> Task<Message> {
+        let Some(descriptor) = self.wallet.inheritance_descriptor().cloned() else {
+            return Task::done(Message::KeychainSign(KeychainSignMessage::Classified(Err(
+                OpError::new("Imported wallets do not use Cube Keychain signing."),
+            ))));
+        };
         let mut client = self.coincube_client.clone();
         let tokens = self.tokens.clone();
         let cube_server_id = self.cube_server_id;
@@ -726,7 +731,7 @@ impl KeychainSignModal {
                     cube_server_id,
                     vault,
                     &cube_keys,
-                    &wallet.main_descriptor,
+                    &descriptor,
                     self_user_id,
                 )
                 .await
@@ -736,7 +741,7 @@ impl KeychainSignModal {
                 let required = classify_signers(
                     wallet.chain,
                     &psbt,
-                    &wallet.main_descriptor,
+                    &descriptor,
                     &index,
                     &wallet.keys_aliases,
                     &super::signers::ReplayCapabilities::from_wallet(&wallet),
@@ -994,6 +999,11 @@ impl KeychainSignModal {
         let Some(entry) = self.pending.get_mut(index) else {
             return Task::none();
         };
+        let Some(descriptor) = self.wallet.inheritance_descriptor() else {
+            entry.status = PendingSessionStatus::Failed;
+            entry.error = Some("Imported wallets do not use Cube Keychain signing.".into());
+            return Task::none();
+        };
         if self.wallet.chain.is_blake2b()
             && !resolved_keychain_replay_protection(self.wallet.chain, &entry.capabilities)
                 .is_capable()
@@ -1066,11 +1076,7 @@ impl KeychainSignModal {
         // We prune a *clone* and merge the returned signatures back into the
         // full `tx.psbt`, so the stored PSBT keeps all its derivations — this
         // mirrors the hardware-wallet (BitBox02) handling in `sign_psbt`.
-        let psbt_to_sign = match self
-            .wallet
-            .main_descriptor
-            .prune_bip32_derivs_last_avail(self.psbt.clone())
-        {
+        let psbt_to_sign = match descriptor.prune_bip32_derivs_last_avail(self.psbt.clone()) {
             Ok(psbt) => psbt,
             Err(e) => {
                 // Never fall back to sending the unpruned PSBT: the remote
@@ -1109,7 +1115,7 @@ impl KeychainSignModal {
             &transport_pubkey,
             &request_id,
             &psbt_bytes,
-            &self.wallet.main_descriptor.to_string(),
+            &descriptor.to_string(),
         ) {
             Ok(sealed) => sealed,
             Err(e) => {
@@ -1137,8 +1143,7 @@ impl KeychainSignModal {
         let capabilities = self.pending[index].capabilities.clone();
 
         let vault_id = self.vault_id.unwrap_or(0).to_string();
-        let descriptor_id =
-            crate::app::wallet::descriptor_id_fingerprint(&self.wallet.main_descriptor).to_string();
+        let descriptor_id = crate::app::wallet::descriptor_id_fingerprint(descriptor).to_string();
         let tokens = self.tokens.clone();
         let grpc_url = self.grpc_url.clone();
         let desktop_device_id = self.desktop_device_id.clone();

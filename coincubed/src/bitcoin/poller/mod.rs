@@ -3,7 +3,7 @@ mod looper;
 pub(crate) use looper::poll as test_poll;
 
 use crate::{bitcoin::BitcoinInterface, database::DatabaseInterface};
-use coincube_core::descriptors;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 use std::{
     sync::{self, mpsc},
@@ -34,7 +34,7 @@ pub struct Poller {
     db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
     secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     // The receive and change descriptors (in this order).
-    descs: [descriptors::SinglePathCoincubeDesc; 2],
+    descs: [miniscript::Descriptor<miniscript::DescriptorPublicKey>; 2],
     // Lock-free mirror of the latest sync progress, so `get_info` can read it
     // without contending for the `BitcoinInterface` mutex this poller holds
     // across a full wallet scan.
@@ -51,16 +51,14 @@ impl Poller {
     pub fn new(
         bit: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
         db: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
-        desc: descriptors::CoincubeDescriptor,
+        desc: WalletDescriptor,
         sync_cache: sync::Arc<crate::bitcoin::SyncProgressCache>,
         reorg_alert: sync::Arc<crate::bitcoin::ReorgAlertCache>,
         history_sync: sync::Arc<crate::bitcoin::HistorySyncCache>,
     ) -> Result<Poller, crate::bitcoin::GenesisError> {
         let secp = secp256k1::Secp256k1::verification_only();
-        let descs = [
-            desc.receive_descriptor().clone(),
-            desc.change_descriptor().clone(),
-        ];
+        let (receive, change) = desc.branches_public();
+        let descs = [receive.clone(), change.clone()];
 
         // On first startup the tip may be NULL. Make sure it's set as the poller relies on it.
         looper::maybe_initialize_tip(&bit, &db)?;

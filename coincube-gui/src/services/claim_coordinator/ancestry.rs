@@ -67,7 +67,7 @@ impl Coordinator {
         if production
             .daemon
             .config()
-            .is_none_or(|c| c.main_descriptor != *construction.descriptor())
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(construction.descriptor()))
         {
             return Err(Error::InvalidBinding);
         }

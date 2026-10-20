@@ -112,6 +112,7 @@ fn wallet_card<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     balance_masked: bool,
     has_vault: bool,
+    import_pending: bool,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     pending_vault_incoming: Option<PendingTransfer>,
     pending_send_sats: u64,
@@ -262,6 +263,19 @@ fn wallet_card<'a>(
     }
 
     let content = match wallet_type {
+        WalletType::Vault if import_pending => Column::new().spacing(12).push(
+            Row::new()
+                .spacing(8)
+                .align_y(Alignment::Center)
+                .push(vault_icon())
+                .push(text("Vault").size(14))
+                .push(text("Wallet import pending").style(theme::text::secondary))
+                .push(Space::new().width(Length::Fill))
+                .push(
+                    button::primary(None, "Finish import")
+                        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
+                ),
+        ),
         WalletType::Vault if !has_vault => Column::new().spacing(12).push(
             Row::new()
                 .spacing(8)
@@ -1466,6 +1480,8 @@ pub struct GlobalViewConfig<'a> {
     pub vault_pending_send_sats: u64,
     pub vault_pending_receive_sats: u64,
     pub vault_balance: Amount,
+    pub imported_balance: Option<Amount>,
+    pub imported_installed: bool,
     pub fiat_converter: Option<FiatAmountConverter>,
     pub balance_masked: bool,
     /// True until every applicable wallet has reported its first balance
@@ -1496,6 +1512,7 @@ pub struct GlobalViewConfig<'a> {
     /// from `cache.display_mode`.
     pub display_mode: crate::app::settings::display::DisplayMode,
     pub has_vault: bool,
+    pub has_imported_bitcoin: bool,
     /// Whether this cube has a working Spark backend. Mirrors
     /// `spark_backend.is_some()` in the state layer. Drives the Spark card
     /// visibility and feeds [`transfer_available`].
@@ -1578,6 +1595,8 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         vault_pending_send_sats,
         vault_pending_receive_sats,
         vault_balance,
+        imported_balance,
+        imported_installed,
         fiat_converter,
         balance_masked,
         total_balance_loading,
@@ -1588,6 +1607,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         vault_loaded,
         display_mode,
         has_vault,
+        has_imported_bitcoin,
         has_spark,
         has_liquid,
         current_view,
@@ -1714,7 +1734,14 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // Global Total Balance: aggregate across Spark + Liquid (L-BTC + USDt-as-sats) + Vault.
     // Callers pass `has_spark`/`has_vault` to gate visibility, but zero-balance
     // default values for absent wallets don't skew the total.
-    let global_total_sats = spark_balance.to_sat() + total_sats + vault_balance.to_sat();
+    // An imported Vault can report coins before its bounded history search is
+    // complete. Those coins are not an authoritative balance yet.
+    let display_vault_balance = if has_imported_bitcoin && imported_balance.is_none() {
+        Amount::ZERO
+    } else {
+        vault_balance
+    };
+    let global_total_sats = spark_balance.to_sat() + total_sats + display_vault_balance.to_sat();
     let global_total_amount = Amount::from_sat(global_total_sats);
     let global_total_fiat = fiat_converter
         .as_ref()
@@ -2094,20 +2121,28 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         )))
     });
 
-    let vault_card_element = mouse_area(wallet_card(
-        WalletType::Vault,
-        &vault_balance,
-        fiat_converter,
-        balance_masked,
-        has_vault,
-        bitcoin_unit,
-        pending_vault_incoming,
-        vault_pending_send_sats,
-        vault_pending_receive_sats,
-        display_mode,
-        vault_loaded,
-    ))
-    .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview)));
+    let vault_card_element: Element<'a, Message> = {
+        mouse_area(wallet_card(
+            WalletType::Vault,
+            &display_vault_balance,
+            fiat_converter,
+            balance_masked,
+            has_vault || (has_imported_bitcoin && imported_installed),
+            has_imported_bitcoin && !imported_installed,
+            bitcoin_unit,
+            pending_vault_incoming,
+            vault_pending_send_sats,
+            vault_pending_receive_sats,
+            display_mode,
+            if has_imported_bitcoin {
+                imported_balance.is_some()
+            } else {
+                vault_loaded
+            },
+        ))
+        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
+        .into()
+    };
 
     // Total Balance block — the fiat-first headline number above the
     // Wallets section. While any wallet is still loading we render
@@ -2329,6 +2364,8 @@ mod tests {
                 vault_pending_send_sats: 5_000,
                 vault_pending_receive_sats: 6_000,
                 vault_balance: Amount::from_sat(375_000),
+                imported_balance: None,
+                imported_installed: false,
                 fiat_converter: Some(self.fiat_converter),
                 balance_masked: false,
                 total_balance_loading: false,
@@ -2339,6 +2376,7 @@ mod tests {
                 vault_loaded: true,
                 display_mode: DisplayMode::FiatNative,
                 has_vault: true,
+                has_imported_bitcoin: false,
                 has_spark: true,
                 has_liquid: true,
                 current_view: HomeView { step },

@@ -1058,6 +1058,23 @@ impl Installer {
                             // We must persist the recovered signer so Breez Liquid/Spark
                             // can load it from the datadir on next startup.
                             // Even though there is no vault descriptor, the seed is needed.
+                            if ctx.restored_imported_wallet.is_some()
+                                && ctx.recovered_signer.is_none()
+                            {
+                                // Descriptor-only restore into an already unlocked
+                                // Cube: retain its seed and current credentials.
+                                if ctx.cube_id.is_none() {
+                                    return Err(Error::Unexpected(
+                                        "Imported wallet restore is missing its originating Cube."
+                                            .into(),
+                                    ));
+                                }
+                                return ensure_gui_config(
+                                    &ctx.coincube_directory
+                                        .network_directory(ctx.bitcoin_config.chain),
+                                    false,
+                                );
+                            }
                             let recovered = ctx.recovered_signer.as_ref().ok_or_else(|| {
                                 Error::Unexpected(
                                     "Seed-only install is missing the recovered signer".into(),
@@ -1545,11 +1562,11 @@ pub async fn install_local_wallet(
 
     info!("Daemon configuration file created");
 
-    if cfg
-        .main_descriptor
-        .to_string()
-        .contains(&signer.lock().unwrap().fingerprint().to_string())
-    {
+    if cfg.main_descriptor.as_vault().is_some_and(|vault| {
+        vault
+            .to_string()
+            .contains(&signer.lock().unwrap().fingerprint().to_string())
+    }) {
         // In developer mode this signer is a *clone of the Cube master signer*
         // (see `Installer::new`), so the pre-hardening `store(...)` here was
         // writing the master seed itself to disk in the clear. It gets the same

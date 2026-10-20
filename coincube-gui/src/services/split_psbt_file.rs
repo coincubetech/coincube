@@ -21,9 +21,8 @@
 //! The ordinary paired importer checks each returned `S+B` and `S+F` PSBT
 //! through its own core finalizer and keeps completion dependent on both.
 
-use std::{fmt, io::Read, path::Path};
+use std::{fmt, path::Path};
 
-use base64::Engine;
 use coincube_core::{
     chain::ChainId,
     foreign_split::{
@@ -35,17 +34,11 @@ use coincube_core::{
     miniscript::bitcoin::{psbt::Psbt, secp256k1},
 };
 
-/// Largest PSBT file accepted, in bytes (binary or text).
-pub const MAX_FILE_BYTES: u64 = 8 * 1024 * 1024;
+use super::psbt_file::{self, TransportError};
+pub use super::psbt_file::{Encoding, MAX_FILE_BYTES};
+
 /// Most returned files one combine accepts.
 pub const MAX_COMBINED_FILES: usize = 16;
-const MAGIC: &[u8] = b"psbt\xff";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Encoding {
-    Binary,
-    Base64,
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FileError {
@@ -101,40 +94,22 @@ impl fmt::Display for FileError {
 impl std::error::Error for FileError {}
 
 pub fn encode(psbt: &Psbt, encoding: Encoding) -> Vec<u8> {
-    match encoding {
-        Encoding::Binary => psbt.serialize(),
-        Encoding::Base64 => base64::engine::general_purpose::STANDARD
-            .encode(psbt.serialize())
-            .into_bytes(),
-    }
+    psbt_file::encode(psbt, encoding)
 }
 
 /// Binary when it starts with the BIP 174 magic, otherwise base64 text (all
 /// ASCII whitespace ignored, so line-wrapped text loads). Returns the
 /// detected encoding.
 pub fn decode(bytes: &[u8]) -> Result<(Psbt, Encoding), FileError> {
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(FileError::TooLarge);
+    psbt_file::decode(bytes).map_err(file_error)
+}
+
+fn file_error(error: TransportError) -> FileError {
+    match error {
+        TransportError::Io(error) => FileError::Io(error),
+        TransportError::TooLarge => FileError::TooLarge,
+        TransportError::NotPsbt => FileError::NotPsbt,
     }
-    if bytes.starts_with(MAGIC) {
-        return Psbt::deserialize(bytes)
-            .map(|psbt| (psbt, Encoding::Binary))
-            .map_err(|_| FileError::NotPsbt);
-    }
-    let text: String = std::str::from_utf8(bytes)
-        .map_err(|_| FileError::NotPsbt)?
-        .chars()
-        .filter(|c| !c.is_ascii_whitespace())
-        .collect();
-    let raw = base64::engine::general_purpose::STANDARD
-        .decode(text)
-        .map_err(|_| FileError::NotPsbt)?;
-    if !raw.starts_with(MAGIC) {
-        return Err(FileError::NotPsbt);
-    }
-    Psbt::deserialize(&raw)
-        .map(|psbt| (psbt, Encoding::Base64))
-        .map_err(|_| FileError::NotPsbt)
 }
 
 /// Write the unsigned construction for an external signer.
@@ -146,12 +121,7 @@ pub fn save(path: &Path, construction: &SplitStep1, encoding: Encoding) -> Resul
 /// Read one returned file, refusing anything over [`MAX_FILE_BYTES`] without
 /// reading past the cap.
 pub fn load(path: &Path) -> Result<Psbt, FileError> {
-    let file = std::fs::File::open(path).map_err(|error| FileError::Io(error.to_string()))?;
-    let mut bytes = Vec::new();
-    file.take(MAX_FILE_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .map_err(|error| FileError::Io(error.to_string()))?;
-    decode(&bytes).map(|(psbt, _)| psbt)
+    psbt_file::load(path).map_err(file_error)
 }
 
 /// Whether `psbt` is the exact construction plus at least one valid

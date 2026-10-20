@@ -32,12 +32,14 @@ pub const RAIL_WIDTH: f32 = 72.0;
 
 /// Returns the tertiary-rail items for `menu`, or `None` when the route
 /// has no third level (and the rail should be hidden).
-pub fn items_for(menu: &Menu, _ctx: &NavContext) -> Option<Vec<SubItem>> {
+pub fn items_for(menu: &Menu, ctx: &NavContext) -> Option<Vec<SubItem>> {
     match menu {
         Menu::Cube(CubeSubMenu::Settings(_)) => Some(cube_settings_items()),
         Menu::Spark(SparkSubMenu::Settings(_)) => Some(spark_settings_items()),
         Menu::Marketplace(MarketplaceSubMenu::P2P(_)) => Some(p2p_items()),
-        Menu::Vault(VaultSubMenu::Settings(_)) => Some(vault_settings_items()),
+        Menu::Vault(VaultSubMenu::Settings(_)) => {
+            Some(vault_settings_items(ctx.has_imported_bitcoin))
+        }
         _ => None,
     }
 }
@@ -238,8 +240,8 @@ fn p2p_items() -> Vec<SubItem> {
     ]
 }
 
-fn vault_settings_items() -> Vec<SubItem> {
-    vec![
+fn vault_settings_items(imported: bool) -> Vec<SubItem> {
+    let mut items = vec![
         SubItem::new(
             "Node",
             bitcoin_icon,
@@ -274,7 +276,9 @@ fn vault_settings_items() -> Vec<SubItem> {
                 )
             },
         ),
-        SubItem::new(
+    ];
+    if !imported {
+        items.push(SubItem::new(
             "Pair",
             phone_icon,
             Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))),
@@ -284,6 +288,7 @@ fn vault_settings_items() -> Vec<SubItem> {
                     Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning)))
                 )
             },
-        ),
-    ]
+        ));
+    }
+    items
 }

@@ -29,7 +29,8 @@ fn reserve_claim_change(
         .and_then(serde_json::Value::as_str)
         .and_then(|value| coincube_core::descriptors::CoincubeDescriptor::from_str(value).ok())
         .ok_or_else(|| Error::invalid_params("Invalid 'descriptor' parameter."))?;
-    if control.config.bitcoin_config.chain != chain || control.config.main_descriptor != descriptor
+    if control.config.bitcoin_config.chain != chain
+        || control.config.main_descriptor.as_vault() != Some(&descriptor)
     {
         return Err(Error::invalid_params(
             "Claim wallet identity does not match this daemon.",
@@ -555,7 +556,7 @@ pub fn handle_request(control: &mut DaemonControl, req: Request) -> Result<Respo
             // the next state refresh.
             serde_json::json!({})
         }
-        "getnewaddress" => serde_json::json!(&control.get_new_address()),
+        "getnewaddress" => serde_json::json!(&control.try_get_new_address()?),
         "reserveclaimchange" => {
             let params = req.params.ok_or_else(|| {
                 Error::invalid_params("Missing 'chain_id' and 'descriptor' parameters.")
@@ -653,7 +654,12 @@ mod claim_change_tests {
         let daemon = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
         let control = daemon.control();
         let chain = control.config.bitcoin_config.chain;
-        let descriptor = control.config.main_descriptor.to_string();
+        let descriptor = control
+            .config
+            .main_descriptor
+            .as_vault()
+            .unwrap()
+            .to_string();
         let request = |chain: &str, descriptor: &str| {
             Params::Array(vec![
                 serde_json::json!(chain),

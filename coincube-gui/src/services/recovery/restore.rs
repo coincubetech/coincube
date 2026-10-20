@@ -148,6 +148,85 @@ pub struct DecryptedKit {
     pub descriptor: Option<DescriptorBlob>,
 }
 
+/// Wallet half of a Kit. Vault v1 keeps its original byte shape; imported
+/// wallets use a separate v2 payload with both public branches and indices.
+#[derive(Debug, Clone)]
+pub enum RecoveredWalletBlob {
+    Vault(DescriptorBlob),
+    Imported(super::imported::ImportedDescriptorBlob),
+}
+
+#[derive(Debug)]
+pub struct RecoveredKit {
+    pub seed: Option<SeedBlob>,
+    pub wallet: Option<RecoveredWalletBlob>,
+}
+
+/// Download and decrypt either supported wallet half without routing an
+/// imported descriptor through the Vault-only parser.
+pub async fn fetch_and_decrypt_wallet_kit(
+    client: &CoincubeClient,
+    cube_id: u64,
+    password: &Zeroizing<String>,
+) -> Result<RecoveredKit, RestoreError> {
+    let kit = client
+        .download_recovery_kit(cube_id, password.as_str())
+        .await?;
+    let seed = if kit.encrypted_cube_seed.is_empty() {
+        None
+    } else {
+        Some(decrypt_seed_blob(&kit.encrypted_cube_seed, password)?)
+    };
+    let wallet = if kit.encrypted_wallet_descriptor.is_empty() {
+        None
+    } else {
+        Some(decrypt_wallet_descriptor_blob(
+            &kit.encrypted_wallet_descriptor,
+            password,
+        )?)
+    };
+    Ok(RecoveredKit { seed, wallet })
+}
+
+pub fn decrypt_wallet_descriptor_blob(
+    ciphertext_b64: &str,
+    password: &Zeroizing<String>,
+) -> Result<RecoveredWalletBlob, RestoreError> {
+    let bytes = decrypt(ciphertext_b64, password)?;
+    parse_wallet_descriptor_blob(&bytes)
+}
+
+/// Parse an already-authenticated wallet payload. Password Kits and owner-self
+/// Keychain envelopes share this version dispatch; heir recovery continues to
+/// use its Vault-only descriptor parser.
+pub fn parse_wallet_descriptor_blob(bytes: &[u8]) -> Result<RecoveredWalletBlob, RestoreError> {
+    let value: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
+    let version = value
+        .get("version")
+        .and_then(serde_json::Value::as_u64)
+        .ok_or_else(|| RestoreError::BlobParse("descriptor blob: missing version".into()))?;
+    match version {
+        1 => {
+            let vault: DescriptorBlob = serde_json::from_value(value)
+                .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
+            Ok(RecoveredWalletBlob::Vault(vault))
+        }
+        2 => {
+            let imported: super::imported::ImportedDescriptorBlob =
+                serde_json::from_value(value)
+                    .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
+            imported
+                .validate(imported.wallet.descriptor.chain())
+                .map_err(|e| RestoreError::BlobParse(format!("descriptor blob: {e}")))?;
+            Ok(RecoveredWalletBlob::Imported(imported))
+        }
+        _ => Err(RestoreError::BlobParse(format!(
+            "descriptor blob version {version} is not supported; update Tenshu"
+        ))),
+    }
+}
+
 /// Decrypts a single ciphertext envelope into `SeedBlob`.
 pub fn decrypt_seed_blob(
     ciphertext_b64: &str,
@@ -435,6 +514,21 @@ mod tests {
 
         let got = decrypt_descriptor_blob(&envelope, &password).unwrap();
         assert_eq!(got.vault.name, blob.vault.name);
+        assert_eq!(got.vault.descriptor, blob.vault.descriptor);
+    }
+
+    #[test]
+    fn typed_wallet_decrypt_keeps_legacy_vault_v1() {
+        let password = pw("correct horse battery staple");
+        let blob = sample_descriptor_blob();
+        let envelope =
+            encrypt(&serde_json::to_vec(&blob).unwrap(), &password, TEST_PARAMS).unwrap();
+        let RecoveredWalletBlob::Vault(got) =
+            decrypt_wallet_descriptor_blob(&envelope, &password).unwrap()
+        else {
+            panic!("legacy v1 Kit must remain a Vault blob");
+        };
+        assert_eq!(got.cube.uuid, blob.cube.uuid);
         assert_eq!(got.vault.descriptor, blob.vault.descriptor);
     }
 

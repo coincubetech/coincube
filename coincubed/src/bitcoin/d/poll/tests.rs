@@ -76,7 +76,7 @@ fn recovered_core_spent_history_replays_into_the_daemon_at_an_unchanged_database
         root.join("wallet.sqlite3"),
         Some(crate::database::sqlite::FreshDbOptions::new(
             control.config.bitcoin_config.chain,
-            control.config.main_descriptor.clone(),
+            control.config.main_descriptor.as_vault().unwrap().clone(),
         )),
         &control.secp,
     )
@@ -89,8 +89,10 @@ fn recovered_core_spent_history_replays_into_the_daemon_at_an_unchanged_database
     control.db.connection().update_tip(&tip);
     let desc = control.config.main_descriptor.receive_descriptor();
     let address = desc
-        .derive(500.into(), &control.secp)
-        .address(bitcoin::Network::Bitcoin);
+        .derive(500)
+        .unwrap()
+        .address(bitcoin::Network::Bitcoin)
+        .unwrap();
     let mut funding =
         bitcoin::blockdata::constants::genesis_block(bitcoin::Network::Bitcoin).txdata[0].clone();
     funding.input[0].previous_output =
@@ -118,7 +120,7 @@ fn recovered_core_spent_history_replays_into_the_daemon_at_an_unchanged_database
         ),
         (
             "listsinceblock",
-            serde_json::json!({"transactions":[{"category":"receive","txid":txid,"vout":0,"amount":1.0,"blockheight":10,"address":address,"parent_descs":[desc.as_descriptor_public_key().to_string()]}]}),
+            serde_json::json!({"transactions":[{"category":"receive","txid":txid,"vout":0,"amount":1.0,"blockheight":10,"address":address,"parent_descs":[desc.as_descriptor().to_string()]}]}),
         ),
         ("gettransaction", transaction.clone()),
         ("gettxout", Json::Null),
@@ -166,8 +168,18 @@ fn recovered_core_spent_history_replays_into_the_daemon_at_an_unchanged_database
         &control.db,
         &control.secp,
         &[
-            control.config.main_descriptor.receive_descriptor().clone(),
-            control.config.main_descriptor.change_descriptor().clone(),
+            control
+                .config
+                .main_descriptor
+                .receive_descriptor()
+                .as_descriptor()
+                .clone(),
+            control
+                .config
+                .main_descriptor
+                .change_descriptor()
+                .as_descriptor()
+                .clone(),
         ],
         &Default::default(),
         &Default::default(),
@@ -734,7 +746,7 @@ fn start_rescan_node_outage_is_a_retryable_error_not_a_panic() {
             .iter()
             .map(|d| {
                 serde_json::json!({
-                    "desc": d.as_descriptor_public_key().to_string(),
+                    "desc": d.as_descriptor().to_string(),
                     "timestamp": timestamp,
                     "range": [0, 999],
                 })
@@ -832,12 +844,13 @@ fn store_coin(
     block_info: Option<crate::database::BlockInfo>,
     is_from_self: bool,
 ) -> bitcoin::OutPoint {
-    use bitcoin::{absolute, bip32, transaction::Version};
+    use bitcoin::{absolute, transaction::Version};
     let script_pubkey = control
         .config
         .main_descriptor
         .receive_descriptor()
-        .derive(bip32::ChildNumber::from(0), &control.secp)
+        .derive(0)
+        .unwrap()
         .script_pubkey();
     let funding = bitcoin::Transaction {
         version: Version::TWO,

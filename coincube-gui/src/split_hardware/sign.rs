@@ -64,6 +64,7 @@ use coincube_core::miniscript::{
     miniscript::decode::Terminal,
     Descriptor, ForEachKey,
 };
+use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
 use zeroize::Zeroizing;
 
 use crate::hw::HardwareWallet;
@@ -306,6 +307,22 @@ impl DevicePolicy {
         })
     }
 
+    /// Imported multisig registration uses its chain-bound full wallet
+    /// identity, keeping every existing Split device name unchanged.
+    pub(super) fn new_imported(
+        descriptor: &Descriptor<DescriptorPublicKey>,
+        wallet: &ImportedWalletDescriptor,
+    ) -> Result<Self, SignError> {
+        let mut policy = Self::new(descriptor)?;
+        if policy.shape.is_multisig() {
+            let identity = wallet
+                .identity(wallet.chain())
+                .map_err(|_| SignError::KeyForm)?;
+            policy.name = format!("Import{}", &identity.to_string()[..8]);
+        }
+        Ok(policy)
+    }
+
     pub fn shape(&self) -> PolicyShape {
         self.shape
     }
@@ -313,6 +330,10 @@ impl DevicePolicy {
     /// The name the device shows for a registered multisig policy.
     pub fn name(&self) -> &str {
         &self.name
+    }
+
+    pub fn descriptor(&self) -> &str {
+        &self.descriptor
     }
 
     pub fn contains(&self, fingerprint: Fingerprint) -> bool {

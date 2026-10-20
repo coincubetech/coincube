@@ -934,6 +934,8 @@ pub async fn import_psbt(
     let psbt = Psbt::from_str(&psbt_str).map_err(|_| Error::ParsePsbt)?;
     send_progress!(sender, Progress(50.0));
     descr
+        .as_vault()
+        .ok_or(Error::InsanePsbt)?
         .partial_spend_info(&psbt)
         .map_err(|_| Error::InsanePsbt)?;
 
@@ -1178,7 +1180,7 @@ pub async fn import_backup(
         }
     };
 
-    if backup_descriptor != descriptor {
+    if descriptor.as_vault() != Some(&backup_descriptor) {
         return Err(Error::BackupImport(
             "The backup descriptor do not match this wallet!".into(),
         ));
@@ -1579,7 +1581,7 @@ pub async fn import_backup_at_launch(
     let backup_descriptor = CoincubeDescriptor::from_str(&account.descriptor)
         .map_err(|_| RestoreBackupError::InvalidDescriptor)?;
 
-    if backup_descriptor != descriptor {
+    if descriptor.as_vault() != Some(&backup_descriptor) {
         return Err(RestoreBackupError::WrongDescriptor);
     }
 

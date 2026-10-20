@@ -1,3 +1,4 @@
+pub mod bitcoin_import;
 pub mod branta;
 pub(crate) mod claim_ancestry_gate;
 pub mod claim_coordinator;
@@ -12,6 +13,10 @@ pub mod foreign_psbt;
 pub mod foreign_scan;
 pub mod foreign_split_inventory;
 pub mod foreign_wallet_source;
+pub mod psbt_file;
+pub mod public_account_source;
+pub mod public_hardware_source;
+pub mod public_wallet_pair;
 pub mod split_evidence;
 pub mod split_fees;
 pub mod split_psbt_file;

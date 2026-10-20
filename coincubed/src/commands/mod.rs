@@ -16,11 +16,11 @@ use crate::{
 
 pub use crate::database::{CoinStatus, LabelItem};
 
-use coincube_core::descriptors;
 use coincube_core::spend::{
     self, create_spend, AddrInfo, AncestorInfo, CandidateCoin, CreateSpendRes, SpendCreationError,
     SpendOutputAddress, SpendTxFees, TxGetter,
 };
+use coincube_core::{imported_spend, wallet_descriptor::WalletDescriptor};
 
 use utils::{
     deser_addr_assume_checked, deser_amount_from_sats, deser_fromstr, deser_hex, ser_amount,
@@ -94,6 +94,8 @@ pub enum CommandError {
     /// and the finaliser would refuse. Nothing was stored; an existing row is
     /// unchanged.
     UnifiedSpendValidation(String),
+    /// Imported Bitcoin PSBT changed construction or supplied invalid signer data.
+    ImportedSpendValidation(String),
     /// The locally retained Bitcoin Blake2b PSBT has a unified-bearing
     /// satisfaction, but its legacy signatures can independently satisfy an
     /// input. Refused before storage, export, or broadcast so Coincube does not
@@ -179,6 +181,9 @@ impl fmt::Display for CommandError {
             ),
             Self::UnifiedSpendValidation(e) => {
                 write!(f, "Refused to store the Bitcoin Blake2b spend: '{}'.", e)
+            }
+            Self::ImportedSpendValidation(e) => {
+                write!(f, "Refused imported Bitcoin spend: '{e}'.")
             }
             Self::UnsafeLegacyAlternative {
                 input,
@@ -333,6 +338,14 @@ fn validate_spend_for_chain(
     coincube_core::unified_finalize::verify_all_signatures(&unified, secp)
         .map_err(|e| CommandError::UnifiedSpendValidation(e.to_string()))?;
     enforce_legacy_signature_policy(&unified, secp)
+}
+
+fn imported_construction(psbt: &Psbt) -> Psbt {
+    let mut construction = psbt.clone();
+    for input in &mut construction.inputs {
+        input.partial_sigs.clear();
+    }
+    construction
 }
 
 fn enforce_legacy_signature_policy(
@@ -537,13 +550,17 @@ fn coin_to_candidate(
 
 impl DaemonControl {
     // Get the derived descriptor for this coin
-    fn derived_desc(&self, coin: &Coin) -> descriptors::DerivedSinglePathCoincubeDesc {
+    fn derived_desc(
+        &self,
+        coin: &Coin,
+    ) -> miniscript::Descriptor<miniscript::DefiniteDescriptorKey> {
         let desc = if coin.is_change {
             self.config.main_descriptor.change_descriptor()
         } else {
             self.config.main_descriptor.receive_descriptor()
         };
-        desc.derive(coin.derivation_index, &self.secp)
+        desc.derive(u32::from(coin.derivation_index))
+            .expect("stored wallet derivation index is valid")
     }
 
     // Check whether this address is valid for the network we are operating on.
@@ -586,7 +603,10 @@ impl DaemonControl {
         self.db
             .reserve_change(
                 self.config.bitcoin_config.chain,
-                &self.config.main_descriptor,
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
                 &self.secp,
             )
             .map_err(CommandError::ChangeReservation)
@@ -597,9 +617,12 @@ impl DaemonControl {
             .config
             .main_descriptor
             .change_descriptor()
-            .derive(index, &self.secp);
+            .derive(u32::from(index))
+            .expect("change derivation index is valid");
         SpendOutputAddress {
-            addr: desc.address(self.config.bitcoin_config.network),
+            addr: desc
+                .address(self.config.bitcoin_config.network)
+                .expect("supported wallet address"),
             info: Some(AddrInfo {
                 index,
                 is_change: true,
@@ -632,10 +655,19 @@ impl DaemonControl {
             }) => *index,
             _ => return Ok(true),
         };
+        if let Some(imported) = self.config.main_descriptor.as_imported() {
+            return self
+                .db
+                .commit_imported_change_if_next(self.config.bitcoin_config.chain, imported, index)
+                .map_err(CommandError::ChangeReservation);
+        }
         self.db
             .commit_change_if_next(
                 self.config.bitcoin_config.chain,
-                &self.config.main_descriptor,
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
                 &self.secp,
                 index,
             )
@@ -966,6 +998,27 @@ impl DaemonControl {
             descriptors: GetInfoDescriptors {
                 main: self.config.main_descriptor.clone(),
             },
+            imported_wallet: self
+                .config
+                .main_descriptor
+                .as_imported()
+                .and_then(|imported| {
+                    let state = db_conn.imported_history()?;
+                    let wallet_identity = imported
+                        .identity(self.config.bitcoin_config.chain)
+                        .ok()?
+                        .to_string();
+                    Some(ImportedWalletSync {
+                        wallet_identity,
+                        chain_id: self.config.bitcoin_config.chain,
+                        birthday: state.birthday,
+                        initial_lookahead: state.initial_lookahead,
+                        discovery_target: state.discovery_target,
+                        receive_scanned: state.receive_scanned,
+                        change_scanned: state.change_scanned,
+                        history_complete: state.history_complete,
+                    })
+                }),
             rescan_progress,
             refused_reorg_depth,
             chain_divergence,
@@ -980,6 +1033,18 @@ impl DaemonControl {
     /// Get a new deposit address. This will always generate a new deposit address, regardless of
     /// whether it was actually used.
     pub fn get_new_address(&self) -> GetAddressResult {
+        self.try_get_new_address()
+            .expect("Vault receive allocation must succeed")
+    }
+
+    pub fn try_get_new_address(&self) -> Result<GetAddressResult, CommandError> {
+        if let Some(imported) = self.config.main_descriptor.as_imported() {
+            let (address, index) = self
+                .db
+                .reserve_imported_receive(self.config.bitcoin_config.chain, imported)
+                .map_err(CommandError::ChangeReservation)?;
+            return Ok(GetAddressResult::new(address, index));
+        }
         let mut db_conn = self.db.connection();
         let index = db_conn.receive_index();
         let new_index = index
@@ -990,9 +1055,11 @@ impl DaemonControl {
             .config
             .main_descriptor
             .receive_descriptor()
-            .derive(new_index, &self.secp)
-            .address(self.config.bitcoin_config.network);
-        GetAddressResult::new(address, new_index)
+            .derive(u32::from(new_index))
+            .expect("receive derivation index is valid")
+            .address(self.config.bitcoin_config.network)
+            .expect("supported wallet address");
+        Ok(GetAddressResult::new(address, new_index))
     }
 
     /// Update derivation indexes
@@ -1090,15 +1157,19 @@ impl DaemonControl {
                     .config
                     .main_descriptor
                     .receive_descriptor()
-                    .derive(child, &self.secp)
-                    .address(self.config.bitcoin_config.network);
+                    .derive(u32::from(child))
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?
+                    .address(self.config.bitcoin_config.network)
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?;
 
                 let change = self
                     .config
                     .main_descriptor
                     .change_descriptor()
-                    .derive(child, &self.secp)
-                    .address(self.config.bitcoin_config.network);
+                    .derive(u32::from(child))
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?
+                    .address(self.config.bitcoin_config.network)
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?;
 
                 Ok(AddressInfo {
                     index,
@@ -1174,8 +1245,10 @@ impl DaemonControl {
             }
             if !exclude_used || !used_counts.contains_key(&index) {
                 let addr = desc
-                    .derive(index, &self.secp)
-                    .address(self.config.bitcoin_config.network);
+                    .derive(u32::from(index))
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?
+                    .address(self.config.bitcoin_config.network)
+                    .map_err(|_| CommandError::InvalidDerivationIndex)?;
                 derived_addresses.push((index, addr));
             }
         }
@@ -1234,7 +1307,8 @@ impl DaemonControl {
                 let block_height = block_info.map(|b| b.height);
                 let address = self
                     .derived_desc(&coin)
-                    .address(self.config.bitcoin_config.network);
+                    .address(self.config.bitcoin_config.network)
+                    .expect("supported wallet address");
                 ListCoinsEntry {
                     address,
                     amount,
@@ -1365,16 +1439,28 @@ impl DaemonControl {
                 psbt,
                 has_change,
                 warnings,
-            } = match create_spend(
-                &self.config.main_descriptor,
-                &self.secp,
-                &mut tx_getter,
-                &destinations_checked,
-                &candidate_coins,
-                SpendTxFees::Regular(feerate_vb),
-                change_address,
-                locktime,
-            ) {
+            } = match match &self.config.main_descriptor {
+                WalletDescriptor::Vault(vault) => create_spend(
+                    vault,
+                    &self.secp,
+                    &mut tx_getter,
+                    &destinations_checked,
+                    &candidate_coins,
+                    SpendTxFees::Regular(feerate_vb),
+                    change_address,
+                    locktime,
+                ),
+                WalletDescriptor::Imported(imported) => imported_spend::create_imported_spend(
+                    imported,
+                    &self.secp,
+                    &mut tx_getter,
+                    &destinations_checked,
+                    &candidate_coins,
+                    SpendTxFees::Regular(feerate_vb),
+                    change_address,
+                    locktime,
+                ),
+            } {
                 Ok(res) => res,
                 Err(SpendCreationError::CoinSelection(e)) => {
                     return Ok(CreateSpendResult::InsufficientFunds { missing: e.missing });
@@ -1398,6 +1484,14 @@ impl DaemonControl {
                 self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
             }
 
+            // The imported spend's exact unsigned construction must exist
+            // before any externally signed PSBT can be accepted against it.
+            if self.config.main_descriptor.as_imported().is_some() {
+                db_conn
+                    .store_imported_construction(&psbt)
+                    .map_err(CommandError::ImportedSpendValidation)?;
+            }
+
             return Ok(CreateSpendResult::Success {
                 psbt,
                 warnings: warnings.iter().map(|w| w.to_string()).collect(),
@@ -1406,6 +1500,58 @@ impl DaemonControl {
     }
 
     pub fn update_spend(&self, mut psbt: Psbt) -> Result<(), CommandError> {
+        if let Some(imported) = self.config.main_descriptor.as_imported() {
+            backfill_previous_transactions(&mut psbt, &mut DbTxGetter::new(&self.db))?;
+            let mut db_conn = self.db.connection();
+            let txid = psbt.unsigned_tx.compute_txid();
+            let stored = db_conn.spend_tx(&txid).ok_or_else(|| {
+                CommandError::ImportedSpendValidation(
+                    "spend was not created and saved by this imported wallet".into(),
+                )
+            })?;
+            let construction = imported_construction(&stored);
+            imported_spend::verify_imported_signatures(imported, &construction, &psbt, &self.secp)
+                .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
+            let merged = {
+                let mut stored = stored.clone();
+                for (old, incoming) in stored.inputs.iter_mut().zip(&psbt.inputs) {
+                    for (key, signature) in &incoming.partial_sigs {
+                        if old
+                            .partial_sigs
+                            .get(key)
+                            .is_some_and(|existing| existing != signature)
+                        {
+                            return Err(CommandError::ImportedSpendValidation(
+                                "conflicting signature for the same signer".into(),
+                            ));
+                        }
+                        old.partial_sigs.insert(*key, *signature);
+                    }
+                }
+                imported_spend::verify_imported_signatures(
+                    imported,
+                    &construction,
+                    &stored,
+                    &self.secp,
+                )
+                .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?;
+                stored
+            };
+            if db_conn
+                .spend_broadcast_txid(&txid)
+                .map_err(CommandError::ImportedSpendValidation)?
+                .is_some()
+            {
+                if merged == stored {
+                    return Ok(());
+                }
+                return Err(CommandError::ImportedSpendValidation(
+                    "a broadcast spend cannot accept more signatures".into(),
+                ));
+            }
+            db_conn.store_spend(&merged);
+            return Ok(());
+        }
         // On Bitcoin Blake2b the value verified is the value stored. The
         // verifier authenticates every prevout through `non_witness_utxo`,
         // which the public `updatespend` contract never required (a PSBT with
@@ -1488,13 +1634,17 @@ impl DaemonControl {
         let txids_set: Option<HashSet<_>> = txids.as_ref().map(|list| list.iter().collect());
         let spend_txs = spend_psbts
             .into_iter()
-            .filter_map(|(psbt, updated_at)| {
+            .filter_map(|(psbt, updated_at, broadcast_txid)| {
                 if let Some(set) = &txids_set {
                     if !set.contains(&psbt.unsigned_tx.compute_txid()) {
                         return None;
                     }
                 }
-                Some(ListSpendEntry { psbt, updated_at })
+                Some(ListSpendEntry {
+                    psbt,
+                    updated_at,
+                    broadcast_txid,
+                })
             })
             .collect();
         Ok(ListSpendResult { spend_txs })
@@ -1525,16 +1675,46 @@ impl DaemonControl {
         // same checks run at spend-creation time, but re-running them here — on
         // the pre-finalization PSBT — means a PSBT mutated in-flight between
         // creation and broadcast is rejected before it can hit the network.
-        spend::reverify_spend_before_broadcast(&self.config.main_descriptor, &spend_psbt)?;
-
-        // Then, broadcast it (or try to, we never know if we are not going to hit an
-        // error at broadcast time).
-        // These checks are already performed at Spend creation time. TODO: a belt-and-suspenders is still worth it though.
-        let final_tx =
-            finalize_spend_for_chain(self.config.bitcoin_config.chain, spend_psbt, &self.secp)?;
+        let final_tx = match &self.config.main_descriptor {
+            WalletDescriptor::Vault(vault) => {
+                spend::reverify_spend_before_broadcast(vault, &spend_psbt)?;
+                finalize_spend_for_chain(self.config.bitcoin_config.chain, spend_psbt, &self.secp)?
+            }
+            WalletDescriptor::Imported(imported) => {
+                let construction = imported_construction(&spend_psbt);
+                imported_spend::finalize_imported_spend(
+                    imported,
+                    &construction,
+                    &spend_psbt,
+                    &self.secp,
+                )
+                .map_err(|error| CommandError::ImportedSpendValidation(error.to_string()))?
+                .transaction()
+                .clone()
+            }
+        };
+        if self.config.main_descriptor.as_imported().is_some() {
+            if let Some(recorded) = db_conn
+                .spend_broadcast_txid(txid)
+                .map_err(CommandError::ImportedSpendValidation)?
+            {
+                if recorded == final_tx.compute_txid() {
+                    return Ok(());
+                }
+                return Err(CommandError::ImportedSpendValidation(
+                    "stored broadcast transaction ID conflicts with finalized spend".into(),
+                ));
+            }
+        }
         self.bitcoin
             .broadcast_tx(&final_tx)
             .map_err(CommandError::TxBroadcast)?;
+        if self.config.main_descriptor.as_imported().is_some() {
+            db_conn.record_broadcast_txid(txid, &final_tx.compute_txid()).map_err(|error|
+                CommandError::ImportedSpendValidation(format!(
+                    "broadcast may have succeeded, but saving the actual transaction ID failed: {error}"
+                )))?;
+        }
 
         // Finally, update our state with the changes from this transaction.
         let (tx, rx) = mpsc::sync_channel(0);
@@ -1785,16 +1965,28 @@ impl DaemonControl {
         // have their own finite budget so a reservation stream cannot starve this RPC.
         let mut change_commit_conflicts = 0;
         loop {
-            match create_spend(
-                &self.config.main_descriptor,
-                &self.secp,
-                &mut tx_getter,
-                &destinations,
-                &candidate_coins,
-                SpendTxFees::Rbf(feerate_vb, replaced_fee),
-                change_address.clone(),
-                locktime,
-            ) {
+            match match &self.config.main_descriptor {
+                WalletDescriptor::Vault(vault) => create_spend(
+                    vault,
+                    &self.secp,
+                    &mut tx_getter,
+                    &destinations,
+                    &candidate_coins,
+                    SpendTxFees::Rbf(feerate_vb, replaced_fee),
+                    change_address.clone(),
+                    locktime,
+                ),
+                WalletDescriptor::Imported(imported) => imported_spend::create_imported_spend(
+                    imported,
+                    &self.secp,
+                    &mut tx_getter,
+                    &destinations,
+                    &candidate_coins,
+                    SpendTxFees::Rbf(feerate_vb, replaced_fee),
+                    change_address.clone(),
+                    locktime,
+                ),
+            } {
                 Ok(CreateSpendRes {
                     psbt,
                     has_change,
@@ -1816,6 +2008,11 @@ impl DaemonControl {
                     }
                     if has_change {
                         self.maybe_increase_last_deriv_index(&mut db_conn, &change_info);
+                    }
+                    if self.config.main_descriptor.as_imported().is_some() {
+                        db_conn
+                            .store_imported_construction(&psbt)
+                            .map_err(CommandError::ImportedSpendValidation)?;
                     }
 
                     return Ok(CreateSpendResult::Success {
@@ -1880,7 +2077,13 @@ impl DaemonControl {
         // rescanning. This could make us crash with the bitcoind backend if someone triggered a
         // rescan of the wallet just after we checked above and did now.
         self.bitcoin
-            .start_rescan(&self.config.main_descriptor, timestamp)
+            .start_rescan(
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .ok_or(CommandError::RecoveryNotAvailable)?,
+                timestamp,
+            )
             .map_err(CommandError::RescanTrigger)?;
         db_conn.set_rescan(timestamp);
 
@@ -1970,8 +2173,12 @@ impl DaemonControl {
             .chain_tip_result()
             .map_err(CommandError::ChainTipUnavailable)?
             .height;
-        let timelock =
-            timelock.unwrap_or_else(|| self.config.main_descriptor.first_timelock_value());
+        let vault = self
+            .config
+            .main_descriptor
+            .as_vault()
+            .ok_or(CommandError::RecoveryNotAvailable)?;
+        let timelock = timelock.unwrap_or_else(|| vault.first_timelock_value());
         let height_delta: i32 = timelock.into();
         let coins = if coins_outpoints.is_empty() {
             db_conn.coins(&[CoinStatus::Confirmed], &[])
@@ -2018,7 +2225,7 @@ impl DaemonControl {
         let CreateSpendRes {
             psbt, has_change, ..
         } = create_spend(
-            &self.config.main_descriptor,
+            vault,
             &self.secp,
             &mut tx_getter,
             &[], // No destination, only the change address.
@@ -2037,7 +2244,26 @@ impl DaemonControl {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GetInfoDescriptors {
-    pub main: descriptors::CoincubeDescriptor,
+    pub main: coincube_core::wallet_descriptor::WalletDescriptor,
+}
+
+/// Durable discovery status for a descriptor-imported Bitcoin wallet. Scanned
+/// counts are exclusive receive/change derivation bounds whose history was
+/// successfully checked; requested bounds are never reported as coverage.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ImportedWalletSync {
+    /// Full, chain-bound SHA256 wallet identity encoded as 64 hex digits.
+    pub wallet_identity: String,
+    pub chain_id: coincube_core::chain::ChainId,
+    pub birthday: u32,
+    pub initial_lookahead: u32,
+    /// Durable wider historical scan request. Readiness requires both branch
+    /// coverage counts to reach this bound, separately from allocation state.
+    #[serde(default)]
+    pub discovery_target: u32,
+    pub receive_scanned: u32,
+    pub change_scanned: u32,
+    pub history_complete: bool,
 }
 
 /// Information about the daemon
@@ -2053,6 +2279,9 @@ pub struct GetInfoResult {
     pub block_height: i32,
     pub sync: f64,
     pub descriptors: GetInfoDescriptors,
+    /// Absent for every historical Vault response and old daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_wallet: Option<ImportedWalletSync>,
     /// The progress as a percentage (between 0 and 1) of an ongoing rescan if there is any
     pub rescan_progress: Option<f64>,
     /// Depth, in blocks, of a block chain reorganization the poller refused to apply because
@@ -2229,6 +2458,8 @@ pub struct ListSpendEntry {
     #[serde(serialize_with = "ser_to_string", deserialize_with = "deser_fromstr")]
     pub psbt: Psbt,
     pub updated_at: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub broadcast_txid: Option<bitcoin::Txid>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2872,9 +3103,7 @@ mod tests {
             };
             output[*vout as usize] = bitcoin::TxOut {
                 value: bitcoin::Amount::from_sat(*amount),
-                script_pubkey: desc
-                    .derive(bip32::ChildNumber::from(*index), &control.secp)
-                    .script_pubkey(),
+                script_pubkey: desc.derive(*index).unwrap().script_pubkey(),
             };
         }
         bitcoin::Transaction {
@@ -2947,7 +3176,8 @@ mod tests {
             .config
             .main_descriptor
             .change_descriptor()
-            .derive(3.into(), &control.secp)
+            .derive(3)
+            .unwrap()
             .script_pubkey();
         assert!(psbt
             .unsigned_tx
@@ -3040,8 +3270,10 @@ mod tests {
             .config
             .main_descriptor
             .change_descriptor()
-            .derive(0.into(), &control.secp)
+            .derive(0)
+            .unwrap()
             .address(control.config.bitcoin_config.network)
+            .unwrap()
             .as_unchecked()
             .clone();
         let before = db_conn.change_index();
@@ -3653,17 +3885,22 @@ mod tests {
         // import) is backfilled from the wallet and then passes re-verification.
         let mut stripped = psbt.clone();
         stripped.inputs[0].non_witness_utxo = None;
-        assert!(
-            spend::reverify_spend_before_broadcast(&control.config.main_descriptor, &stripped)
-                .is_err()
-        );
+        assert!(spend::reverify_spend_before_broadcast(
+            control.config.main_descriptor.as_vault().unwrap(),
+            &stripped
+        )
+        .is_err());
         backfill_previous_transactions(&mut stripped, &mut DbTxGetter::new(&control.db())).unwrap();
         assert_eq!(
             stripped.inputs[0].non_witness_utxo.as_ref(),
             Some(&dummy_tx)
         );
         assert_eq!(stripped, psbt);
-        spend::reverify_spend_before_broadcast(&control.config.main_descriptor, &stripped).unwrap();
+        spend::reverify_spend_before_broadcast(
+            control.config.main_descriptor.as_vault().unwrap(),
+            &stripped,
+        )
+        .unwrap();
 
         // An input already carrying a previous transaction is left untouched, even
         // one the wallet would not have handed out.
@@ -4979,6 +5216,19 @@ mod tests {
         let info: GetInfoResult = serde_json::from_value(value).unwrap();
         assert_eq!(info.history_sync, crate::bitcoin::HistorySync::default());
         assert_eq!(info.chain_id, None);
+    }
+
+    #[test]
+    fn legacy_get_info_descriptor_json_remains_the_struct_object() {
+        let dummy = DummyCoincube::new(DummyBitcoind::new(), DummyDatabase::new());
+        let info = serde_json::to_value(dummy.control().get_info()).unwrap();
+        let main = &info["descriptors"]["main"];
+        let object = main.as_object().expect("legacy main is a JSON object");
+        assert!(object.contains_key("multi_desc"));
+        assert!(object.contains_key("receive_desc"));
+        assert!(object.contains_key("change_desc"));
+        assert!(!object.contains_key("kind"));
+        assert!(info.get("imported_wallet").is_none());
     }
 
     mod chain_keyed_spend {

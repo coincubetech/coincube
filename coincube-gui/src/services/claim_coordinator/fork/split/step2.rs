@@ -849,7 +849,11 @@ impl SplitStep2Production {
         )
         .map_err(Error::Preflight)?;
         Ok(Self(Step2Routes {
-            descriptor: config.main_descriptor.clone(),
+            descriptor: config
+                .main_descriptor
+                .as_vault()
+                .ok_or(Error::Unsupported)?
+                .clone(),
             daemon,
             preflight,
             origin: origin.as_str().to_owned(),

@@ -34,7 +34,7 @@ use crate::{
     config::{Config, ConfigError},
     database::{
         sqlite::{preflight, FreshDbOptions, SqliteDb, SqliteDbError, MAX_DB_VERSION_NO_TX_DB},
-        DatabaseInterface,
+        DatabaseConnection, DatabaseInterface,
     },
 };
 pub use database::sqlite::preflight::{PreflightError, StoredIdentity};
@@ -48,6 +48,184 @@ use std::{
 };
 
 use miniscript::bitcoin::{constants::ChainHash, hashes::Hash, secp256k1, BlockHash};
+
+/// Prepare an imported wallet without starting a backend or publishing it as a
+/// Cube. `config` must already name the final data directory; `staged_dir` is
+/// where the caller builds the private database and daemon.toml before rename.
+pub fn create_imported_storage(
+    config: &Config,
+    staged_dir: &DataDirectory,
+    birthday: u32,
+    initial_lookahead: u32,
+) -> Result<(), StartupError> {
+    let mut config = config.clone();
+    config.import_birthday = Some(birthday);
+    config.import_initial_lookahead = Some(initial_lookahead);
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "import storage requires an imported wallet".into(),
+        ))
+    })?;
+    let final_dir = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if final_dir.path() == staged_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "import staging directory must differ from final data directory".into(),
+        )));
+    }
+    if matches!(
+        config.bitcoin_backend,
+        Some(config::BitcoinBackend::Bitcoind(_))
+    ) {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
+        )));
+    }
+    staged_dir
+        .init()
+        .map_err(|error| StartupError::DatadirCreation(staged_dir.path().to_path_buf(), error))?;
+    database::sqlite::create_imported_db(
+        &staged_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        birthday,
+        initial_lookahead,
+    )?;
+    let serialized = toml::to_string_pretty(&config.for_persistence())
+        .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.to_string())))?;
+    let path = staged_dir.path().join("daemon.toml");
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options.open(&path)?;
+    use std::io::Write;
+    file.write_all(serialized.as_bytes())?;
+    file.sync_all()?;
+    #[cfg(unix)]
+    std::fs::File::open(staged_dir.path())?.sync_all()?;
+    Ok(())
+}
+
+/// Apply restored address high-water marks to unpublished imported storage.
+/// The config must still point at its eventual final directory; only the
+/// staged database is opened here, with no backend or network access.
+pub fn restore_imported_address_state(
+    config: &Config,
+    staged_dir: &DataDirectory,
+    receive_index: u32,
+    change_index: u32,
+) -> Result<(), StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "address-state restore requires an imported wallet".into(),
+        ))
+    })?;
+    let final_dir = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if final_dir.path() == staged_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "restore storage must remain staged until address state is complete".into(),
+        )));
+    }
+    database::sqlite::restore_imported_address_state(
+        &staged_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        config.import_birthday.expect("validated imported birthday"),
+        config
+            .import_initial_lookahead
+            .expect("validated imported lookahead"),
+        receive_index,
+        change_index,
+    )?;
+    Ok(())
+}
+
+/// Queue a wider historical scan while the imported daemon is stopped. The
+/// immutable initial lookahead stays bound to config; the separate target and
+/// incomplete marker survive restart and cause a full scan on next startup.
+pub fn expand_imported_discovery(
+    config: &Config,
+    data_dir: &DataDirectory,
+    target: u32,
+) -> Result<u32, StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "discovery expansion requires an imported wallet".into(),
+        ))
+    })?;
+    let expected = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if expected.path() != data_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "discovery directory does not match the imported wallet configuration".into(),
+        )));
+    }
+    Ok(database::sqlite::expand_imported_discovery(
+        &data_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        config.import_birthday.expect("validated imported birthday"),
+        config
+            .import_initial_lookahead
+            .expect("validated imported lookahead"),
+        target,
+    )?)
+}
+
+/// Inspect a published or staged imported database without starting a backend.
+/// Recovery uses this to verify the exact stored wallet and its durable
+/// address high-water marks before declaring an interrupted attach complete.
+pub fn read_imported_address_state(
+    config: &Config,
+    data_dir: &DataDirectory,
+) -> Result<(u32, u32), StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "address-state lookup requires an imported wallet".into(),
+        ))
+    })?;
+    let expected = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if expected.path() != data_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "address-state directory does not match imported wallet config".into(),
+        )));
+    }
+    let secp = secp256k1::Secp256k1::verification_only();
+    let db = SqliteDb::new(data_dir.sqlite_db_file_path(), None, &secp)?;
+    db.sanity_check_wallet(
+        config.bitcoin_config.chain,
+        &coincube_core::wallet_descriptor::WalletDescriptor::Imported(imported.clone()),
+    )?;
+    let mut conn = db.connection()?;
+    let history = conn
+        .imported_history()
+        .map_err(SqliteDbError::Rusqlite)?
+        .ok_or_else(|| {
+            SqliteDbError::MalformedIdentity("imported wallet has no historical scan state".into())
+        })?;
+    if Some(history.birthday) != config.import_birthday
+        || Some(history.initial_lookahead) != config.import_initial_lookahead
+    {
+        return Err(StartupError::Database(SqliteDbError::MalformedIdentity(
+            "imported scan settings do not match persisted wallet".into(),
+        )));
+    }
+    Ok((conn.receive_index().into(), conn.change_index().into()))
+}
 
 #[cfg(not(test))]
 use std::panic;
@@ -289,10 +467,27 @@ fn setup_sqlite(
 ) -> Result<SqliteDb, StartupError> {
     let db_path = data_dir.sqlite_db_file_path();
     let options = if fresh_data_dir {
-        Some(FreshDbOptions::new(
-            config.bitcoin_config.chain,
-            config.main_descriptor.clone(),
-        ))
+        if let Some(vault) = config.main_descriptor.as_vault() {
+            Some(FreshDbOptions::new(
+                config.bitcoin_config.chain,
+                vault.clone(),
+            ))
+        } else {
+            let imported = config
+                .main_descriptor
+                .as_imported()
+                .expect("wallet is imported");
+            database::sqlite::create_imported_db(
+                &db_path,
+                config.bitcoin_config.chain,
+                imported,
+                config.import_birthday.expect("checked imported birthday"),
+                config
+                    .import_initial_lookahead
+                    .expect("checked imported lookahead"),
+            )?;
+            None
+        }
     } else {
         None
     };
@@ -320,7 +515,25 @@ fn setup_sqlite(
         sqlite.maybe_apply_migrations(&wallet_txs)?;
     }
 
-    sqlite.sanity_check(config.bitcoin_config.chain, &config.main_descriptor)?;
+    sqlite.sanity_check_wallet(config.bitcoin_config.chain, &config.main_descriptor)?;
+    if config.main_descriptor.as_imported().is_some() {
+        let history = sqlite
+            .connection()?
+            .imported_history()
+            .map_err(SqliteDbError::Rusqlite)?
+            .ok_or_else(|| {
+                StartupError::Config(ConfigError::Unexpected(
+                    "import history state missing".into(),
+                ))
+            })?;
+        if Some(history.birthday) != config.import_birthday
+            || Some(history.initial_lookahead) != config.import_initial_lookahead
+        {
+            return Err(StartupError::Config(ConfigError::Unexpected(
+                "Imported scan settings differ from the installed wallet".into(),
+            )));
+        }
+    }
     log::info!("Database initialized and checked.");
 
     Ok(sqlite)
@@ -606,6 +819,10 @@ fn setup_bitcoind(
     fresh_data_dir: bool,
     admitted: Option<BitcoinD>,
 ) -> Result<BitcoinD, StartupError> {
+    let vault = config.main_descriptor.as_vault().ok_or_else(||
+        StartupError::Config(ConfigError::Unexpected(
+            "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
+        )))?;
     let wo_path: path::PathBuf = data_dir.coincubed_watchonly_wallet_path();
     let wo_path_str = bitcoind_watchonly_wallet_path(data_dir);
 
@@ -617,18 +834,15 @@ fn setup_bitcoind(
         Some(bitcoind) => bitcoind,
         None => BitcoinD::new(bitcoind_config, wo_path_str)?,
     };
-    bitcoind.node_sanity_checks(
-        config.bitcoin_config.network,
-        config.main_descriptor.is_taproot(),
-    )?;
+    bitcoind.node_sanity_checks(config.bitcoin_config.network, vault.is_taproot())?;
     if fresh_data_dir || !wo_path.exists() {
         log::info!("Creating a new watchonly wallet on bitcoind.");
-        bitcoind.create_watchonly_wallet(&config.main_descriptor)?;
+        bitcoind.create_watchonly_wallet(vault)?;
         log::info!("Watchonly wallet created.");
     }
     log::info!("Loading our watchonly wallet on bitcoind.");
     bitcoind.maybe_load_watchonly_wallet()?;
-    bitcoind.wallet_sanity_checks(&config.main_descriptor)?;
+    bitcoind.wallet_sanity_checks(vault)?;
     log::info!("Watchonly wallet loaded on bitcoind and sanity checked.");
 
     Ok(bitcoind)
@@ -682,7 +896,8 @@ fn setup_electrum(
         let chain_hash = ChainHash::using_genesis_block(config.bitcoin_config.network);
         BlockHash::from_byte_array(*chain_hash.as_bytes())
     };
-    let bdk_wallet = electrum::wallet::BdkWallet::new(
+    let imported_history = db_conn.imported_history();
+    let bdk_wallet = electrum::wallet::BdkWallet::new_for_wallet(
         &config.main_descriptor,
         genesis_hash,
         tip,
@@ -690,9 +905,31 @@ fn setup_electrum(
         &txs,
         receive_index,
         change_index,
+        imported_history
+            .as_ref()
+            .map_or(30, |state| state.discovery_target),
     );
-    let full_scan = db_conn.rescan_timestamp().is_some();
-    let electrum = Electrum::new(client, bdk_wallet, full_scan).map_err(StartupError::Electrum)?;
+    let full_scan = db_conn.rescan_timestamp().is_some()
+        || imported_history
+            .as_ref()
+            .is_some_and(|state| !state.history_complete);
+    let mut electrum =
+        Electrum::new(client, bdk_wallet, full_scan).map_err(StartupError::Electrum)?;
+    if let Some(history) = imported_history {
+        // BDK's full scan stop gap is counted from index zero, even when
+        // high-water addresses are revealed. Cover every restored allocation
+        // plus the requested discovery gap before declaring history complete.
+        let required_gap = u32::from(receive_index.max(change_index))
+            .checked_add(history.discovery_target)
+            .ok_or_else(|| {
+                StartupError::Config(ConfigError::Unexpected(
+                    "imported historical scan bound overflow".into(),
+                ))
+            })?;
+        electrum
+            .set_full_scan_gap(required_gap as usize)
+            .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
+    }
     electrum
         .sanity_checks(&genesis_hash)
         .map_err(StartupError::Electrum)?;
@@ -749,7 +986,8 @@ fn setup_esplora(
         .map(|(tx, _, _)| tx)
         .collect();
     let (receive_index, change_index) = (db_conn.receive_index(), db_conn.change_index());
-    let bdk_wallet = electrum::wallet::BdkWallet::new(
+    let imported_history = db_conn.imported_history();
+    let bdk_wallet = electrum::wallet::BdkWallet::new_for_wallet(
         &config.main_descriptor,
         genesis_hash,
         tip,
@@ -757,9 +995,27 @@ fn setup_esplora(
         &txs,
         receive_index,
         change_index,
+        imported_history
+            .as_ref()
+            .map_or(30, |state| state.discovery_target),
     );
-    let full_scan = db_conn.rescan_timestamp().is_some();
-    let esplora = Esplora::new(client, bdk_wallet, full_scan).map_err(StartupError::Esplora)?;
+    let full_scan = db_conn.rescan_timestamp().is_some()
+        || imported_history
+            .as_ref()
+            .is_some_and(|state| !state.history_complete);
+    let mut esplora = Esplora::new(client, bdk_wallet, full_scan).map_err(StartupError::Esplora)?;
+    if let Some(history) = imported_history {
+        let required_gap = u32::from(receive_index.max(change_index))
+            .checked_add(history.discovery_target)
+            .ok_or_else(|| {
+                StartupError::Config(ConfigError::Unexpected(
+                    "imported historical scan bound overflow".into(),
+                ))
+            })?;
+        esplora
+            .set_full_scan_gap(required_gap as usize)
+            .map_err(|error| StartupError::Config(ConfigError::Unexpected(error.into())))?;
+    }
     esplora
         .sanity_checks(&genesis_hash)
         .map_err(StartupError::Esplora)?;
@@ -880,7 +1136,13 @@ impl DaemonHandle {
             || with_rpc_server
             || config.pending_bitcoind.is_some()
             || !matches!(
-                config.main_descriptor.descriptor(),
+                config
+                    .main_descriptor
+                    .as_vault()
+                    .map(|vault| vault.descriptor())
+                    .ok_or(StartupError::ConnectAdmission(
+                        connect::AdmissionError::InvalidBackend
+                    ))?,
                 miniscript::Descriptor::Wsh(_)
             )
         {
@@ -912,7 +1174,13 @@ impl DaemonHandle {
                 Some(config::BitcoinBackend::Bitcoind(node)) if node.addr.ip().is_loopback()
             )
             || !matches!(
-                config.main_descriptor.descriptor(),
+                config
+                    .main_descriptor
+                    .as_vault()
+                    .map(|vault| vault.descriptor())
+                    .ok_or(StartupError::ConnectAdmission(
+                        connect::AdmissionError::InvalidBackend
+                    ))?,
                 miniscript::Descriptor::Wsh(_)
             )
         {
@@ -951,6 +1219,19 @@ impl DaemonHandle {
             .bitcoin_config
             .check_chain_encoding()
             .map_err(StartupError::Config)?;
+        if config.main_descriptor.as_imported().is_some() {
+            config.check().map_err(StartupError::Config)?;
+        }
+        if config.main_descriptor.as_imported().is_some()
+            && matches!(
+                config.bitcoin_backend,
+                Some(config::BitcoinBackend::Bitcoind(_))
+            )
+        {
+            return Err(StartupError::Config(ConfigError::Unexpected(
+                "Bitcoin Core backend cannot safely complete imported-wallet historical sync yet; choose Electrum or Esplora".into(),
+            )));
+        }
         if let Some(backend) = connect.as_ref() {
             if backend.chain() != config.bitcoin_config.chain
                 || bitcoin.is_some()
@@ -1007,6 +1288,12 @@ impl DaemonHandle {
             preflight::refuse_orphan_sidecars(&data_dir.sqlite_db_file_path())
                 .map_err(StartupError::DbPreflight)?;
         }
+        // Retain the historical Vault refusal order (chain admission and
+        // existing-database identity first), while still validating every
+        // caller-built configuration before any startup writes.
+        if config.main_descriptor.as_vault().is_some() {
+            config.check().map_err(StartupError::Config)?;
+        }
         if !data_dir.exists() {
             data_dir
                 .init()
@@ -1049,7 +1336,9 @@ impl DaemonHandle {
         // A wallet whose scan window starts after the coins we already know about
         // cannot track them, and nothing else notices — see `heal_scan_window`.
         if let Some(bitcoind) = bitcoind.as_mut() {
-            heal_scan_window(bitcoind, &db, &config.main_descriptor);
+            if let Some(vault) = config.main_descriptor.as_vault() {
+                heal_scan_window(bitcoind, &db, vault);
+            }
         }
 
         // Shared abort flag: `stop` flips it so an in-flight Esplora scan stops
@@ -2375,7 +2664,7 @@ mod tests {
                     }
                     "taproot" => config.main_descriptor = CoincubeDescriptor::from_str(
                         "tr([abcdef01]xpub6Eze7yAT3Y1wGrnzedCNVYDXUqa9NmHVWck5emBaTbXtURbe1NWZbK9bsz1TiVE7Cz341PMTfYgFw1KdLWdzcM1UMFTcdQfCYhhXZ2HJvTW/<0;1>/*,and_v(v:pk([abcdef01]xpub688Hn4wScQAAiYJLPg9yH27hUpfZAUnmJejRQBCiwfP5PEDzjWMNW1wChcninxr5gyavFqbbDjdV1aK5USJz8NDVjUy7FRQaaqqXHh5SbXe/<0;1>/*),older(52560)))#0mt7e93c"
-                    ).unwrap(),
+                    ).unwrap().into(),
                     "bitcoin" => config.bitcoin_config = BitcoinConfig::new(ChainId::Bitcoin, time::Duration::from_secs(2)),
                     "fallback" => {
                         if let Some(config::BitcoinBackend::Esplora(ref mut selection)) = config.bitcoin_backend {
@@ -2710,12 +2999,12 @@ mod tests {
             let db_path = v8_database(&data_directory, ChainId::Bitcoin);
             rusqlite::Connection::open(&db_path)
                 .unwrap()
-                .execute("UPDATE version SET version = 10", [])
+                .execute("UPDATE version SET version = 11", [])
                 .unwrap();
             let before = (sha256_of(&db_path), listing(&data_directory));
             let config = config_for(ChainId::Bitcoin, &tmp_dir, data_directory.clone(), &node);
             match DaemonHandle::start_default(config, false) {
-                Err(StartupError::DbPreflight(PreflightError::UnsupportedVersion(10))) => {}
+                Err(StartupError::DbPreflight(PreflightError::UnsupportedVersion(11))) => {}
                 other => panic!("expected UnsupportedVersion, got {:?}", other.map(|_| ())),
             }
             assert_eq!((sha256_of(&db_path), listing(&data_directory)), before);
@@ -2879,13 +3168,13 @@ mod tests {
             complete_tip_init(&server);
             finish_daemon_shutdown(&server, t);
 
-            // Migrated in place: v9, identity backfilled, encoding kept.
+            // Migrated in place: v10, identity backfilled, encoding kept.
             let stored =
                 crate::database::sqlite::preflight::read_stored_identity(&db_path).unwrap();
             assert_eq!(
                 stored,
                 StoredIdentity {
-                    version: 9,
+                    version: 10,
                     chain: ChainId::Bitcoin,
                     network: bitcoin::Network::Bitcoin,
                 }

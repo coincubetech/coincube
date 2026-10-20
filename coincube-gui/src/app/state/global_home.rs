@@ -251,6 +251,9 @@ impl Labelled for ReceiveAddressInfo {
 
 #[derive(Debug)]
 pub struct GlobalHome {
+    /// Only populated after the imported wallet's full discovery is verified.
+    pub(crate) imported_balance: Option<Amount>,
+    pub(crate) imported_installed: bool,
     breez_client: Option<Arc<LiquidBackend>>,
     /// Optional Spark backend handle. `None` when the cube has no
     /// Spark signer or the bridge subprocess failed to spawn — the
@@ -410,6 +413,8 @@ impl GlobalHome {
         balance_masked: bool,
     ) -> Self {
         Self {
+            imported_balance: None,
+            imported_installed: false,
             wallet: Some(wallet),
             liquid_balance: Amount::ZERO,
             liquid_balance_loaded: false,
@@ -478,6 +483,8 @@ impl GlobalHome {
         balance_masked: bool,
     ) -> Self {
         Self {
+            imported_balance: None,
+            imported_installed: false,
             wallet: None,
             liquid_balance: Amount::from_sat(0),
             liquid_balance_loaded: false,
@@ -596,14 +603,15 @@ impl State for GlobalHome {
             crate::app::features::liquid_wallet_usable(cache.chain(), cache.liquid_gate);
         let vault_pending = cache.has_vault
             && vault_balance_pending(cache.blockheight(), cache.history_sync(), vault_balance);
-        let total_balance_loading = total_balance_pending(BalanceReadiness {
-            has_spark,
-            spark_loaded: self.spark_balance_loaded,
-            has_liquid,
-            liquid_loaded: self.liquid_balance_loaded,
-            usdt_loaded: self.usdt_balance_loaded,
-            vault_pending,
-        });
+        let total_balance_loading = (cache.has_imported_bitcoin && self.imported_balance.is_none())
+            || total_balance_pending(BalanceReadiness {
+                has_spark,
+                spark_loaded: self.spark_balance_loaded,
+                has_liquid,
+                liquid_loaded: self.liquid_balance_loaded,
+                usdt_loaded: self.usdt_balance_loaded,
+                vault_pending,
+            });
 
         let content = view::dashboard(
             menu,
@@ -614,6 +622,8 @@ impl State for GlobalHome {
                 usdt_balance,
                 usdt_balance_error,
                 vault_balance,
+                imported_balance: self.imported_balance,
+                imported_installed: self.imported_installed,
                 fiat_converter,
                 balance_masked: self.balance_masked,
                 total_balance_loading,
@@ -624,6 +634,7 @@ impl State for GlobalHome {
                 vault_loaded: !vault_pending,
                 display_mode: cache.display_mode,
                 has_vault: cache.has_vault,
+                has_imported_bitcoin: cache.has_imported_bitcoin,
                 has_spark,
                 has_liquid,
                 current_view: self.current_view,
@@ -872,6 +883,13 @@ impl State for GlobalHome {
                         // Breez to prepare a pay_onchain so fees can render on
                         // the confirm screen.
                         if self.current_view.step == 1 {
+                            if self
+                                .transfer_direction
+                                .is_some_and(Self::direction_uses_vault)
+                                && !self.legacy_vault_available(cache)
+                            {
+                                return Task::none();
+                            }
                             let mut tasks = Vec::new();
                             if matches!(
                                 self.transfer_direction,
@@ -1263,6 +1281,11 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::ConfirmSparkSend => {
+                        if self.transfer_direction == Some(TransferDirection::SparkToVault)
+                            && !self.legacy_vault_available(cache)
+                        {
+                            return Task::none();
+                        }
                         // Spark-sourced confirm: broadcast the prepared send. The
                         // destination address + prepare handle were populated at
                         // step 1→2 (see `SparkPrepareSendReady`).
@@ -1492,6 +1515,13 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::SelectWalletInPicker(kind) => {
+                        if !self.legacy_vault_available(cache)
+                            && (kind == WalletKind::Vault
+                                || self.transfer_from == Some(WalletKind::Vault)
+                                || self.transfer_to == Some(WalletKind::Vault))
+                        {
+                            return Task::none();
+                        }
                         // Apply the selection to the side being edited. The TO
                         // popup already filters out the current FROM, but the
                         // FROM popup shows all three — so picking a FROM that
@@ -1529,6 +1559,9 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::SignVaultToLiquidTx => {
+                        if !self.legacy_vault_available(cache) {
+                            return Task::none();
+                        }
                         if let Some(transfer_direction) = self.transfer_direction {
                             // Shared signer path for both Vault-sourced directions —
                             // `receive_address_info` is the only thing that differs
@@ -1637,6 +1670,13 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::ConfirmTransfer => {
+                        if self
+                            .transfer_direction
+                            .is_some_and(Self::direction_uses_vault)
+                            && !self.legacy_vault_available(cache)
+                        {
+                            return Task::none();
+                        }
                         if let Some(transfer_direction) = self.transfer_direction {
                             if matches!(
                                 transfer_direction,
@@ -2425,21 +2465,31 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::TransferPsbtReady(result) => {
+                        if !self.legacy_vault_available(cache) {
+                            self.is_sending = false;
+                            return Task::none();
+                        }
                         self.is_sending = false;
                         match result {
                             Ok((psbt, wallet, (datadir_path, network))) => {
                                 if let Some(wallet) = wallet {
-                                    let sigs =
-                                        match wallet.main_descriptor.partial_spend_info(&psbt) {
-                                            Ok(info) => info,
-                                            Err(e) => {
-                                                let err_msg =
-                                                    format!("Failed to get signature info: {}", e);
-                                                return Task::done(Message::View(
-                                                    view::Message::ShowError(err_msg),
-                                                ));
-                                            }
-                                        };
+                                    let Some(descriptor) = wallet.inheritance_descriptor() else {
+                                        return Task::done(Message::View(
+                                            view::Message::ShowError(
+                                                "This transfer requires a Cube Vault.".into(),
+                                            ),
+                                        ));
+                                    };
+                                    let sigs = match descriptor.partial_spend_info(&psbt) {
+                                        Ok(info) => info,
+                                        Err(e) => {
+                                            let err_msg =
+                                                format!("Failed to get signature info: {}", e);
+                                            return Task::done(Message::View(
+                                                view::Message::ShowError(err_msg),
+                                            ));
+                                        }
+                                    };
 
                                     let spend_amount =
                                         psbt.unsigned_tx.output.iter().map(|out| out.value).sum();
@@ -2451,7 +2501,7 @@ impl State for GlobalHome {
                                         .iter()
                                         .map(|txin| txin.sequence)
                                         .any(|seq| seq.is_relative_lock_time());
-                                    let max_vbytes = wallet.main_descriptor.unsigned_tx_max_vbytes(
+                                    let max_vbytes = descriptor.unsigned_tx_max_vbytes(
                                         &psbt.unsigned_tx,
                                         use_primary_path,
                                     );
@@ -2525,6 +2575,9 @@ impl State for GlobalHome {
                         Task::none()
                     }
                     HomeMessage::TransferPsbtPreviewReady { feerate_vb, result } => {
+                        if !self.legacy_vault_available(cache) {
+                            return Task::none();
+                        }
                         // Drop late results: if the user has since edited the
                         // feerate, `self.transfer_feerate.value` won't parse to
                         // the feerate this preview was built against. Keeping
@@ -2701,6 +2754,19 @@ impl State for GlobalHome {
 }
 
 impl GlobalHome {
+    fn legacy_vault_available(&self, cache: &Cache) -> bool {
+        cache.has_vault
+            && self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.supports_inheritance())
+    }
+
+    fn direction_uses_vault(direction: TransferDirection) -> bool {
+        let (from, to) = direction.pair();
+        from == WalletKind::Vault || to == WalletKind::Vault
+    }
+
     /// Re-parse `entered_amount.value` against the current `transfer_direction`
     /// and the source wallet's balance. Mutates `entered_amount.valid` and
     /// `entered_amount.warning`. Called from `AmountEdited` (obvious) and
@@ -2844,6 +2910,9 @@ impl GlobalHome {
         cache: &Cache,
         daemon: &Option<Arc<dyn Daemon + Sync + Send>>,
     ) -> Task<Message> {
+        if !self.legacy_vault_available(cache) {
+            return Task::none();
+        }
         let Some(direction) = self.transfer_direction else {
             return Task::none();
         };
@@ -3989,12 +4058,16 @@ mod tests {
             let (mut home, wallet) = home_on_transfer_screen();
             let daemon = Arc::new(RecordingDaemon::default());
             let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+            let cache = Cache {
+                has_vault: true,
+                ..Cache::default()
+            };
             // Type a two-digit feerate one keystroke at a time, then correct it:
             // four valid intermediate values, four previews, four PSBTs thrown away.
             for keystroke in ["2", "25", "2", "20"] {
                 drain(home.update(
                     Some(as_daemon.clone()),
-                    &Cache::default(),
+                    &cache,
                     Message::View(view::Message::Home(HomeMessage::SetTransferFeerate(
                         keystroke.to_string(),
                     ))),
@@ -4021,12 +4094,48 @@ mod tests {
         }
 
         #[test]
+        fn hidden_vault_transfer_messages_cannot_construct_an_imported_spend() {
+            let (mut home, _) = home_on_transfer_screen();
+            let daemon = Arc::new(RecordingDaemon::default());
+            let as_daemon: Arc<dyn Daemon + Sync + Send> = daemon.clone();
+            // A common Bitcoin Wallet may be loaded without a Cube Vault.
+            // Even forged/stale legacy transfer messages must stop before a
+            // daemon create_spend_tx call or an in-memory picker mutation.
+            let cache = Cache::default();
+            home.wallet_picker = Some(PickerSide::From);
+            drain(home.update(
+                Some(as_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Home(HomeMessage::SelectWalletInPicker(
+                    WalletKind::Vault,
+                ))),
+            ));
+            assert_eq!(home.wallet_picker, Some(PickerSide::From));
+            assert_eq!(home.transfer_from, None);
+
+            for message in [
+                HomeMessage::SetTransferFeerate("25".to_string()),
+                HomeMessage::SignVaultToLiquidTx,
+                HomeMessage::ConfirmTransfer,
+            ] {
+                drain(home.update(
+                    Some(as_daemon.clone()),
+                    &cache,
+                    Message::View(view::Message::Home(message)),
+                ));
+            }
+            assert!(daemon.calls.lock().unwrap().is_empty());
+            assert!(!home.is_sending);
+        }
+
+        #[test]
         fn the_sizing_address_is_the_wallet_own_change_index_zero() {
             let wallet = Wallet::new(CoincubeDescriptor::from_str(DESC).unwrap());
             let secp =
                 coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only();
             let expected = wallet
-                .main_descriptor
+                .inheritance_descriptor()
+                .unwrap()
                 .change_descriptor()
                 .derive(0.into(), &secp)
                 .address(coincube_core::miniscript::bitcoin::Network::Bitcoin);

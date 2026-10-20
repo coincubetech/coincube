@@ -117,6 +117,7 @@ impl fmt::Display for InputAuthError {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SpendCreationError {
+    InvalidImportedWallet(&'static str),
     InvalidFeerate(/* sats/vb */ u64),
     FeeEstimationFailed,
     InvalidOutputValue(bitcoin::Amount),
@@ -132,6 +133,7 @@ pub enum SpendCreationError {
 impl fmt::Display for SpendCreationError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
+            Self::InvalidImportedWallet(reason) => write!(f, "Invalid imported wallet spend: {reason}."),
             Self::InvalidFeerate(sats_vb) => write!(f, "Invalid feerate: {} sats/vb.", sats_vb),
             Self::InvalidOutputValue(amount) => write!(f, "Invalid output value '{}'.", amount),
             Self::InsaneFees(info) => write!(
@@ -164,7 +166,7 @@ impl fmt::Display for SpendCreationError {
 impl std::error::Error for SpendCreationError {}
 
 // Sanity check the value of a transaction output.
-fn check_output_value(value: bitcoin::Amount) -> Result<(), SpendCreationError> {
+pub(crate) fn check_output_value(value: bitcoin::Amount) -> Result<(), SpendCreationError> {
     if value > bitcoin::Amount::MAX_MONEY || value.to_sat() < DUST_OUTPUT_SATS {
         Err(SpendCreationError::InvalidOutputValue(value))
     } else {
@@ -424,13 +426,15 @@ impl bdk_coin_select::BnbMetric for LowestFeeChangeCondition {
 ///
 /// `must_have_change` indicates whether the transaction must have a change output.
 /// If `true`, the returned change amount will be positive.
-fn select_coins_for_spend(
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn select_coins_for_spend(
     candidate_coins: &[CandidateCoin],
     base_tx: bitcoin::Transaction,
     change_txo: bitcoin::TxOut,
     feerate_vb: f32,
     replaced_fee: Option<u64>,
     max_sat_weight: u64,
+    is_segwit: bool,
     must_have_change: bool,
 ) -> Result<CoinSelectionRes, InsufficientFunds> {
     let out_value_nochange = base_tx.output.iter().map(|o| o.value.to_sat()).sum();
@@ -487,7 +491,7 @@ fn select_coins_for_spend(
                     .checked_add(extra)
                     .expect("effective weight must fit in u64")
             },
-            is_segwit: true, // We only support receiving on Segwit scripts.
+            is_segwit,
         })
         .collect();
     let mut selector = CoinSelector::new(&candidates);
@@ -923,6 +927,7 @@ pub(crate) fn create_spend_with_poison(
             feerate_vb,
             replaced_fee,
             max_sat_wu,
+            true,
             is_self_send,
         )
         .map_err(SpendCreationError::CoinSelection)?

@@ -77,7 +77,7 @@ pub fn rail<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     // "setup vault" action button in the same row slot. Keeping the
     // slot always occupied means the vault-aligned secondary/tertiary
     // offsets stay stable across cube configurations.
-    if ctx.has_vault {
+    if ctx.has_vault || ctx.has_imported_bitcoin {
         top = top.push(item(TopLevel::Vault, current == TopLevel::Vault, None));
     } else {
         top = top.push(setup_vault_item());

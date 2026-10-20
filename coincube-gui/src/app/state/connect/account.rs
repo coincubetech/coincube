@@ -3159,6 +3159,15 @@ impl ConnectAccountPanel {
                     // reload keeps the checklist current.
                     return self.reload_duress_cubes();
                 }
+                if let Err(error) = crate::app::check_import_duress_compatibility() {
+                    self.error = Some(PanelError::settled(UserError::new(
+                        "Duress Mode is unavailable",
+                        error,
+                        crate::user_error::CC_CONFIG,
+                        false,
+                    )));
+                    return iced::Task::none();
+                }
                 self.open_enroll_wizard();
                 // Kick a fresh checklist fetch as the user commits to enrolling.
                 // The cached list the gate just read could be briefly stale (a
@@ -3269,6 +3278,9 @@ impl ConnectAccountPanel {
                     e.error = Some(msg);
                     return iced::Task::none();
                 }
+                // The blocking preflight also rejects pending/imported wallets
+                // before server enrollment. Keep this filesystem check there so
+                // the wizard receives the error without blocking the UI thread.
                 // Pre-flight: reject a duress PIN that collides with any Cube's
                 // real unlock PIN BEFORE anything irreversible. Connect tiers
                 // enroll on the server first, so catching the collision only in

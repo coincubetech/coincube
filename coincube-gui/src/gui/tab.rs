@@ -68,7 +68,7 @@ fn unlock_state(
 
 pub enum State {
     Home(Home),
-    Installer(Installer),
+    Installer(Box<Installer>),
     Loader(Loader),
     Login(login::CoincubeLiteLogin),
     PinEntry(crate::pin_entry::PinEntry),
@@ -457,6 +457,7 @@ pub enum Message {
     /// screen just returns to its prompt.
     PasskeyRelocked,
     BreezClientLoadedAfterPin {
+        connect_client: Option<crate::services::coincube::CoincubeClient>,
         /// Set when the post-unlock seed-file migration aborted. The Cube still
         /// opens and its files are untouched, but the upgrade did not happen and
         /// the user is told rather than only the log.
@@ -529,6 +530,34 @@ fn vault_settings_for_cube(
         .wallets
         .into_iter()
         .find(|wallet| wallet.wallet_id() == *vault_id)
+}
+
+/// Resolve either local Bitcoin wallet attached to this exact Cube. Imported
+/// wallets keep the same WalletSettings/daemon directory lifecycle as Vaults,
+/// while their descriptor and signing capabilities remain distinct.
+fn bitcoin_wallet_settings_for_cube(
+    root: &CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    cube: &app::settings::CubeSettings,
+) -> Option<WalletSettings> {
+    if cube.network != chain {
+        return None;
+    }
+    let Some(import) = &cube.bitcoin_import else {
+        return vault_settings_for_cube(root, chain, cube);
+    };
+    if cube.vault_wallet_id.is_some() {
+        return None;
+    }
+    let attachment = import.active_attachment()?;
+    attachment.validate(chain).ok()?;
+    app::settings::Settings::from_file(&root.network_directory(chain))
+        .ok()?
+        .wallets
+        .into_iter()
+        .find(|wallet| {
+            wallet.wallet_id() == attachment.wallet_id && wallet.remote_backend_auth.is_none()
+        })
 }
 
 /// A Connect authentication change `GUI::update` broadcasts to every tab.
@@ -998,17 +1027,19 @@ impl Tab {
                     return command.map(Message::Launch);
                 };
 
-                let wallet_settings = cube.vault_wallet_id.as_ref().and_then(|vault_id| {
-                    let network_dir = datadir.network_directory(chain);
-                    app::settings::Settings::from_file(&network_dir)
-                        .ok()
-                        .and_then(|s| {
-                            s.wallets
-                                .iter()
-                                .find(|w| w.wallet_id() == *vault_id)
-                                .cloned()
-                        })
-                });
+                let wallet_settings = bitcoin_wallet_settings_for_cube(&datadir, chain, &cube);
+                if cube
+                    .bitcoin_import
+                    .as_deref()
+                    .and_then(app::settings::BitcoinImport::active_attachment)
+                    .is_some()
+                    && wallet_settings.is_none()
+                {
+                    let (mut home, command) = Home::new_for_chain(datadir, Some(chain));
+                    home.set_error("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.");
+                    self.state = State::Home(home);
+                    return command.map(Message::Launch);
+                }
                 let duress_account_id =
                     crate::services::duress::DuressLocalState::load(datadir.path())
                         .map(|st| st.account_id)
@@ -1072,7 +1103,7 @@ impl Tab {
                             );
                         }
                     }
-                    self.state = State::Installer(install);
+                    self.state = State::Installer(Box::new(install));
                     command.map(Message::Install)
                 }
                 home::Message::InstallForSplit(datadir, coincube_client) => {
@@ -1101,7 +1132,7 @@ impl Tab {
                         }
                     };
                     self.pending_split_after_install = true;
-                    self.state = State::Installer(install);
+                    self.state = State::Installer(Box::new(install));
                     command.map(Message::Install)
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
@@ -1225,7 +1256,18 @@ impl Tab {
                     // wallet settings, the duress account id (PIN path only —
                     // a passkey Cube has no duress PIN), and where to go on
                     // success.
-                    let wallet_settings = vault_settings_for_cube(&datadir_path, chain, &cube);
+                    let wallet_settings =
+                        bitcoin_wallet_settings_for_cube(&datadir_path, chain, &cube);
+                    if cube
+                        .bitcoin_import
+                        .as_deref()
+                        .and_then(app::settings::BitcoinImport::active_attachment)
+                        .is_some()
+                        && wallet_settings.is_none()
+                    {
+                        l.set_error("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.");
+                        return Task::none();
+                    }
 
                     // Carry this device's enrolled Connect duress account id into
                     // the PIN-entry path so a duress trigger hands it to the
@@ -1284,7 +1326,7 @@ impl Tab {
                         None, // No coincube_client from login screen
                     ) {
                         Ok((install, command)) => {
-                            self.state = State::Installer(install);
+                            self.state = State::Installer(Box::new(install));
                             command.map(Message::Install)
                         }
                         Err(error) => {
@@ -1400,20 +1442,70 @@ impl Tab {
                         Some(installer::RestoreSource::PasswordKit)
                     );
                     let restore_seed = installer_exit_seed(i);
+                    let imported_restore = i.context.restored_imported_wallet.clone();
+                    let imported_kit_source = match i.context.restore_source {
+                        Some(installer::RestoreSource::PasswordKit) => {
+                            Some(crate::services::bitcoin_import::RestoredKitSource::Password)
+                        }
+                        Some(installer::RestoreSource::KeychainSeal) => {
+                            Some(crate::services::bitcoin_import::RestoredKitSource::OwnerKeychain)
+                        }
+                        _ => None,
+                    };
+                    // Kit restore uses the authenticated Connect Esplora proxy;
+                    // imported wallets never enter the remote Vault backend.
+                    let imported_backend = i
+                        .context
+                        .connect_jwt
+                        .as_ref()
+                        .map(|jwt| {
+                            coincubed::config::BitcoinBackend::Esplora(
+                                installer::connect_esplora_config(chain, jwt.as_str()),
+                            )
+                        })
+                        .or_else(|| i.context.bitcoin_backend.clone());
 
                     let generation = self.fork_session_generation;
                     let task = Task::perform(
                         async move {
-                            let cube = find_or_create_cube(
-                                &network_dir,
-                                vault.as_ref(),
-                                &wallet_alias,
-                                chain,
-                                originating_cube_id,
-                                restored_cube,
-                                restore_seed.as_ref(),
-                            )
-                            .await?;
+                            let mut cube = if let Some(blob) = imported_restore.as_ref() {
+                                find_or_create_cube_for_imported_restore(
+                                    &network_dir,
+                                    vault.as_ref(),
+                                    &wallet_alias,
+                                    chain,
+                                    originating_cube_id,
+                                    restored_cube,
+                                    restore_seed.as_ref(),
+                                    blob,
+                                )
+                                .await?
+                            } else {
+                                find_or_create_cube(
+                                    &network_dir,
+                                    vault.as_ref(),
+                                    &wallet_alias,
+                                    chain,
+                                    originating_cube_id,
+                                    restored_cube,
+                                    restore_seed.as_ref(),
+                                )
+                                .await?
+                            };
+                            if let Some(blob) = &imported_restore {
+                                let backend = imported_backend.ok_or_else(||
+                                    "Sign in to Connect to restore this imported Bitcoin wallet.".to_string())?;
+                                cube = crate::services::bitcoin_import::restore_from_kit(
+                                    &network_dir,
+                                    &cube.id,
+                                    blob,
+                                    backend,
+                                    imported_kit_source.ok_or_else(|| {
+                                        "Imported wallets require owner recovery.".to_string()
+                                    })?,
+                                )
+                                .await?;
+                            }
 
                             // Hand the freshly minted Cube's PIN to the session.
                             //
@@ -1611,6 +1703,31 @@ impl Tab {
                         }
                     };
 
+                    // An imported Recovery Kit attaches its wallet inside the
+                    // durable import journal after the installer handed us a
+                    // seed-only `settings_opt`. Resolve the newly persisted
+                    // wallet row now so this first open takes the same Loader
+                    // route as every later open.
+                    let settings_opt = if cube
+                        .bitcoin_import
+                        .as_deref()
+                        .and_then(app::settings::BitcoinImport::active_attachment)
+                        .is_some()
+                    {
+                        match bitcoin_wallet_settings_for_cube(&i.datadir, cube.network, &cube) {
+                            Some(wallet) => Some(Box::new(wallet)),
+                            None => {
+                                return i
+                                    .update(installer::Message::CubeSaveFailed(
+                                        "Imported wallet registration is missing or inconsistent after recovery. Retry this Recovery Kit before opening the Cube.".into(),
+                                    ))
+                                    .map(Message::Install);
+                            }
+                        }
+                    } else {
+                        settings_opt
+                    };
+
                     if cube.network.is_blake2b() {
                         // Target setup is a prerequisite, not the Claim itself.
                         // Reopen the Bitcoin source and let App re-check admission
@@ -1742,27 +1859,46 @@ impl Tab {
                         )
                         .expect("A gui configuration file must be present");
 
-                        let (loader, command) = Loader::new(
-                            i.datadir.clone(),
-                            cfg,
-                            i.network,
-                            internal_bitcoind,
-                            i.context.backup.clone(),
-                            settings_opt.map(|s| *s),
-                            cube.clone(),
-                            // Same preference chain as the Login arm —
-                            // the restored BreezClient (built against
-                            // the user's new PIN) wins over the
-                            // installer-launched one.
-                            restored_breez_client.or_else(|| i.breez_client.clone()),
-                            // Spark backend built against the user's
-                            // new PIN during the restore async block.
-                            // Falling back to the installer's existing
-                            // handle covers the non-restore flows that
-                            // already had Spark wired in before this
-                            // Message arm widened.
-                            restored_spark_backend.or_else(|| i.spark_backend.clone()),
-                        );
+                        let imported = cube
+                            .bitcoin_import
+                            .as_ref()
+                            .is_some_and(|i| i.active_attachment().is_some());
+                        let (loader, command) = if imported {
+                            Loader::new_imported(
+                                i.datadir.clone(),
+                                cfg,
+                                i.network,
+                                internal_bitcoind,
+                                i.context.backup.clone(),
+                                *settings_opt.expect("attached import has wallet settings"),
+                                cube.clone(),
+                                restored_breez_client.or_else(|| i.breez_client.clone()),
+                                restored_spark_backend.or_else(|| i.spark_backend.clone()),
+                                i.context.coincube_client.clone(),
+                            )
+                        } else {
+                            Loader::new(
+                                i.datadir.clone(),
+                                cfg,
+                                i.network,
+                                internal_bitcoind,
+                                i.context.backup.clone(),
+                                settings_opt.map(|s| *s),
+                                cube.clone(),
+                                // Same preference chain as the Login arm —
+                                // the restored BreezClient (built against
+                                // the user's new PIN) wins over the
+                                // installer-launched one.
+                                restored_breez_client.or_else(|| i.breez_client.clone()),
+                                // Spark backend built against the user's
+                                // new PIN during the restore async block.
+                                // Falling back to the installer's existing
+                                // handle covers the non-restore flows that
+                                // already had Spark wired in before this
+                                // Message arm widened.
+                                restored_spark_backend.or_else(|| i.spark_backend.clone()),
+                            )
+                        };
                         self.state = State::Loader(loader);
                         command.map(Message::Load)
                     }
@@ -1858,6 +1994,13 @@ impl Tab {
                     command.map(Message::Launch)
                 }
                 loader::Message::View(loader::ViewMessage::SetupVault) => {
+                    if loader.cube_settings.bitcoin_import.is_some() {
+                        loader.fail(loader::Error::Unexpected(
+                            "This Cube is reserved for an imported Bitcoin wallet. Resume its import from the Cube overview."
+                                .into(),
+                        ));
+                        return Task::none();
+                    }
                     // Launch installer for vault setup from loader - should return to app on Previous
                     // Opened on the Cube's own chain through the admission gate,
                     // like the App paths: `loader.network` cannot name a fork.
@@ -1876,7 +2019,7 @@ impl Tab {
                         loader.connect_client.clone(), // the fork gate needs the session it was admitted with
                     ) {
                         Ok((install, command)) => {
-                            self.state = State::Installer(install);
+                            self.state = State::Installer(Box::new(install));
                             command.map(Message::Install)
                         }
                         Err(error) => {
@@ -2083,6 +2226,14 @@ impl Tab {
             (State::App(app), Message::Run(msg)) => {
                 match msg {
                     app::Message::View(app::view::Message::SetupVault) => {
+                        if app.cube_settings().bitcoin_import.is_some() {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This Cube is reserved for an imported Bitcoin wallet. Resume its import from the Cube overview."
+                                        .into(),
+                                ),
+                            )));
+                        }
                         // Launch installer for vault setup from app - should return to app on Previous.
                         // The installer is opened on the Cube's own chain through the
                         // admission gate: `app.cache().network` is a `bitcoin::Network`
@@ -2103,7 +2254,7 @@ impl Tab {
                             app.authenticated_coincube_client(), // authenticated API client for Keychain keys
                         ) {
                             Ok((install, command)) => {
-                                self.state = State::Installer(install);
+                                self.state = State::Installer(Box::new(install));
                                 command.map(Message::Install)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
@@ -2142,6 +2293,14 @@ impl Tab {
                                 ),
                             )));
                         };
+                        let Some(inheritance_descriptor) = wallet.inheritance_descriptor() else {
+                            return Task::done(Message::Run(app::Message::View(
+                                app::view::Message::ShowError(
+                                    "This imported Bitcoin wallet does not have a Vault claim policy."
+                                        .to_string(),
+                                ),
+                            )));
+                        };
                         let Some(fingerprint) = cube.master_signer_fingerprint else {
                             return Task::done(Message::Run(app::Message::View(
                                 app::view::Message::ShowError(
@@ -2165,7 +2324,7 @@ impl Tab {
                             // themselves to rebuild this Cube if the user backs
                             // out of the claim.
                             cube: cube.clone(),
-                            descriptor: wallet.main_descriptor.clone(),
+                            descriptor: inheritance_descriptor.clone(),
                             signer: std::sync::Arc::new(crate::signer::Signer::new(signer)),
                         };
                         match Installer::try_new_for_chain(
@@ -2189,7 +2348,7 @@ impl Tab {
                             app.authenticated_coincube_client(),
                         ) {
                             Ok((install, command)) => {
-                                self.state = State::Installer(install);
+                                self.state = State::Installer(Box::new(install));
                                 command.map(Message::Install)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
@@ -2219,7 +2378,7 @@ impl Tab {
                             app.authenticated_coincube_client(),
                         ) {
                             Ok((install, command)) => {
-                                self.state = State::Installer(install);
+                                self.state = State::Installer(Box::new(install));
                                 command.map(Message::Install)
                             }
                             Err(error) => Task::done(Message::Run(app::Message::View(
@@ -2399,6 +2558,7 @@ impl Tab {
                             let wallet_settings_clone = wallet_settings.clone();
                             let internal_bitcoind_clone = internal_bitcoind.clone();
                             let backup_clone = backup.clone();
+                            let connect_client_clone = connect_client.clone();
 
                             Task::perform(
                                 async move {
@@ -2819,6 +2979,7 @@ impl Tab {
                                         wallet_settings_clone,
                                         internal_bitcoind_clone,
                                         backup_clone,
+                                        connect_client_clone,
                                         migration_error,
                                         enc_key_error,
                                     )
@@ -2833,6 +2994,7 @@ impl Tab {
                                     wallet_settings,
                                     internal_bitcoind,
                                     backup,
+                                    connect_client,
                                     migration_error,
                                     enc_key_error,
                                 )| {
@@ -2846,6 +3008,7 @@ impl Tab {
                                         wallet_settings,
                                         internal_bitcoind,
                                         backup,
+                                        connect_client,
                                         migration_error,
                                         enc_key_error,
                                     }
@@ -2953,7 +3116,7 @@ impl Tab {
                         wallet_settings,
                         internal_bitcoind,
                         backup,
-                        connect_client: _,
+                        connect_client,
                     } = &unlock.on_success;
 
                     let cube = unlock.cube().clone();
@@ -2963,6 +3126,7 @@ impl Tab {
                     let wallet_settings_clone = wallet_settings.clone();
                     let internal_bitcoind_clone = internal_bitcoind.clone();
                     let backup_clone = backup.clone();
+                    let connect_client_clone = connect_client.clone();
 
                     Task::perform(
                         async move {
@@ -3113,6 +3277,7 @@ impl Tab {
                                 wallet_settings: wallet_settings_clone,
                                 internal_bitcoind: internal_bitcoind_clone,
                                 backup: backup_clone,
+                                connect_client: connect_client_clone,
                                 // A passkey Cube has no seed file, so there is
                                 // no migration that could have failed — and the
                                 // encryption key is derived from a signer this
@@ -3313,6 +3478,7 @@ impl Tab {
                     wallet_settings,
                     internal_bitcoind,
                     backup,
+                    connect_client,
                     migration_error,
                     enc_key_error,
                 },
@@ -3354,17 +3520,36 @@ impl Tab {
                         self.state = State::Login(login);
                         command.map(Message::Login)
                     } else {
-                        let (loader, command) = Loader::new(
-                            datadir.clone(),
-                            config.clone(),
-                            network,
-                            internal_bitcoind.clone(),
-                            backup.clone(),
-                            Some(wallet_settings.clone()),
-                            cube,
-                            Some(breez),
-                            spark_backend,
-                        );
+                        let (loader, command) = if cube
+                            .bitcoin_import
+                            .as_ref()
+                            .is_some_and(|i| i.active_attachment().is_some())
+                        {
+                            Loader::new_imported(
+                                datadir.clone(),
+                                config.clone(),
+                                network,
+                                internal_bitcoind.clone(),
+                                backup.clone(),
+                                wallet_settings.clone(),
+                                cube,
+                                Some(breez),
+                                spark_backend,
+                                connect_client,
+                            )
+                        } else {
+                            Loader::new(
+                                datadir.clone(),
+                                config.clone(),
+                                network,
+                                internal_bitcoind.clone(),
+                                backup.clone(),
+                                Some(wallet_settings.clone()),
+                                cube,
+                                Some(breez),
+                                spark_backend,
+                            )
+                        };
                         self.state = State::Loader(loader);
                         command.map(Message::Load)
                     }
@@ -3731,6 +3916,68 @@ fn marked_kit_backed_up(
     settings
 }
 
+/// Resume an imported Kit restore after its wallet was already attached but a
+/// later installer step failed. The generic restore path deliberately refuses
+/// every Cube with an import; only this exact wallet/Cube/seed match may reuse
+/// that attachment and retry the journal's idempotent completion.
+#[allow(clippy::too_many_arguments)]
+async fn find_or_create_cube_for_imported_restore(
+    network_dir: &NetworkDirectory,
+    vault: Option<&VaultIdentity>,
+    wallet_alias: &Option<String>,
+    chain: crate::chain::ChainId,
+    originating_cube_id: Option<String>,
+    restored_cube: Option<RestoreCubeIdentity>,
+    restore_seed: Option<&RestoreCubeSeed>,
+    blob: &crate::services::recovery::ImportedDescriptorBlob,
+) -> Result<app::settings::CubeSettings, String> {
+    blob.validate(chain)?;
+    if vault.is_some() {
+        return Err("An imported Bitcoin restore cannot also attach a Vault.".into());
+    }
+    let expected = app::settings::ImportedWalletAttachment::new(
+        blob.wallet.descriptor.clone(),
+        chain,
+        blob.wallet.birthday,
+        blob.wallet.initial_lookahead,
+    )?;
+    let target_id = restored_cube
+        .as_ref()
+        .map(|identity| identity.uuid.as_str())
+        .or(originating_cube_id.as_deref())
+        .ok_or("The imported wallet restore has no original Cube identity.")?;
+    if target_id != blob.cube.uuid {
+        return Err("This imported wallet backup belongs to a different Cube.".into());
+    }
+    if let Ok(settings) = app::settings::Settings::from_file(network_dir) {
+        if let Some(cube) = settings.cubes.iter().find(|cube| cube.id == target_id) {
+            if let Some(intent) = &cube.bitcoin_import {
+                if cube.network != chain
+                    || cube.vault_wallet_id.is_some()
+                    || intent.active_attachment() != Some(&expected)
+                    || (restored_cube.is_some()
+                        && !restore_seed.is_some_and(|seed| {
+                            cube.master_signer_fingerprint == Some(seed.master_signer_fingerprint)
+                        }))
+                {
+                    return Err("This Cube already has a different or unfinished Bitcoin wallet import. Resume that import before retrying recovery.".into());
+                }
+                return Ok(cube.clone());
+            }
+        }
+    }
+    find_or_create_cube(
+        network_dir,
+        vault,
+        wallet_alias,
+        chain,
+        originating_cube_id,
+        restored_cube,
+        restore_seed,
+    )
+    .await
+}
+
 pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
     network_dir: &NetworkDirectory,
     // Both halves of the Vault's identity, or `None` when the installer exited
@@ -3846,6 +4093,11 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             // reuse it; otherwise mint one with that UUID.
             if let Some(RestoreCubeIdentity { uuid, .. }) = &restored_cube {
                 if let Some(idx) = settings_data.cubes.iter().position(|c| &c.id == uuid) {
+                    if settings_data.cubes[idx].bitcoin_import.is_some() {
+                        return Err(
+                            "The restored Cube is reserved for a Bitcoin wallet import.".into()
+                        );
+                    }
                     if settings_data.cubes[idx].vault_wallet_id.is_some() {
                         return Err(format!(
                             "Cube '{}' has already been recovered on this device.",
@@ -3888,6 +4140,12 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
                     .find(|c| c.id == target_cube_id)
                 {
                     if let Some(v) = vault {
+                        if target_cube.bitcoin_import.is_some() {
+                            return Err(format!(
+                                "Cube '{}' is reserved for an imported Bitcoin wallet. Resume or cancel that import before creating a Vault.",
+                                target_cube.name
+                            ));
+                        }
                         if target_cube.vault_wallet_id.is_some() {
                             return Err(format!(
                                 "Cube '{}' already has a vault. Remove the existing vault before creating a new one.",
@@ -3932,7 +4190,7 @@ pub(crate) async fn find_or_create_cube<C: Into<crate::chain::ChainId>>(
             if let Some(empty_idx) = settings_data
                 .cubes
                 .iter()
-                .position(|c| c.vault_wallet_id.is_none())
+                .position(|c| c.vault_wallet_id.is_none() && c.bitcoin_import.is_none())
             {
                 let mut empty_cube = settings_data.cubes[empty_idx].clone();
                 attach_vault(&mut empty_cube, vault);
@@ -4175,6 +4433,7 @@ pub fn create_app_with_remote_backend(
             // start, even before the Connect panel reaches its Dashboard step.
             has_connect_session: true,
             has_vault: true,
+            has_imported_bitcoin: false,
             cube_name: cube_settings.name.clone(),
             cube_connect_owner: cube_settings.connect_owner.clone(),
             cube_owned_by_other_account: false,
@@ -4616,6 +4875,213 @@ mod find_or_create_cube_tests {
     //! listed as recoverable and let the flow be repeated indefinitely).
     use super::*;
     use app::settings::WalletId;
+    use coincube_core::miniscript::bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+    use coincube_core::miniscript::bitcoin::secp256k1::Secp256k1;
+    use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+    use std::str::FromStr;
+
+    fn imported_restore_blob(seed_byte: u8) -> crate::services::recovery::ImportedDescriptorBlob {
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[seed_byte; 32]).unwrap();
+        let path = DerivationPath::from_str("m/84h/0h/0h").unwrap();
+        let account = master.derive_priv(&secp, &path).unwrap();
+        let xpub = Xpub::from_priv(&secp, &account);
+        let key = format!("[{}/84h/0h/0h]{xpub}", master.fingerprint(&secp));
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .unwrap();
+        crate::services::recovery::ImportedDescriptorBlob::new(
+            ORIG_UUID.to_string(),
+            crate::chain::ChainId::Bitcoin,
+            crate::services::recovery::ImportedDescriptorBlobWallet {
+                name: "My imported wallet".into(),
+                descriptor,
+                birthday: 0,
+                initial_lookahead: 20,
+                receive_index: 7,
+                change_index: 3,
+            },
+        )
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn imported_cube_resolves_its_normal_local_wallet_row() {
+        let root_path =
+            std::env::temp_dir().join(format!("imported-wallet-open-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let network = root.network_directory(crate::chain::ChainId::Bitcoin);
+        let blob = imported_restore_blob(31);
+        let attachment = app::settings::ImportedWalletAttachment::new(
+            blob.wallet.descriptor.clone(),
+            crate::chain::ChainId::Bitcoin,
+            blob.wallet.birthday,
+            blob.wallet.initial_lookahead,
+        )
+        .unwrap();
+        let mut cube =
+            app::settings::CubeSettings::new("Imported".into(), crate::chain::ChainId::Bitcoin);
+        cube.id = ORIG_UUID.into();
+        cube.bitcoin_import = Some(Box::new(app::settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: app::settings::BitcoinImportStage::Syncing {
+                wallet: attachment.clone(),
+            },
+            last_error: None,
+        }));
+        let wallet = app::settings::WalletSettings {
+            name: "Imported".into(),
+            alias: None,
+            descriptor_checksum: attachment.wallet_id.descriptor_checksum.clone(),
+            pinned_at: None,
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        update_settings_file(&network, |_| {
+            Some(app::settings::Settings {
+                cubes: vec![cube.clone()],
+                wallets: vec![wallet.clone()],
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+
+        assert_eq!(
+            bitcoin_wallet_settings_for_cube(&root, crate::chain::ChainId::Bitcoin, &cube)
+                .unwrap()
+                .wallet_id(),
+            attachment.wallet_id
+        );
+        assert!(
+            bitcoin_wallet_settings_for_cube(&root, crate::chain::ChainId::Signet, &cube).is_none()
+        );
+        let mut pending = cube.clone();
+        pending.bitcoin_import.as_mut().unwrap().stage =
+            app::settings::BitcoinImportStage::PendingSource;
+        assert!(
+            bitcoin_wallet_settings_for_cube(&root, crate::chain::ChainId::Bitcoin, &pending)
+                .is_none()
+        );
+        std::fs::remove_dir_all(root_path).unwrap();
+    }
+
+    #[tokio::test]
+    async fn imported_restore_retries_exact_attached_cube_without_replacing_it() {
+        let nd = temp_network_dir("imported-retry");
+        let blob = imported_restore_blob(19);
+        let attachment = app::settings::ImportedWalletAttachment::new(
+            blob.wallet.descriptor.clone(),
+            crate::chain::ChainId::Bitcoin,
+            blob.wallet.birthday,
+            blob.wallet.initial_lookahead,
+        )
+        .unwrap();
+        let fp = bitcoin::bip32::Fingerprint::from([1, 2, 3, 4]);
+        let seed = RestoreCubeSeed {
+            pin: zeroize::Zeroizing::new("246810".to_string()),
+            master_signer_fingerprint: fp,
+            seed_backed_up: false,
+        };
+        let mut cube = app::settings::CubeSettings::new(
+            "Restored".to_string(),
+            crate::chain::ChainId::Bitcoin,
+        )
+        .with_master_signer(fp);
+        cube.id = ORIG_UUID.to_string();
+        cube.bitcoin_import = Some(Box::new(app::settings::BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: app::settings::BitcoinImportStage::Syncing { wallet: attachment },
+            last_error: None,
+        }));
+        update_settings_file(&nd, |_| {
+            Some(app::settings::Settings {
+                cubes: vec![cube.clone()],
+                ..Default::default()
+            })
+        })
+        .await
+        .unwrap();
+
+        let returned = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            None,
+            Some(RestoreCubeIdentity {
+                uuid: ORIG_UUID.to_string(),
+                name: "Restored".into(),
+            }),
+            Some(&seed),
+            &blob,
+        )
+        .await
+        .expect("exact published attachment may resume");
+        assert_eq!(returned.id, ORIG_UUID);
+        assert_eq!(reload(&nd).cubes.len(), 1);
+
+        let different_blob = imported_restore_blob(20);
+        let mismatch = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            None,
+            Some(RestoreCubeIdentity {
+                uuid: ORIG_UUID.to_string(),
+                name: "Restored".into(),
+            }),
+            Some(&seed),
+            &different_blob,
+        )
+        .await
+        .expect_err("another imported wallet must not reuse the Cube");
+        assert!(mismatch.contains("different or unfinished"));
+
+        let wrong_seed = RestoreCubeSeed {
+            pin: zeroize::Zeroizing::new("246810".to_string()),
+            master_signer_fingerprint: bitcoin::bip32::Fingerprint::from([9, 9, 9, 9]),
+            seed_backed_up: false,
+        };
+        let mismatch = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            None,
+            Some(RestoreCubeIdentity {
+                uuid: ORIG_UUID.to_string(),
+                name: "Restored".into(),
+            }),
+            Some(&wrong_seed),
+            &blob,
+        )
+        .await
+        .expect_err("another Cube seed must not reuse the attachment");
+        assert!(mismatch.contains("different or unfinished"));
+
+        let returned = find_or_create_cube_for_imported_restore(
+            &nd,
+            None,
+            &None,
+            crate::chain::ChainId::Bitcoin,
+            Some(ORIG_UUID.to_string()),
+            None,
+            None,
+            &blob,
+        )
+        .await
+        .expect("descriptor-only restore may resume its exact Cube");
+        assert_eq!(returned.id, ORIG_UUID);
+    }
 
     #[tokio::test]
     async fn fork_install_save_preserves_updates_after_its_snapshot() {
@@ -5800,7 +6266,7 @@ mod fork_completion_tests {
         )
         .expect("installer fixture");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-        let mut tab = Tab::new(1, State::Installer(installer));
+        let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
         tab.pending_split_after_install = true;
 
         let _ = tab.update(Message::Install(installer::Message::BackToApp(
@@ -5865,7 +6331,7 @@ mod fork_completion_tests {
                 breez_client: None,
                 spark_backend: None,
             });
-            let mut tab = Box::new(Tab::new(1, State::Installer(installer)));
+            let mut tab = Box::new(Tab::new(1, State::Installer(Box::new(installer))));
             app::claim_intent::clear();
             let msg = if outcome.starts_with("cancel") {
                 Message::Install(installer::Message::BackToApp(bitcoin::Network::Bitcoin))
@@ -6057,7 +6523,7 @@ mod fork_completion_tests {
         installer.context.fresh_fork_seed_backed_up = true;
         installer.context.cube_id = Some("synthetic-save-cube".into());
         installer.context.restore_pin = Some(zeroize::Zeroizing::new("2468".to_string()));
-        let mut tab = Box::new(Tab::new(1, State::Installer(installer)));
+        let mut tab = Box::new(Tab::new(1, State::Installer(Box::new(installer))));
         let mut save = Some(tab.update(Message::Install(installer::Message::Exit(
             Some(Box::new(wallet("fork-vault"))),
             None,
@@ -6107,8 +6573,12 @@ mod layout_tests {
         let bytes = std::mem::size_of::<super::State>();
         assert!(
             bytes <= 8 * 1024,
-            "Tab State is {} bytes; review stack use and box bulky state",
-            bytes
+            "Tab State is {} bytes (Home {}, Installer {}, Loader {}, App {}); review stack use and box bulky state",
+            bytes,
+            std::mem::size_of::<crate::home::Home>(),
+            std::mem::size_of::<crate::installer::Installer>(),
+            std::mem::size_of::<crate::loader::Loader>(),
+            std::mem::size_of::<crate::app::App>(),
         );
     }
 }

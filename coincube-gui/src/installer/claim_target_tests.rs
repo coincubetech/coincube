@@ -800,7 +800,8 @@ async fn backing_out_of_a_claim_returns_to_the_source_cube_not_to_home() {
         "the source Cube's handle is parked for the return trip"
     );
 
-    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
     let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
         Network::Bitcoin,
     )));
@@ -980,7 +981,8 @@ async fn every_exit_from_a_claim_releases_the_parked_source_handle() {
     )
     .unwrap();
     let (installer, _) = build(second, root.clone());
-    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
     let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
         Network::Bitcoin,
     )));
@@ -1475,7 +1477,8 @@ async fn cancelling_a_claim_from_a_remote_backed_source_returns_to_its_own_backe
     )
     .unwrap();
 
-    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
     let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
         Network::Bitcoin,
     )));
@@ -1560,7 +1563,8 @@ async fn cancelling_a_claim_restores_the_vault_the_source_cube_points_at() {
     )
     .unwrap();
 
-    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
     let _ = tab.update(crate::gui::tab::Message::Install(Message::BackToApp(
         Network::Bitcoin,
     )));
@@ -1637,7 +1641,8 @@ async fn completing_claim_setup_returns_to_the_source_session_for_step_one() {
         "Savings · BTCB2".to_string(),
         ChainId::BitcoinBlake2b,
     );
-    let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(installer));
+    let mut tab =
+        crate::gui::tab::Tab::new(0, crate::gui::tab::State::Installer(Box::new(installer)));
     let _ = tab.update(crate::gui::tab::Message::Install(Message::CubeSaved(
         Ok((target, None, None)),
         None,

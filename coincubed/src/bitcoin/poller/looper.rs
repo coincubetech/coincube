@@ -8,6 +8,7 @@ use crate::{
 
 use std::{collections::HashSet, convert::TryInto, sync, thread, time};
 
+#[cfg(test)]
 use coincube_core::descriptors;
 use miniscript::bitcoin::{self, secp256k1};
 
@@ -65,8 +66,8 @@ fn update_coins(
     bit: &impl BitcoinInterface,
     db_conn: &mut Box<dyn DatabaseConnection>,
     previous_tip: &BlockChainTip,
-    descs: &[descriptors::SinglePathCoincubeDesc],
-    secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    _secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
 ) -> Result<UpdatedCoins, String> {
     let network = db_conn.network();
     let curr_coins = db_conn.coins(&[], &[]);
@@ -77,7 +78,19 @@ fn update_coins(
 
     // Start by fetching newly received coins.
     let mut received = Vec::new();
-    let mut pending = bit.try_received_coins(previous_tip, descs)?;
+    // An imported wallet may expand its discovery window after the database
+    // tip already passed the funding blocks. During that pending historical
+    // scan, offer all backend-discovered outputs and let the durable outpoint
+    // set below de-duplicate them. A tip-bounded query would permanently hide
+    // those old outputs and falsely mark the larger scan complete at zero.
+    let mut pending = if db_conn
+        .imported_history()
+        .is_some_and(|history| !history.history_complete)
+    {
+        bit.try_historical_received_coins(previous_tip, descs)?
+    } else {
+        bit.try_received_coins(previous_tip, descs)?
+    };
     loop {
         let before = pending.len();
         let mut unresolved = Vec::new();
@@ -122,7 +135,13 @@ fn update_coins(
                             let child = bitcoin::bip32::ChildNumber::from_normal_idx(index)
                                 .map_err(|_| "Derivation range exhausted")?;
                             for (branch, desc) in descs.iter().enumerate().take(2) {
-                                if desc.derive(child, secp).address(network) == address {
+                                if desc
+                                    .at_derivation_index(u32::from(child))
+                                    .map_err(|error| error.to_string())?
+                                    .address(network)
+                                    .map_err(|error| error.to_string())?
+                                    == address
+                                {
                                     found = Some((child, branch == 1));
                                     break;
                                 }
@@ -481,7 +500,7 @@ fn report_divergence(
 fn updates(
     db_conn: &mut Box<dyn DatabaseConnection>,
     bit: &mut impl BitcoinInterface,
-    descs: &[descriptors::SinglePathCoincubeDesc],
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
     reorg_alert: &ReorgAlertCache,
 ) -> Result<(), String> {
@@ -647,7 +666,7 @@ pub fn poll(
     bit: &mut sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
     db: &sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
     secp: &secp256k1::Secp256k1<secp256k1::VerifyOnly>,
-    descs: &[descriptors::SinglePathCoincubeDesc],
+    descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     reorg_alert: &ReorgAlertCache,
     history_sync: &HistorySyncCache,
 ) {
@@ -693,6 +712,17 @@ pub fn poll(
     }
     if let Some(ticket) = replay_ticket {
         bit.acknowledge_wallet_record_replay(ticket);
+    }
+    if let Some((receive_scanned, change_scanned)) = history_sync.pending_full_scan_coverage() {
+        if db_conn.imported_history().is_some() {
+            if let Err(error) = db_conn.complete_import_history(receive_scanned, change_scanned) {
+                let (failure, changed) = history_sync.poll_failed(&error, now);
+                if failure_is_worth_a_warning(&failure, changed) {
+                    log::warn!("Imported history status could not be saved: {error}");
+                }
+                return;
+            }
+        }
     }
     history_sync.poll_succeeded(now);
     db_conn.set_last_poll(now);
@@ -954,7 +984,7 @@ mod tests {
         assert!(!managed_node_maintenance());
     }
 
-    pub(super) fn test_descs() -> [descriptors::SinglePathCoincubeDesc; 2] {
+    pub(super) fn test_descs() -> [miniscript::Descriptor<miniscript::DescriptorPublicKey>; 2] {
         let owner_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8KLW4HGLXZBJknja7kDUJuFHnM424LbziEXsfkh1WQCiEjjHw4zLqSUm4rvhgyGkkuRowE9tCJSgt3TQB5J3SKAbZ2SdcKST/<0;1>/*").unwrap());
         let heir_key = descriptors::PathInfo::Single(descriptor::DescriptorPublicKey::from_str("[aabbccdd]xpub68JJTXc1MWK8PEQozKsRatrUHXKFNkD1Cb1BuQU9Xr5moCv87anqGyXLyUd4KpnDyZgo3gz4aN1r3NiaoweFW8UutBsBbgKHzaD5HkTkifK/<0;1>/*").unwrap());
         let policy = descriptors::CoincubePolicy::new_legacy(
@@ -964,8 +994,8 @@ mod tests {
         .unwrap();
         let desc = descriptors::CoincubeDescriptor::new(policy);
         [
-            desc.receive_descriptor().clone(),
-            desc.change_descriptor().clone(),
+            desc.receive_descriptor().as_descriptor_public_key().clone(),
+            desc.change_descriptor().as_descriptor_public_key().clone(),
         ]
     }
 
@@ -1271,8 +1301,10 @@ mod failure_tests {
                 block_height: Some(99),
                 address: UTxOAddress::Address(
                     descs[0]
-                        .derive(1500.into(), &secp)
+                        .at_derivation_index(1500)
+                        .unwrap()
                         .address(database.connection().network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 is_immature: false,
@@ -1321,8 +1353,10 @@ mod failure_tests {
                 },
                 address: UTxOAddress::Address(
                     descs[branch]
-                        .derive(200.into(), &secp)
+                        .at_derivation_index(200)
+                        .unwrap()
                         .address(conn.network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 ..first.clone()
@@ -1334,8 +1368,10 @@ mod failure_tests {
                 },
                 address: UTxOAddress::Address(
                     descs[branch]
-                        .derive(399.into(), &secp)
+                        .at_derivation_index(399)
+                        .unwrap()
                         .address(conn.network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 ..first.clone()
@@ -1347,8 +1383,10 @@ mod failure_tests {
                 },
                 address: UTxOAddress::Address(
                     descs[branch]
-                        .derive(1000.into(), &secp)
+                        .at_derivation_index(1000)
+                        .unwrap()
                         .address(conn.network())
+                        .unwrap()
                         .into_unchecked(),
                 ),
                 ..first.clone()
@@ -1476,7 +1514,7 @@ mod history_sync_tests {
         bit: sync::Arc<sync::Mutex<DummyBitcoind>>,
         backend: sync::Arc<sync::Mutex<dyn BitcoinInterface>>,
         database: sync::Arc<sync::Mutex<dyn DatabaseInterface>>,
-        descs: Vec<descriptors::SinglePathCoincubeDesc>,
+        descs: Vec<miniscript::Descriptor<miniscript::DescriptorPublicKey>>,
         secp: secp256k1::Secp256k1<secp256k1::VerifyOnly>,
         alert: ReorgAlertCache,
         history: HistorySyncCache,

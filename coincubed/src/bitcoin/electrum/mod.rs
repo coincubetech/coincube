@@ -67,6 +67,7 @@ pub struct Electrum {
     /// Set to `true` to force a full scan from the genesis block regardless of
     /// the wallet's local chain height.
     full_scan: bool,
+    full_scan_gap: usize,
     /// Where a full scan reports how far it has got. See
     /// [`crate::bitcoin::HistorySyncCache`].
     history_sync: Option<std::sync::Arc<crate::bitcoin::HistorySyncCache>>,
@@ -83,8 +84,17 @@ impl Electrum {
             bdk_wallet,
             sync_count: 0,
             full_scan,
+            full_scan_gap: 200,
             history_sync: None,
         })
+    }
+
+    pub fn set_full_scan_gap(&mut self, gap: usize) -> Result<(), &'static str> {
+        if !(1..=1_010_000).contains(&gap) {
+            return Err("full scan gap must be between 1 and 1010000");
+        }
+        self.full_scan_gap = gap;
+        Ok(())
     }
 
     /// Report full-scan progress into `cache` from now on.
@@ -172,7 +182,6 @@ impl Electrum {
         // We'll only need to calculate fees of mempool transactions and this will be done separately from our graph
         // so we don't need to fetch prev txouts. In any case, we'll already have these for our own transactions.
         const FETCH_PREV_TXOUTS: bool = false;
-        const STOP_GAP: usize = 200;
 
         // TODO: See if this caching can be done in a more optimal way, e.g. only new txs after syncing.
         self.client
@@ -213,16 +222,17 @@ impl Electrum {
                         .index()
                         .last_revealed_indices()
                         .into_values(),
-                    STOP_GAP,
+                    self.full_scan_gap,
                 ));
             }
             for (k, spks) in spk_iters {
+                let change = matches!(k, wallet::KeychainType::Change);
                 request = match &self.history_sync {
                     Some(cache) => {
                         let cache = cache.clone();
                         request.set_spks_for_keychain(
                             k,
-                            spks.inspect(move |_| cache.address_checked()),
+                            spks.inspect(move |_| cache.branch_address_checked(change)),
                         )
                     }
                     None => request.set_spks_for_keychain(k, spks),
@@ -232,7 +242,7 @@ impl Electrum {
                 .client
                 .full_scan_with_confirmation_time_height_anchor(
                     request,
-                    STOP_GAP,
+                    self.full_scan_gap,
                     FETCH_PREV_TXOUTS,
                 )
                 .map_err(ElectrumError::Client)?;

@@ -143,6 +143,18 @@ fn is_user_input(event: &Event) -> bool {
     )
 }
 
+fn connect_account_message(
+    message: &tab::Message,
+) -> Option<&crate::app::view::ConnectAccountMessage> {
+    match message {
+        tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(message)))
+        | tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(message))) => {
+            Some(message)
+        }
+        _ => None,
+    }
+}
+
 impl GUI {
     pub fn title(&self) -> String {
         match cfg!(debug_assertions) {
@@ -199,10 +211,12 @@ impl GUI {
         // Validate session-tagged App callbacks before inspecting global auth
         // actions. A queued event from an old App cannot affect a reopened one.
         let message = match message {
-            Message::Pane(
-                pane_id,
-                pane::Message::Tab(tab_id, tab::Message::ForkAsync(generation, message)),
-            ) => {
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, tab_message))
+                if matches!(tab_message.as_ref(), tab::Message::ForkAsync(..)) =>
+            {
+                let tab::Message::ForkAsync(generation, message) = *tab_message else {
+                    unreachable!();
+                };
                 let current = self
                     .panes
                     .get(pane_id)
@@ -211,7 +225,7 @@ impl GUI {
                 if !current {
                     return Task::none();
                 }
-                Message::Pane(pane_id, pane::Message::Tab(tab_id, *message))
+                Message::Pane(pane_id, pane::Message::tab(tab_id, *message))
             }
             message => message,
         };
@@ -219,15 +233,16 @@ impl GUI {
         // another tab's fork daemon is bound to it. Reuse an active in-memory
         // client; the admitted-user load still checks it with Connect.
         let home_init = match &message {
-            Message::Pane(
-                pane_id,
-                pane::Message::Tab(
-                    tab_id,
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
                     tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
-                        crate::app::view::ConnectAccountMessage::Init,
-                    ))),
-                ),
-            ) => Some((*pane_id, *tab_id)),
+                        crate::app::view::ConnectAccountMessage::Init
+                    )))
+                ) =>
+            {
+                Some((*pane_id, *tab_id))
+            }
             _ => None,
         };
         if let Some((origin_pane, origin_tab)) = home_init {
@@ -255,7 +270,7 @@ impl GUI {
                             return home.adopt_connect_client(client).map(move |message| {
                                 Message::Pane(
                                     origin_pane,
-                                    pane::Message::Tab(origin_tab, tab::Message::Launch(message)),
+                                    pane::Message::tab(origin_tab, tab::Message::Launch(message)),
                                 )
                             });
                         }
@@ -272,60 +287,50 @@ impl GUI {
         // panel is about to drop must not tell the other tabs anything — this
         // is the first reader of the variant, ahead of that dispatch.
         let auth_change = match &message {
-            Message::Pane(
-                pane_id,
-                pane::Message::Tab(
-                    tab_id,
-                    tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
-                        msg,
-                    ))),
-                ),
-            )
-            | Message::Pane(
-                pane_id,
-                pane::Message::Tab(
-                    tab_id,
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
-                        msg,
-                    ))),
-                ),
-            ) => match msg {
-                crate::app::view::ConnectAccountMessage::LogOut => {
-                    Some((tab::AuthChange::LogOut, *pane_id, *tab_id))
-                }
-                crate::app::view::ConnectAccountMessage::SetSession(login, epoch) => {
-                    let origin_epoch = self
-                        .panes
-                        .get(*pane_id)
-                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
-                        .and_then(|tab| match &tab.state {
-                            tab::State::App(app) => Some(app.connect_auth_epoch()),
-                            tab::State::Home(home) => Some(home.connect_account.auth_epoch()),
-                            _ => None,
-                        });
-                    let same_fork_session = self
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => {
+                match connect_account_message(inner) {
+                    Some(msg) => match msg {
+                        crate::app::view::ConnectAccountMessage::LogOut => {
+                            Some((tab::AuthChange::LogOut, *pane_id, *tab_id))
+                        }
+                        crate::app::view::ConnectAccountMessage::SetSession(login, epoch) => {
+                            let origin_epoch = self
+                                .panes
+                                .get(*pane_id)
+                                .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                                .and_then(|tab| match &tab.state {
+                                    tab::State::App(app) => Some(app.connect_auth_epoch()),
+                                    tab::State::Home(home) => {
+                                        Some(home.connect_account.auth_epoch())
+                                    }
+                                    _ => None,
+                                });
+                            let same_fork_session = self
                         .panes
                         .get(*pane_id)
                         .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
                         .is_some_and(|tab| {
                             matches!(&tab.state, tab::State::App(app) if app.matches_admitted_connect_session(login))
                         });
-                    match origin_epoch {
-                        Some(current) if *epoch >= current && !same_fork_session => Some((
-                            tab::AuthChange::SignIn {
-                                user_id: login.user.id,
-                                token: zeroize::Zeroizing::new(login.token.clone()),
-                            },
-                            *pane_id,
-                            *tab_id,
-                        )),
-                        // Stale for its own tab (dropped there on dispatch), or
-                        // no account panel to judge it: not a sign-in.
+                            match origin_epoch {
+                                Some(current) if *epoch >= current && !same_fork_session => Some((
+                                    tab::AuthChange::SignIn {
+                                        user_id: login.user.id,
+                                        token: zeroize::Zeroizing::new(login.token.clone()),
+                                    },
+                                    *pane_id,
+                                    *tab_id,
+                                )),
+                                // Stale for its own tab (dropped there on dispatch), or
+                                // no account panel to judge it: not a sign-in.
+                                _ => None,
+                            }
+                        }
                         _ => None,
-                    }
+                    },
+                    None => None,
                 }
-                _ => None,
-            },
+            }
             _ => None,
         };
         let auth_from_fork_app = if auth_change.is_some() {
@@ -345,22 +350,14 @@ impl GUI {
         let mut auth_tasks = Vec::new();
         if let Some((change, origin_pane, origin_tab)) = auth_change {
             let completed_login = match &message {
-                Message::Pane(
-                    _,
-                    pane::Message::Tab(
-                        _,
-                        tab::Message::Launch(home::Message::View(
-                            home::ViewMessage::ConnectAccount(
-                                crate::app::view::ConnectAccountMessage::SetSession(login, _),
-                            ),
-                        ))
-                        | tab::Message::Run(AppMessage::View(
-                            crate::app::view::Message::ConnectAccount(
-                                crate::app::view::ConnectAccountMessage::SetSession(login, _),
-                            ),
-                        )),
-                    ),
-                ) => Some(login),
+                Message::Pane(_, pane::Message::Tab(_, inner)) => {
+                    match connect_account_message(inner) {
+                        Some(crate::app::view::ConnectAccountMessage::SetSession(login, _)) => {
+                            Some(login)
+                        }
+                        _ => None,
+                    }
+                }
                 _ => None,
             };
             for (&pane_id, pane) in self.panes.iter_mut() {
@@ -375,7 +372,7 @@ impl GUI {
                     auth_tasks.push(
                         tab.invalidate_fork_session(change.clone(), originated)
                             .map(move |msg| {
-                                Message::Pane(pane_id, pane::Message::Tab(tab_id, msg))
+                                Message::Pane(pane_id, pane::Message::tab(tab_id, msg))
                             }),
                     );
                 }
@@ -385,23 +382,20 @@ impl GUI {
         // Home so logout clears saved login state instead of being discarded.
         let message = if auth_from_fork_app {
             match message {
-                Message::Pane(
-                    pane_id,
-                    pane::Message::Tab(
-                        tab_id,
-                        tab::Message::Run(AppMessage::View(
-                            crate::app::view::Message::ConnectAccount(msg),
-                        )),
+                Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => match *inner {
+                    tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::ConnectAccount(msg),
+                    )) => Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            tab_id,
+                            tab::Message::Launch(home::Message::View(
+                                home::ViewMessage::ConnectAccount(msg),
+                            )),
+                        ),
                     ),
-                ) => Message::Pane(
-                    pane_id,
-                    pane::Message::Tab(
-                        tab_id,
-                        tab::Message::Launch(home::Message::View(
-                            home::ViewMessage::ConnectAccount(msg),
-                        )),
-                    ),
-                ),
+                    other => Message::Pane(pane_id, pane::Message::tab(tab_id, other)),
+                },
                 message => message,
             }
         } else {
@@ -623,7 +617,7 @@ impl GUI {
                             return task.map(move |message| {
                                 Message::Pane(
                                     pane_id,
-                                    pane::Message::Tab(tab_id, tab::Message::Run(message)),
+                                    pane::Message::tab(tab_id, tab::Message::Run(message)),
                                 )
                             });
                         }
@@ -646,7 +640,7 @@ impl GUI {
                     for tab in &mut pane.tabs {
                         let tab_id = tab.id;
                         tasks.push(tab.reload_global_settings(root).map(move |message| {
-                            Message::Pane(pane_id, pane::Message::Tab(tab_id, message))
+                            Message::Pane(pane_id, pane::Message::tab(tab_id, message))
                         }));
                     }
                 }
@@ -692,7 +686,12 @@ impl GUI {
                 Task::none()
             }
             // In case of cube deletion, remove any tab where the cube/wallet is currently running.
-            Message::Pane(p, pane::Message::Tab(t, tab::Message::Launch(msg))) => {
+            Message::Pane(p, pane::Message::Tab(t, inner))
+                if matches!(inner.as_ref(), tab::Message::Launch(_)) =>
+            {
+                let tab::Message::Launch(msg) = *inner else {
+                    unreachable!();
+                };
                 let mut tasks = Vec::new();
                 if let home::Message::View(home::ViewMessage::DeleteCube(
                     home::DeleteCubeMessage::Confirm(..),
@@ -726,7 +725,7 @@ impl GUI {
                                 tasks.push(l.reload().map(move |msg| {
                                     Message::Pane(
                                         id,
-                                        pane::Message::Tab(tab_id, tab::Message::Launch(msg)),
+                                        pane::Message::tab(tab_id, tab::Message::Launch(msg)),
                                     )
                                 }));
                             }
@@ -737,7 +736,7 @@ impl GUI {
                 if let Some(pane) = self.panes.get_mut(p) {
                     tasks.push(
                         pane.update(
-                            pane::Message::Tab(t, tab::Message::Launch(msg)),
+                            pane::Message::tab(t, tab::Message::Launch(msg)),
                             &self.config,
                         )
                         .map(move |msg| Message::Pane(p, msg)),
@@ -753,9 +752,7 @@ impl GUI {
                 // intentionally have no generic JSON-RPC socket; borrowing
                 // their in-process daemon keeps that restriction intact.
                 if let Some(tab_id) = match &msg {
-                    pane::Message::Tab(tab_id, tab::Message::Run(message))
-                        if refreshes_claim_pair(message) =>
-                    {
+                    pane::Message::Tab(tab_id, inner) if matches!(inner.as_ref(), tab::Message::Run(message) if refreshes_claim_pair(message)) => {
                         Some(tab_id)
                     }
                     _ => None,
@@ -787,10 +784,16 @@ impl GUI {
                 }
                 match msg {
                     // Handle ListCurrencies requests separately.
-                    pane::Message::Tab(tab_id, tab::Message::Run(inner))
-                        if matches!(inner, AppMessage::Fiat(AppFiatMessage::ListCurrencies(_))) =>
+                    pane::Message::Tab(tab_id, inner)
+                        if matches!(
+                            inner.as_ref(),
+                            tab::Message::Run(AppMessage::Fiat(AppFiatMessage::ListCurrencies(_)))
+                        ) =>
                     {
-                        let AppMessage::Fiat(AppFiatMessage::ListCurrencies(source)) = inner else {
+                        let tab::Message::Run(AppMessage::Fiat(AppFiatMessage::ListCurrencies(
+                            source,
+                        ))) = *inner
+                        else {
                             tracing::error!("Unexpected message type after unboxing");
                             return Task::none();
                         };
@@ -1193,7 +1196,7 @@ mod fork_auth_dispatch_tests {
         )
         .expect("a Bitcoin fixture installer");
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
-        tab::State::Installer(installer)
+        tab::State::Installer(Box::new(installer))
     }
 
     #[test]
@@ -1223,7 +1226,7 @@ mod fork_auth_dispatch_tests {
         };
         drop(gui.update(Message::Pane(
             pane_id,
-            pane::Message::Tab(
+            pane::Message::tab(
                 2,
                 tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
                     crate::app::view::ConnectAccountMessage::Init,
@@ -1315,7 +1318,7 @@ mod fork_auth_dispatch_tests {
             };
             let task = gui.update(Message::Pane(
                 source,
-                pane::Message::Tab(
+                pane::Message::tab(
                     1,
                     tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
                         auth,
@@ -1325,16 +1328,12 @@ mod fork_auth_dispatch_tests {
             let mut checked = HashSet::new();
             if let Some(mut stream) = iced_runtime::task::into_stream(task) {
                 while let Some(action) = stream.next().await {
-                    if let iced_runtime::Action::Output(
-                        message @ Message::Pane(
-                            _,
-                            pane::Message::Tab(
-                                _,
-                                tab::Message::Launch(home::Message::Checked { .. }),
-                            ),
-                        ),
-                    ) = action
-                    {
+                    if let iced_runtime::Action::Output(message) = action {
+                        if !matches!(&message, Message::Pane(_, pane::Message::Tab(_, inner))
+                            if matches!(inner.as_ref(), tab::Message::Launch(home::Message::Checked { .. })))
+                        {
+                            continue;
+                        }
                         if let Message::Pane(pane_id, pane::Message::Tab(tab_id, _)) = &message {
                             checked.insert((*pane_id, *tab_id));
                         }
@@ -1368,7 +1367,7 @@ mod fork_auth_dispatch_tests {
             let mut stream = iced_runtime::task::into_stream(task).expect("pane task retained");
             assert!(matches!(stream.next().await,
                 Some(iced_runtime::Action::Output(Message::Pane(id,
-                    pane::Message::Tab(1, tab::Message::Launch(_))))) if id == source));
+                    pane::Message::Tab(1, inner)))) if id == source && matches!(inner.as_ref(), tab::Message::Launch(_))));
             std::fs::remove_dir_all(root_path).unwrap();
         }
     }
@@ -1547,7 +1546,7 @@ mod fork_auth_revocation_tests {
                 .push(tab::Tab::new(2, tab::State::Home(home)));
             drop(gui.update(Message::Pane(
                 pane_id,
-                pane::Message::Tab(
+                pane::Message::tab(
                     2,
                     tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
                         ConnectAccountMessage::Init,
@@ -1589,7 +1588,7 @@ mod fork_auth_revocation_tests {
             // Actual GUI auth broadcaster, with the signing picker still open.
             drop(gui.update(Message::Pane(
                 pane_id,
-                pane::Message::Tab(
+                pane::Message::tab(
                     1,
                     tab::Message::Run(AppMessage::View(view::Message::ConnectAccount(auth))),
                 ),
@@ -1658,7 +1657,7 @@ impl GUI {
     ) -> Task<Message> {
         self.update(Message::Pane(
             self.focus.unwrap(),
-            pane::Message::Tab(
+            pane::Message::tab(
                 id,
                 tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
                     account,
@@ -1670,35 +1669,18 @@ impl GUI {
     /// kind (a completion, a re-dispatched `LogOut`), so a test can drive
     /// exactly those through the real GUI and leave network bootstrap alone.
     pub(crate) fn reviewer_is_account_message(message: &Message) -> bool {
-        matches!(
-            message,
-            Message::Pane(
-                _,
-                pane::Message::Tab(
-                    _,
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
-                        _
-                    ))),
-                ),
-            )
-        )
+        matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
+            if matches!(inner.as_ref(), tab::Message::Run(AppMessage::View(
+                crate::app::view::Message::ConnectAccount(_)))))
     }
     /// Whether a GUI message is a tab's `SetSession` completion — what a
     /// real refresh or login operation hands back — so a test can route the
     /// real completion through the real broadcaster.
     pub(crate) fn reviewer_is_set_session(message: &Message) -> bool {
-        matches!(
-            message,
-            Message::Pane(
-                _,
-                pane::Message::Tab(
-                    _,
-                    tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
-                        crate::app::view::ConnectAccountMessage::SetSession(..),
-                    ))),
-                ),
-            )
-        )
+        matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
+            if matches!(inner.as_ref(), tab::Message::Run(AppMessage::View(
+                crate::app::view::Message::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::SetSession(..))))))
     }
 }
 
@@ -1819,10 +1801,10 @@ mod claim_return_routing_tests {
                     if let iced_runtime::Action::Output(message) = action {
                         outputs += 1;
                         match message {
-                            Message::Pane(
-                                pane_id,
-                                pane::Message::Tab(id, tab::Message::Run(message)),
-                            ) => {
+                            Message::Pane(pane_id, pane::Message::Tab(id, inner)) => {
+                                let tab::Message::Run(message) = *inner else {
+                                    panic!("unexpected tab route")
+                                };
                                 assert_eq!(
                                     (pane_id, id),
                                     (target, tab_id),

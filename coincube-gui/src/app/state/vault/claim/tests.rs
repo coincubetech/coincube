@@ -70,7 +70,7 @@ fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backe
         block_height: 1_000,
         sync: 1.0,
         descriptors: coincubed::commands::GetInfoDescriptors {
-            main: descriptor.clone(),
+            main: descriptor.clone().into(),
         },
         rescan_progress: None,
         refused_reorg_depth: None,
@@ -78,6 +78,7 @@ fn funding_accepts_a_chain_identified_wallet_without_requiring_an_embedded_backe
         timestamp: 0,
         last_poll_timestamp: None,
         history_sync: Default::default(),
+        imported_wallet: None,
         receive_index: 1,
         change_index: 1,
     };
@@ -309,6 +310,37 @@ fn vault_shape_refusal_admits_single_and_multi_key_p2wsh() {
     assert_eq!(vault_shape_refusal(&wallet(MULTI_WSH)), None);
     let taproot = vault_shape_refusal(&wallet(TAPROOT)).expect("taproot refused");
     assert!(taproot.contains("Taproot"), "{}", taproot);
+}
+
+#[test]
+fn imported_wallet_has_no_claim_policy() {
+    use coincube_core::miniscript::bitcoin::{
+        bip32::{DerivationPath, Xpriv, Xpub},
+        secp256k1::Secp256k1,
+    };
+    use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+
+    let secp = Secp256k1::new();
+    let master = Xpriv::new_master(Network::Bitcoin, &[44; 32]).unwrap();
+    let account = master
+        .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+        .unwrap();
+    let key = format!(
+        "[{}/84h/0h/0h]{}",
+        master.fingerprint(&secp),
+        Xpub::from_priv(&secp, &account)
+    );
+    let descriptor = ImportedWalletDescriptor::parse(
+        &format!("wpkh({key}/0/*)"),
+        Some(&format!("wpkh({key}/1/*)")),
+        ChainId::Bitcoin,
+    )
+    .unwrap();
+    let wallet =
+        Wallet::new(coincube_core::wallet_descriptor::WalletDescriptor::Imported(descriptor));
+    assert!(vault_shape_refusal(&wallet)
+        .unwrap()
+        .contains("no Vault Claim policy"));
 }
 
 fn anchor(mtp: i64, expiry: i64, active: bool, observed_at: i64) -> NetworkAnchorStatus {
@@ -1220,6 +1252,7 @@ mod flow {
                 timestamp: 0,
                 last_poll_timestamp: None,
                 history_sync: Default::default(),
+                imported_wallet: None,
                 receive_index: 1,
                 change_index: 0,
             })
@@ -1253,9 +1286,17 @@ mod flow {
             let live_receive = false;
             let _ = is_change;
             let descriptor = if live_receive {
-                self.config.main_descriptor.receive_descriptor()
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .expect("Vault fixture")
+                    .receive_descriptor()
             } else {
-                self.config.main_descriptor.change_descriptor()
+                self.config
+                    .main_descriptor
+                    .as_vault()
+                    .expect("Vault fixture")
+                    .change_descriptor()
             };
             Ok(model::ListRevealedAddressesResult {
                 addresses: vec![coincubed::commands::ListRevealedAddressesEntry {
@@ -1374,7 +1415,7 @@ mod flow {
             #[cfg(feature = "regtest-harness")]
             if self.live.is_some()
                 && self.config.bitcoin_config.chain == chain
-                && self.config.main_descriptor == *descriptor
+                && self.config.main_descriptor.as_vault() == Some(descriptor)
             {
                 return self.reserve_change().await;
             }
@@ -2424,7 +2465,7 @@ mod flow {
             (ChainId::BitcoinBlake2b, "fork-cube"),
         ] {
             let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
-                VaultIdentity::new(f.wallet.id(), Some(&f.wallet.main_descriptor)),
+                VaultIdentity::new(f.wallet.id(), f.wallet.inheritance_descriptor()),
             );
             update_settings_file(&f.datadir.network_directory(chain), |mut settings| {
                 settings.cubes = vec![cube];
@@ -2466,7 +2507,10 @@ mod flow {
             bitcoin_cube: "bitcoin-cube".into(),
             fork_cube: "fork-cube".into(),
             descriptor_digest: coincube_core::miniscript::bitcoin::hashes::sha256::Hash::hash(
-                f.wallet.main_descriptor.to_string().as_bytes(),
+                require_vault_descriptor(&f.wallet)
+                    .unwrap()
+                    .to_string()
+                    .as_bytes(),
             ),
         };
         // Settling: the release may land just after the panel's task returns
@@ -2530,8 +2574,9 @@ mod flow {
             (ChainId::Bitcoin, "bitcoin-cube", f.wallet.clone()),
             (ChainId::BitcoinBlake2b, "fork-cube", wallet.clone()),
         ] {
-            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain)
-                .with_vault(VaultIdentity::new(vault.id(), Some(&vault.main_descriptor)));
+            let cube = CubeSettings::new_with_raw_id(id.into(), id.into(), chain).with_vault(
+                VaultIdentity::new(vault.id(), vault.inheritance_descriptor()),
+            );
             update_settings_file(&f.datadir.network_directory(chain), |mut settings| {
                 settings.cubes = vec![cube];
                 Some(settings)
@@ -2579,8 +2624,8 @@ mod flow {
                 .push_int(961_640)
                 .push_int(1)
                 .into_script();
-            root.output[0].script_pubkey = wallet
-                .main_descriptor
+            root.output[0].script_pubkey = require_vault_descriptor(&wallet)
+                .unwrap()
                 .receive_descriptor()
                 .derive(1.into(), &verify)
                 .script_pubkey();
@@ -2623,7 +2668,7 @@ mod flow {
             );
             let source = create_ancestry_self_transfer(
                 ChainId::Bitcoin,
-                &wallet.main_descriptor,
+                require_vault_descriptor(&wallet).unwrap(),
                 &verify,
                 &mut getter,
                 &coins,
@@ -4956,20 +5001,12 @@ mod flow {
                         let loaded = gui.update(message);
                         for follow in gui_outputs(loaded).await {
                             // Deliver the real queued SessionLoaded too; omit unrelated network bootstrap.
-                            if matches!(
-                                &follow,
-                                crate::gui::Message::Pane(
-                                    _,
-                                    crate::gui::pane::Message::Tab(
-                                        _,
-                                        crate::gui::tab::Message::Run(Message::View(
-                                            view::Message::ConnectAccount(
-                                                view::ConnectAccountMessage::SessionLoaded { .. }
-                                            )
-                                        ))
-                                    )
-                                )
-                            ) {
+                            if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
+                            if matches!(inner.as_ref(), crate::gui::tab::Message::Run(Message::View(
+                                view::Message::ConnectAccount(
+                                    view::ConnectAccountMessage::SessionLoaded { .. }
+                                )))))
+                            {
                                 drop(gui.update(follow));
                             }
                         }
@@ -5020,21 +5057,12 @@ mod flow {
                     let mut queue =
                         std::collections::VecDeque::from(gui_outputs(gui.update(message)).await);
                     while let Some(follow) = queue.pop_front() {
-                        if matches!(
-                            &follow,
-                            crate::gui::Message::Pane(
-                                _,
-                                crate::gui::pane::Message::Tab(
-                                    _,
-                                    crate::gui::tab::Message::Run(
-                                        Message::Claim(_)
-                                            | Message::View(view::Message::ConnectAccount(
-                                                view::ConnectAccountMessage::SessionLoaded { .. }
-                                            ))
-                                    )
-                                )
-                            )
-                        ) {
+                        if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
+                        if matches!(inner.as_ref(), crate::gui::tab::Message::Run(
+                            Message::Claim(_) | Message::View(view::Message::ConnectAccount(
+                                view::ConnectAccountMessage::SessionLoaded { .. }
+                            )))))
+                        {
                             queue.extend(gui_outputs(gui.update(follow)).await);
                         }
                     }

@@ -301,7 +301,13 @@ fn ensure_claim_wallet_ready(
 ) -> Result<(), ClaimAddressError> {
     if info.network != Network::Bitcoin
         || info.chain_id != Some(coincube_core::chain::ChainId::Bitcoin)
-        || info.descriptors.main.to_string() != saved.descriptor
+        || info
+            .descriptors
+            .main
+            .as_vault()
+            .map(ToString::to_string)
+            .as_deref()
+            != Some(saved.descriptor.as_str())
         || info.block_height <= 0
         || !info.sync.is_finite()
         || info.sync < 0.9999
@@ -642,7 +648,7 @@ fn change_wallet_ready(
 ) -> bool {
     info.network == Network::Bitcoin
         && info.chain_id == Some(chain)
-        && info.descriptors.main == *descriptor
+        && info.descriptors.main.as_vault() == Some(descriptor)
         && info.rescan_progress.is_none()
         && !info.chain_divergence
         && info.refused_reorg_depth.is_none()
@@ -1906,7 +1912,7 @@ mod tests {
                 block_height: 100,
                 sync: 1.0,
                 descriptors: coincubed::commands::GetInfoDescriptors {
-                    main: self.descriptor.clone(),
+                    main: self.descriptor.clone().into(),
                 },
                 rescan_progress: None,
                 refused_reorg_depth: None,
@@ -1914,6 +1920,7 @@ mod tests {
                 timestamp: 0,
                 last_poll_timestamp: None,
                 history_sync: Default::default(),
+                imported_wallet: None,
                 receive_index: *self.receive.lock().unwrap(),
                 change_index: 0,
             })
@@ -2152,7 +2159,7 @@ mod tests {
             block_height: 1,
             sync: 1.0,
             descriptors: coincubed::commands::GetInfoDescriptors {
-                main: descriptor.clone(),
+                main: descriptor.clone().into(),
             },
             rescan_progress: None,
             refused_reorg_depth: None,
@@ -2160,6 +2167,7 @@ mod tests {
             timestamp: 0,
             last_poll_timestamp: None,
             history_sync: Default::default(),
+            imported_wallet: None,
             receive_index: 0,
             change_index: 0,
         };

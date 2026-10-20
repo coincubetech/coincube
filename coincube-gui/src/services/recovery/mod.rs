@@ -11,6 +11,7 @@
 
 pub mod envelope;
 pub mod error;
+pub mod imported;
 pub mod keyholder;
 pub mod owner_keychain;
 pub mod password;
@@ -19,6 +20,10 @@ pub mod restore;
 
 pub use envelope::{decrypt, encrypt, KdfParams, ENVELOPE_VERSION, KDF_ID_ARGON2ID_V1};
 pub use error::RecoveryError;
+pub use imported::{
+    imported_descriptor_blob_fingerprint, ImportedDescriptorBlob, ImportedDescriptorBlobWallet,
+    IMPORTED_BLOB_VERSION,
+};
 pub use keyholder::{fetch_recovery_descriptor, KeyholderRecoveryError};
 pub use owner_keychain::{fetch_owner_recovery_envelope, OwnerKeychainRecoveryError};
 pub use password::{score as score_password, PasswordStrength, MIN_PASSWORD_LEN};
@@ -27,6 +32,8 @@ pub use plaintext::{
     SeedBlobCube, SeedBlobMnemonic, BLOB_VERSION,
 };
 pub use restore::{
-    decrypt_descriptor_blob, decrypt_seed_blob, fetch_and_decrypt_descriptor,
-    fetch_and_decrypt_for_install, fetch_and_decrypt_kit, DecryptedKit, RestoreError,
+    decrypt_descriptor_blob, decrypt_seed_blob, decrypt_wallet_descriptor_blob,
+    fetch_and_decrypt_descriptor, fetch_and_decrypt_for_install, fetch_and_decrypt_kit,
+    fetch_and_decrypt_wallet_kit, parse_wallet_descriptor_blob, DecryptedKit, RecoveredKit,
+    RecoveredWalletBlob, RestoreError,
 };

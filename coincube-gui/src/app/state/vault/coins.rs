@@ -51,19 +51,23 @@ pub struct CoinsPanel {
     labels_edited: LabelsEdited,
     warning: Option<Error>,
     /// timelock value to pass for the heir to consume a coin.
-    timelock: u16,
+    timelock: Option<u16>,
     /// The Cube's chain, for other-chain deposit status on the fork pair.
     chain: crate::chain::ChainId,
 }
 
 impl CoinsPanel {
-    pub fn new(coins: &[Coin], timelock: u16, chain: crate::chain::ChainId) -> Self {
+    pub fn new(
+        coins: &[Coin],
+        timelock: impl Into<Option<u16>>,
+        chain: crate::chain::ChainId,
+    ) -> Self {
         let mut panel = Self {
             labels_edited: LabelsEdited::default(),
             coins: Coins::default(),
             selected: Vec::new(),
             warning: None,
-            timelock,
+            timelock: timelock.into(),
             chain,
         };
         panel.update_coins(coins);

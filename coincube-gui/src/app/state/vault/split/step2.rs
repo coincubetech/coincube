@@ -1576,7 +1576,7 @@ impl ProductionStep2 {
         )?;
         let vault = daemon
             .config()
-            .map(|config| config.main_descriptor.clone())
+            .and_then(|config| config.main_descriptor.as_vault().cloned())
             .ok_or(claim_coordinator::Error::Unsupported)?;
         let context = SplitForkProduction::new(
             session.client.clone(),

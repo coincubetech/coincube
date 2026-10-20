@@ -375,7 +375,12 @@ impl Daemon for EmbeddedDaemon {
     }
 
     async fn get_new_address(&self) -> Result<GetAddressResult, DaemonError> {
-        self.command(|daemon| Ok(daemon.get_new_address())).await
+        self.command(|daemon| {
+            daemon
+                .try_get_new_address()
+                .map_err(|e| DaemonError::Unexpected(e.to_string()))
+        })
+        .await
     }
 
     async fn list_revealed_addresses(
@@ -511,7 +516,9 @@ impl Daemon for EmbeddedDaemon {
         chain: coincube_core::chain::ChainId,
         descriptor: &coincube_core::descriptors::CoincubeDescriptor,
     ) -> Result<coincube_core::miniscript::bitcoin::bip32::ChildNumber, DaemonError> {
-        if self.config.bitcoin_config.chain != chain || self.config.main_descriptor != *descriptor {
+        if self.config.bitcoin_config.chain != chain
+            || self.config.main_descriptor.as_vault() != Some(descriptor)
+        {
             return Err(DaemonError::Unexpected(
                 "Claim wallet identity does not match this daemon".into(),
             ));

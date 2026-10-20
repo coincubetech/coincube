@@ -113,7 +113,7 @@ impl Coordinator {
             .0
             .daemon
             .config()
-            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(source.descriptor()))
         {
             return Err(Error::InvalidBinding);
         }
@@ -149,7 +149,7 @@ impl Coordinator {
             .0
             .daemon
             .config()
-            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(source.descriptor()))
         {
             return Err(Error::InvalidBinding);
         }
@@ -682,7 +682,7 @@ impl Preparation {
             .0
             .daemon
             .config()
-            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(source.descriptor()))
         {
             return Err(Error::InvalidBinding);
         }
@@ -716,7 +716,7 @@ impl Preparation {
             .0
             .daemon
             .config()
-            .is_none_or(|c| c.main_descriptor != *source.descriptor())
+            .is_none_or(|c| c.main_descriptor.as_vault() != Some(source.descriptor()))
         {
             return Err(Error::InvalidBinding);
         }

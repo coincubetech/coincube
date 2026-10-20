@@ -4,7 +4,9 @@
 
 pub mod reservation;
 pub mod sqlite;
-use coincube_core::{chain::ChainId, descriptors::CoincubeDescriptor};
+use coincube_core::{
+    chain::ChainId, descriptors::CoincubeDescriptor, wallet_descriptor::ImportedWalletDescriptor,
+};
 pub use reservation::{ChangeReservation, ReservationError};
 
 use crate::{
@@ -43,8 +45,37 @@ pub struct Wallet {
     pub last_poll_timestamp: Option<u32>,
 }
 
+/// Durable historical discovery state for imported public wallets. These
+/// bounds count addresses whose lookup completed, not addresses merely queued.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ImportedHistory {
+    pub birthday: u32,
+    pub initial_lookahead: u32,
+    pub discovery_target: u32,
+    pub receive_scanned: u32,
+    pub change_scanned: u32,
+    pub history_complete: bool,
+}
+
 pub trait DatabaseInterface: Send {
     fn connection(&self) -> Box<dyn DatabaseConnection>;
+
+    fn reserve_imported_receive(
+        &self,
+        _chain: ChainId,
+        _descriptor: &ImportedWalletDescriptor,
+    ) -> Result<(bitcoin::Address, bip32::ChildNumber), ReservationError> {
+        Err(ReservationError::Unsupported)
+    }
+
+    fn commit_imported_change_if_next(
+        &self,
+        _chain: ChainId,
+        _descriptor: &ImportedWalletDescriptor,
+        _index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        Err(ReservationError::Unsupported)
+    }
 
     /// Atomically persist a fresh change allocation before returning. Implementations
     /// without durable allocation refuse; a read followed by set_change_index is unsafe.
@@ -71,6 +102,26 @@ pub trait DatabaseInterface: Send {
 }
 
 impl DatabaseInterface for SqliteDb {
+    fn reserve_imported_receive(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+    ) -> Result<(bitcoin::Address, bip32::ChildNumber), ReservationError> {
+        self.connection()
+            .map_err(|_| ReservationError::Storage)?
+            .reserve_imported_receive(chain, descriptor)
+    }
+
+    fn commit_imported_change_if_next(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        self.connection()
+            .map_err(|_| ReservationError::Storage)?
+            .commit_imported_change_if_next(chain, descriptor, index)
+    }
     fn reserve_change(
         &self,
         chain: ChainId,
@@ -101,6 +152,26 @@ impl DatabaseInterface for SqliteDb {
 
 // FIXME: do we need to repeat the entire trait implementation? Isn't there a nicer way?
 impl DatabaseInterface for sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
+    fn reserve_imported_receive(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+    ) -> Result<(bitcoin::Address, bip32::ChildNumber), ReservationError> {
+        self.lock()
+            .map_err(|_| ReservationError::Storage)?
+            .reserve_imported_receive(chain, descriptor)
+    }
+
+    fn commit_imported_change_if_next(
+        &self,
+        chain: ChainId,
+        descriptor: &ImportedWalletDescriptor,
+        index: bip32::ChildNumber,
+    ) -> Result<bool, ReservationError> {
+        self.lock()
+            .map_err(|_| ReservationError::Storage)?
+            .commit_imported_change_if_next(chain, descriptor, index)
+    }
     fn reserve_change(
         &self,
         chain: ChainId,
@@ -130,6 +201,24 @@ impl DatabaseInterface for sync::Arc<sync::Mutex<dyn DatabaseInterface>> {
 }
 
 pub trait DatabaseConnection {
+    fn imported_history(&mut self) -> Option<ImportedHistory> {
+        None
+    }
+
+    /// Record successful branch coverage after a backend scan. A backend
+    /// failure must not call this; the previous incomplete state survives.
+    fn complete_import_history(
+        &mut self,
+        _receive_scanned: u32,
+        _change_scanned: u32,
+    ) -> Result<(), String> {
+        Err("imported history tracking is unsupported".into())
+    }
+
+    fn mark_import_history_pending(&mut self) -> Result<(), String> {
+        Err("imported history tracking is unsupported".into())
+    }
+
     /// Get the tip of the best chain we've seen.
     fn chain_tip(&mut self) -> Option<BlockChainTip>;
 
@@ -230,8 +319,27 @@ pub trait DatabaseConnection {
     /// Insert a new Spend transaction or replace an existing one.
     fn store_spend(&mut self, psbt: &Psbt);
 
+    fn store_imported_construction(&mut self, _psbt: &Psbt) -> Result<(), String> {
+        Err("imported draft persistence is unsupported".into())
+    }
+
+    fn spend_broadcast_txid(
+        &mut self,
+        _draft: &bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Txid>, String> {
+        Err("broadcast identity lookup is unsupported".into())
+    }
+
     /// List all existing Spend transactions, along with an optional last update timestamp.
-    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>)>;
+    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>, Option<bitcoin::Txid>)>;
+
+    fn record_broadcast_txid(
+        &mut self,
+        _draft: &bitcoin::Txid,
+        _actual: &bitcoin::Txid,
+    ) -> Result<(), String> {
+        Err("broadcast identity persistence is unsupported".into())
+    }
 
     /// Delete a Spend transaction from database.
     fn delete_spend(&mut self, txid: &bitcoin::Txid);
@@ -269,6 +377,23 @@ pub trait DatabaseConnection {
 }
 
 impl DatabaseConnection for SqliteConn {
+    fn imported_history(&mut self) -> Option<ImportedHistory> {
+        SqliteConn::imported_history(self).ok().flatten()
+    }
+
+    fn complete_import_history(
+        &mut self,
+        receive_scanned: u32,
+        change_scanned: u32,
+    ) -> Result<(), String> {
+        SqliteConn::complete_import_history(self, receive_scanned, change_scanned)
+            .map_err(|error| error.to_string())
+    }
+
+    fn mark_import_history_pending(&mut self) -> Result<(), String> {
+        SqliteConn::mark_import_history_pending(self).map_err(|error| error.to_string())
+    }
+
     fn chain_tip(&mut self) -> Option<BlockChainTip> {
         match self.db_tip() {
             DbTip {
@@ -423,11 +548,33 @@ impl DatabaseConnection for SqliteConn {
         self.store_spend(psbt)
     }
 
-    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>)> {
+    fn store_imported_construction(&mut self, psbt: &Psbt) -> Result<(), String> {
+        self.store_imported_construction(psbt)
+            .map_err(|error| error.to_string())
+    }
+
+    fn spend_broadcast_txid(
+        &mut self,
+        draft: &bitcoin::Txid,
+    ) -> Result<Option<bitcoin::Txid>, String> {
+        self.spend_broadcast_txid(draft)
+            .map_err(|error| error.to_string())
+    }
+
+    fn list_spend(&mut self) -> Vec<(Psbt, Option<u32>, Option<bitcoin::Txid>)> {
         self.list_spend()
             .into_iter()
-            .map(|db_spend| (db_spend.psbt, db_spend.updated_at))
+            .map(|db_spend| (db_spend.psbt, db_spend.updated_at, db_spend.broadcast_txid))
             .collect()
+    }
+
+    fn record_broadcast_txid(
+        &mut self,
+        draft: &bitcoin::Txid,
+        actual: &bitcoin::Txid,
+    ) -> Result<(), String> {
+        self.record_broadcast_txid(draft, actual)
+            .map_err(|error| error.to_string())
     }
 
     fn delete_spend(&mut self, txid: &bitcoin::Txid) {

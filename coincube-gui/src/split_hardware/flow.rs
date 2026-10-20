@@ -357,7 +357,11 @@ mod tests {
                 "split_descriptor(",
                 "PolicyError",
             ] {
-                if text.contains(ident) {
+                // The imported wallet uses the same public HID binder for its
+                // own policy; it must not gain any Split signing entry point.
+                let imported_public_binder =
+                    file == "src/app/state/imported_bitcoin.rs" && ident == "ProductionBinder";
+                if text.contains(ident) && !imported_public_binder {
                     unexpected.push(format!("{file}: {ident}"));
                 }
             }

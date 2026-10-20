@@ -252,6 +252,8 @@ impl HistorySync {
 pub struct HistorySyncCache {
     scanning: sync::atomic::AtomicBool,
     checked: sync::atomic::AtomicU64,
+    receive_checked: sync::atomic::AtomicU64,
+    change_checked: sync::atomic::AtomicU64,
     expected: sync::atomic::AtomicU64,
     /// A full scan finished in the backend; the poll that writes it to the database
     /// has not succeeded yet.
@@ -267,6 +269,8 @@ impl HistorySyncCache {
     pub fn begin_full_scan(&self, expected: u64) {
         use sync::atomic::Ordering::{Relaxed, Release};
         self.checked.store(0, Relaxed);
+        self.receive_checked.store(0, Relaxed);
+        self.change_checked.store(0, Relaxed);
         self.expected.store(expected, Relaxed);
         // Release, paired with the Acquire in `snapshot`: a reader that sees this
         // scan running also sees its reset count and estimate, never the previous
@@ -279,11 +283,38 @@ impl HistorySyncCache {
         self.checked.fetch_add(1, sync::atomic::Ordering::Relaxed);
     }
 
+    /// Count an actually queried address on its branch. The generic checked
+    /// count still drives the existing progress indicator.
+    pub fn branch_address_checked(&self, change: bool) {
+        self.address_checked();
+        let counter = if change {
+            &self.change_checked
+        } else {
+            &self.receive_checked
+        };
+        counter.fetch_add(1, sync::atomic::Ordering::Relaxed);
+    }
+
+    /// A backend returned a complete full scan, but the poller has not yet
+    /// persisted its wallet update. Counts remain pending on a failed poll.
+    pub fn pending_full_scan_coverage(&self) -> Option<(u32, u32)> {
+        use sync::atomic::Ordering::{Acquire, Relaxed};
+        self.awaiting_commit.load(Acquire).then(|| {
+            let bounded =
+                |count: &sync::atomic::AtomicU64| count.load(Relaxed).min(i32::MAX as u64) as u32;
+            (
+                bounded(&self.receive_checked),
+                bounded(&self.change_checked),
+            )
+        })
+    }
+
     /// The full scan returned a result for the backend to apply.
     pub fn full_scan_fetched(&self) {
         use sync::atomic::Ordering::Relaxed;
         self.scanning.store(false, Relaxed);
-        self.awaiting_commit.store(true, Relaxed);
+        self.awaiting_commit
+            .store(true, sync::atomic::Ordering::Release);
     }
 
     /// A poll completed: its result, including any full scan it carried, is in the
@@ -609,7 +640,7 @@ pub trait BitcoinInterface: Send {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO>;
 
     /// Get all coins that were confirmed, and at what height and time. Along with "expired"
@@ -664,9 +695,21 @@ pub trait BitcoinInterface: Send {
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         Ok(self.received_coins(tip, descs))
+    }
+
+    /// Return every wallet output discovered by a historical imported-wallet scan,
+    /// including outputs confirmed before the database's current chain tip. The
+    /// poller de-duplicates these against its durable outpoints. Other backends
+    /// retain their ordinary tip-bounded behavior unless they support this scan.
+    fn try_historical_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        self.try_received_coins(tip, descs)
     }
     fn try_confirmed_coins(
         &self,
@@ -824,7 +867,7 @@ impl BitcoinInterface for d::BitcoinD {
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         // Core keeps recovered transaction records even after their bodies are
         // pruned. Replay those records once on startup and after explicit scans.
@@ -1029,7 +1072,7 @@ impl BitcoinInterface for d::BitcoinD {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         let lsb_res = self.list_since_block(&tip.hash);
 
@@ -1308,14 +1351,18 @@ impl BitcoinInterface for d::BitcoinD {
 // four bodies byte-for-byte. Keeping the projection in one place stops the two
 // backends from silently diverging.
 
-fn received_coins_from(coins: &HashMap<bitcoin::OutPoint, Coin>, tip: &BlockChainTip) -> Vec<UTxO> {
-    // Wallet coins that are either unconfirmed or confirmed after `tip`. The
-    // poller discards any that had already been received.
+fn received_coins_from(
+    coins: &HashMap<bitcoin::OutPoint, Coin>,
+    tip: Option<&BlockChainTip>,
+) -> Vec<UTxO> {
+    // Ordinary polling only offers outputs confirmed after `tip`. Historical
+    // import catch-up offers every discovered output, even if its funding block
+    // predates the stored tip; the poller de-duplicates by outpoint.
     coins
         .values()
         .filter_map(|c| {
             let height = c.block_info.map(|info| info.height);
-            if height.filter(|h| *h <= tip.height).is_some() {
+            if height.is_some_and(|h| tip.is_some_and(|tip| h <= tip.height)) {
                 None
             } else {
                 Some(UTxO {
@@ -1410,9 +1457,17 @@ impl BitcoinInterface for electrum::Electrum {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        _descs: &[descriptors::SinglePathCoincubeDesc],
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
-        received_coins_from(&self.wallet_coins(None), tip)
+        received_coins_from(&self.wallet_coins(None), Some(tip))
+    }
+
+    fn try_historical_received_coins(
+        &self,
+        _tip: &BlockChainTip,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(received_coins_from(&self.wallet_coins(None), None))
     }
 
     fn confirmed_coins(
@@ -1580,9 +1635,17 @@ impl BitcoinInterface for esplora::Esplora {
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        _descs: &[descriptors::SinglePathCoincubeDesc],
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
-        received_coins_from(&self.wallet_coins(None), tip)
+        received_coins_from(&self.wallet_coins(None), Some(tip))
+    }
+
+    fn try_historical_received_coins(
+        &self,
+        _tip: &BlockChainTip,
+        _descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        Ok(received_coins_from(&self.wallet_coins(None), None))
     }
 
     fn confirmed_coins(
@@ -1723,9 +1786,18 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
     fn try_received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Result<Vec<UTxO>, String> {
         self.lock().unwrap().try_received_coins(tip, descs)
+    }
+    fn try_historical_received_coins(
+        &self,
+        tip: &BlockChainTip,
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
+    ) -> Result<Vec<UTxO>, String> {
+        self.lock()
+            .unwrap()
+            .try_historical_received_coins(tip, descs)
     }
     fn try_confirmed_coins(
         &self,
@@ -1814,7 +1886,7 @@ impl BitcoinInterface for sync::Arc<sync::Mutex<dyn BitcoinInterface + 'static>>
     fn received_coins(
         &self,
         tip: &BlockChainTip,
-        descs: &[descriptors::SinglePathCoincubeDesc],
+        descs: &[miniscript::Descriptor<miniscript::DescriptorPublicKey>],
     ) -> Vec<UTxO> {
         self.lock().unwrap().received_coins(tip, descs)
     }
@@ -1949,6 +2021,47 @@ pub struct Coin {
 }
 
 #[cfg(test)]
+mod imported_history_projection_tests {
+    use super::*;
+    use bitcoin::hashes::Hash;
+
+    #[test]
+    fn historical_projection_includes_outputs_confirmed_before_stored_tip() {
+        let outpoint = bitcoin::OutPoint {
+            txid: bitcoin::Txid::all_zeros(),
+            vout: 0,
+        };
+        let coin = Coin {
+            outpoint,
+            amount: bitcoin::Amount::from_sat(42_000),
+            derivation_index: ChildNumber::from_normal_idx(250).unwrap(),
+            is_change: false,
+            is_immature: false,
+            block_info: Some(BlockInfo {
+                height: 100,
+                time: 1,
+            }),
+            spend_txid: None,
+            spend_block: None,
+        };
+        let coins = HashMap::from([(outpoint, coin)]);
+        let persisted_tip = BlockChainTip {
+            hash: bitcoin::BlockHash::all_zeros(),
+            height: 150,
+        };
+
+        assert!(received_coins_from(&coins, Some(&persisted_tip)).is_empty());
+        let discovered = received_coins_from(&coins, None);
+        assert_eq!(discovered.len(), 1);
+        assert_eq!(discovered[0].outpoint, outpoint);
+        assert!(matches!(
+            discovered[0].address,
+            UTxOAddress::DerivIndex(index, false) if u32::from(index) == 250
+        ));
+    }
+}
+
+#[cfg(test)]
 mod genesis_tests {
     use super::*;
     use bitcoin::hashes::Hash;
@@ -2027,6 +2140,27 @@ mod history_sync_cache_tests {
         }
         cache.begin_full_scan(10);
         assert_eq!(cache.snapshot().addresses_checked, 0);
+    }
+
+    #[test]
+    fn branch_coverage_is_available_only_after_a_fetched_scan_and_survives_failed_poll() {
+        let cache = HistorySyncCache::default();
+        cache.begin_full_scan(400);
+        cache.branch_address_checked(false);
+        cache.branch_address_checked(false);
+        cache.branch_address_checked(true);
+        assert_eq!(cache.pending_full_scan_coverage(), None);
+        cache.full_scan_fetched();
+        assert_eq!(cache.pending_full_scan_coverage(), Some((2, 1)));
+        cache.poll_failed("db write", 5);
+        assert_eq!(cache.pending_full_scan_coverage(), Some((2, 1)));
+        cache.poll_succeeded(7);
+        assert_eq!(cache.pending_full_scan_coverage(), None);
+        cache.begin_full_scan(400);
+        assert_eq!(cache.snapshot().addresses_checked, 0);
+        cache.branch_address_checked(true);
+        cache.full_scan_fetched();
+        assert_eq!(cache.pending_full_scan_coverage(), Some((0, 1)));
     }
 
     #[test]

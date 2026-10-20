@@ -255,6 +255,12 @@ impl HardwareWallets {
         self
     }
 
+    /// Session-only listing bound to a public wallet policy. Imported
+    /// wallets use the same device transport without acquiring a Split name.
+    pub fn with_public_policy(self, name: String, descriptor: String) -> Self {
+        self.with_split_policy(name, descriptor)
+    }
+
     pub fn split_policy_binding(&self) -> Option<&SplitPolicyBinding> {
         self.split_policy.as_ref()
     }
@@ -434,8 +440,12 @@ async fn unlock_bitbox(
     let fingerprint = bitbox2.get_master_fingerprint().await?;
     let mut registered = false;
     let version = bitbox2.get_version().await.ok();
-    if let Some(wallet) = &wallet {
-        let desc = wallet.main_descriptor.to_string();
+    if let Some((wallet, descriptor)) = wallet.as_ref().and_then(|wallet| {
+        wallet
+            .inheritance_descriptor()
+            .map(|descriptor| (wallet, descriptor))
+    }) {
+        let desc = descriptor.to_string();
         bitbox2 = bitbox2.with_policy(&desc)?;
         registered = bitbox2.is_policy_registered(&desc).await?;
         if wallet.descriptor_keys().contains(&fingerprint) {
@@ -878,7 +888,11 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     // Vault scoping: a phone is a candidate signer only
                     // for the vault it was paired against. `None` means
                     // no vault is loaded, so nothing is in scope.
-                    let active_vault_id = state.wallet.as_ref().map(|w| w.id_fingerprint());
+                    let active_vault_id = state
+                        .wallet
+                        .as_ref()
+                        .filter(|wallet| wallet.supports_inheritance())
+                        .map(|wallet| wallet.id_fingerprint());
                     // What every LAN session gets sealed with. Loaded once per
                     // tick rather than per phone: `load_or_create` touches the
                     // sidecar, and a tick can dial several phones.
@@ -891,7 +905,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                     let lan_descriptor = state
                         .wallet
                         .as_ref()
-                        .map(|w| w.main_descriptor.to_string())
+                        .and_then(|w| w.inheritance_descriptor().map(ToString::to_string))
                         .unwrap_or_default();
                     // A phone can still be listed and dialled without this —
                     // it just can't be sent a session. `sign_tx` turns the
@@ -1174,10 +1188,12 @@ async fn handle_ledger_device<'a, T: async_hwi::ledger::Transport + Sync + Send 
                         .iter()
                         .find(|cfg| cfg.fingerprint == fingerprint)
                     {
-                        device = device
-                            .with_wallet(&w.name, &w.main_descriptor.to_string(), Some(cfg.token()))
-                            .expect("Configuration must be correct");
-                        registered = true;
+                        if let Some(descriptor) = w.inheritance_descriptor() {
+                            device = device
+                                .with_wallet(&w.name, &descriptor.to_string(), Some(cfg.token()))
+                                .expect("Configuration must be correct");
+                            registered = true;
+                        }
                     }
                 }
                 Ok(HardwareWallet::Supported {
@@ -1262,7 +1278,15 @@ async fn handle_jade_device(
                 let alias = keys_aliases.and_then(|aliases| aliases.get(&fingerprint).cloned());
                 if let Some(wallet) = &wallet {
                     if wallet.descriptor_keys().contains(&fingerprint) {
-                        let desc = wallet.main_descriptor.to_string();
+                        let Some(descriptor) = wallet.inheritance_descriptor() else {
+                            return Ok(HardwareWallet::Unsupported {
+                                id: id.clone(),
+                                kind,
+                                version,
+                                reason: UnsupportedReason::NotPartOfWallet(fingerprint),
+                            });
+                        };
+                        let desc = descriptor.to_string();
                         let device = device.with_wallet(wallet.name.clone());
                         let registered = device.is_wallet_registered(&wallet.name, &desc).await?;
                         Ok(HardwareWallet::Supported {

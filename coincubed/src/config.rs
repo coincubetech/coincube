@@ -1,5 +1,6 @@
 use coincube_core::chain::ChainId;
 use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
 
 use std::{fmt, net::SocketAddr, path::PathBuf, str::FromStr, time::Duration};
 
@@ -24,6 +25,35 @@ pub fn serialize_to_string<T: std::fmt::Display, S: Serializer>(
     s: S,
 ) -> Result<S::Ok, S::Error> {
     s.serialize_str(&field.to_string())
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredWalletDescriptor {
+    /// Every pre-import daemon.toml stores one strict Vault descriptor string.
+    Vault(String),
+    Imported(ImportedWalletDescriptor),
+}
+
+fn deserialize_wallet_descriptor<'de, D: Deserializer<'de>>(
+    deserializer: D,
+) -> Result<WalletDescriptor, D::Error> {
+    match StoredWalletDescriptor::deserialize(deserializer)? {
+        StoredWalletDescriptor::Vault(value) => CoincubeDescriptor::from_str(&value)
+            .map(WalletDescriptor::Vault)
+            .map_err(de::Error::custom),
+        StoredWalletDescriptor::Imported(value) => Ok(WalletDescriptor::Imported(value)),
+    }
+}
+
+fn serialize_wallet_descriptor<S: Serializer>(
+    descriptor: &WalletDescriptor,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    match descriptor {
+        WalletDescriptor::Vault(value) => serializer.serialize_str(&value.to_string()),
+        WalletDescriptor::Imported(value) => value.serialize(serializer),
+    }
 }
 
 fn deserialize_duration<'de, D>(deserializer: D) -> Result<Duration, D::Error>
@@ -356,10 +386,16 @@ pub struct Config {
     pub log_level: log::LevelFilter,
     /// The descriptor to use for sending/receiving coins
     #[serde(
-        deserialize_with = "deserialize_fromstr",
-        serialize_with = "serialize_to_string"
+        deserialize_with = "deserialize_wallet_descriptor",
+        serialize_with = "serialize_wallet_descriptor"
     )]
-    pub main_descriptor: CoincubeDescriptor,
+    pub main_descriptor: WalletDescriptor,
+    /// Imported history lower bound; absent for strict Vaults. The database is
+    /// authoritative after initialization and these values must match it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_birthday: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_initial_lookahead: Option<u32>,
     /// Settings for the Bitcoin interface
     pub bitcoin_config: BitcoinConfig,
     /// Settings specific to the Bitcoin backend.
@@ -400,11 +436,13 @@ pub struct Config {
 }
 
 impl Config {
-    /// Copy suitable for persistence: fork authentication is runtime-only.
-    /// Bitcoin persistence remains unchanged for compatibility.
+    /// Copy suitable for persistence: fork and imported-wallet Connect
+    /// authentication are runtime-only. Legacy Vault persistence is unchanged.
     pub fn for_persistence(&self) -> Self {
         let mut config = self.clone();
-        if config.bitcoin_config.chain.is_blake2b() {
+        if config.bitcoin_config.chain.is_blake2b()
+            || config.main_descriptor.as_imported().is_some()
+        {
             if let Some(backend) = config.fallback_esplora.as_mut() {
                 backend.token = None;
                 backend.fallback_token = None;
@@ -423,14 +461,16 @@ impl Config {
         bitcoin_config: BitcoinConfig,
         bitcoin_backend: Option<BitcoinBackend>,
         log_level: log::LevelFilter,
-        main_descriptor: CoincubeDescriptor,
+        main_descriptor: impl Into<WalletDescriptor>,
         data_directory: DataDirectory,
     ) -> Self {
         Self {
             bitcoin_config,
             bitcoin_backend,
             log_level,
-            main_descriptor,
+            main_descriptor: main_descriptor.into(),
+            import_birthday: None,
+            import_initial_lookahead: None,
             data_directory: Some(data_directory.path().to_path_buf()),
             data_dir: None,
             fallback_esplora: None,
@@ -555,11 +595,41 @@ impl Config {
             Network::Bitcoin => Network::Bitcoin,
             _ => Network::Testnet,
         };
-        if !self.main_descriptor.all_xpubs_net_is(expected_network) {
-            return Err(ConfigError::Unexpected(format!(
-                "Our bitcoin network is {} but one xpub is not for network {}",
-                self.bitcoin_config.network, expected_network
-            )));
+        match &self.main_descriptor {
+            WalletDescriptor::Vault(vault) => {
+                if self.import_birthday.is_some() || self.import_initial_lookahead.is_some() {
+                    return Err(ConfigError::Unexpected(
+                        "Vault config cannot set imported scan options".into(),
+                    ));
+                }
+                if !vault.all_xpubs_net_is(expected_network) {
+                    return Err(ConfigError::Unexpected(format!(
+                        "Our bitcoin network is {} but one xpub is not for network {}",
+                        self.bitcoin_config.network, expected_network
+                    )));
+                }
+            }
+            WalletDescriptor::Imported(imported) => {
+                if self.import_birthday.is_none()
+                    || !self
+                        .import_initial_lookahead
+                        .is_some_and(|value| (1..=10_000).contains(&value))
+                {
+                    return Err(ConfigError::Unexpected(
+                        "Imported wallet requires birthday and initial lookahead (1..10000)".into(),
+                    ));
+                }
+                if imported.chain() != self.bitcoin_config.chain {
+                    return Err(ConfigError::Unexpected(
+                        "Imported wallet descriptor belongs to another chain".into(),
+                    ));
+                }
+                if self.bitcoin_config.chain.is_blake2b() {
+                    return Err(ConfigError::Unexpected(
+                        "Imported wallets require a Bitcoin chain".into(),
+                    ));
+                }
+            }
         }
 
         // Validate Esplora endpoint pairs wherever they appear:
@@ -597,6 +667,52 @@ mod tests {
             secondary_fallback_addr: None,
             secondary_fallback_token: None,
         }
+    }
+
+    #[test]
+    fn imported_connect_tokens_are_runtime_only_even_on_bitcoin_mainnet() {
+        use coincube_core::miniscript::bitcoin::{
+            bip32::{DerivationPath, Xpriv, Xpub},
+            secp256k1::Secp256k1,
+        };
+        use std::str::FromStr;
+
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[45; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let key = format!(
+            "[{}/84h/0h/0h]{}",
+            master.fingerprint(&secp),
+            Xpub::from_priv(&secp, &account)
+        );
+        let descriptor = ImportedWalletDescriptor::parse(
+            &format!("wpkh({key}/0/*)"),
+            Some(&format!("wpkh({key}/1/*)")),
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        let mut provider = bare_esplora_config();
+        provider.token = Some("jwt-primary".into());
+        provider.fallback_addr = Some("https://example.com/fallback".into());
+        provider.fallback_token = Some("jwt-fallback".into());
+        provider.secondary_fallback_addr = Some("https://example.com/secondary".into());
+        provider.secondary_fallback_token = Some("jwt-secondary".into());
+        let mut config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30)),
+            Some(BitcoinBackend::Esplora(provider.clone())),
+            log::LevelFilter::Info,
+            WalletDescriptor::Imported(descriptor),
+            DataDirectory::new(std::env::temp_dir().join("imported-token-test")),
+        );
+        config.fallback_esplora = Some(provider);
+        let serialized = toml::to_string(&config.for_persistence()).unwrap();
+        assert!(!serialized.contains("jwt-"));
+        assert!(serialized.contains("example.com/fallback"));
+        assert!(serialized.contains("example.com/secondary"));
+        // Authentication remains available to this process while the disk copy is public.
+        assert!(toml::to_string(&config).unwrap().contains("jwt-primary"));
     }
 
     /// Regression: an orphan `fallback_token` (no matching

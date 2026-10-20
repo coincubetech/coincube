@@ -158,11 +158,19 @@ pub fn create_fresh_db(
                 rusqlite::params![network.to_string()],
             )?;
         }
-        tx.execute(
-            "INSERT INTO wallets (timestamp, main_descriptor, deposit_derivation_index, change_derivation_index) \
-                     VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![timestamp, options.main_descriptor.to_string(), 0, 0],
-        )?;
+        if options.version >= 10 {
+            tx.execute(
+                "INSERT INTO wallets (timestamp, main_descriptor, deposit_derivation_index, change_derivation_index, wallet_kind) \
+                         VALUES (?1, ?2, ?3, ?4, 'vault')",
+                rusqlite::params![timestamp, options.main_descriptor.to_string(), 0, 0],
+            )?;
+        } else {
+            tx.execute(
+                "INSERT INTO wallets (timestamp, main_descriptor, deposit_derivation_index, change_derivation_index) \
+                         VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![timestamp, options.main_descriptor.to_string(), 0, 0],
+            )?;
+        }
         tx.execute_batch(&query)?;
 
         Ok(())
@@ -567,6 +575,96 @@ fn migrate_v8_to_v9(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbError
     Ok(())
 }
 
+/// v9 -> v10: a wallet row is either the historical Vault descriptor or an imported
+/// public receive/change pair. Rebuild the table because `main_descriptor` used to
+/// be NOT NULL. Preserve the wallet's row id so coins and labels keep their owner.
+fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbError> {
+    // SQLite checks foreign keys while dropping a referenced parent table, even if
+    // the replacement has identical ids. Disable enforcement only for the rebuild,
+    // then validate every reference before committing it.
+    let foreign_keys_enabled: bool =
+        conn.pragma_query_value(None, "foreign_keys", |row| row.get(0))?;
+    conn.pragma_update(None, "foreign_keys", "OFF")?;
+    let result = (|| {
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let rows: i64 = tx.query_row("SELECT COUNT(*) FROM wallets", [], |row| row.get(0))?;
+        if rows != 1 {
+            return Err(SqliteDbError::MalformedIdentity(format!(
+                "expected one wallet row before v10 migration, found {rows}"
+            )));
+        }
+        tx.execute_batch(
+        "CREATE TABLE wallets_v10 (
+            id INTEGER PRIMARY KEY NOT NULL,
+            timestamp INTEGER NOT NULL,
+            main_descriptor TEXT,
+            deposit_derivation_index INTEGER NOT NULL,
+            change_derivation_index INTEGER NOT NULL,
+            rescan_timestamp INTEGER,
+            last_poll_timestamp INTEGER,
+            wallet_kind TEXT NOT NULL CHECK (wallet_kind IN ('vault', 'imported')),
+            import_chain TEXT,
+            imported_receive_descriptor TEXT,
+            imported_change_descriptor TEXT,
+            import_birthday INTEGER,
+            import_history_complete BOOLEAN CHECK (import_history_complete IN (0,1)),
+            import_initial_lookahead INTEGER,
+            import_receive_scanned INTEGER,
+            import_change_scanned INTEGER,
+            CHECK (
+                (wallet_kind = 'vault' AND main_descriptor IS NOT NULL
+                    AND import_chain IS NULL AND imported_receive_descriptor IS NULL
+                    AND imported_change_descriptor IS NULL
+                    AND import_birthday IS NULL AND import_history_complete IS NULL
+                    AND import_initial_lookahead IS NULL AND import_receive_scanned IS NULL
+                    AND import_change_scanned IS NULL)
+                OR
+                (wallet_kind = 'imported' AND main_descriptor IS NULL
+                    AND import_chain IS NOT NULL
+                    AND import_chain IN ('bitcoin', 'testnet', 'testnet4', 'signet', 'regtest')
+                    AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
+                    AND import_birthday IS NOT NULL AND import_birthday BETWEEN 0 AND 4294967295
+                    AND import_history_complete IS NOT NULL
+                    AND import_initial_lookahead IS NOT NULL
+                    AND import_initial_lookahead BETWEEN 1 AND 10000
+                    AND import_receive_scanned IS NOT NULL
+                    AND import_receive_scanned BETWEEN 0 AND 2147483647
+                    AND import_change_scanned IS NOT NULL
+                    AND import_change_scanned BETWEEN 0 AND 2147483647)
+            )
+        );
+        INSERT INTO wallets_v10 (
+            id, timestamp, main_descriptor, deposit_derivation_index,
+            change_derivation_index, rescan_timestamp, last_poll_timestamp,
+            wallet_kind
+        ) SELECT id, timestamp, main_descriptor, deposit_derivation_index,
+                 change_derivation_index, rescan_timestamp, last_poll_timestamp,
+                 'vault' FROM wallets;
+        DROP TABLE wallets;
+        ALTER TABLE wallets_v10 RENAME TO wallets;
+        CREATE TABLE IF NOT EXISTS import_discovery (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            target INTEGER NOT NULL CHECK (target BETWEEN 1 AND 10000)
+        );
+        UPDATE version SET version = 10;",
+        )?;
+        tx.execute("ALTER TABLE spend_transactions ADD COLUMN broadcast_txid BLOB CHECK (broadcast_txid IS NULL OR length(broadcast_txid) = 32)", [])?;
+        let broken: i64 =
+            tx.query_row("SELECT COUNT(*) FROM pragma_foreign_key_check", [], |row| {
+                row.get(0)
+            })?;
+        if broken != 0 {
+            return Err(SqliteDbError::MalformedIdentity(format!(
+                "v10 migration would leave {broken} broken foreign keys"
+            )));
+        }
+        tx.commit()?;
+        Ok(())
+    })();
+    conn.pragma_update(None, "foreign_keys", foreign_keys_enabled)?;
+    result
+}
+
 /// Check the database version and if necessary apply the migrations to upgrade it to the current
 /// one. The `bitcoin_txs` parameter is here for the migration from versions 4 and earlier, which
 /// did not store the Bitcoin transactions in database, to versions 5 and later, which do. For a
@@ -634,6 +732,11 @@ pub fn maybe_apply_migration(
                 log::warn!("Upgrading database from version 8 to version 9.");
                 migrate_v8_to_v9(&mut conn)?;
                 log::warn!("Migration from database version 8 to version 9 successful.");
+            }
+            9 => {
+                log::warn!("Upgrading database from version 9 to version 10.");
+                migrate_v9_to_v10(&mut conn)?;
+                log::warn!("Migration from database version 9 to version 10 successful.");
             }
             _ => return Err(SqliteDbError::UnsupportedVersion(version)),
         }

@@ -316,6 +316,7 @@ pub fn transaction_detail_view<'a>(
     tx: &'a HistoryTransaction,
     labels_editing: &'a HashMap<String, form::Value<String>>,
     bitcoin_unit: BitcoinDisplayUnit,
+    supports_vault_rbf: bool,
 ) -> Element<'a, Message> {
     let txid = tx.tx.compute_txid().to_string();
     let back_btn: Element<'_, Message> = button::secondary(Some(icon::previous_icon()), "Back")
@@ -382,7 +383,7 @@ pub fn transaction_detail_view<'a>(
             )
             // If unconfirmed, give option to use RBF.
             // Check fee amount is some as otherwise we may be missing coins for this transaction.
-            .push(if tx.time.is_none() && tx.fee_amount.is_some() {
+            .push(if supports_vault_rbf && tx.time.is_none() && tx.fee_amount.is_some() {
                 Some(
                     Row::new()
                         .push(

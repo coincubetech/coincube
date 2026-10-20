@@ -153,6 +153,8 @@ pub struct Cache {
     pub has_connect_session: bool,
     /// Whether this cube has a vault wallet configured
     pub has_vault: bool,
+    /// This Cube owns a pending or installed public Bitcoin wallet import.
+    pub has_imported_bitcoin: bool,
     /// Display name of the current Cube
     pub cube_name: String,
     /// The Connect account that owns this Cube
@@ -387,6 +389,7 @@ impl std::default::Default for Cache {
             connect_authenticated: false,
             has_connect_session: false,
             has_vault: false,
+            has_imported_bitcoin: false,
             cube_name: String::new(),
             cube_connect_owner: None,
             cube_owned_by_other_account: false,

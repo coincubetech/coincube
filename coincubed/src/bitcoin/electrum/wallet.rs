@@ -19,6 +19,7 @@ use super::utils::{
 };
 use crate::bitcoin::{Block, BlockChainTip, Coin, COINBASE_MATURITY};
 use coincube_core::descriptors::CoincubeDescriptor;
+use coincube_core::wallet_descriptor::WalletDescriptor;
 
 // We don't want to overload the server (each SPK is separate call).
 const LOOK_AHEAD_LIMIT: u32 = 30;
@@ -54,17 +55,92 @@ impl BdkWallet {
         receive_index: ChildNumber,
         change_index: ChildNumber,
     ) -> Self {
-        let local_chain = LocalChain::from_genesis_hash(genesis_hash).0;
+        Self::new_with_lookahead(
+            main_descriptor,
+            genesis_hash,
+            tip,
+            coins,
+            txs,
+            receive_index,
+            change_index,
+            LOOK_AHEAD_LIMIT,
+        )
+    }
+
+    /// Use a wider persistent script window for an imported wallet whose
+    /// existing activity may be beyond the normal newly-created Vault gap.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_lookahead(
+        main_descriptor: &CoincubeDescriptor,
+        genesis_hash: BlockHash,
+        tip: Option<BlockChainTip>,
+        coins: &[Coin],
+        txs: &[bitcoin::Transaction],
+        receive_index: ChildNumber,
+        change_index: ChildNumber,
+        lookahead: u32,
+    ) -> Self {
         let receive_desc = main_descriptor
             .receive_descriptor()
             .as_descriptor_public_key();
         let change_desc = main_descriptor
             .change_descriptor()
             .as_descriptor_public_key();
+        Self::new_with_descriptors(
+            receive_desc.clone(),
+            change_desc.clone(),
+            genesis_hash,
+            tip,
+            coins,
+            txs,
+            receive_index,
+            change_index,
+            lookahead,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_for_wallet(
+        wallet: &WalletDescriptor,
+        genesis_hash: BlockHash,
+        tip: Option<BlockChainTip>,
+        coins: &[Coin],
+        txs: &[bitcoin::Transaction],
+        receive_index: ChildNumber,
+        change_index: ChildNumber,
+        lookahead: u32,
+    ) -> Self {
+        let (receive_desc, change_desc) = wallet.branches_public();
+        Self::new_with_descriptors(
+            receive_desc.clone(),
+            change_desc.clone(),
+            genesis_hash,
+            tip,
+            coins,
+            txs,
+            receive_index,
+            change_index,
+            lookahead,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn new_with_descriptors(
+        receive_desc: Descriptor<DescriptorPublicKey>,
+        change_desc: Descriptor<DescriptorPublicKey>,
+        genesis_hash: BlockHash,
+        tip: Option<BlockChainTip>,
+        coins: &[Coin],
+        txs: &[bitcoin::Transaction],
+        receive_index: ChildNumber,
+        change_index: ChildNumber,
+        lookahead: u32,
+    ) -> Self {
+        let local_chain = LocalChain::from_genesis_hash(genesis_hash).0;
 
         let mut bdk_wallet = BdkWallet {
             graph: {
-                let mut indexer = KeychainTxOutIndex::<KeychainType>::new(LOOK_AHEAD_LIMIT);
+                let mut indexer = KeychainTxOutIndex::<KeychainType>::new(lookahead);
                 let _ = indexer.insert_descriptor(KeychainType::Receive, receive_desc.clone());
                 let _ = indexer.insert_descriptor(KeychainType::Change, change_desc.clone());
                 IndexedTxGraph::new(indexer)
@@ -73,6 +149,10 @@ impl BdkWallet {
             receive_desc: receive_desc.clone(),
             change_desc: change_desc.clone(),
         };
+        // Restored imported storage can have allocated addresses but no chain
+        // tip yet. Reveal them before the first historical full scan; otherwise
+        // BDK's stop-gap could end before any of those addresses are checked.
+        bdk_wallet.reveal_spks(receive_index, change_index);
         if let Some(tip) = tip {
             // This will be our anchor for any confirmed transactions.
             let anchor_block = block_id_from_tip(tip);
@@ -83,12 +163,6 @@ impl BdkWallet {
                     .insert_block(anchor_block)
                     .expect("local chain only contains genesis block");
             }
-            // Update the last used derivation index for both change and receive addresses.
-            log::debug!(
-                "revealing SPKs up to receive index {receive_index} and change index {change_index}"
-            );
-            bdk_wallet.reveal_spks(receive_index, change_index);
-
             // Update the existing coins and transactions information using a TxGraph changeset.
             log::debug!("Number of coins to load: {}.", coins.len());
             log::debug!("Number of txs to load: {}.", txs.len());
@@ -382,9 +456,59 @@ pub fn divergence_height(previous_tip: &CheckPoint, changeset: &ChainChangeSet) 
 mod tests {
     use super::*;
     use bdk_electrum::bdk_chain::{bitcoin::hashes::Hash, BlockId};
+    use std::str::FromStr;
 
     fn hash(seed: u8) -> BlockHash {
         BlockHash::from_byte_array([seed; 32])
+    }
+
+    #[test]
+    fn configured_lookahead_tracks_addresses_beyond_the_default_gap() {
+        let descriptor = CoincubeDescriptor::from_str(super::super::tests::DESCRIPTOR).unwrap();
+        let wallet = BdkWallet::new_with_lookahead(
+            &descriptor,
+            BlockHash::all_zeros(),
+            None,
+            &[],
+            &[],
+            ChildNumber::from(0),
+            ChildNumber::from(0),
+            300,
+        );
+        let distant = wallet.get_spk(ChildNumber::from(250), false);
+        assert!(wallet
+            .index()
+            .inner()
+            .all_spks()
+            .values()
+            .any(|spk| *spk == distant));
+    }
+
+    #[test]
+    fn restored_high_water_is_revealed_even_without_a_tip() {
+        let descriptor = CoincubeDescriptor::from_str(super::super::tests::DESCRIPTOR).unwrap();
+        let wallet = BdkWallet::new_with_lookahead(
+            &descriptor,
+            BlockHash::all_zeros(),
+            None,
+            &[],
+            &[],
+            ChildNumber::from(45),
+            ChildNumber::from(32),
+            20,
+        );
+        let revealed = wallet.index().last_revealed_indices();
+        assert_eq!(revealed.get(&KeychainType::Receive), Some(&45));
+        assert_eq!(revealed.get(&KeychainType::Change), Some(&32));
+        for (index, change) in [(45, false), (32, true)] {
+            let script = wallet.get_spk(ChildNumber::from(index), change);
+            assert!(wallet
+                .index()
+                .inner()
+                .all_spks()
+                .values()
+                .any(|spk| *spk == script));
+        }
     }
 
     /// A sparse chain, as these backends actually keep one: genesis, an old block

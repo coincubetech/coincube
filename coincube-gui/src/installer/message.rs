@@ -128,6 +128,7 @@ pub enum Message {
     RecoveryKitRestore(RecoveryKitRestoreMsg),
     /// Heir inheritance-recovery decrypt step (ECIES pivot, COIN-377 PR 3).
     InheritanceRestore(InheritanceRestoreMsg),
+    OwnerKeychainRestore(OwnerKeychainRestoreMsg),
     BorderWalletWizard(
         super::step::descriptor::editor::border_wallet_wizard::BorderWalletWizardMessage,
     ),
@@ -308,7 +309,7 @@ pub enum RecoveryKitRestoreMsg {
         Result<
             (
                 Option<crate::services::recovery::SeedBlob>,
-                Option<crate::services::recovery::DescriptorBlob>,
+                Option<crate::services::recovery::RecoveredWalletBlob>,
             ),
             crate::services::recovery::restore::RestoreError,
         >,
@@ -366,6 +367,30 @@ pub enum InheritanceRestoreMsg {
             String,
         >,
     ),
+}
+
+/// Owner self-recovery accepts imported v2 wallet payloads in addition to
+/// strict Vault v1. Heir recovery keeps `InheritanceRestoreMsg` unchanged.
+#[derive(Clone)]
+pub enum OwnerKeychainRestoreMsg {
+    DecryptResult(
+        Result<
+            (
+                Option<crate::services::recovery::SeedBlob>,
+                Option<crate::services::recovery::RecoveredWalletBlob>,
+            ),
+            String,
+        >,
+    ),
+}
+
+impl std::fmt::Debug for OwnerKeychainRestoreMsg {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::DecryptResult(Ok(_)) => write!(f, "DecryptResult(Ok(<redacted>))"),
+            Self::DecryptResult(Err(e)) => f.debug_tuple("DecryptResult").field(e).finish(),
+        }
+    }
 }
 
 impl std::fmt::Debug for InheritanceRestoreMsg {

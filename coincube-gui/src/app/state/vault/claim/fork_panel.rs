@@ -100,6 +100,9 @@ impl ForkClaimPanel {
         if wallet.chain != coincube_core::chain::ChainId::BitcoinBlake2b {
             return Err("Open the paired Bitcoin Blake2b Vault to continue this Claim.".into());
         }
+        let descriptor = wallet.inheritance_descriptor().ok_or_else(|| {
+            "An imported Bitcoin wallet cannot continue a Vault Claim.".to_string()
+        })?;
         let revoker = loaded.revoker();
         let (context, preparation, psbt, coordinator, outcome) = match loaded {
             Loaded::Signing {
@@ -111,7 +114,7 @@ impl ForkClaimPanel {
                     None,
                     psbt.psbt().clone(),
                     coins,
-                    &wallet.main_descriptor,
+                    descriptor,
                     &secp256k1::Secp256k1::verification_only(),
                     wallet.chain.bitcoin_network(),
                 );
@@ -596,9 +599,22 @@ impl State for ForkClaimPanel {
                 ),
             );
         if let Some(psbt) = &self.psbt {
-            body = body.push(p1_regular("Sign the transfer to your Bitcoin Blake2b Vault. Each signing request checks Bitcoin confirmation and replay protection again."))
-                .push(view::vault::psbt::spend_overview_view(&psbt.tx, &psbt.desc_policy, &psbt.wallet.keys_aliases,
-                    self.busy, psbt.saved, psbt.replay_presentation(cache), false));
+            body = body.push(p1_regular("Sign the transfer to your Bitcoin Blake2b Vault. Each signing request checks Bitcoin confirmation and replay protection again."));
+            if let Some(policy) = psbt.desc_policy.as_ref() {
+                body = body.push(view::vault::psbt::spend_overview_view(
+                    &psbt.tx,
+                    policy,
+                    &psbt.wallet.keys_aliases,
+                    self.busy,
+                    psbt.saved,
+                    psbt.replay_presentation(cache),
+                    false,
+                ));
+            } else {
+                body = body.push(card::warning(
+                    "This wallet has no Vault Claim policy.".into(),
+                ));
+            }
             let content = view::dashboard(menu, cache, body);
             return if let Some(modal) = &psbt.modal {
                 modal.as_ref().view(content)

@@ -121,6 +121,7 @@ pub enum VaultReceiveMessage {
 
 #[derive(Debug, Clone)]
 pub enum Message {
+    ImportedBitcoin(crate::app::state::imported_bitcoin::ImportMessage),
     /// Close the read-only foreign-wallet sweep review and destroy its
     /// session-only evidence.
     DismissSplitReview,

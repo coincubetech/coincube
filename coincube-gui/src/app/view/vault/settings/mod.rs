@@ -12,8 +12,9 @@ use iced::{
 };
 
 use coincube_core::{
-    descriptors::{CoincubeDescriptor, CoincubePolicy},
+    descriptors::CoincubePolicy,
     miniscript::bitcoin::{bip32::Fingerprint, Network},
+    wallet_descriptor::WalletDescriptor,
 };
 use coincubed::config::BitcoindRpcAuth;
 
@@ -23,7 +24,7 @@ use coincube_ui::{
     component::{badge, button, card, form, separation, text::*},
     icon,
     theme::{self},
-    widget::{Button, Container, Element, ProgressBar, Row, RowExt, TextInput},
+    widget::{Button, ColumnExt, Container, Element, ProgressBar, Row, RowExt, TextInput},
 };
 
 use crate::{
@@ -132,7 +133,11 @@ pub fn bitcoind_settings<'a>(
     )
 }
 
-pub fn import_export<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Message> {
+pub fn import_export<'a>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    supports_inheritance: bool,
+) -> Element<'a, Message> {
     let header = header("Import/Export", SettingsMessage::ImportExportSection);
 
     let description = Row::new()
@@ -216,13 +221,13 @@ pub fn import_export<'a>(menu: &'a Menu, cache: &'a Cache) -> Element<'a, Messag
             .push(header)
             .push(description)
             .push(backup_to_connect)
-            .push(export_encrypted_descriptor)
-            .push(export_wallet)
-            .push(import_wallet)
+            .push_maybe(supports_inheritance.then_some(export_encrypted_descriptor))
+            .push_maybe(supports_inheritance.then_some(export_wallet))
+            .push_maybe(supports_inheritance.then_some(import_wallet))
             .push(separator)
             .push(export_labels)
             .push(export_transactions)
-            .push(export_descriptor)
+            .push_maybe(supports_inheritance.then_some(export_descriptor))
             .width(Length::Fill),
     )
 }
@@ -1092,7 +1097,7 @@ fn is_ok_and<T, E>(res: &Result<T, E>, f: impl FnOnce(&T) -> bool) -> bool {
 pub fn wallet_settings<'a>(
     menu: &'a Menu,
     cache: &'a Cache,
-    descriptor: &'a CoincubeDescriptor,
+    descriptor: &'a WalletDescriptor,
     vault_id: Fingerprint,
     wallet_alias: &'a form::Value<String>,
     keys_aliases: &'a [(Fingerprint, form::Value<String>)],
@@ -1101,6 +1106,15 @@ pub fn wallet_settings<'a>(
     updated: bool,
     hardware_registration_allowed: bool,
 ) -> Element<'a, Message> {
+    let vault = descriptor.as_vault();
+    let descriptor_text = match descriptor {
+        WalletDescriptor::Vault(vault) => vault.to_string(),
+        WalletDescriptor::Imported(_) => format!(
+            "Receive: {}\nChange: {}",
+            descriptor.receive_descriptor(),
+            descriptor.change_descriptor()
+        ),
+    };
     let header = header("Wallet", SettingsMessage::EditWalletSettings);
     let r = Row::new().spacing(10).align_y(Vertical::Center)
         .push(icon::backup_icon())
@@ -1129,7 +1143,7 @@ pub fn wallet_settings<'a>(
             .push(
                 scrollable(
                     Column::new()
-                        .push(text(descriptor.to_string()).small())
+                        .push(text(descriptor_text.clone()).small())
                         .push(Space::new().height(Length::Fixed(5.0))),
                 )
                 .direction(scrollable::Direction::Horizontal(
@@ -1140,16 +1154,16 @@ pub fn wallet_settings<'a>(
                 Row::new()
                     .spacing(8)
                     .align_y(Alignment::Center)
-                    .push(text("Vault ID:").bold())
+                    .push(text(if vault.is_some() { "Vault ID:" } else { "Wallet ID:" }).bold())
                     .push(text(vault_id.to_string()))
                     .push(iced_tooltip::Tooltip::new(
                         icon::tooltip_icon(),
                         Container::new(text(
-                            "A stable 4-byte identifier derived from the wallet \
-                                 descriptor. Unique per vault and distinct from any \
-                                 individual signer's master fingerprint. Used by the \
-                                 local-signer pairing flow to scope a paired phone to \
-                                 this vault.",
+                            if vault.is_some() {
+                                "A stable 4-byte identifier derived from this Vault's descriptor. Used to scope paired local signers."
+                            } else {
+                                "A short display identifier for this imported wallet. Its full chain-bound receive/change identity is used for storage."
+                            },
                         ))
                         .padding(8)
                         .max_width(320.0)
@@ -1161,10 +1175,10 @@ pub fn wallet_settings<'a>(
                 Row::new()
                     .spacing(10)
                     .width(Length::Fill)
-                    .push(back_up_encrypted_descriptor)
+                    .push_maybe(vault.map(|_| back_up_encrypted_descriptor))
                     .push(
                         button::secondary(Some(icon::clipboard_icon()), "Copy")
-                            .on_press(Message::Clipboard(descriptor.to_string())),
+                            .on_press(Message::Clipboard(descriptor_text)),
                     )
                     .push_maybe(hardware_registration_allowed.then(|| {
                         button::secondary(Some(icon::chip_icon()), "Register on hardware device")
@@ -1244,14 +1258,10 @@ pub fn wallet_settings<'a>(
             .spacing(20)
             .push(header)
             .push(descr)
-            .push(
-                card::simple(display_policy(
-                    descriptor.policy(),
-                    keys_aliases,
-                    provider_keys,
-                ))
-                .width(Length::Fill),
-            )
+            .push_maybe(vault.map(|vault| {
+                card::simple(display_policy(vault.policy(), keys_aliases, provider_keys))
+                    .width(Length::Fill)
+            }))
             .push(aliases),
     )
 }
@@ -2651,7 +2661,8 @@ mod tests {
         let _ = link("https://example.com/docs", "Docs");
         let _ = list(&menu, &cache, false);
         let _ = bitcoind_settings(&menu, &cache, vec![text("child").into()]);
-        let _ = import_export(&menu, &cache);
+        let _ = import_export(&menu, &cache, true);
+        let _ = import_export(&menu, &cache, false);
         let _ = remote_backend_section(&menu, &cache, &valid_email, false, true);
         let _ = remote_backend_section(&menu, &cache, &invalid_email, true, false);
     }

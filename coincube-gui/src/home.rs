@@ -33,7 +33,7 @@ use crate::{
         settings::{
             self,
             global::{AccountTier, GlobalSettings},
-            AuthConfig, CubeConnectState, CubeSettings, WalletSettings,
+            AuthConfig, BitcoinImport, CubeConnectState, CubeSettings, WalletSettings,
         },
         state::{connect::ConnectAccountPanel, settings::general},
         view::{BackupWalletMessage, ConnectAccountMessage, RecoveryKitMessage},
@@ -287,6 +287,12 @@ pub struct Home {
     create_cube_name: coincube_ui::component::form::Value<String>,
     create_cube_pin: pin_input::PinInput,
     create_cube_pin_confirm: pin_input::PinInput,
+    /// A stable operation identity selected before Cube creation. It is
+    /// persisted with the Cube only after the normal backup gate succeeds.
+    pending_bitcoin_import: Option<Box<BitcoinImport>>,
+    /// Opens a newly created import Cube through the ordinary unlock path
+    /// after the settings reload makes its row available.
+    open_created_import_cube: Option<String>,
     creating_cube: bool,
     /// UUID pre-generated on the first creation attempt and reused on retries
     /// so that each logical cube has a stable client-side identifier.
@@ -453,6 +459,8 @@ impl Home {
                 create_cube_name: coincube_ui::component::form::Value::default(),
                 create_cube_pin: pin_input::PinInput::new(),
                 create_cube_pin_confirm: pin_input::PinInput::new(),
+                pending_bitcoin_import: None,
+                open_created_import_cube: None,
                 creating_cube: false,
                 pending_cube_id: None,
                 recovery_words: Default::default(),
@@ -777,7 +785,8 @@ impl Home {
     /// loaded) from one being filled in (replacing it would steal input the
     /// user can no longer see).
     fn create_form_has_input(&self) -> bool {
-        !self.create_cube_name.value.is_empty()
+        self.pending_bitcoin_import.is_some()
+            || !self.create_cube_name.value.is_empty()
             || !self.create_cube_pin.value().is_empty()
             || !self.create_cube_pin_confirm.value().is_empty()
     }
@@ -1388,6 +1397,7 @@ impl Home {
             }
             Message::View(ViewMessage::ShowCreateCube(show)) => {
                 if show {
+                    self.pending_bitcoin_import = None;
                     // Opening the form picks the default afresh: whether the
                     // passkey path can demonstrate a backup depends on the
                     // Connect session, which can change between visits.
@@ -1404,6 +1414,7 @@ impl Home {
                     _ => false,
                 };
                 if toggled && !show {
+                    self.pending_bitcoin_import = None;
                     self.create_cube_name = coincube_ui::component::form::Value::default();
                     self.create_cube_pin = pin_input::PinInput::new();
                     self.create_cube_pin_confirm = pin_input::PinInput::new();
@@ -1419,6 +1430,33 @@ impl Home {
                     }
                     self.recovery_active_index = None;
                 }
+                Task::none()
+            }
+            Message::View(ViewMessage::ShowImportBitcoin) => {
+                if self.creating_cube
+                    || !matches!(
+                        self.state,
+                        State::Cubes { .. } | State::NoCube { .. } | State::Unchecked
+                    )
+                {
+                    return Task::none();
+                }
+                if self.network != ChainId::Bitcoin {
+                    self.set_error("Import a Bitcoin wallet from the Bitcoin Cube list.");
+                    return Task::none();
+                }
+                if self.pending_bitcoin_import.is_none() {
+                    self.pending_bitcoin_import = Some(Box::new(BitcoinImport::pending()));
+                }
+                self.passkey_mode = self.default_passkey_mode();
+                match &mut self.state {
+                    State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
+                        *create_cube = true;
+                    }
+                    State::Unchecked => {}
+                    _ => return Task::none(),
+                }
+                self.error = None;
                 Task::none()
             }
             Message::View(ViewMessage::CubeNameEdited(name)) => {
@@ -1446,6 +1484,10 @@ impl Home {
             }
             Message::View(ViewMessage::CreateCube) => {
                 if self.creating_cube {
+                    return Task::none();
+                }
+                if self.pending_bitcoin_import.is_some() && self.network != ChainId::Bitcoin {
+                    self.set_error("Import a Bitcoin wallet from the Bitcoin Cube list.");
                     return Task::none();
                 }
 
@@ -1711,6 +1753,11 @@ impl Home {
                         // UUID was consumed successfully — reset it so the next
                         // cube creation starts with a fresh identifier.
                         self.pending_cube_id = None;
+                        // The operation identity is now durable on this exact
+                        // Cube. A fresh creation must not reuse it.
+                        self.pending_bitcoin_import = None;
+                        self.open_created_import_cube =
+                            cube.bitcoin_import.as_ref().map(|_| cube.id.clone());
                         // Clear any previous error state
                         self.error = None;
                         // Reset form fields
@@ -2268,6 +2315,10 @@ impl Home {
                     return Task::none();
                 }
                 self.network = network;
+                self.open_created_import_cube = None;
+                if network != ChainId::Bitcoin {
+                    self.pending_bitcoin_import = None;
+                }
                 self.error = None;
                 // Clear stale limit from previous network
                 self.server_cube_limit = None;
@@ -2409,7 +2460,15 @@ impl Home {
                     self.error = Some(e.to_string());
                     Task::none()
                 }
-                Ok(state) => {
+                Ok(mut state) => {
+                    if self.pending_bitcoin_import.is_some() {
+                        match &mut state {
+                            State::Cubes { create_cube, .. } | State::NoCube { create_cube } => {
+                                *create_cube = true
+                            }
+                            _ => {}
+                        }
+                    }
                     // Prune remote cubes that now exist locally
                     if let State::Cubes { cubes, .. } = &state {
                         let local_ids: std::collections::HashSet<&str> =
@@ -2418,6 +2477,14 @@ impl Home {
                             .retain(|rc| !local_ids.contains(rc.uuid.as_str()));
                     }
                     self.state = state;
+                    if let (Some(id), State::Cubes { cubes, .. }) =
+                        (&self.open_created_import_cube, &self.state)
+                    {
+                        if let Some(index) = cubes.iter().position(|cube| &cube.id == id) {
+                            self.open_created_import_cube = None;
+                            return self.update_inner(Message::View(ViewMessage::Run(index)));
+                        }
+                    }
                     Task::none()
                 }
             },
@@ -2573,6 +2640,7 @@ impl Home {
                         let cube_name = self.create_cube_name.value.trim().to_string();
                         let pin = self.create_cube_pin.value();
                         let datadir_path = self.datadir_path.clone();
+                        let pending_bitcoin_import = self.pending_bitcoin_import.clone();
                         // Reuse the UUID that was pre-generated when the user
                         // first clicked "Create Cube" (recovery path).
                         let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
@@ -2640,6 +2708,7 @@ impl Home {
                                 let mut cube =
                                     CubeSettings::new_with_id(cube_id, cube_name, network)
                                         .with_master_signer(master_fingerprint);
+                                cube.bitcoin_import = pending_bitcoin_import;
                                 // Same instant the seed file carries (X7).
                                 cube.created_at = timestamp;
                                 // The Cube's second slot, written at creation —
@@ -2711,6 +2780,7 @@ impl Home {
                 self.create_cube_name = coincube_ui::component::form::Value::default();
                 self.create_cube_pin = pin_input::PinInput::new();
                 self.create_cube_pin_confirm = pin_input::PinInput::new();
+                self.pending_bitcoin_import = None;
                 self.error = None;
                 self.reload()
             }
@@ -4018,6 +4088,7 @@ impl Home {
         let datadir_path = self.datadir_path.clone();
         let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
         let owner = self.connect_owner();
+        let pending_bitcoin_import = self.pending_bitcoin_import.clone();
 
         Task::perform(
             async move {
@@ -4038,6 +4109,7 @@ impl Home {
                 let mut cube = CubeSettings::new_with_id(cube_id, cube_name, network)
                     .with_master_signer(pending.master_fingerprint)
                     .with_passkey(passkey_metadata);
+                cube.bitcoin_import = pending_bitcoin_import;
                 cube.backed_up = backed_up;
                 cube.creation_backup_bypass = bypass;
                 // The Kit was uploaded before this write, so the Cube is
@@ -4149,6 +4221,7 @@ impl Home {
         let datadir_path = self.datadir_path.clone();
         let cube_id = *self.pending_cube_id.get_or_insert_with(uuid::Uuid::new_v4);
         let owner = self.connect_owner();
+        let pending_bitcoin_import = self.pending_bitcoin_import.clone();
 
         Task::perform(
             async move {
@@ -4241,6 +4314,7 @@ impl Home {
                 // is the bug this whole change removes (I1).
                 let mut cube = CubeSettings::new_with_id(cube_id, cube_name, network)
                     .with_master_signer(master_fingerprint);
+                cube.bitcoin_import = pending_bitcoin_import;
                 // Same instant the seed file carries — see the note above.
                 cube.created_at = timestamp;
 
@@ -4323,9 +4397,13 @@ impl Home {
             &self.create_cube_pin,
             &self.create_cube_pin_confirm,
             &self.error,
-            self.creating_cube,
-            self.passkey_mode,
-            self.connect_account.authenticated_client().is_some(),
+            CreateCubeFormOptions {
+                creating_cube: self.creating_cube,
+                passkey_mode: self.passkey_mode,
+                signed_in: self.connect_account.authenticated_client().is_some(),
+                importing_bitcoin: self.pending_bitcoin_import.is_some(),
+                can_import_bitcoin: self.network == ChainId::Bitcoin,
+            },
         )
     }
 
@@ -4448,8 +4526,7 @@ impl Home {
                                             col = col.push(remote_cube_list_item(rc));
                                         }
                                         let total_count = self.total_cube_count();
-                                        let at_limit = cubes.len() >= self.account_tier.cube_limit()
-                                            && matches!(self.network, ChainId::Bitcoin);
+                                        let at_limit = total_count >= self.cube_limit();
                                         if at_limit {
                                             col = col.push(
                                                 Column::new()
@@ -4461,6 +4538,11 @@ impl Home {
                                                         )
                                                         .padding(10)
                                                         .width(Length::Fixed(500.0)),
+                                                    )
+                                                    .push(
+                                                        button::secondary(None, "Import Bitcoin wallet")
+                                                            .padding(10)
+                                                            .width(Length::Fixed(500.0)),
                                                     )
                                                     .push(
                                                         Container::new(
@@ -4478,15 +4560,23 @@ impl Home {
                                             );
                                         } else {
                                             col = col.push(
-                                                Column::new().push(
-                                                    button::secondary(
-                                                        Some(icon::plus_icon()),
-                                                        "Create Cube",
+                                                Column::new()
+                                                    .spacing(10)
+                                                    .push(
+                                                        button::secondary(
+                                                            Some(icon::plus_icon()),
+                                                            "Create Cube",
+                                                        )
+                                                        .on_press(ViewMessage::ShowCreateCube(true))
+                                                        .padding(10)
+                                                        .width(Length::Fixed(500.0)),
                                                     )
-                                                    .on_press(ViewMessage::ShowCreateCube(true))
-                                                    .padding(10)
-                                                    .width(Length::Fixed(500.0)),
-                                                ),
+                                                    .push(
+                                                        button::secondary(None, "Import Bitcoin wallet")
+                                                            .on_press_maybe((self.network == ChainId::Bitcoin).then_some(ViewMessage::ShowImportBitcoin))
+                                                            .padding(10)
+                                                            .width(Length::Fixed(500.0)),
+                                                    ),
                                             );
                                         }
                                         col.into()
@@ -4557,6 +4647,11 @@ impl Home {
                                                 .spacing(8)
                                                 .push(create_button)
                                                 .push(
+                                                    button::secondary(None, "Import Bitcoin wallet")
+                                                        .padding(10)
+                                                        .width(Length::Fixed(500.0)),
+                                                )
+                                                .push(
                                                     Container::new(
                                                         p1_regular(format!(
                                                             "Cube limit reached ({}/{}) on the {} plan. \
@@ -4570,7 +4665,15 @@ impl Home {
                                                     .max_width(500),
                                                 )
                                         } else {
-                                            Column::new().push(create_button)
+                                            Column::new()
+                                                .spacing(10)
+                                                .push(create_button)
+                                                .push(
+                                                    button::secondary(None, "Import Bitcoin wallet")
+                                                        .on_press_maybe((self.network == ChainId::Bitcoin).then_some(ViewMessage::ShowImportBitcoin))
+                                                        .padding(10)
+                                                        .width(Length::Fixed(500.0)),
+                                                )
                                         });
                                         col.into()
                                     }
@@ -5104,27 +5207,47 @@ fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message>
     .into()
 }
 
+#[derive(Clone, Copy)]
+struct CreateCubeFormOptions {
+    creating_cube: bool,
+    passkey_mode: bool,
+    signed_in: bool,
+    importing_bitcoin: bool,
+    can_import_bitcoin: bool,
+}
+
 fn create_cube_form<'a>(
     cube_name: &coincube_ui::component::form::Value<String>,
     pin: &'a pin_input::PinInput,
     pin_confirm: &'a pin_input::PinInput,
     error: &'a Option<String>,
-    creating_cube: bool,
-    passkey_mode: bool,
-    signed_in: bool,
+    options: CreateCubeFormOptions,
 ) -> Element<'a, ViewMessage> {
     use coincube_ui::component::form;
     use std::time::Duration;
+    let CreateCubeFormOptions {
+        creating_cube,
+        passkey_mode,
+        signed_in,
+        importing_bitcoin,
+        can_import_bitcoin,
+    } = options;
 
     let mut column = Column::new()
         .spacing(20)
         .align_x(Alignment::Center)
         .width(Length::Fixed(500.0))
-        .push(h4_bold("Create a new Cube"))
+        .push(h4_bold(if importing_bitcoin {
+            "Create a Cube for your Bitcoin wallet"
+        } else {
+            "Create a new Cube"
+        }))
         .push(
-            p1_regular(
-                "A Cube is your account which can contain a Spark wallet, a Liquid wallet, a Vault wallet and other features.",
-            )
+            p1_regular(if importing_bitcoin {
+                "Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend."
+            } else {
+                "A Cube is your account which can contain a Spark wallet, a Liquid wallet, a Vault wallet and other features."
+            })
             .style(theme::text::secondary),
         );
 
@@ -5311,6 +5434,13 @@ fn create_cube_form<'a>(
     };
 
     column = column.push(submit_button);
+    if !importing_bitcoin && can_import_bitcoin {
+        column = column.push(
+            button::secondary(None, "Import Bitcoin wallet")
+                .on_press_maybe((!creating_cube).then_some(ViewMessage::ShowImportBitcoin))
+                .width(Length::Fixed(200.0)),
+        );
+    }
 
     Container::new(column)
         .padding(20)
@@ -5334,6 +5464,18 @@ fn create_cube_form<'a>(
 /// vault — the checksum is a storage key and the name is a placeholder — and
 /// rendering one as if it did is the bug this replaced.
 fn vault_subtitle(cube: &CubeSettings) -> String {
+    if let Some(import) = &cube.bitcoin_import {
+        return match &import.stage {
+            settings::BitcoinImportStage::PendingSource => "Vault import pending".into(),
+            settings::BitcoinImportStage::Installing { .. } => {
+                "Vault import interrupted — resume import".into()
+            }
+            settings::BitcoinImportStage::Syncing { .. } => {
+                "Vault · Imported wallet · Sync incomplete".into()
+            }
+            settings::BitcoinImportStage::Ready { .. } => "Vault · Imported wallet".into(),
+        };
+    }
     match (&cube.vault_wallet_id, &cube.vault_fingerprint) {
         (None, _) => "No Vault configured".to_string(),
         (Some(_), None) => "Vault configured".to_string(),
@@ -5363,7 +5505,12 @@ fn cubes_list_item<'a>(
         ),
         CubeConnectState::Registered => (
             icon::cube_icon().style(theme::text::secondary).into(),
-            "Registered to Connect — no recovery kit".to_string(),
+            if cube.has_imported_bitcoin() && cube.has_recovery_kit() {
+                "Registered to Connect — Recovery Kit needs updating for imported wallet"
+                    .to_string()
+            } else {
+                "Registered to Connect — no recovery kit".to_string()
+            },
         ),
         CubeConnectState::Sovereign if signed_in => match sync_error {
             Some(reason) => (
@@ -6199,6 +6346,7 @@ pub enum ViewMessage {
     /// Dismiss the recovery-method picker without choosing.
     CloseRecoveryMethodPicker,
     ShowCreateCube(bool),
+    ShowImportBitcoin,
     CubeNameEdited(String),
     CreateCube,
     PinInput(pin_input::Message),
@@ -6490,6 +6638,28 @@ impl DeleteCubeModal {
                 }
 
                 self.warning = None;
+
+                // Imported wallets have no Vault id. Their database and
+                // journal belong to an exact Cube/import operation, so use
+                // the ownership-checked removal path rather than the generic
+                // wallet deletion below.
+                if self.cube.bitcoin_import.is_some() {
+                    if let Err(error) = Handle::current().block_on(
+                        crate::services::bitcoin_import::remove_cube_import(
+                            &self.network_directory,
+                            &self.cube,
+                        ),
+                    ) {
+                        self.warning = Some(DeleteError::Settings(
+                            settings::SettingsError::WritingFile(error),
+                        ));
+                        return Task::none();
+                    }
+                    self.deleted = true;
+                    return Task::perform(async {}, |_| {
+                        Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::Deleted))
+                    });
+                }
 
                 // Delete vault if it exists
                 if let Some(wallet_settings) = &self.wallet_settings {
@@ -6879,6 +7049,41 @@ mod tests {
 
     fn home() -> Home {
         Home::new(test_datadir(), Some(Network::Bitcoin)).0
+    }
+
+    #[test]
+    fn import_entry_preserves_one_operation_until_creation_is_cancelled() {
+        let mut home = home();
+        home.state = State::NoCube { create_cube: false };
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(matches!(home.state, State::NoCube { create_cube: true }));
+        let first = home
+            .pending_bitcoin_import
+            .as_ref()
+            .expect("import intent")
+            .operation_id;
+        assert!(home.create_form_has_input());
+
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert_eq!(
+            home.pending_bitcoin_import.as_ref().unwrap().operation_id,
+            first
+        );
+
+        let _ = home.update(Message::View(ViewMessage::ShowCreateCube(false)));
+        assert!(home.pending_bitcoin_import.is_none());
+        assert!(matches!(home.state, State::NoCube { create_cube: false }));
+    }
+
+    #[test]
+    fn first_run_import_entry_and_cube_subtitle_are_distinct_from_vault() {
+        let mut home = home();
+        home.state = State::Unchecked;
+        let _ = home.update(Message::View(ViewMessage::ShowImportBitcoin));
+        assert!(home.pending_bitcoin_import.is_some());
+        let mut cube = CubeSettings::new("Imported".to_string(), Network::Bitcoin);
+        cube.bitcoin_import = home.pending_bitcoin_import.clone();
+        assert_eq!(vault_subtitle(&cube), "Vault import pending");
     }
 
     fn signed_in_home() -> Home {
@@ -8300,15 +8505,31 @@ mod tests {
             "3".to_string(),
             "4".to_string(),
         ];
-        let _ = create_cube_form(&valid_name, &pin, &pin, &None, false, false, true);
+        let _ = create_cube_form(
+            &valid_name,
+            &pin,
+            &pin,
+            &None,
+            CreateCubeFormOptions {
+                creating_cube: false,
+                passkey_mode: false,
+                signed_in: true,
+                importing_bitcoin: false,
+                can_import_bitcoin: true,
+            },
+        );
         let _ = create_cube_form(
             &invalid_name,
             &pin_input::PinInput::new(),
             &pin_input::PinInput::new(),
             &Some("form error".to_string()),
-            true,
-            true,
-            false,
+            CreateCubeFormOptions {
+                creating_cube: true,
+                passkey_mode: true,
+                signed_in: false,
+                importing_bitcoin: true,
+                can_import_bitcoin: true,
+            },
         );
 
         let mut words: [String; 12] = Default::default();
