@@ -808,6 +808,7 @@ async fn split_tip_height_is_bound_to_the_scanned_tip() {
 async fn rate_limit_cooldown_is_shared_across_sources_and_both_chains() {
     use httpmock::prelude::*;
     let server = MockServer::start();
+    let _cooldown = crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
     let mut client = CoincubeClient::for_test(server.base_url());
     client.set_token("synthetic-scan-token");
     let limited = server.mock(|when, then| {

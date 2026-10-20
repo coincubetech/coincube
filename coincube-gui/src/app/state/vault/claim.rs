@@ -498,7 +498,10 @@ fn inventory_scan_refusal(
         ClaimInventoryError::Scan(InventoryError::Scan(chain, cause)) => {
             let chain = if chain == ChainId::Bitcoin { "Bitcoin" } else { "BTCB2" };
             let detail = match cause {
-                ScanError::RateLimited(delay) => return format!("The indexer is rate limited. Verification will resume after its cooldown (about {} minutes). Your saved deposit addresses are retained.", delay.as_secs().div_ceil(60)),
+                ScanError::RateLimited(delay) => return match retry {
+                    ScanRetry::Automatic => format!("The indexer is rate limited. Verification will retry after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+                    ScanRetry::Manual => format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+                },
                 ScanError::Deadline => "the indexer did not finish the Vault scan in time",
                 ScanError::Changed => "the chain or an address changed during the scan",
                 ScanError::Http(429 | 502 | 503 | 504) | ScanError::Unavailable =>
@@ -537,6 +540,7 @@ fn inventory_scan_refusal(
 fn claim_address_refusal(error: claim_workflow::ClaimAddressError) -> String {
     use claim_workflow::ClaimAddressError;
     match error {
+        ClaimAddressError::RateLimited(delay) => return format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
         ClaimAddressError::FeeUnavailable => "Current Bitcoin and BTCB2 fee quotes are needed before showing deposit amounts.",
         ClaimAddressError::Unavailable | ClaimAddressError::Deadline => "The indexer is temporarily unavailable while checking the saved deposit addresses. Retry Continue split; your addresses are retained.",
         ClaimAddressError::WalletState => "The Bitcoin Vault is still syncing or its reserved addresses are unavailable. Wait for it to finish syncing, then retry Continue split.",

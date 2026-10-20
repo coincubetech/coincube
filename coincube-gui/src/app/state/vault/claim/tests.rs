@@ -47,6 +47,24 @@ fn incomplete_inventory_identifies_the_failing_chain() {
     assert!(!signing_message.contains("automatically"));
 }
 
+#[test]
+fn rate_limit_copy_only_promises_the_retry_that_will_happen() {
+    use crate::services::{
+        claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
+    };
+    let failure = ClaimInventoryError::Scan(InventoryError::Scan(
+        ChainId::Bitcoin,
+        ScanError::RateLimited(Duration::from_secs(120)),
+    ));
+    let manual = inventory_scan_refusal(failure, ScanRetry::Manual);
+    assert!(manual.contains("Try opening the split again"));
+    assert!(!manual.contains("will retry"));
+    assert!(!manual.contains("saved"));
+    let automatic = inventory_scan_refusal(failure, ScanRetry::Automatic);
+    assert!(automatic.contains("will retry"));
+    assert!(automatic.contains("2 minutes"));
+}
+
 /// Single-key primary path, native SegWit: what the coordinator admits.
 const SINGLE_WSH: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
 /// A 1-of-2 primary path: refused by the coordinator (`Coordinator::open`).
@@ -767,64 +785,81 @@ async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
     use httpmock::prelude::*;
     use iced::futures::StreamExt;
     use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
-    let server = MockServer::start();
-    let unavailable = server.mock(|when, then| {
-        when.method(GET);
-        then.status(503);
-    });
-    let (_sender, receiver) = watch::channel(7);
-    let mut p = panel(SINGLE_WSH);
-    p.generation = receiver;
-    let mut client = CoincubeClient::for_test(server.base_url());
-    client.set_token("synthetic-scan-token");
-    p.connect = Some(ConnectSession {
-        client,
-        account: "account".into(),
-    });
-    p.pre.target = Some("fork-cube".into());
-    p.pre.shape = None;
-    p.pre.checked = Some(checked_ok(1_000_000));
-    let descriptor = p.wallet.inheritance_descriptor().unwrap();
-    let context =
-        ClaimStep1Panel::funding_context(p.connect.as_ref().unwrap(), 7, p.generation.clone())
+    for status in [503, 429] {
+        let server = MockServer::start();
+        let _cooldown =
+            crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
+        let unavailable = server.mock(|when, then| {
+            when.method(GET);
+            then.status(status).header("Retry-After", "120");
+        });
+        let (_sender, receiver) = watch::channel(7);
+        let mut p = panel(SINGLE_WSH);
+        p.generation = receiver;
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-scan-token");
+        p.connect = Some(ConnectSession {
+            client,
+            account: "account".into(),
+        });
+        p.pre.target = Some("fork-cube".into());
+        p.pre.shape = None;
+        p.pre.checked = Some(checked_ok(1_000_000));
+        let descriptor = p.wallet.inheritance_descriptor().unwrap();
+        let context =
+            ClaimStep1Panel::funding_context(p.connect.as_ref().unwrap(), 7, p.generation.clone())
+                .unwrap();
+        let directory = journal_directory(&p.datadir, &p.wallet);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
             .unwrap();
-    let directory = journal_directory(&p.datadir, &p.wallet);
-    std::fs::DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(&directory)
-        .unwrap();
-    let saved = serde_json::json!({
-        "version": 2,
-        "identity": claim_workflow::WalletIdentity {
-            bitcoin_cube: "bitcoin-cube".into(), fork_cube: "fork-cube".into(),
-            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
-        },
-        "account": context.account, "provider": context.provider,
-        "descriptor": descriptor.to_string(),
-        "indices": {"bitcoin_deposit":4, "btcb2_deposit":5}, "released":true,
-    })
-    .to_string();
-    let file = directory.join("claim-funding.json");
-    std::fs::write(&file, &saved).unwrap();
-    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
-    // Recording panics on wallet reads. A resumed reservation must go straight
-    // to its small address-history check, not another full descriptor scan.
-    let task = p.prepare_funding(Arc::new(Recording::default()));
-    let mut stream = iced_runtime::task::into_stream(task).unwrap();
-    while let Some(action) = stream.next().await {
-        if let iced_runtime::Action::Output(Message::Claim(event)) = action {
-            drop(p.apply(event));
+        let saved = serde_json::json!({
+            "version": 2,
+            "identity": claim_workflow::WalletIdentity {
+                bitcoin_cube: "bitcoin-cube".into(), fork_cube: "fork-cube".into(),
+                descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+            },
+            "account": context.account, "provider": context.provider,
+            "descriptor": descriptor.to_string(),
+            "indices": {"bitcoin_deposit":4, "btcb2_deposit":5}, "released":true,
+        })
+        .to_string();
+        let file = directory.join("claim-funding.json");
+        std::fs::write(&file, &saved).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Recording panics on wallet reads. A resumed reservation must go straight
+        // to its small address-history check, not another full descriptor scan.
+        let task = p.prepare_funding(Arc::new(Recording::default()));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+                drop(p.apply(event));
+            }
         }
+        assert!(matches!(p.stage, Stage::Preconditions));
+        if status == 429 {
+            assert!(p.funding_error().unwrap().contains("rate limited"));
+            assert!(p.funding_error().unwrap().contains("2 minutes"));
+            let task = p.prepare_funding(Arc::new(Recording::default()));
+            let mut stream = iced_runtime::task::into_stream(task).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+                    drop(p.apply(event));
+                }
+            }
+            assert!(p.funding_error().unwrap().contains("rate limited"));
+        } else {
+            assert!(p
+                .funding_error()
+                .unwrap()
+                .contains("indexer is temporarily unavailable"));
+        }
+        unavailable.assert_hits(1);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), saved);
+        std::fs::remove_dir_all(p.datadir.path()).unwrap();
     }
-    assert!(matches!(p.stage, Stage::Preconditions));
-    assert!(p
-        .funding_error()
-        .unwrap()
-        .contains("indexer is temporarily unavailable"));
-    unavailable.assert_hits(1);
-    assert_eq!(std::fs::read_to_string(file).unwrap(), saved);
-    std::fs::remove_dir_all(p.datadir.path()).unwrap();
 }
 
 #[test]
