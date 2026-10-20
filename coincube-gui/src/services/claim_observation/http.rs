@@ -166,6 +166,9 @@ impl HttpObservationSource {
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), FailureKind> {
         let prefix = Self::prefix(chain)?;
         self.bounded(async {
+            if crate::services::esplora_backoff::remaining(&self.base).is_some() {
+                return Err(FailureKind::Http(429));
+            }
             let stamp = self.now();
             if let Some(budget) = &self.budget {
                 budget.charge_request(0)?;
@@ -179,6 +182,9 @@ impl HttpObservationSource {
             }
             let mut response = request.send().await.map_err(|_| FailureKind::Unavailable)?;
             let status = response.status().as_u16();
+            if status == 429 {
+                crate::services::esplora_backoff::record(&self.base, response.headers());
+            }
             if status != 200 && status != 404 {
                 return Err(FailureKind::Http(status));
             }

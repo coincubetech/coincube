@@ -307,7 +307,7 @@ fn funding_view<'a>(
             } else {
                 "Review and sign is waiting for both deposits to be confirmed and verified. Verification runs automatically."
             })))
-        .push_maybe(panel.funding_checking().then(|| p2_regular("Verifying deposit ancestry and preparing both self-transfers…")))
+        .push_maybe(panel.funding_checking().then(|| p2_regular(panel.funding_status().unwrap_or("Verifying deposit ancestry and preparing both self-transfers…"))))
         .push_maybe(panel.funding_review().and_then(|review| {
             let descriptor = panel.wallet().inheritance_descriptor()?;
             let (threshold, _) = descriptor.policy().primary_path().thresh_origins();
@@ -516,6 +516,9 @@ fn deposit_row<'a>(
 ) -> Element<'a, Message> {
     let (mark, detail) = match observed {
         None => (None, "Checking the reserved address…".to_string()),
+        Some(Err(crate::services::foreign_scan::ScanError::RateLimited(delay))) => (
+            Some(false), format!("Indexer rate limited; retrying after its cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+        ),
         Some(Err(_)) => (Some(false), "Indexer status unavailable; retrying automatically.".to_string()),
         Some(Ok(funds)) if funds.largest_mature_sats >= minimum => (
             None,

@@ -40,6 +40,7 @@ pub enum ScanError {
     Deadline,
     Unavailable,
     Http(u16),
+    RateLimited(Duration),
     Malformed,
     Freshness,
     Changed,

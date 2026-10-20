@@ -7,6 +7,7 @@ pub mod claim_observation;
 #[allow(dead_code)] // Kept behind the paired ancestry gate until GUI admission is wired.
 pub(crate) mod claim_pair_signing;
 pub mod connect;
+pub(crate) mod esplora_backoff;
 pub mod feeestimation;
 pub mod fiat;
 pub mod foreign_psbt;

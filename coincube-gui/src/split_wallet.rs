@@ -559,6 +559,7 @@ fn fresh_index_copy(fresh: FreshIndex) -> String {
 
 fn scan_error_copy(error: ScanError) -> String {
     match error {
+        ScanError::RateLimited(delay) => format!("The indexer is rate limited. Try again after its cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
         ScanError::Descriptor => "Enter a supported public mainnet descriptor. Private keys, hardened public derivation and ambiguous multipath descriptors are refused.".to_string(),
         ScanError::RangeLimit | ScanError::AddressLimit => "The wallet history did not reach a safe gap inside this bounded scan. No zero-balance conclusion was made.".to_string(),
         ScanError::Freshness | ScanError::Changed => "The chain changed or fresh evidence could not be proved. Scan again before continuing.".to_string(),

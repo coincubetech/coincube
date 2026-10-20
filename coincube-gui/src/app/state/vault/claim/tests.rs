@@ -760,6 +760,145 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(matches!(p.stage, Stage::Preconditions));
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
+    use coincube_core::miniscript::bitcoin::hashes::sha256;
+    use httpmock::prelude::*;
+    use iced::futures::StreamExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let server = MockServer::start();
+    let unavailable = server.mock(|when, then| {
+        when.method(GET);
+        then.status(503);
+    });
+    let (_sender, receiver) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = receiver;
+    let mut client = CoincubeClient::for_test(server.base_url());
+    client.set_token("synthetic-scan-token");
+    p.connect = Some(ConnectSession {
+        client,
+        account: "account".into(),
+    });
+    p.pre.target = Some("fork-cube".into());
+    p.pre.shape = None;
+    p.pre.checked = Some(checked_ok(1_000_000));
+    let descriptor = p.wallet.inheritance_descriptor().unwrap();
+    let context =
+        ClaimStep1Panel::funding_context(p.connect.as_ref().unwrap(), 7, p.generation.clone())
+            .unwrap();
+    let directory = journal_directory(&p.datadir, &p.wallet);
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&directory)
+        .unwrap();
+    let saved = serde_json::json!({
+        "version": 2,
+        "identity": claim_workflow::WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(), fork_cube: "fork-cube".into(),
+            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+        },
+        "account": context.account, "provider": context.provider,
+        "descriptor": descriptor.to_string(),
+        "indices": {"bitcoin_deposit":4, "btcb2_deposit":5}, "released":true,
+    })
+    .to_string();
+    let file = directory.join("claim-funding.json");
+    std::fs::write(&file, &saved).unwrap();
+    std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    // Recording panics on wallet reads. A resumed reservation must go straight
+    // to its small address-history check, not another full descriptor scan.
+    let task = p.prepare_funding(Arc::new(Recording::default()));
+    let mut stream = iced_runtime::task::into_stream(task).unwrap();
+    while let Some(action) = stream.next().await {
+        if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+            drop(p.apply(event));
+        }
+    }
+    assert!(matches!(p.stage, Stage::Preconditions));
+    assert!(p
+        .funding_error()
+        .unwrap()
+        .contains("indexer is temporarily unavailable"));
+    unavailable.assert_hits(1);
+    assert_eq!(std::fs::read_to_string(file).unwrap(), saved);
+    std::fs::remove_dir_all(p.datadir.path()).unwrap();
+}
+
+#[test]
+fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
+    let (_sender, receiver) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = receiver;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    let addresses = claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "bitcoin-address".into(),
+        btcb2_deposit: "btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
+    };
+    for revoke in [false, true] {
+        p.stage = Stage::FundingDeposits(addresses.clone());
+        p.funding_checking = true;
+        p.check_seq = 12;
+        let revocations = p.revocations;
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            11,
+            7,
+            revocations,
+            "stale attempt",
+        )));
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            12,
+            8,
+            revocations,
+            "wrong session",
+        )));
+        assert!(p.funding_status.is_none());
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            12,
+            7,
+            revocations,
+            "Scanning both Vaults",
+        )));
+        assert_eq!(p.funding_status(), Some("Scanning both Vaults…"));
+        let (task, handle) = Task::done(Message::Claim(ClaimEvent::DepositPoll)).abortable();
+        p.funding_task = Some(handle);
+        if revoke {
+            p.revoke();
+        } else {
+            p.cancel();
+        }
+        assert!(p.funding_task.is_none());
+        assert!(!p.funding_checking);
+        assert!(matches!(p.stage, Stage::Preconditions));
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            12,
+            7,
+            revocations,
+            "late progress",
+        )));
+        drop(p.apply(ClaimEvent::FundingChecked(
+            12,
+            7,
+            revocations,
+            Err("late error".into()),
+        )));
+        assert!(p.funding_status.is_none());
+        assert!(p.funding_error.is_none());
+        use iced::futures::StreamExt;
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(iced::futures::executor::block_on(stream.next()).is_none());
+    }
+}
+
 #[test]
 fn claim_fork_pairing_expires_when_the_open_wallet_is_dropped() {
     let (_sender, receiver) = watch::channel(1);
