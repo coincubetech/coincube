@@ -1458,11 +1458,9 @@ impl ClaimStep1Panel {
             .and_then(|c| c.feerate_vb.as_ref().ok().copied())
     }
 
-    /// The first precondition that fails, in the order a user can act on
-    /// them: target, Vault shape, Connect session, node backend, the fork's
-    /// observation validity, coins, fee rate. `None` when construction may
-    /// attempt positive ancestry.
-    pub fn refusal(&self) -> Option<Refusal> {
+    /// Blockers shared by read-only deposit setup and the recorded-claim flow.
+    /// Coin classification and the retired single-transfer gate are not deposit blockers.
+    pub fn funding_setup_refusal(&self) -> Option<Refusal> {
         let refuse = |reason: &str, retry: bool| {
             Some(Refusal {
                 reason: reason.to_string(),
@@ -1495,12 +1493,25 @@ impl ClaimStep1Panel {
                 true,
             );
         }
-        let Some(checked) = &self.pre.checked else {
-            return None;
-        };
-        if let Err(reason) = &checked.backend {
+        if let Some(Err(reason)) = self.pre.checked.as_ref().map(|checked| &checked.backend) {
             return refuse(reason, false);
         }
+        None
+    }
+
+    /// The first precondition that fails, in the order a user can act on
+    /// them. The paired deposit wizard uses only `funding_setup_refusal`.
+    pub fn refusal(&self) -> Option<Refusal> {
+        if let Some(refusal) = self.funding_setup_refusal() {
+            return Some(refusal);
+        }
+        let refuse = |reason: &str, retry: bool| {
+            Some(Refusal {
+                reason: reason.to_string(),
+                retry,
+            })
+        };
+        let checked = self.pre.checked.as_ref()?;
         if let Err(reason) = &checked.window {
             return refuse(
                 &format!("Couldn't read Bitcoin Blake2b's status: {reason}"),

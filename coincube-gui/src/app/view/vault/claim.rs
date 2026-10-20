@@ -720,19 +720,9 @@ fn preconditions_view<'a>(
 
     if !panel.can_sign_or_submit() {
         let problem = panel
-            .funding_error()
-            .map(str::to_owned)
-            .or_else(|| pre.shape.clone())
-            .or_else(|| {
-                pre.target
-                    .is_none()
-                    .then(|| "Create the paired BTCB2 Cube to start this split.".to_owned())
-            })
-            .or_else(|| {
-                checked
-                    .and_then(|checked| checked.backend.as_ref().err())
-                    .cloned()
-            });
+            .funding_setup_refusal()
+            .map(|refusal| refusal.reason)
+            .or_else(|| panel.funding_error().map(str::to_owned));
         let summary = coins.map(|coins| {
             let total: Amount = coins.pre_fork.iter().map(|coin| coin.amount).sum();
             format!(
@@ -756,13 +746,17 @@ fn preconditions_view<'a>(
                     })
                     .style(theme::text::secondary)
                 }))
-                .push_maybe((problem.is_some() || panel.can_prepare_funding()).then(|| {
+                .push({
                     button::secondary_compact(
                         Some(icon::reload_icon()),
-                        if problem.is_some() {
-                            "Retry loading deposits"
+                        if panel.can_prepare_funding() {
+                            if panel.funding_error().is_some() {
+                                "Retry loading deposits"
+                            } else {
+                                "Load deposits"
+                            }
                         } else {
-                            "Load deposits"
+                            "Check again"
                         },
                     )
                     .on_press_maybe((!pre.checking).then_some(Message::Claim(
@@ -772,7 +766,7 @@ fn preconditions_view<'a>(
                             ClaimMessage::Recheck
                         },
                     )))
-                }))
+                })
                 .push(
                     button::secondary_compact(
                         Some(if panel.setup_details_expanded() {
