@@ -2769,6 +2769,7 @@ pub enum ClaimMessage {
     /// Reserve distinct source-Vault addresses for chain-specific deposits.
     StartFunding,
     ToggleDepositDetails,
+    ToggleSetupDetails,
     CheckFunding,
     /// Open the two ordinary Claim PSBTs after a fresh pair requalification.
     SignPair,

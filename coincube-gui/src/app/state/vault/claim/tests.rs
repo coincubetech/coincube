@@ -47,6 +47,24 @@ fn incomplete_inventory_identifies_the_failing_chain() {
     assert!(!signing_message.contains("automatically"));
 }
 
+#[test]
+fn rate_limit_copy_only_promises_the_retry_that_will_happen() {
+    use crate::services::{
+        claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
+    };
+    let failure = ClaimInventoryError::Scan(InventoryError::Scan(
+        ChainId::Bitcoin,
+        ScanError::RateLimited(Duration::from_secs(120)),
+    ));
+    let manual = inventory_scan_refusal(failure, ScanRetry::Manual);
+    assert!(manual.contains("Try opening the split again"));
+    assert!(!manual.contains("will retry"));
+    assert!(!manual.contains("saved"));
+    let automatic = inventory_scan_refusal(failure, ScanRetry::Automatic);
+    assert!(automatic.contains("will retry"));
+    assert!(automatic.contains("2 minutes"));
+}
+
 /// Single-key primary path, native SegWit: what the coordinator admits.
 const SINGLE_WSH: &str = "wsh(or_d(pk([f5acc2fd]tpubD6NzVbkrYhZ4YgUx2ZLNt2rLYAMTdYysCRzKoLu2BeSHKvzqPaBDvf17GeBPnExUVPkuBpx4kniP964e2MxyzzazcXLptxLXModSVCVEV1T/<0;1>/*),and_v(v:pkh([8a64f2a9]tpubD6NzVbkrYhZ4WmzFjvQrp7sDa4ECUxTi9oby8K4FZkd3XCBtEdKwUiQyYJaxiJo5y42gyDWEczrFpozEjeLxMPxjf2WtkfcbpUdfvNnozWF/<0;1>/*),older(10))))#d72le4dr";
 /// A 1-of-2 primary path: refused by the coordinator (`Coordinator::open`).
@@ -758,6 +776,197 @@ fn claim_funding_results_require_the_current_panel_and_session() {
     assert!(p.deposit_details_override.is_none());
     drop(p.apply(ClaimEvent::FundingPrepared(11, 7, 0, Ok(addresses))));
     assert!(matches!(p.stage, Stage::Preconditions));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reopening_saved_deposits_does_not_repeat_the_full_vault_scan() {
+    use coincube_core::miniscript::bitcoin::hashes::sha256;
+    use httpmock::prelude::*;
+    use iced::futures::StreamExt;
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    for status in [503, 429] {
+        let server = MockServer::start();
+        let _cooldown =
+            crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
+        let unavailable = server.mock(|when, then| {
+            when.method(GET);
+            then.status(status).header("Retry-After", "120");
+        });
+        let (_sender, receiver) = watch::channel(7);
+        let mut p = panel(SINGLE_WSH);
+        p.generation = receiver;
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-scan-token");
+        p.connect = Some(ConnectSession {
+            client,
+            account: "account".into(),
+        });
+        p.pre.target = Some("fork-cube".into());
+        p.pre.shape = None;
+        p.pre.checked = Some(checked_ok(1_000_000));
+        let descriptor = p.wallet.inheritance_descriptor().unwrap();
+        let context =
+            ClaimStep1Panel::funding_context(p.connect.as_ref().unwrap(), 7, p.generation.clone())
+                .unwrap();
+        let directory = journal_directory(&p.datadir, &p.wallet);
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(&directory)
+            .unwrap();
+        let saved = serde_json::json!({
+            "version": 2,
+            "identity": claim_workflow::WalletIdentity {
+                bitcoin_cube: "bitcoin-cube".into(), fork_cube: "fork-cube".into(),
+                descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+            },
+            "account": context.account, "provider": context.provider,
+            "descriptor": descriptor.to_string(),
+            "indices": {"bitcoin_deposit":4, "btcb2_deposit":5}, "released":true,
+        })
+        .to_string();
+        let file = directory.join("claim-funding.json");
+        std::fs::write(&file, &saved).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        // Recording panics on wallet reads. A resumed reservation must go straight
+        // to its small address-history check, not another full descriptor scan.
+        let task = p.prepare_funding(Arc::new(Recording::default()));
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+                drop(p.apply(event));
+            }
+        }
+        assert!(matches!(p.stage, Stage::Preconditions));
+        if status == 429 {
+            assert!(p.funding_error().unwrap().contains("rate limited"));
+            assert!(p.funding_error().unwrap().contains("2 minutes"));
+            let task = p.prepare_funding(Arc::new(Recording::default()));
+            let mut stream = iced_runtime::task::into_stream(task).unwrap();
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+                    drop(p.apply(event));
+                }
+            }
+            assert!(p.funding_error().unwrap().contains("rate limited"));
+        } else {
+            assert!(p
+                .funding_error()
+                .unwrap()
+                .contains("indexer is temporarily unavailable"));
+        }
+        unavailable.assert_hits(1);
+        assert_eq!(std::fs::read_to_string(file).unwrap(), saved);
+        std::fs::remove_dir_all(p.datadir.path()).unwrap();
+    }
+}
+
+#[tokio::test]
+async fn healthy_claim_entry_loads_deposits_inline_without_a_continue_button() {
+    use iced::futures::StreamExt;
+    let (_sender, receiver) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = receiver;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    p.pre.target = Some("fork-cube".into());
+    p.pre.shape = None;
+    p.pre.checking = true;
+    p.check_seq = 3;
+    let task = p.apply(ClaimEvent::Checked(3, Box::new(checked_ok(1_000_000))));
+    let mut stream =
+        iced_runtime::task::into_stream(task).expect("entry prepares deposits automatically");
+    assert!(matches!(
+        stream.next().await,
+        Some(iced_runtime::Action::Output(Message::View(
+            view::Message::Claim(view::ClaimMessage::StartFunding)
+        )))
+    ));
+    assert!(!p.setup_details_expanded());
+    drop(p.update(
+        None,
+        &Cache::default(),
+        Message::View(view::Message::Claim(view::ClaimMessage::ToggleSetupDetails)),
+    ));
+    assert!(p.setup_details_expanded());
+    // An outdated precondition result cannot reopen the deposit loader.
+    let task = p.apply(ClaimEvent::Checked(2, Box::new(checked_ok(1_000_000))));
+    assert!(iced_runtime::task::into_stream(task).is_none());
+}
+
+#[test]
+fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
+    let (_sender, receiver) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = receiver;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "account".into(),
+    });
+    let addresses = claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "bitcoin-address".into(),
+        btcb2_deposit: "btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
+    };
+    for revoke in [false, true] {
+        p.stage = Stage::FundingDeposits(addresses.clone());
+        p.funding_checking = true;
+        p.check_seq = 12;
+        let revocations = p.revocations;
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            11,
+            7,
+            revocations,
+            "stale attempt",
+        )));
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            12,
+            8,
+            revocations,
+            "wrong session",
+        )));
+        assert!(p.funding_status.is_none());
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            12,
+            7,
+            revocations,
+            "Scanning both Vaults",
+        )));
+        assert_eq!(p.funding_status(), Some("Scanning both Vaults…"));
+        let (task, handle) = Task::done(Message::Claim(ClaimEvent::DepositPoll)).abortable();
+        p.funding_task = Some(handle);
+        if revoke {
+            p.revoke();
+        } else {
+            p.cancel();
+        }
+        assert!(p.funding_task.is_none());
+        assert!(!p.funding_checking);
+        assert!(matches!(p.stage, Stage::Preconditions));
+        drop(p.apply(ClaimEvent::FundingCheckProgress(
+            12,
+            7,
+            revocations,
+            "late progress",
+        )));
+        drop(p.apply(ClaimEvent::FundingChecked(
+            12,
+            7,
+            revocations,
+            Err("late error".into()),
+        )));
+        assert!(p.funding_status.is_none());
+        assert!(p.funding_error.is_none());
+        use iced::futures::StreamExt;
+        let mut stream = iced_runtime::task::into_stream(task).unwrap();
+        assert!(iced::futures::executor::block_on(stream.next()).is_none());
+    }
 }
 
 #[test]
@@ -5639,13 +5848,16 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         Layout,
     };
     #[derive(Default)]
-    struct Labels(Vec<String>);
+    struct Labels(Vec<String>, Option<iced::Point>);
     impl Operation for Labels {
         fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
             f(self);
         }
-        fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
             self.0.push(value.to_owned());
+            if value == "Check again" {
+                self.1 = Some(bounds.center());
+            }
         }
     }
     for bytes in [
@@ -5684,7 +5896,59 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
     });
     let cache = Cache::default();
     let menu = crate::app::menu::Menu::Vault(crate::app::menu::VaultSubMenu::Claim);
-    for (width, expanded) in [(1400, false), (900, true)] {
+    let addresses = match &p.stage {
+        Stage::FundingDeposits(addresses) => addresses.clone(),
+        _ => unreachable!(),
+    };
+    for (width, expanded, scenario) in [
+        (1400, false, "deposits"),
+        (900, true, "deposits"),
+        (1400, false, "setup"),
+        (1400, false, "loading"),
+        (1400, false, "error"),
+        (1400, false, "signed-out"),
+        (1400, false, "switching"),
+        (1400, false, "unavailable"),
+        (1400, false, "unknown"),
+        (1400, false, "recorded"),
+        (1400, false, "unchecked"),
+        (1400, false, "ready"),
+    ] {
+        p.stage = match scenario {
+            "deposits" => Stage::FundingDeposits(addresses.clone()),
+            "loading" => Stage::FundingChecking,
+            _ => Stage::Preconditions,
+        };
+        p.connect = (scenario != "signed-out").then(|| ConnectSession {
+            client: CoincubeClient::new(),
+            account: "test-account".into(),
+        });
+        p.backend = match scenario {
+            "switching" => BackendState::Switching,
+            "unavailable" => BackendState::Unavailable,
+            "unknown" => BackendState::Unknown,
+            _ => BackendState::Ready,
+        };
+        p.restart_pending = scenario == "recorded";
+        p.pre.target = Some("fork-cube".into());
+        p.pre.shape = None;
+        p.pre.checked = (scenario != "unchecked").then(|| checked_ok(1_000_000));
+        p.pre.checking = scenario == "setup";
+        p.funding_error = (scenario == "error")
+            .then(|| {
+                "Bitcoin indexer unavailable. Retry loading deposits when it recovers.".to_owned()
+            })
+            .or_else(|| {
+                [
+                    "signed-out",
+                    "switching",
+                    "unavailable",
+                    "unknown",
+                    "recorded",
+                ]
+                .contains(&scenario)
+                .then(|| "An older deposit check failed.".to_owned())
+            });
         p.deposit_details_override = Some(expanded);
         if expanded {
             drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
@@ -5692,7 +5956,6 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         } else {
             p.funding_status = Some("Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into());
         }
-        let expected_status = p.funding_status().unwrap().to_owned();
         let mut renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
             iced::Pixels(16.0),
@@ -5716,16 +5979,9 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             "1. Deposits",
             "2. Review and sign",
             "3. Broadcast and confirm",
-            "Replay protection not yet verified.",
-            "Next: transfer the coins back",
-            "Funds received at both addresses",
-            "Split signing is disabled for this launch",
-            "Review and sign self-transfers",
-            &expected_status,
-            "Retry verification now",
         ] {
             assert!(
-                labels.0.iter().any(|label| label.contains(expected)),
+                labels.0.iter().any(|label| label == expected),
                 "Missing {expected}: {:?}",
                 labels.0
             );
@@ -5734,9 +5990,106 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             labels
                 .0
                 .iter()
-                .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
-            expanded
+                .filter(|label| label.as_str() == "Claim Bitcoin Blake2b")
+                .count(),
+            1
         );
+        assert!(!labels.0.iter().any(|label| label == "Continue split"));
+        assert!(!labels
+            .0
+            .iter()
+            .any(|label| label.contains("post-fork candidate")));
+        if scenario == "deposits" {
+            for expected in [
+                "verifying replay protection",
+                "Funds received at both addresses",
+                "Available after both deposits are verified.",
+            ] {
+                assert!(
+                    labels.0.iter().any(|label| label.contains(expected)),
+                    "Missing {expected}: {:?}",
+                    labels.0
+                );
+            }
+            assert_eq!(
+                labels
+                    .0
+                    .iter()
+                    .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
+                expanded
+            );
+        } else if scenario == "error" {
+            assert!(labels
+                .0
+                .iter()
+                .any(|label| label.contains("Bitcoin indexer unavailable")));
+            assert!(labels
+                .0
+                .iter()
+                .any(|label| label == "Retry loading deposits"));
+        } else if scenario == "setup" {
+            assert!(labels.0.iter().any(|label| label == "Wallet details"));
+            assert!(!labels.0.iter().any(|label| label == "Node backend"));
+        }
+        if [
+            "signed-out",
+            "switching",
+            "unavailable",
+            "unknown",
+            "recorded",
+            "unchecked",
+        ]
+        .contains(&scenario)
+        {
+            if scenario != "unchecked" {
+                let refusal = p.funding_setup_refusal().expect("setup blocker");
+                assert!(
+                    labels.0.contains(&refusal.reason),
+                    "Hidden blocker for {}",
+                    scenario
+                );
+                assert!(!labels
+                    .0
+                    .iter()
+                    .any(|label| label.starts_with("Load your deposit")));
+            }
+            let cursor =
+                iced::mouse::Cursor::Available(labels.1.expect("visible Check again action"));
+            let mut messages = Vec::new();
+            for event in [
+                iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+            ] {
+                element.as_widget_mut().update(
+                    &mut tree,
+                    &iced::Event::Mouse(event),
+                    Layout::new(&node),
+                    cursor,
+                    &renderer,
+                    &mut iced::advanced::clipboard::Null,
+                    &mut iced::advanced::Shell::new(&mut messages),
+                    &iced::Rectangle::with_size(size),
+                );
+            }
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [crate::app::view::Message::Claim(
+                        crate::app::view::ClaimMessage::Recheck
+                    )]
+                ),
+                "Missing recovery action for {}: {:?}",
+                scenario,
+                messages
+            );
+        } else if scenario == "ready" {
+            assert!(p.funding_setup_refusal().is_none());
+            assert!(labels.0.iter().any(|label| label == "Load deposits"));
+            assert!(!labels
+                .0
+                .iter()
+                .any(|label| label == crate::services::claim_ancestry_gate::NEW_CLAIM_MESSAGE));
+        }
         assert!(p.funding_review().is_none());
         assert!(crate::services::claim_ancestry_gate::authorization().is_none());
         if let Ok(directory) = std::env::var("CLAIM_PREVIEW_DIR") {
@@ -5768,7 +6121,7 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                 iced::Color::from_rgb8(22, 22, 22),
             );
             image::save_buffer(
-                std::path::Path::new(&directory).join(format!("claim-{width}.png")),
+                std::path::Path::new(&directory).join(format!("claim-{scenario}-{width}.png")),
                 &pixels,
                 width,
                 1500,

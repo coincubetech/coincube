@@ -437,6 +437,7 @@ pub enum ClaimAddressError {
     Used,
     Unavailable,
     FeeUnavailable,
+    RateLimited(Duration),
     WalletState,
     Stale,
     Deadline,
@@ -467,6 +468,10 @@ pub enum ClaimFundingDiscoveryError {
 
 #[async_trait]
 trait AddressHistory: Send + Sync {
+    fn retry_after(&self) -> Option<Duration> {
+        None
+    }
+
     async fn used(
         &self,
         chain: coincube_core::chain::ChainId,
@@ -476,6 +481,10 @@ trait AddressHistory: Send + Sync {
 
 #[async_trait]
 impl AddressHistory for ConnectEsplora {
+    fn retry_after(&self) -> Option<Duration> {
+        self.rate_limit_retry_after()
+    }
+
     async fn used(
         &self,
         chain: coincube_core::chain::ChainId,
@@ -504,10 +513,16 @@ async fn checked_history(
     tokio::time::timeout(ADDRESS_CHECK_BUDGET, async {
         for address in &addresses {
             for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
-                let (used, observed_at) = source
-                    .used(chain, address)
-                    .await
-                    .map_err(|_| ClaimAddressError::Unavailable)?;
+                let (used, observed_at) =
+                    source
+                        .used(chain, address)
+                        .await
+                        .map_err(|error| match error {
+                            FailureKind::Http(429) => ClaimAddressError::RateLimited(
+                                source.retry_after().unwrap_or(Duration::from_secs(60)),
+                            ),
+                            _ => ClaimAddressError::Unavailable,
+                        })?;
                 let now = SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .map_err(|_| ClaimAddressError::Stale)?
@@ -1528,6 +1543,12 @@ fn claim_provider_matches(
     .is_ok_and(|source| source.provider_identity() == context.provider)
 }
 
+fn fee_read_error(client: &CoincubeClient) -> ClaimAddressError {
+    crate::services::esplora_backoff::remaining(&client.base_url)
+        .map(ClaimAddressError::RateLimited)
+        .unwrap_or(ClaimAddressError::FeeUnavailable)
+}
+
 /// Prepare the Bitcoin Vault to notice deposits at both reserved receive
 /// indices, then release the already checked instructions. Revealing an index
 /// does not authorize a spend or assert chain-exclusive ancestry.
@@ -1601,18 +1622,21 @@ pub async fn prepare_claim_deposit_instructions(
     let bitcoin_fees = ConnectBitcoinFees::new(&client).ok_or(ClaimAddressError::FeeUnavailable)?;
     let bitcoin_rate = bitcoin_step1_feerate(&bitcoin_fees)
         .await
-        .ok_or(ClaimAddressError::FeeUnavailable)?;
+        .ok_or_else(|| fee_read_error(&client))?;
     let btcb2_fees = btcb2_fee_source(Some(client.clone()));
     let btcb2_rate = btcb2_sweep_feerate(&*btcb2_fees)
         .await
-        .ok_or(ClaimAddressError::FeeUnavailable)?;
+        .ok_or_else(|| fee_read_error(&client))?;
     if !current(&generation, expected) {
         return Err(ClaimAddressError::ChangedSession);
     }
     let (bitcoin_minimum_sats, btcb2_minimum_sats) = minimum_claim_deposits(
         &descriptor,
         saved.indices,
-        shared_count,
+        // An incomplete local listing is not an authoritative zero. Use
+        // one shared coin as the instruction estimate floor; the real pair
+        // is priced from its complete fresh inventory before signing.
+        shared_count.max(1),
         bitcoin_rate,
         btcb2_rate,
     )?;
@@ -2206,6 +2230,105 @@ mod tests {
             ensure_claim_wallet_ready(&info, &saved),
             Err(ClaimAddressError::WalletState)
         );
+    }
+
+    #[tokio::test]
+    async fn saved_funded_addresses_reopen_without_a_local_shared_coin_count() {
+        use httpmock::prelude::*;
+        let server = MockServer::start();
+        let _cooldown =
+            crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
+        let directory = std::env::temp_dir().join(format!(
+            "claim-funding-{}",
+            super::super::controller_id().unwrap()
+        ));
+        let descriptor = descriptor();
+        let identity = WalletIdentity {
+            bitcoin_cube: "bitcoin-cube".into(),
+            fork_cube: "btcb2-cube".into(),
+            descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
+        };
+        let (_sender, generation) = watch::channel(7);
+        let mut client = CoincubeClient::for_test(server.base_url());
+        client.set_token("synthetic-test-token");
+        let source = HttpObservationSource::new(
+            client.clone(),
+            ChainId::Bitcoin,
+            ChainId::BitcoinBlake2b,
+            CollectionContext {
+                expected_generation: 7,
+                generation: generation.clone(),
+            },
+        )
+        .unwrap();
+        let context = Context {
+            generation: 7,
+            account: "account".into(),
+            provider: source.provider_identity(),
+        };
+        let indices = FreshDepositAddresses {
+            bitcoin_deposit: 4,
+            btcb2_deposit: 5,
+        };
+        let saved =
+            ClaimFundingReservation::new(&descriptor, &identity, &context, indices).unwrap();
+        let addresses = saved.addresses().unwrap();
+        super::super::prepare_directory(&directory).unwrap();
+        {
+            let mut journal = Journal::open(&directory).unwrap();
+            journal.store_claim_funding_reservation(&saved).unwrap();
+            journal.release_claim_funding_reservation(&saved).unwrap();
+        }
+        let mut mocks = Vec::new();
+        for network in ["bitcoin", "bitcoin-blake2b"] {
+            for address in &addresses {
+                mocks.push(server.mock(|when, then| {
+                    when.method(GET).path(format!("/api/v1/esplora/{network}/mainnet/address/{address}"));
+                    then.status(200).header("X-Coincube-Observation", "fresh")
+                        .header("X-Cache", "BYPASS").header("Cache-Control", "no-store")
+                        .json_body(serde_json::json!({"address":address,
+                            "chain_stats":{"funded_txo_count":1,"spent_txo_count":0,"tx_count":1},
+                            "mempool_stats":{"funded_txo_count":0,"spent_txo_count":0,"tx_count":0}}));
+                }));
+            }
+            mocks.push(server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/{network}/mainnet/fee-estimates"));
+                then.status(200)
+                    .header("X-Coincube-Observation", "fresh")
+                    .header("X-Cache", "BYPASS")
+                    .header("Cache-Control", "no-store")
+                    .body(r#"{"6":2}"#);
+            }));
+        }
+        let wallet = ReceiveWallet::new(descriptor.clone(), DaemonBackend::RemoteBackend);
+        *wallet.receive.lock().unwrap() = 5;
+        let checked = prepare_claim_deposit_instructions(
+            directory.clone(),
+            descriptor.clone(),
+            identity,
+            context,
+            client,
+            generation,
+            &wallet,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!([checked.bitcoin_deposit, checked.btcb2_deposit], addresses);
+        assert_eq!(
+            (checked.bitcoin_minimum_sats, checked.btcb2_minimum_sats),
+            minimum_claim_deposits(&descriptor, indices, 1, 2, 2).unwrap()
+        );
+        // A real zero-input spend is still rejected; only the instruction estimate has a floor.
+        assert_eq!(
+            minimum_claim_deposits(&descriptor, indices, 0, 2, 2),
+            Err(ClaimAddressError::FeeUnavailable)
+        );
+        for mock in mocks {
+            mock.assert_hits(1);
+        }
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

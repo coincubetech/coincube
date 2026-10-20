@@ -803,3 +803,49 @@ async fn split_tip_height_is_bound_to_the_scanned_tip() {
         mock.assert();
     }
 }
+
+#[tokio::test]
+async fn rate_limit_cooldown_is_shared_across_sources_and_both_chains() {
+    use httpmock::prelude::*;
+    let server = MockServer::start();
+    let _cooldown = crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
+    let mut client = CoincubeClient::for_test(server.base_url());
+    client.set_token("synthetic-scan-token");
+    let limited = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v1/esplora/bitcoin/mainnet/address/abc");
+        then.status(429).header("Retry-After", "3090");
+    });
+    let mirror = server.mock(|when, then| {
+        when.method(GET)
+            .path("/api/v1/esplora/bitcoin-blake2b/mainnet/address/abc");
+        then.status(200);
+    });
+    let source = http::HttpSource::new(client.clone()).unwrap();
+    assert!(matches!(source.stats(ChainId::Bitcoin, "abc").await,
+        Err(ScanError::RateLimited(delay)) if delay.as_secs() == 3090));
+    let another = http::HttpSource::new(client.clone()).unwrap();
+    assert!(
+        matches!(another.stats(ChainId::BitcoinBlake2b, "abc").await,
+        Err(ScanError::RateLimited(delay)) if delay > Duration::from_secs(3000))
+    );
+    let (_sender, receiver) = watch::channel(7);
+    let observations = crate::services::claim_observation::http::HttpObservationSource::new(
+        client,
+        ChainId::Bitcoin,
+        ChainId::BitcoinBlake2b,
+        crate::services::claim_observation::CollectionContext {
+            expected_generation: 7,
+            generation: receiver,
+        },
+    )
+    .unwrap();
+    use crate::services::claim_observation::{FailureKind, ObservationSource};
+    assert!(matches!(
+        observations.tip(ChainId::Bitcoin).await,
+        Err(FailureKind::Http(429))
+    ));
+    limited.assert_hits(1);
+    // The blocked mirror-chain read must not reach the server either.
+    mirror.assert_hits(0);
+}

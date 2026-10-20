@@ -35,7 +35,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use iced::Task;
+use iced::{futures::SinkExt, Task};
 use tokio::sync::watch;
 
 use coincube_core::{
@@ -461,6 +461,7 @@ pub(crate) fn funding_proof_refusal(
         DiscoveryError::Observation(FailureKind::Changed) => {
             "A deposit or shared coin changed, was spent, or is not sufficiently confirmed. Check both chains again after confirmation."
         }
+        DiscoveryError::Observation(FailureKind::Http(429)) => "The indexer is rate limited. Verification will retry after the server's cooldown.",
         DiscoveryError::Observation(
             FailureKind::Unavailable
             | FailureKind::Http(_)
@@ -497,6 +498,10 @@ fn inventory_scan_refusal(
         ClaimInventoryError::Scan(InventoryError::Scan(chain, cause)) => {
             let chain = if chain == ChainId::Bitcoin { "Bitcoin" } else { "BTCB2" };
             let detail = match cause {
+                ScanError::RateLimited(delay) => return match retry {
+                    ScanRetry::Automatic => format!("The indexer is rate limited. Verification will retry after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+                    ScanRetry::Manual => format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+                },
                 ScanError::Deadline => "the indexer did not finish the Vault scan in time",
                 ScanError::Changed => "the chain or an address changed during the scan",
                 ScanError::Http(429 | 502 | 503 | 504) | ScanError::Unavailable =>
@@ -532,6 +537,18 @@ fn inventory_scan_refusal(
     }
 }
 
+fn claim_address_refusal(error: claim_workflow::ClaimAddressError) -> String {
+    use claim_workflow::ClaimAddressError;
+    match error {
+        ClaimAddressError::RateLimited(delay) => return format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
+        ClaimAddressError::FeeUnavailable => "Current Bitcoin and BTCB2 fee quotes are needed before showing deposit amounts.",
+        ClaimAddressError::Unavailable | ClaimAddressError::Deadline => "The indexer is temporarily unavailable while checking the saved deposit addresses. Retry Continue split; your addresses are retained.",
+        ClaimAddressError::WalletState => "The Bitcoin Vault is still syncing or its reserved addresses are unavailable. Wait for it to finish syncing, then retry Continue split.",
+        ClaimAddressError::ChangedSession => "The Connect session changed while loading deposit addresses. Reopen this Cube under the same account.",
+        _ => "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.",
+    }.to_string()
+}
+
 /// Results of the panel's async work. Every variant that carries the
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
@@ -543,6 +560,7 @@ pub enum ClaimEvent {
         Result<claim_workflow::CheckedClaimFundingAddresses, String>,
     ),
     FundingChecked(u64, u64, u64, Result<ClaimDepositProgress, String>),
+    FundingCheckProgress(u64, u64, u64, &'static str),
     DepositPoll,
     DepositStatusChecked(u64, u64, u64, DepositStatus),
     /// A read-only ancestry status is only a short-lived observation.
@@ -788,10 +806,12 @@ pub struct ClaimStep1Panel {
     deposit_polling: bool,
     deposit_poll_seq: u64,
     deposit_details_override: Option<bool>,
+    setup_details_expanded: bool,
     last_full_check: Option<Instant>,
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
     funding_checking: bool,
+    funding_task: Option<iced::task::Handle>,
     paired_signing_pending: bool,
     paired_sign_seq: u64,
     paired_dispatch_seq: u64,
@@ -848,10 +868,12 @@ impl ClaimStep1Panel {
             deposit_polling: false,
             deposit_poll_seq: 0,
             deposit_details_override: None,
+            setup_details_expanded: false,
             last_full_check: None,
             funding_review: None,
             prepared_pair: None,
             funding_checking: false,
+            funding_task: None,
             paired_signing_pending: false,
             paired_sign_seq: 0,
             paired_dispatch_seq: 0,
@@ -1017,6 +1039,10 @@ impl ClaimStep1Panel {
             .is_some_and(ClaimForkBinding::current)
     }
 
+    pub fn setup_details_expanded(&self) -> bool {
+        self.setup_details_expanded
+    }
+
     pub fn funding_checking(&self) -> bool {
         self.funding_checking
     }
@@ -1051,6 +1077,9 @@ impl ClaimStep1Panel {
     /// coordinator yet: the count advanced here tells its result apart from
     /// one sent after the revocation.
     pub fn revoke(&mut self) {
+        if let Some(task) = self.funding_task.take() {
+            task.abort();
+        }
         self.fork_daemon = None;
         self.revoked = true;
         self.revocations = self.revocations.wrapping_add(1);
@@ -1429,11 +1458,9 @@ impl ClaimStep1Panel {
             .and_then(|c| c.feerate_vb.as_ref().ok().copied())
     }
 
-    /// The first precondition that fails, in the order a user can act on
-    /// them: target, Vault shape, Connect session, node backend, the fork's
-    /// observation validity, coins, fee rate. `None` when construction may
-    /// attempt positive ancestry.
-    pub fn refusal(&self) -> Option<Refusal> {
+    /// Blockers shared by read-only deposit setup and the recorded-claim flow.
+    /// Coin classification and the retired single-transfer gate are not deposit blockers.
+    pub fn funding_setup_refusal(&self) -> Option<Refusal> {
         let refuse = |reason: &str, retry: bool| {
             Some(Refusal {
                 reason: reason.to_string(),
@@ -1466,12 +1493,25 @@ impl ClaimStep1Panel {
                 true,
             );
         }
-        let Some(checked) = &self.pre.checked else {
-            return None;
-        };
-        if let Err(reason) = &checked.backend {
+        if let Some(Err(reason)) = self.pre.checked.as_ref().map(|checked| &checked.backend) {
             return refuse(reason, false);
         }
+        None
+    }
+
+    /// The first precondition that fails, in the order a user can act on
+    /// them. The paired deposit wizard uses only `funding_setup_refusal`.
+    pub fn refusal(&self) -> Option<Refusal> {
+        if let Some(refusal) = self.funding_setup_refusal() {
+            return Some(refusal);
+        }
+        let refuse = |reason: &str, retry: bool| {
+            Some(Refusal {
+                reason: reason.to_string(),
+                retry,
+            })
+        };
+        let checked = self.pre.checked.as_ref()?;
         if let Err(reason) = &checked.window {
             return refuse(
                 &format!("Couldn't read Bitcoin Blake2b's status: {reason}"),
@@ -1677,12 +1717,19 @@ impl ClaimStep1Panel {
             self.funding_error = Some("This imported wallet has no Vault Claim policy.".into());
             return Task::none();
         };
+        let shared_count_hint = self
+            .pre
+            .checked
+            .as_ref()
+            .and_then(|checked| checked.coins.as_ref().ok())
+            .map_or(0, |coins| coins.pre_fork.len());
         let bitcoin_cube = self.bitcoin_cube.clone();
         let directory = journal_directory(&self.datadir, &self.wallet);
         self.funding_error = None;
         self.stage = Stage::FundingChecking;
-        Task::perform(
+        let task = Task::perform(
             async move {
+                tokio::time::timeout(Duration::from_secs(150), async move {
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
                 let context = Self::funding_context(&connect, expected, generation.clone())?;
                 let identity = claim_workflow::WalletIdentity {
@@ -1690,6 +1737,24 @@ impl ClaimStep1Panel {
                     fork_cube,
                     descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
                 };
+                let for_load = (directory.clone(), descriptor.clone(), identity.clone(), context.clone());
+                let saved = tokio::task::spawn_blocking(move || {
+                    let (directory, descriptor, identity, context) = for_load;
+                    match std::fs::symlink_metadata(&directory) {
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                        _ => claim_workflow::load_claim_funding(&directory, &descriptor, &identity, &context),
+                    }
+                }).await
+                    .map_err(|_| "Loading the saved deposit addresses was interrupted.".to_string())?
+                    .map_err(|_| "The saved deposit addresses no longer match this Vault and Connect account.".to_string())?;
+                if saved.is_some() {
+                    // Display-only fee estimate. Fresh inventory and ancestry
+                    // checks still run before either transaction can be signed.
+                    return claim_workflow::prepare_claim_deposit_instructions(
+                        directory, descriptor, identity, context, connect.client,
+                        generation, &*daemon, shared_count_hint,
+                    ).await.map_err(claim_address_refusal);
+                }
                 let info = daemon
                     .get_info()
                     .await
@@ -1750,15 +1815,8 @@ impl ClaimStep1Panel {
                     shared_count,
                 )
                 .await
-                .map_err(|error| {
-                    #[cfg(test)]
-                    eprintln!("Claim funding preparation refused: {error:?}");
-                    if error == claim_workflow::ClaimAddressError::FeeUnavailable {
-                        "Current Bitcoin and BTCB2 fee quotes are needed before showing deposit amounts.".to_string()
-                    } else {
-                        "The reserved Claim addresses could not be checked on both chains or prepared in this Vault.".to_string()
-                    }
-                })
+                .map_err(claim_address_refusal)
+                }).await.unwrap_or_else(|_| Err("Loading the deposit addresses timed out. Retry Continue split; your saved addresses are retained.".into()))
             },
             move |result| {
                 Message::Claim(ClaimEvent::FundingPrepared(
@@ -1768,7 +1826,10 @@ impl ClaimStep1Panel {
                     result,
                 ))
             },
-        )
+        );
+        let (task, handle) = task.abortable();
+        self.funding_task = Some(handle);
+        task
     }
 
     /// Reload the exact saved address reservation, then search both chains
@@ -1803,8 +1864,12 @@ impl ClaimStep1Panel {
         self.funding_error = None;
         self.funding_review = None;
         self.prepared_pair = None;
-        Task::perform(
-            async move {
+        let task = Task::stream(iced::stream::channel(
+            8,
+            move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
+                let mut phase = "Reading the Bitcoin Vault";
+                let result = tokio::time::timeout(Duration::from_secs(150), async {
+                let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
                 let fork_cube =
                     fork_cube.ok_or_else(|| "The paired BTCB2 Cube is missing.".to_string())?;
@@ -1830,6 +1895,8 @@ impl ClaimStep1Panel {
                         "The Vault's address range is too large for this bounded scan.".into(),
                     );
                 }
+                phase = "Scanning the Bitcoin and BTCB2 Vaults";
+                let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 let inventory = crate::services::claim_inventory::ClaimInventory::scan(
                     connect.client.clone(),
                     &descriptor,
@@ -1905,6 +1972,8 @@ impl ClaimStep1Panel {
                     },
                 )
                 .map_err(|_| "The two-chain observation source is unavailable.".to_string())?;
+                phase = "Verifying both deposits’ chain-specific ancestry";
+                let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 let proof = saved
                     .discover_reserved_funding(
                         directory.clone(),
@@ -1946,6 +2015,8 @@ impl ClaimStep1Panel {
                     {
                         return Err("The paired BTCB2 Vault no longer matches this Claim. Reopen both Cubes and check deposits again.".into());
                     }
+                    phase = "Checking the paired BTCB2 Vault’s coins";
+                    let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                     inventory
                         .reconcile_fork_daemon(&*fork_daemon, saved.indices.btcb2_deposit)
                         .await
@@ -1960,6 +2031,8 @@ impl ClaimStep1Panel {
                         return Err("The paired BTCB2 Cube changed during the deposit check. Reopen it and check deposits again.".into());
                     }
                     let (fork_generation, fork_expected) = fork_binding.generation_guard();
+                    phase = "Reserving return addresses in both Vaults";
+                    let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                     let change = claim_workflow::reserve_claim_change_indices(
                         directory,
                         &descriptor,
@@ -2027,6 +2100,8 @@ impl ClaimStep1Panel {
                     // PSBTs can race a wallet update. This same paired
                     // snapshot check is reusable at the signer boundary,
                     // where it must follow a fresh proof collection.
+                    phase = "Rechecking both self-transfers against the current Vaults";
+                    let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                     inventory
                         .reconcile_pair_snapshot(
                             &*daemon,
@@ -2089,16 +2164,23 @@ impl ClaimStep1Panel {
                     review,
                     prepared,
                 })
+            }).await.unwrap_or_else(|_| Err(format!("{phase} timed out. Your deposits remain in your Vaults. Retry verification when the wallets and indexer are available.")));
+                if let Err(reason) = &result {
+                    log::warn!("Claim deposit verification stopped at {phase}: {reason}");
+                }
+                let _ = output
+                    .send(Message::Claim(ClaimEvent::FundingChecked(
+                        seq,
+                        expected,
+                        revocations,
+                        result,
+                    )))
+                    .await;
             },
-            move |result| {
-                Message::Claim(ClaimEvent::FundingChecked(
-                    seq,
-                    expected,
-                    revocations,
-                    result,
-                ))
-            },
-        )
+        ));
+        let (task, handle) = task.abortable();
+        self.funding_task = Some(handle);
+        task
     }
 
     /// Watch the two reserved receive addresses without running a full
@@ -3366,6 +3448,9 @@ impl ClaimStep1Panel {
                 self.pre.checked = None;
             }
             Stage::FundingChecking | Stage::FundingDeposits(_) => {
+                if let Some(task) = self.funding_task.take() {
+                    task.abort();
+                }
                 self.check_seq = self.check_seq.wrapping_add(1);
                 self.paired_sign_seq = self.paired_sign_seq.wrapping_add(1);
                 self.paired_signing_pending = false;
@@ -3623,10 +3708,22 @@ impl ClaimStep1Panel {
                 }
             }
             ClaimEvent::PairedPsbt(..) | ClaimEvent::PairedAuthorizedPsbt(..) => Task::none(),
+            ClaimEvent::FundingCheckProgress(seq, generation, revocations, phase) => {
+                if seq == self.check_seq
+                    && self.funding_checking
+                    && matches!(self.stage, Stage::FundingDeposits(_))
+                    && self.authorized(generation, revocations)
+                    && self.backend_ready()
+                {
+                    self.funding_status = Some(format!("{phase}…"));
+                }
+                Task::none()
+            }
             ClaimEvent::FundingChecked(seq, generation, revocations, mut result) => {
                 if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
                     return Task::none();
                 }
+                self.funding_task = None;
                 self.funding_checking = false;
                 // Space automatic retries from the completed scan. A slow
                 // timeout must not trigger another full scan immediately.
@@ -3725,6 +3822,7 @@ impl ClaimStep1Panel {
                         Some("The Claim session changed during the address check.".into());
                     return Task::none();
                 }
+                self.funding_task = None;
                 match result {
                     Ok(addresses) => {
                         self.stage = Stage::FundingDeposits(addresses);
@@ -3830,7 +3928,15 @@ impl ClaimStep1Panel {
                 }
                 self.pre.checking = false;
                 self.pre.checked = Some(*checked);
-                Task::none()
+                if self.can_prepare_funding() {
+                    // Entering Claim opens the deposit step in place. This
+                    // only reserves/loads addresses; signing stays explicit.
+                    Task::done(Message::View(view::Message::Claim(
+                        view::ClaimMessage::StartFunding,
+                    )))
+                } else {
+                    Task::none()
+                }
             }
             ClaimEvent::SigningChecked(id, built, result) => {
                 let Stage::CheckingSign(attempt) = self.stage else {
@@ -4296,6 +4402,10 @@ impl State for ClaimStep1Panel {
                     self.handoff_pending = false;
                 }
                 match intent {
+                    view::ClaimMessage::ToggleSetupDetails => {
+                        self.setup_details_expanded = !self.setup_details_expanded;
+                        Task::none()
+                    }
                     view::ClaimMessage::ToggleDepositDetails => {
                         self.deposit_details_override = Some(!self.deposit_details_expanded());
                         Task::none()

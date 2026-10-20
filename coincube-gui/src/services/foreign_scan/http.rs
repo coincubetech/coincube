@@ -40,6 +40,9 @@ impl HttpSource {
         })
     }
     async fn get(&self, chain: ChainId, path: &str, fresh: bool) -> Result<Vec<u8>, ScanError> {
+        if let Some(delay) = crate::services::esplora_backoff::remaining(&self.base) {
+            return Err(ScanError::RateLimited(delay));
+        }
         let network = match chain {
             ChainId::Bitcoin => "bitcoin/mainnet",
             ChainId::BitcoinBlake2b => "bitcoin-blake2b/mainnet",
@@ -53,6 +56,11 @@ impl HttpSource {
             request = request.header("X-Coincube-Observation", "fresh");
         }
         let mut response = request.send().await.map_err(|_| ScanError::Unavailable)?;
+        if response.status().as_u16() == 429 {
+            return Err(ScanError::RateLimited(
+                crate::services::esplora_backoff::record(&self.base, response.headers()),
+            ));
+        }
         if response.status().as_u16() != 200 {
             return Err(ScanError::Http(response.status().as_u16()));
         }
