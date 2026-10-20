@@ -424,14 +424,9 @@ impl ImportedBitcoinPanel {
         self.is_ready()
             .then(|| {
                 self.coins.as_ref().map(|coins| {
-                    coins
-                        .coins
-                        .iter()
-                        .filter(|coin| coin.spend_info.is_none())
-                        .fold(
-                            coincube_core::miniscript::bitcoin::Amount::ZERO,
-                            |total, coin| total + coin.amount,
-                        )
+                    // Match the ordinary Vault balance: pending external
+                    // deposits remain pending, while self-change is owned.
+                    super::coins_summary(&coins.coins, 0, None).0
                 })
             })
             .flatten()
@@ -2557,11 +2552,13 @@ mod tests {
     use super::*;
     use coincube_core::miniscript::bitcoin::{
         absolute::LockTime,
-        bip32::{DerivationPath, Xpriv, Xpub},
+        bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
         secp256k1::Secp256k1,
-        transaction, Transaction,
+        transaction, Amount, OutPoint, Transaction, Txid,
     };
-    use coincubed::commands::{GetInfoDescriptors, ImportedWalletSync};
+    use coincubed::commands::{
+        GetInfoDescriptors, ImportedWalletSync, LCSpendInfo, ListCoinsEntry, ListCoinsResult,
+    };
     use serde::{de::DeserializeOwned, Serialize};
 
     #[derive(Debug)]
@@ -2672,8 +2669,7 @@ mod tests {
         );
     }
 
-    #[test]
-    fn completed_import_stays_ready_after_receive_or_change_allocation() {
+    fn ready_import_panel() -> ImportedBitcoinPanel {
         let secp = Secp256k1::new();
         let master = Xpriv::new_master(Network::Bitcoin, &[43; 32]).unwrap();
         let account = master
@@ -2724,6 +2720,12 @@ mod tests {
             receive_index: 0,
             change_index: 0,
         });
+        panel
+    }
+
+    #[test]
+    fn completed_import_stays_ready_after_receive_or_change_allocation() {
+        let mut panel = ready_import_panel();
         assert!(panel.is_ready());
 
         // Ordinary address allocation advances durable high-water indices but
@@ -2752,6 +2754,56 @@ mod tests {
         status.history_complete = true;
         status.discovery_target = 300;
         assert!(!panel.is_ready());
+    }
+
+    #[test]
+    fn imported_home_available_balance_matches_vault_coin_ownership() {
+        let mut panel = ready_import_panel();
+        let txid =
+            Txid::from_str("f7bd1b2a995b689d326e51eb742eb1088c4a8f110d9cb56128fd553acc9f88e5")
+                .unwrap();
+        let address = coincube_core::miniscript::bitcoin::Address::from_str(
+            "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg",
+        )
+        .unwrap()
+        .assume_checked();
+        let coin = |vout, sats, block_height, is_from_self, is_change, spend_info| ListCoinsEntry {
+            outpoint: OutPoint::new(txid, vout),
+            amount: Amount::from_sat(sats),
+            address: address.clone(),
+            derivation_index: ChildNumber::Normal { index: vout },
+            block_height,
+            is_immature: false,
+            is_change,
+            is_from_self,
+            spend_info,
+        };
+        panel.coins = Some(ListCoinsResult {
+            coins: vec![
+                coin(0, 1_000, Some(1), false, false, None), // confirmed incoming
+                coin(1, 2_000, None, false, false, None),    // pending external incoming
+                coin(2, 3_000, None, true, true, None),      // pending self-change
+                coin(
+                    3,
+                    4_000,
+                    Some(1),
+                    false,
+                    false,
+                    Some(LCSpendInfo {
+                        txid,
+                        height: Some(2),
+                    }),
+                ), // spent coin
+            ],
+        });
+
+        let mut cache = Cache::default();
+        assert!(panel.sync_cache(&mut cache));
+        assert_eq!(cache.coins().len(), 4);
+        let (available, pending, _, _) = crate::app::state::coins_summary(cache.coins(), 1, None);
+        assert_eq!(available, Amount::from_sat(4_000));
+        assert_eq!(pending, Amount::from_sat(2_000));
+        assert_eq!(panel.authoritative_balance(), Some(available));
     }
 
     #[test]
