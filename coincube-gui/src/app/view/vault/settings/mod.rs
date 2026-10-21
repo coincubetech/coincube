@@ -700,6 +700,64 @@ pub fn switch_discards_scan_confirm<'a>(
     .into()
 }
 
+/// The local node requested at Vault creation, while the App installs it in
+/// the background or after that install failed. `None` when there is nothing
+/// to show.
+pub fn background_node_install<'a>(
+    status: &crate::app::cache::BackgroundNodeInstall,
+) -> Option<Element<'a, NodeSettingsMessage>> {
+    use crate::app::cache::BackgroundNodeInstall;
+    let body: Element<'a, NodeSettingsMessage> = match status {
+        BackgroundNodeInstall::Idle => return None,
+        BackgroundNodeInstall::Downloading(percent) => {
+            let mut col = Column::new().spacing(10).push(
+                p2_regular(match percent {
+                    Some(percent) => format!("Downloading the local node… {percent:.0}%"),
+                    None => "Downloading the local node…".to_string(),
+                })
+                .style(theme::text::secondary),
+            );
+            if let Some(percent) = percent {
+                col = col.push(ProgressBar::new(0.0..=100.0, *percent).length(Length::Fill));
+            }
+            col.into()
+        }
+        BackgroundNodeInstall::Starting => {
+            p2_regular("Verifying, installing and starting the local node…")
+                .style(theme::text::secondary)
+                .into()
+        }
+        BackgroundNodeInstall::Failed(error) => Column::new()
+            .spacing(10)
+            .push(p2_regular(format!("Setup paused: {error}")).style(theme::text::warning))
+            .push(
+                button::secondary(None, "Retry")
+                    .padding([8, 15])
+                    .on_press(NodeSettingsMessage::RetryBackgroundNodeSetup),
+            )
+            .into(),
+    };
+    Some(
+        Container::new(
+            Column::new()
+                .spacing(8)
+                .push(caption("Local node setup"))
+                .push(
+                    p2_regular(
+                        "Your Vault uses COINCUBE | Connect until the local node is \
+                         installed and synced.",
+                    )
+                    .style(theme::text::secondary),
+                )
+                .push(body),
+        )
+        .padding(15)
+        .width(Length::Fill)
+        .style(theme::card::border)
+        .into(),
+    )
+}
+
 /// Standing notice on the Node settings when the pending local node is pruned
 /// past this Vault's history: neither the manual nor the automatic switch will
 /// happen, and this says why.

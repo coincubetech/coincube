@@ -251,8 +251,16 @@ pub enum Message {
     /// provisioning. Connect remains active until the normal sync promotion.
     BackgroundManagedNodeReady {
         cube: String,
+        /// The App-issued token of the attempt that produced this result.
+        attempt: u64,
         flavor: String,
         result: Result<(coincubed::config::BitcoindConfig, Bitcoind), String>,
+    },
+    /// Stage of that background install, for Settings → Node.
+    BackgroundManagedNodeProgress {
+        cube: String,
+        attempt: u64,
+        progress: super::cache::BackgroundNodeInstall,
     },
     /// Fired by the bitcoind-sync subscription to trigger a progress probe.
     PollBitcoindSync,

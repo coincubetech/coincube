@@ -102,19 +102,33 @@ pub async fn fetch_bytes(url: impl AsRef<str>) -> Result<Vec<u8>, DownloadError>
 
 /// Background managed-node archives are much larger than the Tor bundle.
 /// Give slow connections time to finish without blocking the Vault UI.
-pub async fn fetch_managed_node_bytes(url: impl AsRef<str>) -> Result<Vec<u8>, DownloadError> {
-    let client = reqwest::Client::builder()
-        .connect_timeout(std::time::Duration::from_secs(15))
-        .timeout(std::time::Duration::from_secs(1800))
-        .build()?;
-    Ok(client
-        .get(url.as_ref())
-        .send()
-        .await?
-        .error_for_status()?
-        .bytes()
-        .await?
-        .to_vec())
+/// Reports whole-percent progress when the server sends a content length, so
+/// Settings → Node can show how far the download has got.
+pub fn fetch_managed_node_bytes(url: impl AsRef<str>) -> impl Straw<Vec<u8>, f32, DownloadError> {
+    let url = url.as_ref().to_string();
+    sipper(async move |mut progress| {
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_secs(15))
+            .timeout(std::time::Duration::from_secs(1800))
+            .build()?;
+        let response = client.get(&url).send().await?.error_for_status()?;
+        let total = response.content_length();
+        let mut byte_stream = response.bytes_stream();
+        let mut bytes = Vec::new();
+        let mut reported = None;
+        while let Some(chunk) = byte_stream.next().await {
+            bytes.extend_from_slice(&chunk?);
+            if let Some(total) = total.filter(|total| *total > 0) {
+                let percent = (100 * bytes.len() as u64 / total).min(100) as u8;
+                // One message per whole percent, not per chunk.
+                if reported != Some(percent) {
+                    reported = Some(percent);
+                    progress.send(f32::from(percent)).await;
+                }
+            }
+        }
+        Ok(bytes)
+    })
 }
 
 /// Fetch a small text file in one shot (e.g. a release `SHA256SUMS` manifest or
