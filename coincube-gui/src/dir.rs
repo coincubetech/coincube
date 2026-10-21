@@ -28,12 +28,28 @@ impl CoincubeDirectory {
     }
 
     /// The active data directory, honouring a custom `--datadir`. Falls back to
-    /// the OS default if it was never recorded (e.g. in unit tests).
+    /// the OS default if it was never recorded.
     pub fn active() -> Result<CoincubeDirectory, Box<dyn std::error::Error>> {
         match ACTIVE_DATADIR.get() {
             Some(dir) => Ok(dir.clone()),
-            None => Self::new_default(),
+            None => Self::unrecorded_default(),
         }
+    }
+
+    #[cfg(not(test))]
+    fn unrecorded_default() -> Result<CoincubeDirectory, Box<dyn std::error::Error>> {
+        Self::new_default()
+    }
+
+    /// Unit tests never call `GUI::new`, so nothing records a datadir. Code that
+    /// reads `active()` (the duress reconcile after a mocked sign-in, for one)
+    /// must not reach the developer's real Coincube directory.
+    #[cfg(test)]
+    fn unrecorded_default() -> Result<CoincubeDirectory, Box<dyn std::error::Error>> {
+        Ok(CoincubeDirectory::new(std::env::temp_dir().join(format!(
+            "coincube-test-active-{}",
+            std::process::id()
+        ))))
     }
 }
 
@@ -181,6 +197,21 @@ pub(crate) fn create_directory(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unrecorded_active_datadir_is_never_the_os_default_in_tests() {
+        // Whatever an earlier test recorded, `active()` is a temp path: the
+        // fallback is per-process temp, and every test fixture's root is temp.
+        let active = super::CoincubeDirectory::active().unwrap();
+        assert!(
+            active.path().starts_with(std::env::temp_dir()),
+            "{:?}",
+            active
+        );
+        if let Ok(real) = super::CoincubeDirectory::new_default() {
+            assert_ne!(active, real);
+        }
+    }
+
     use super::*;
     use crate::chain::ChainIdExt;
     use coincube_core::miniscript::bitcoin::Network;
