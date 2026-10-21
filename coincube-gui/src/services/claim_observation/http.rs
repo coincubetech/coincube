@@ -16,8 +16,8 @@ pub use ancestry::{CanonicalCoinbase, CoinbasePair};
 pub use discovery::{
     AncestryContext, ClaimPairError, CollectedAncestry, CollectedAncestrySweep,
     CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs, CollectedSpendInputs,
-    DiscoveredAncestry, DiscoveryError, FundingContext, OwnedClaimFunding, OwnedSplitFunding,
-    SplitPairError, MAX_ANCESTRY_CANDIDATES,
+    DiscoveredAncestry, DiscoveryError, FundingContext, FundingProofStatus, OwnedClaimFunding,
+    OwnedSplitFunding, SplitPairError, MAX_ANCESTRY_CANDIDATES,
 };
 
 const BODY_LIMIT: usize = 256 * 1024;
@@ -34,6 +34,7 @@ pub struct HttpObservationSource {
     generation: watch::Receiver<u64>,
     expected: u64,
     budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
+    funding_observer: Option<discovery::FundingProofObserver>,
     #[cfg(all(test, feature = "regtest-harness"))]
     test_ancestry_history: Option<crate::services::coincube::client::TestAncestryHistory>,
 }
@@ -94,10 +95,27 @@ impl HttpObservationSource {
             expected: context.expected_generation,
             generation: context.generation,
             budget: None,
+            funding_observer: None,
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history,
         })
     }
+    /// Attach diagnostics to this read-only source. No observer result grants
+    /// authority; callers still enter through the saved reservation admission.
+    pub(crate) fn with_funding_observer(
+        mut self,
+        observer: discovery::FundingProofObserver,
+    ) -> Self {
+        self.funding_observer = Some(observer);
+        self
+    }
+
+    fn report_funding(&self, chain: ChainId, status: FundingProofStatus) {
+        if let Some(observer) = &self.funding_observer {
+            observer(chain, status);
+        }
+    }
+
     /// Stable identity shared with the Claim journal. Bind the admitted pair
     /// through its fixed Bitcoin endpoint, without account tokens or credentials.
     /// Preserve this encoding when reopening existing journals.

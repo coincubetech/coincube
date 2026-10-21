@@ -8,6 +8,7 @@ use iced::{
 };
 
 use coincube_core::{
+    chain::ChainId,
     claim::{Assessment, MIN_CONFIRMATIONS},
     miniscript::bitcoin::{Address, Amount, Network, TxOut},
 };
@@ -367,11 +368,11 @@ fn funding_view<'a>(
             if expanded { "Hide deposit addresses" } else { "Deposit addresses" })
             .on_press(Message::Claim(ClaimMessage::ToggleDepositDetails)))
         .push_maybe(expanded.then_some(details))
-        .push_maybe(panel.funding_error().map(|error| card::warning(error.to_string())))
+        .push_maybe(panel.funding_error().filter(|_| !panel.funding_inline_error()).map(|error| card::warning(error.to_string())))
         .push_maybe((!panel.paired_vault_ready()).then(|| card::warning(
             "Open and unlock the paired BTCB2 Cube under the same Connect account. Verification continues here automatically.".into())))
         .push_maybe(panel.funding_checking().then(|| p1_regular(panel.funding_status().unwrap_or("Verifying deposits…")).style(theme::text::secondary)))
-        .push_maybe((panel.funding_error().is_some() && !panel.funding_checking()).then(|| button::secondary_compact(Some(icon::reload_icon()), "Retry verification")
+        .push_maybe(((panel.funding_error().is_some() || panel.funding_proof_needs_retry()) && !panel.funding_checking()).then(|| button::secondary_compact(Some(icon::reload_icon()), "Retry verification")
             .on_press(Message::Claim(ClaimMessage::CheckFunding))))
         .push_maybe((!verified).then(|| button::secondary_compact(None, "Pause checks")
             .on_press(Message::Claim(ClaimMessage::Cancel))));
@@ -552,6 +553,8 @@ fn deposit_status_view<'a>(
                     "Bitcoin",
                     status.map(|status| &status.bitcoin),
                     bitcoin_minimum,
+                    panel.funding_proof_status(ChainId::Bitcoin),
+                    panel.funding_checking(),
                 ),
             })
             .push(match review {
@@ -564,6 +567,8 @@ fn deposit_status_view<'a>(
                     "Bitcoin Blake2b",
                     status.map(|status| &status.btcb2),
                     btcb2_minimum,
+                    panel.funding_proof_status(ChainId::BitcoinBlake2b),
+                    panel.funding_checking(),
                 ),
             })
             .push_maybe(
@@ -586,6 +591,8 @@ fn deposit_row<'a>(
         >,
     >,
     minimum: u64,
+    proof: crate::services::claim_observation::http::FundingProofStatus,
+    checking: bool,
 ) -> Element<'a, Message> {
     let (mark, detail) = match observed {
         None => (None, "Checking the reserved address…".to_string()),
@@ -603,7 +610,7 @@ fn deposit_row<'a>(
         Some(Ok(funds)) if funds.largest_mature_sats >= minimum => (
             None,
             format!(
-                "{} sats · {MIN_CONFIRMATIONS}+ confirmations · verifying replay protection",
+                "{} sats · {MIN_CONFIRMATIONS}+ confirmations",
                 format_u64_as_string(funds.mature_sats, ",")
             ),
         ),
@@ -631,18 +638,63 @@ fn deposit_row<'a>(
         ),
         Some(Ok(_)) => (None, "Waiting for a deposit at this address.".to_string()),
     };
-    let mark = if mark == Some(false) {
+    let proof_detail = deposit_proof_detail(proof, checking);
+    let proof_failed =
+        matches!(proof,
+        crate::services::claim_observation::http::FundingProofStatus::Failed(_)
+        | crate::services::claim_observation::http::FundingProofStatus::NoQualifyingAncestry);
+    let mark = if mark == Some(false) || proof_failed {
         icon::warning_icon().style(theme::text::warning)
     } else {
         icon::receive_icon().style(theme::text::secondary)
     };
     Row::new()
         .spacing(10)
-        .align_y(Alignment::Center)
+        .align_y(Alignment::Start)
         .push(mark)
         .push(p1_regular(label).width(Length::Fixed(170.0)))
-        .push(p1_regular(detail).style(theme::text::secondary))
+        .push(
+            Column::new()
+                .spacing(4)
+                .push(p1_regular(detail).style(theme::text::secondary))
+                .push(p2_regular(proof_detail).style(if proof_failed {
+                    theme::text::warning
+                } else {
+                    theme::text::secondary
+                }))
+                .width(Length::Fill),
+        )
         .into()
+}
+
+pub(crate) fn deposit_proof_detail(
+    proof: crate::services::claim_observation::http::FundingProofStatus,
+    checking: bool,
+) -> &'static str {
+    use crate::services::claim_observation::{
+        http::{DiscoveryError, FundingProofStatus},
+        FailureKind,
+    };
+    use coincube_core::claim_ancestry::Error;
+    match proof {
+        FundingProofStatus::Pending if checking => "Verifying replay protection…",
+        FundingProofStatus::Pending => "Replay protection not verified yet.",
+        FundingProofStatus::PathFound => "Post-fork ancestry found; paired verification incomplete.",
+        FundingProofStatus::NoQualifyingAncestry => "No qualifying post-fork ancestry found yet. Retry verification.",
+        FundingProofStatus::Failed(DiscoveryError::Structural(Error::PathLimit | Error::ByteLimit)) =>
+            "Ancestry check reached its safety limit. Verification is incomplete; retry verification.",
+        FundingProofStatus::Failed(DiscoveryError::Structural(_)) =>
+            "Could not verify a link to a post-fork mining reward. Retry verification.",
+        FundingProofStatus::Failed(DiscoveryError::Observation(error)) => match error {
+            FailureKind::AncestryRootShared { .. } => "Ancestry is shared by both chains; this deposit cannot establish chain-specific replay protection.",
+            FailureKind::AncestryRootChanged { .. } | FailureKind::Changed => "The deposit or chain changed during verification. Wait for confirmations and retry verification.",
+            FailureKind::Http(429) => "Indexer rate limited. Retry verification after the cooldown.",
+            FailureKind::Unavailable | FailureKind::Http(_) | FailureKind::Stale | FailureKind::FreshnessUnverified => "Fresh indexer data is unavailable. Retry verification when the indexer recovers.",
+            FailureKind::Deadline | FailureKind::CollectionLimit => "The bounded ancestry check could not finish. Retry verification.",
+            FailureKind::Cancelled => "The Connect session changed. Reopen this Cube under the same account and retry verification.",
+            _ => "Could not verify this deposit’s replay protection. Retry verification.",
+        },
+    }
 }
 
 fn check_row<'a>(label: &'static str, ok: Option<bool>, detail: String) -> Element<'a, Message> {

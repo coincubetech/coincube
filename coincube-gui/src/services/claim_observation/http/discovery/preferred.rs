@@ -44,16 +44,39 @@ impl HttpObservationSource {
         }
         let source = self.discovery_snapshot();
         tokio::time::timeout(MAX_COLLECTION_TIME, async {
-            let Some(bitcoin) = source
-                .discover_preferred_ancestry(bitcoin_candidates, policy)
-                .await?
-            else {
-                return Ok(None);
+            let search = |chain, candidates| {
+                let source = &source;
+                async move {
+                    let result = source
+                        .discover_preferred_ancestry_for(candidates, policy, chain)
+                        .await;
+                    source.report_funding(
+                        chain,
+                        match &result {
+                            Ok(Some(_)) => FundingProofStatus::PathFound,
+                            Ok(None) => FundingProofStatus::NoQualifyingAncestry,
+                            Err(error) => FundingProofStatus::Failed(*error),
+                        },
+                    );
+                    result
+                }
             };
-            let Some(fork) = source
-                .discover_preferred_fork_ancestry(fork_candidates, policy)
-                .await?
-            else {
+            let (bitcoin, fork) = if source.funding_observer.is_some() {
+                tokio::join!(
+                    search(ChainId::Bitcoin, bitcoin_candidates),
+                    search(ChainId::BitcoinBlake2b, fork_candidates)
+                )
+            } else {
+                let bitcoin = search(ChainId::Bitcoin, bitcoin_candidates).await?;
+                if bitcoin.is_none() {
+                    return Ok(None);
+                }
+                (
+                    Ok(bitcoin),
+                    search(ChainId::BitcoinBlake2b, fork_candidates).await,
+                )
+            };
+            let (Some(bitcoin), Some(fork)) = (bitcoin?, fork?) else {
                 return Ok(None);
             };
             let bitcoin_path = bitcoin
@@ -240,6 +263,91 @@ mod tests {
                 .await,
             Err(DiscoveryError::Observation(FailureKind::CollectionLimit))
         ));
+    }
+
+    #[tokio::test]
+    async fn claim_diagnostics_observe_both_sides_without_short_circuit_or_extra_budget() {
+        use std::sync::Mutex;
+        for (bitcoin_failure, fork_failure) in [(true, false), (false, true), (true, true)] {
+            let server = MockServer::start();
+            let _cooldown =
+                crate::services::esplora_backoff::TestCooldownGuard::new(&server.base_url());
+            let (source, _sender) = source(&server);
+            let legacy_source = source.discovery_snapshot();
+            let seen = Arc::new(Mutex::new([FundingProofStatus::Pending; 2]));
+            let observed = seen.clone();
+            let mut source = source.with_funding_observer(Arc::new(move |chain, status| {
+                observed.lock().unwrap()[usize::from(chain == ChainId::BitcoinBlake2b)] = status;
+            }));
+            // Two attempts share one finite request counter, including nested snapshots.
+            source.budget = Some(Arc::new(CollectionBudget {
+                requests: AtomicUsize::new(2),
+                bytes: AtomicUsize::new(MAX_RESPONSE_BYTES),
+            }));
+            let budget = source.budget.clone().unwrap();
+            let (id, _) = ancestry_fixture();
+            let bitcoin = OutPoint::new(id, 0);
+            let fork = OutPoint::new(id, 1);
+            let shared = OutPoint::new(id, 2);
+            let bitcoin_read = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{id}/hex"));
+                then.status(503);
+            });
+            let fork_read = server.mock(|when, then| {
+                when.method(GET).path(format!(
+                    "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{id}/hex"
+                ));
+                then.status(429);
+            });
+            // Legacy callers still return Bitcoin None before touching a failing fork.
+            assert!(legacy_source
+                .discover_spend_inputs(&[], &[fork], &[shared], policy())
+                .await
+                .unwrap()
+                .is_none());
+            fork_read.assert_hits(0);
+            let result = source
+                .discover_spend_inputs(
+                    if bitcoin_failure {
+                        std::slice::from_ref(&bitcoin)
+                    } else {
+                        &[]
+                    },
+                    if fork_failure {
+                        std::slice::from_ref(&fork)
+                    } else {
+                        &[]
+                    },
+                    &[shared],
+                    policy(),
+                )
+                .await;
+            assert!(result.is_err());
+            let seen = *seen.lock().unwrap();
+            assert_eq!(
+                seen[0],
+                if bitcoin_failure {
+                    FundingProofStatus::Failed(DiscoveryError::Observation(FailureKind::Http(503)))
+                } else {
+                    FundingProofStatus::NoQualifyingAncestry
+                }
+            );
+            assert_eq!(
+                seen[1],
+                if fork_failure {
+                    FundingProofStatus::Failed(DiscoveryError::Observation(FailureKind::Http(429)))
+                } else {
+                    FundingProofStatus::NoQualifyingAncestry
+                }
+            );
+            bitcoin_read.assert_hits(usize::from(bitcoin_failure));
+            fork_read.assert_hits(usize::from(fork_failure));
+            assert_eq!(
+                budget.requests.load(Ordering::Relaxed),
+                2 - usize::from(bitcoin_failure) - usize::from(fork_failure)
+            );
+        }
     }
 
     #[tokio::test]
