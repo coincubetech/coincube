@@ -702,16 +702,17 @@ fn scan_error_copy(error: ScanError) -> String {
     }
 }
 
+/// Render imported Claim setup with its original Bitcoin source first, or the
+/// editable source and destination form for a generic Split. Imported wallet
+/// identity stays read-only; scan, cancel and continuation actions follow the
+/// panel's current state.
 pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     let imported = panel.imported_source.as_ref();
     let header = if imported.is_some() {
-        Column::new()
-            .spacing(6)
-            .push(h3("Claim BTCB2"))
-            .push(
-                p1_regular("Scan your wallet on both chains, then review any BTCB2 found. Your paired Bitcoin Blake2b wallet uses the same descriptors and original signers. Its Cube has no Spark wallet.")
-                    .style(theme::text::secondary),
-            )
+        Column::new().spacing(6).push(h3("Claim BTCB2")).push(
+            p1_regular("Check for BTCB2 using your existing Bitcoin wallet.")
+                .style(theme::text::secondary),
+        )
     } else {
         Column::new()
             .spacing(6)
@@ -730,41 +731,59 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     .placeholder("Choose a Bitcoin Blake2b Cube")
     .width(Length::Fill);
 
-    let mut form = if imported.is_some() {
-        Column::new().spacing(12)
-            .push(p1_bold("Paired Bitcoin Blake2b Cube"))
-            .push(p1_regular(panel.selected.as_ref().map(|target| target.name.as_str()).unwrap_or("Preparing paired Cube…")))
-            .push(caption("Same wallet descriptors and signers. Bitcoin and Bitcoin Blake2b history are stored separately.").style(theme::text::secondary))
+    let form = if let Some(source) = imported {
+        Column::new()
+            .spacing(24)
+            .push(
+                Column::new()
+                    .spacing(6)
+                    .push(p1_bold("Original Bitcoin wallet"))
+                    .push(p1_regular(&source.name))
+                    .push(
+                        caption(format!(
+                            "Receive and change addresses 0–{}",
+                            source.address_window.saturating_sub(1)
+                        ))
+                        .style(theme::text::secondary),
+                    ),
+            )
+            .push(
+                Column::new()
+                    .spacing(6)
+                    .push(p1_bold("Paired Bitcoin Blake2b Cube"))
+                    .push(p1_regular(
+                        panel
+                            .selected
+                            .as_ref()
+                            .map(|target| target.name.as_str())
+                            .unwrap_or("Preparing paired Cube…"),
+                    ))
+                    .push(
+                        caption("Uses the same descriptors and signers, with separate history and no Spark wallet.")
+                            .style(theme::text::secondary),
+                    ),
+            )
     } else {
         Column::new()
             .spacing(12)
             .push(p1_bold("Destination Cube"))
             .push(target)
-    };
-    form = if let Some(source) = imported {
-        form.push(p1_bold("Original Bitcoin wallet"))
-            .push(p1_regular(&source.name))
-            .push(caption(format!(
-                "Selected wallet · receive and change addresses 0–{} will be checked on both chains",
-                source.address_window.saturating_sub(1)
-            )).style(theme::text::secondary))
-    } else {
-        form.push(
-            wallet_source_form::view(&panel.source_form, &SourceFormCopy::split())
-                .map(Message::from),
-        )
+            .push(
+                wallet_source_form::view(&panel.source_form, &SourceFormCopy::split())
+                    .map(Message::from),
+            )
     };
 
     let status: Element<Message> = match &panel.status {
         Status::Editing => caption(if imported.is_some() {
-            "We’ll check both chains before showing what may be available to claim."
+            "Checks BTCB2 history and verifies current Bitcoin activity. No funds are moved."
         } else {
             "Ready to scan. An incomplete scan is always an error, never a zero balance."
         })
         .style(theme::text::secondary)
         .into(),
         Status::Scanning => p1_regular(if imported.is_some() {
-            "Checking Bitcoin and Bitcoin Blake2b history…"
+            "Checking BTCB2 history and verifying current Bitcoin activity…"
         } else {
             "Scanning with fresh, authenticated chain observations…"
         })
@@ -828,24 +847,29 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
 
     let scanning = matches!(panel.status, Status::Scanning);
     let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && (imported.is_none() || summary.inventory.splittable > 0));
+    let scan_button = if imported.is_some() {
+        button::primary_compact(
+            None,
+            if scanning {
+                "Checking availability…"
+            } else {
+                "Check BTCB2 availability"
+            },
+        )
+    } else {
+        button::primary(
+            None,
+            if scanning {
+                "Scanning…"
+            } else {
+                "Scan wallet"
+            },
+        )
+    };
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
-        .push(
-            button::primary(
-                None,
-                if scanning {
-                    "Scanning…"
-                } else {
-                    if imported.is_some() {
-                        "Scan selected wallet"
-                    } else {
-                        "Scan wallet"
-                    }
-                },
-            )
-            .on_press_maybe((!scanning).then_some(Message::Scan)),
-        )
+        .push(scan_button.on_press_maybe((!scanning).then_some(Message::Scan)))
         .push_maybe(scanning.then(|| button::secondary(None, "Cancel").on_press(Message::Cancel)));
     let actions = actions.push_maybe(reviewable.then(|| {
         button::primary(None, "Continue to destination Cube").on_press(Message::Continue)
@@ -855,7 +879,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
         Column::new()
             .spacing(20)
             .push(header)
-            .push(card::simple(form.padding(20)))
+            .push(card::simple(form).padding(if imported.is_some() { 24 } else { 35 }))
             .push(status)
             .push(actions),
     )
@@ -996,6 +1020,9 @@ mod tests {
         assert!(!panel.polls_hardware());
     }
 
+    /// Check source-first layout and action dispatch at narrow and standard
+    /// widths in both themes, including busy and failed states. Optional preview
+    /// output uses the same layout that the bounds and input assertions inspect.
     #[tokio::test(flavor = "multi_thread")]
     async fn imported_view_names_the_source_and_action_without_edit_controls() {
         use iced::advanced::{
@@ -1005,61 +1032,199 @@ mod tests {
             Layout,
         };
         #[derive(Default)]
-        struct Labels(Vec<String>);
+        struct Labels(Vec<(String, iced::Rectangle)>);
         impl Operation for Labels {
+            /// Carry the collector through nested source and action rows.
             fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
                 operate(self);
             }
-            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
-                self.0.push(text.to_owned());
+            /// Keep text bounds to verify ordering, wrapping and containment.
+            fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, text: &str) {
+                self.0.push((text.to_owned(), bounds));
             }
         }
 
-        let renderer = <iced::Renderer as Headless>::new(
-            iced::Font::DEFAULT,
-            iced::Pixels(16.0),
-            Some("tiny-skia"),
-        )
-        .await
-        .expect("software renderer for the claim view");
-        let _guard = crate::app::session::test_guard();
-        let mut panel = SplitWalletPanel::new();
-        panel.set_targets(vec![target()]);
-        panel.set_imported_source(imported_source(240)).unwrap();
-        let mut element = view(&panel);
-        let mut tree = Tree::new(element.as_widget());
-        let node = element.as_widget_mut().layout(
-            &mut tree,
-            &renderer,
-            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 1400.0)),
-        );
-        let mut labels = Labels::default();
-        element
-            .as_widget_mut()
-            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
-        let labels = labels.0.join(" | ");
-        for visible in [
-            "Claim BTCB2",
-            "Original Bitcoin wallet",
-            "My Bitcoin wallet",
-            "receive and change addresses 0–239",
-            "Paired Bitcoin Blake2b Cube",
-            "Scan selected wallet",
+        for bytes in [
+            coincube_ui::font::REGULAR_BYTES,
+            coincube_ui::font::MEDIUM_BYTES,
+            coincube_ui::font::BOLD_BYTES,
         ] {
-            assert!(labels.contains(visible), "missing {}: {}", visible, labels);
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(std::borrow::Cow::Borrowed(bytes));
         }
-        for hidden in [
-            "Public descriptor",
-            "Hardware wallet",
-            "External / receive descriptor",
-            "Internal / change descriptor",
-        ] {
-            assert!(
-                !labels.contains(hidden),
-                "unexpected {}: {}",
-                hidden,
-                labels
-            );
+        for width in [520, 760] {
+            for (appearance, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                for state in ["editing", "scanning", "failed"] {
+                    let mut renderer = <iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(16.0),
+                        Some("tiny-skia"),
+                    )
+                    .await
+                    .expect("software renderer for the claim view");
+                    let _guard = crate::app::session::test_guard();
+                    let mut panel = SplitWalletPanel::new();
+                    panel.set_targets(vec![TargetCube {
+                        id: "cube-1".into(),
+                        name: "My Bitcoin wallet · BTCB2".into(),
+                    }]);
+                    let mut source = imported_source(240);
+                    if width == 520 {
+                        source.name = "Family savings with original external signers".into();
+                    }
+                    let source_name = source.name.clone();
+                    panel.set_imported_source(source).unwrap();
+                    panel.status = match state {
+                        "scanning" => Status::Scanning,
+                        "failed" => Status::Failed("Bitcoin chain: The scanner is temporarily unavailable. No balance conclusion was made.".into()),
+                        _ => Status::Editing,
+                    };
+                    let mut element = view(&panel);
+                    let mut tree = Tree::new(element.as_widget());
+                    let node = element.as_widget_mut().layout(
+                        &mut tree,
+                        &renderer,
+                        &layout::Limits::new(
+                            iced::Size::ZERO,
+                            iced::Size::new(width as f32, 1400.0),
+                        ),
+                    );
+                    let mut labels = Labels::default();
+                    element.as_widget_mut().operate(
+                        &mut tree,
+                        Layout::new(&node),
+                        &renderer,
+                        &mut labels,
+                    );
+                    let bounds = |text: &str| {
+                        labels
+                            .0
+                            .iter()
+                            .find(|(label, _)| label == text)
+                            .unwrap_or_else(|| panic!("missing {text}: {:?}", labels.0))
+                            .1
+                    };
+                    let action = if state == "scanning" {
+                        "Checking availability…"
+                    } else {
+                        "Check BTCB2 availability"
+                    };
+                    let source_heading = bounds("Original Bitcoin wallet");
+                    let source_name = bounds(&source_name);
+                    let range = bounds("Receive and change addresses 0–239");
+                    let pair_heading = bounds("Paired Bitcoin Blake2b Cube");
+                    let pair_name = bounds("My Bitcoin wallet · BTCB2");
+                    let button_bounds = bounds(action);
+                    assert!(source_heading.y + source_heading.height <= source_name.y);
+                    assert!(source_name.y + source_name.height <= range.y);
+                    assert!(range.y + range.height < pair_heading.y);
+                    assert!(pair_heading.y + pair_heading.height <= pair_name.y);
+                    assert!(pair_name.y + pair_name.height < button_bounds.y);
+                    assert!(button_bounds.width < width as f32 * 0.75);
+                    bounds("Claim BTCB2");
+                    bounds("Uses the same descriptors and signers, with separate history and no Spark wallet.");
+                    if state == "failed" {
+                        bounds("Bitcoin chain: The scanner is temporarily unavailable. No balance conclusion was made.");
+                    }
+                    for (label, bounds) in &labels.0 {
+                        assert!(
+                            bounds.x >= 0.0 && bounds.x + bounds.width <= width as f32,
+                            "{} is outside the {}px layout: {:?}",
+                            label,
+                            width,
+                            bounds
+                        );
+                    }
+                    for hidden in [
+                        "Public descriptor",
+                        "Hardware wallet",
+                        "External / receive descriptor",
+                        "Internal / change descriptor",
+                        "Scan selected wallet",
+                    ] {
+                        assert!(!labels.0.iter().any(|(label, _)| label.contains(hidden)));
+                    }
+
+                    let size = iced::Size::new(width as f32, node.size().height.ceil());
+                    let viewport = iced::Rectangle::with_size(size);
+                    if let Ok(directory) = std::env::var("CLAIM_SETUP_PREVIEW_DIR") {
+                        element.as_widget_mut().update(
+                            &mut tree,
+                            &iced::Event::Window(iced::window::Event::RedrawRequested(
+                                std::time::Instant::now(),
+                            )),
+                            Layout::new(&node),
+                            iced::mouse::Cursor::Unavailable,
+                            &renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut iced::advanced::Shell::new(&mut Vec::new()),
+                            &viewport,
+                        );
+                        element.as_widget().draw(
+                            &tree,
+                            &mut renderer,
+                            &theme,
+                            &iced::advanced::renderer::Style {
+                                text_color: theme.colors.text.primary,
+                            },
+                            Layout::new(&node),
+                            iced::mouse::Cursor::Unavailable,
+                            &viewport,
+                        );
+                        let pixels = renderer.screenshot(
+                            iced::Size::new(width, size.height as u32),
+                            1.0,
+                            theme.colors.general.background,
+                        );
+                        image::save_buffer(
+                            std::path::Path::new(&directory)
+                                .join(format!("claim-setup-{width}-{appearance}-{state}.png")),
+                            &pixels,
+                            width,
+                            size.height as u32,
+                            image::ColorType::Rgba8,
+                        )
+                        .unwrap();
+                    }
+                    for (target, expected_cancel) in if state == "scanning" {
+                        vec![(button_bounds, false), (bounds("Cancel"), true)]
+                    } else {
+                        vec![(button_bounds, false)]
+                    } {
+                        let mut messages = Vec::new();
+                        for event in [
+                            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+                        ] {
+                            element.as_widget_mut().update(
+                                &mut tree,
+                                &iced::Event::Mouse(event),
+                                Layout::new(&node),
+                                iced::mouse::Cursor::Available(target.center()),
+                                &renderer,
+                                &mut iced::advanced::clipboard::Null,
+                                &mut iced::advanced::Shell::new(&mut messages),
+                                &viewport,
+                            );
+                        }
+                        if expected_cancel {
+                            assert!(matches!(messages.as_slice(), [Message::Cancel]));
+                        } else if state == "scanning" {
+                            assert!(
+                                messages.is_empty(),
+                                "busy action must not start another check"
+                            );
+                        } else {
+                            assert!(matches!(messages.as_slice(), [Message::Scan]));
+                        }
+                    }
+                }
+            }
         }
     }
 
