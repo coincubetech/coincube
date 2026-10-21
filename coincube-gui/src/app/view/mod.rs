@@ -233,7 +233,7 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
         lightning_address,
         avatar: avatar_handle,
         theme_mode: cache.theme_mode,
-        connect_authenticated: cache.connect_authenticated,
+        connect_authenticated: cache.sidebar_connect_signed_in,
         connect_stream_status: &cache.connect_stream_status,
     };
     let content_column: Element<'_, Message> = Column::new()

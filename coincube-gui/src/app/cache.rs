@@ -140,6 +140,8 @@ pub struct Cache {
     pub display_mode: DisplayMode,
     /// Whether the Connect user is authenticated (Dashboard step reached)
     pub connect_authenticated: bool,
+    /// Display-only account status shared across tabs. Never authorizes Cube operations.
+    pub sidebar_connect_signed_in: bool,
     /// Whether a Connect account session exists for this install — a
     /// launch-time restore from `connect.json`, or a live remote-backend
     /// session — *independent of* whether the Connect panel has advanced to
@@ -387,6 +389,7 @@ impl std::default::Default for Cache {
             bitcoin_unit: BitcoinDisplayUnit::default(),
             display_mode: DisplayMode::default(),
             connect_authenticated: false,
+            sidebar_connect_signed_in: false,
             has_connect_session: false,
             has_vault: false,
             has_imported_bitcoin: false,

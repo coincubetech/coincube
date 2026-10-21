@@ -5372,6 +5372,43 @@ impl App {
         self.hold_claim(None);
     }
 
+    /// A retained client behind a global sign-out/account-change hold must not
+    /// seed a new tab, even while the Bitcoin wallet itself remains open.
+    pub(crate) fn shareable_connect_client(
+        &self,
+    ) -> Option<crate::services::coincube::CoincubeClient> {
+        if self.claim_session_invalidated {
+            None
+        } else {
+            self.authenticated_coincube_client()
+        }
+    }
+
+    /// An ordinary Bitcoin Cube can reuse a verified sibling session at startup.
+    /// Fork daemons keep their admitted credentials, and an explicit auth hold
+    /// must not be lifted by discovering an old sibling client.
+    pub(crate) fn can_adopt_shared_connect_session(&self) -> bool {
+        !self.cache.chain().is_blake2b()
+            && !self.claim_session_invalidated
+            && matches!(
+                self.panels.connect.account.step,
+                state::connect::account::ConnectFlowStep::CheckingSession
+                    | state::connect::account::ConnectFlowStep::Login { loading: false, .. }
+            )
+            && self.panels.connect.account.can_adopt_shared_session()
+    }
+
+    pub(crate) fn adopt_shared_connect_client(
+        &mut self,
+        client: crate::services::coincube::CoincubeClient,
+    ) -> Task<Message> {
+        self.panels.connect.account.invalidate_auth();
+        self.panels.connect.account.install_shared_client(client);
+        self.update(Message::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::Init,
+        )))
+    }
+
     /// The global Connect auth boundary for a Bitcoin App, as broadcast by
     /// `GUI::update` to every tab (`Tab::invalidate_fork_session`).
     /// - A log-out from any tab holds the claim (`invalidate_claim_session`).
@@ -14549,6 +14586,117 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    #[test]
+    fn older_cube_reuses_sibling_session_and_verifies_before_showing_signed_in() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                use httpmock::prelude::*;
+                use iced::futures::StreamExt;
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                let root =
+                    std::env::temp_dir().join(format!("cube-session-{}", uuid::Uuid::new_v4()));
+                let (first, _) = bitcoin_app(&root);
+                let (second, _) = bitcoin_app(&root);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                rt.block_on(async {
+                    let server = MockServer::start_async().await;
+                    let user = server
+                        .mock_async(|when, then| {
+                            when.method(GET)
+                                .path("/api/v1/user")
+                                .header("authorization", "Bearer sibling-session");
+                            then.status(200).json_body(serde_json::json!({
+                                "id":7,"email":"fixture@example.invalid","email_verified":true
+                            }));
+                        })
+                        .await;
+                    server
+                        .mock_async(|when, then| {
+                            when.method(GET).path("/api/v1/connect/features");
+                            then.status(200).json_body(serde_json::json!({
+                                "success":true,"data":{"plans":[]}
+                            }));
+                        })
+                        .await;
+                    server
+                        .mock_async(|when, then| {
+                            when.method(GET).path("/api/v1/connect/duress");
+                            then.status(200).json_body(serde_json::json!({
+                                "success":true,"data":{"active":false,"enrolled":false,
+                                "thisDeviceRegistered":false}
+                            }));
+                        })
+                        .await;
+                    let mut client =
+                        crate::services::coincube::CoincubeClient::for_test(server.base_url());
+                    client.set_token("sibling-session");
+                    let sibling = gui.reviewer_app_mut(0);
+                    sibling.panels.connect.account.install_shared_client(client);
+                    sibling.panels.connect.account.user = Some(crate::services::coincube::User {
+                        id: 7,
+                        email: "fixture@example.invalid".into(),
+                        email_verified: Some(true),
+                    });
+                    sibling.panels.connect.account.step =
+                        state::connect::account::ConnectFlowStep::Dashboard;
+                    sibling.cache.connect_authenticated = true;
+                    let task = gui.reviewer_account(2, view::ConnectAccountMessage::Init);
+                    let older = gui.reviewer_app_mut(1);
+                    assert!(
+                        !older.cache.connect_authenticated,
+                        "a bearer alone is not verified sign-in"
+                    );
+                    assert_eq!(
+                        older.authenticated_coincube_client().unwrap().token(),
+                        Some("sibling-session")
+                    );
+                    let mut pending = vec![task];
+                    while let Some(task) = pending.pop() {
+                        if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                            while let Some(action) = stream.next().await {
+                                if let iced_runtime::Action::Output(message) = action {
+                                    if crate::gui::GUI::reviewer_is_account_message(&message) {
+                                        pending.push(gui.update(message));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    user.assert_async().await;
+                    let older = gui.reviewer_app_mut(1);
+                    assert!(older.cache.connect_authenticated);
+                    assert_eq!(older.panels.connect.account.user.as_ref().unwrap().id, 7);
+                    older.invalidate_claim_session();
+                    assert!(older.shareable_connect_client().is_none());
+                    assert!(
+                        !older.can_adopt_shared_connect_session(),
+                        "logout/claim holds cannot reuse a sibling bearer"
+                    );
+                    drop(gui.reviewer_account(2, view::ConnectAccountMessage::PlanLoaded(None, 0)));
+                    assert!(
+                        gui.reviewer_app_mut(1).cache.sidebar_connect_signed_in,
+                        "another authenticated tab still makes the app signed in"
+                    );
+                    gui.reviewer_app_mut(0).invalidate_claim_session();
+                    drop(gui.reviewer_account(2, view::ConnectAccountMessage::PlanLoaded(None, 0)));
+                    assert!(
+                        !gui.reviewer_app_mut(1).cache.sidebar_connect_signed_in,
+                        "invalidated retained clients must not keep the global indicator signed in"
+                    );
+                });
+                drop(gui);
+                let _ = std::fs::remove_dir_all(root);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     /// The App acts on a completed full scan: the refresh that first reports it

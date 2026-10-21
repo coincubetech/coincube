@@ -4467,6 +4467,7 @@ pub fn create_app_with_remote_backend(
             node_bitcoind_last_log: None,
             node_net_stats: None,
             connect_authenticated: false,
+            sidebar_connect_signed_in: false,
             // Remote backend implies an authenticated Connect session from the
             // start, even before the Connect panel reaches its Dashboard step.
             has_connect_session: true,

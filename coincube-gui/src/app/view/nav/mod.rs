@@ -359,7 +359,9 @@ mod footer_tests {
             for signed_in in [false, true] {
                 let cache = crate::app::cache::Cache {
                     theme_mode: mode,
-                    connect_authenticated: signed_in,
+                    // Account sign-in is independent of this Cube's readiness.
+                    connect_authenticated: !signed_in,
+                    sidebar_connect_signed_in: signed_in,
                     backup_warning_dismissed: true,
                     ..Default::default()
                 };
