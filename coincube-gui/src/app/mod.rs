@@ -5465,7 +5465,6 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
-        self.local_mcp.revoke();
         self.drop_split_port_builds();
         if let Some(panel) = &mut self.split_panel {
             panel.revoke();
@@ -6117,6 +6116,7 @@ impl App {
             imported.stop();
         }
         // Before the daemon that would carry a claim submission goes away.
+        self.local_mcp.revoke();
         self.revoke_claim();
         if self.daemon_backend().is_embedded() {
             if let Some(daemon) = &self.daemon {
@@ -6593,6 +6593,8 @@ impl App {
             Message::SettingsSaved | Message::LoadWallet(_) | Message::WalletUpdated(_)
         ) {
             self.imported_kit_metadata.invalidate();
+        }
+        if matches!(&message, Message::LoadWallet(_) | Message::WalletUpdated(_)) {
             self.local_mcp.revoke();
         }
         let task = self.update_dispatch(message);
@@ -10173,6 +10175,7 @@ impl App {
             panel.set_backend(state::vault::claim::BackendState::Switching);
         }
         self.split_backend = state::vault::claim::BackendState::Switching;
+        self.local_mcp.revoke();
         self.revoke_claim();
         // Mark a switch in flight so subsequent sync probes / triggers don't
         // re-fire it before it completes (the config only changes on success).

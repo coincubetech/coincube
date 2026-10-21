@@ -61,8 +61,8 @@ jobs:
             platform: macos
             arch: arm64
 
-          # macOS Intel
-          - os: macos-latest
+          # macOS Intel: run the signed artifacts natively before publishing.
+          - os: macos-15-intel
             target: x86_64-apple-darwin
             platform: macos
             arch: x64
@@ -270,10 +270,9 @@ jobs:
 
       - name: Build Coincube (macOS ${{ matrix.arch }})
         if: matrix.platform == 'macos'
-        env:
-          PROTOC: /opt/homebrew/bin/protoc
         run: |
           rustup target add ${{ matrix.target }}
+          export PROTOC="$(brew --prefix)/bin/protoc"
           cargo build --package coincube-gui --profile minimal --target ${{ matrix.target }} --locked
           cargo build --package coincube-mcp --features adapter --profile minimal --target ${{ matrix.target }} --locked
           # The bridge is deliberately excluded from the root workspace, so the
@@ -445,6 +444,7 @@ jobs:
           bridge=Tenshu.app/Contents/MacOS/coincube-spark-bridge
           test -x Tenshu.app/Contents/MacOS/tenshu-mcp
           codesign --verify --strict Tenshu.app/Contents/MacOS/tenshu-mcp
+          python3 contrib/check_mcp_binary.py Tenshu.app/Contents/MacOS/tenshu-mcp
 
           # (1) Present at all — the failure this exists to catch.
           test -f "$bridge" \
@@ -477,7 +477,7 @@ jobs:
           #     tokio runtime and the JSON-RPC loop, and needs no API key, no
           #     mnemonic and no network — unlike --smoke-test, which requires
           #     COINCUBE_SPARK_MNEMONIC and transacts against Spark mainnet.
-          #     Native arch only: the x64 leg cross-compiles on an arm64 runner.
+          #     Both release legs run on their native architecture.
           if [ "$want" = "$(uname -m)" ]; then
             out=$(echo '{"type":"request","id":1,"method":"shutdown"}' \
               | "$bridge" 2> bridge-stderr.txt) \

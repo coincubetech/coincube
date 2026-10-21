@@ -26,7 +26,10 @@ Debug binaries are `target/debug/coincube` and `target/debug/tenshu-mcp`.
 The Linux tarball includes `tenshu-mcp` beside `coincube`. The macOS bundle includes
 `Tenshu.app/Contents/MacOS/tenshu-mcp` beside `Coincube`. The release/nightly workflows
 build and stage it before signing. Packaging changes still need validation by CI
-and a signed-release smoke test. Do not copy a development executable into an
+and a signed-release smoke test. Both macOS release architectures use native
+runners and execute `contrib/check_mcp_binary.py` on the signed adapter before
+publishing; the check covers initialization, discovery, authenticated fixture
+reads and clean shutdown. Do not copy a development executable into an
 already signed application bundle.
 
 ## Enable and approve a client
@@ -154,6 +157,16 @@ shutdown, disconnection, socket permissions, bounded frames and sanitized errors
 against a disposable SQLite wallet containing public-only synthetic transactions;
 the blockchain backend is a test double. It is not a funded regtest/full client UI
 acceptance run.
+
+An additional acceptance test launches the actual STDIO executable using the
+private configuration issued by desktop Settings, reads all four tools from that
+SQLite wallet, and verifies scope denial, locking, revocation and clean EOF. It
+runs explicitly in the pinned Unix CI jobs after building the companion binary:
+
+```sh
+cargo build -p coincube-mcp --features adapter --locked
+TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+```
 
 ```sh
 BREEZ_API_KEY=DUMMY_BREEZ_API_KEY cargo test -p coincube-gui --lib app::local_mcp::tests

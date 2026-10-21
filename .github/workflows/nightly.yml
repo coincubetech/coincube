@@ -454,6 +454,7 @@ jobs:
           bridge=Tenshu.app/Contents/MacOS/coincube-spark-bridge
           test -x Tenshu.app/Contents/MacOS/tenshu-mcp
           codesign --verify --strict Tenshu.app/Contents/MacOS/tenshu-mcp
+          python3 contrib/check_mcp_binary.py Tenshu.app/Contents/MacOS/tenshu-mcp
 
           # (1) Present at all — the failure this exists to catch.
           test -f "$bridge" \

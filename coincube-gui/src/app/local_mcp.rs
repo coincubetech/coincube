@@ -412,6 +412,94 @@ mod tests {
         }
     }
 
+    // Runs separately after building the installation's companion executable.
+    // Unlike the isolated protocol/IPC tests, this crosses both process and
+    // wallet-service boundaries, using the configuration issued by Settings.
+    #[test]
+    #[ignore = "build tenshu-mcp and set TENSHU_MCP_TEST_ADAPTER; run explicitly in CI"]
+    fn stdio_client_reads_real_wallet_and_observes_revocation() {
+        use serde_json::{json, Value};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let _session_guard = super::super::session::test_guard();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            super::super::session::open_without_pin("mcp-fixture");
+            let (root, wallet, daemon) = fixture();
+            let mut settings = Settings::default();
+            for message in [
+                Message::Enable(true), Message::ClientName("stdio fixture".into()),
+                Message::Wallet(true), Message::Capability(0, true),
+                Message::Capability(1, true), Message::Capability(2, true), Message::Approve,
+            ] {
+                settings.update(message, Some(wallet.clone()), Some(daemon.clone()), true, "mcp-fixture");
+            }
+            let config: Value = serde_json::from_str(&settings.update(
+                Message::CopyConfig, None, None, true, "mcp-fixture"
+            ).unwrap()).unwrap();
+            let environment = config["mcpServers"]["tenshu"]["env"].as_object().unwrap();
+            let executable = std::env::var_os("TENSHU_MCP_TEST_ADAPTER")
+                .expect("set TENSHU_MCP_TEST_ADAPTER to the built adapter");
+            let mut child = tokio::process::Command::new(executable)
+                .envs(environment.iter().map(|(k,v)| (k, v.as_str().unwrap())))
+                .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+            let mut stdin = child.stdin.take().unwrap();
+            let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+            async fn response(
+                stdin: &mut tokio::process::ChildStdin,
+                stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
+                request: Value,
+            ) -> Value {
+                let mut bytes = serde_json::to_vec(&request).unwrap();
+                bytes.push(b'\n');
+                stdin.write_all(&bytes).await.unwrap();
+                let line = tokio::time::timeout(Duration::from_secs(10), stdout.next_line())
+                    .await.unwrap().unwrap().unwrap();
+                let value: Value = serde_json::from_str(&line).unwrap();
+                assert_eq!(value["id"], request["id"]);
+                assert!(value.get("error").is_none(), "protocol error");
+                value["result"].clone()
+            }
+            let initialized = response(&mut stdin, &mut stdout, json!({
+                "jsonrpc":"2.0", "id":1, "method":"initialize", "params":{
+                    "protocolVersion":"2024-11-05", "capabilities":{},
+                    "clientInfo":{"name":"wallet-acceptance", "version":"1"}
+                }
+            })).await;
+            assert_eq!(initialized["serverInfo"]["name"], "tenshu-mcp");
+            stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap();
+            let discovered = response(&mut stdin, &mut stdout, json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"})).await;
+            assert_eq!(discovered["tools"].as_array().unwrap().len(), 4);
+            let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
+            let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
+            let id = listed["structuredContent"]["wallets"][0]["wallet_id"].as_str().unwrap();
+            let summary = response(&mut stdin, &mut stdout, call(4, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
+            assert_eq!(summary["structuredContent"]["confirmed_sats"], 55_000);
+            let history = response(&mut stdin, &mut stdout, call(5, "tenshu_get_transactions", json!({"wallet_id":id,"limit":10}))).await;
+            assert_eq!(history["structuredContent"]["transactions"][0]["incoming_sats"], 55_000);
+            let policy = response(&mut stdin, &mut stdout, call(6, "tenshu_get_wallet_policy_summary", json!({"wallet_id":id}))).await;
+            assert_eq!(policy["structuredContent"]["recovery"][0]["relative_delay_blocks"], 144);
+            let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
+            assert_eq!(denied["isError"], true);
+            assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
+            super::super::session::close();
+            let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
+            assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");
+            settings.update(Message::Revoke, None, None, true, "mcp-fixture");
+            let revoked = response(&mut stdin, &mut stdout, call(9, "tenshu_list_wallets", json!({}))).await;
+            assert_eq!(revoked["isError"], true);
+            assert!(revoked["structuredContent"].get("wallets").is_none());
+            drop(stdin);
+            let output = tokio::time::timeout(Duration::from_secs(5), child.wait_with_output()).await.unwrap().unwrap();
+            assert!(output.status.success());
+            assert!(output.stderr.is_empty());
+            drop(settings);
+            daemon.stop().await.unwrap();
+            drop(daemon);
+            drop(wallet);
+            std::fs::remove_dir_all(root).unwrap();
+        });
+    }
+
     #[test]
     fn real_sqlite_wallet_reads_require_ui_grant_and_revoke_on_settings_drop() {
         let _session_guard = super::super::session::test_guard();
@@ -604,5 +692,66 @@ mod tests {
             super::super::session::close();
             std::fs::remove_dir_all(root).unwrap();
         });
+    }
+
+    #[test]
+    fn app_preserves_grant_on_connect_refresh_but_revokes_on_backend_switch() {
+        use super::super::{message::Message as AppMessage, App};
+        let _session_guard = super::super::session::test_guard();
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let (root, wallet, daemon) = fixture();
+        let (mut app, startup) = App::new_inner(
+            super::super::Cache::default(),
+            wallet,
+            None,
+            None,
+            super::super::Config::new(false),
+            daemon.clone(),
+            super::super::CoincubeDirectory::new(root.clone()),
+            None,
+            super::super::settings::CubeSettings::new(
+                "MCP fixture".into(),
+                crate::chain::ChainId::Bitcoin,
+            ),
+            None,
+        );
+        drop(startup);
+        super::super::session::open_without_pin(app.cube_settings.id.clone());
+        for message in [
+            Message::Enable(true),
+            Message::Wallet(true),
+            Message::ClientName("client".into()),
+            Message::Capability(0, true),
+            Message::Approve,
+        ] {
+            drop(app.update(AppMessage::View(view::Message::LocalMcp(message))));
+        }
+        let grant = app.local_mcp.server.as_ref().unwrap().grant.clone();
+        let generation = app.panels.connect.account.session_generation();
+        drop(app.update(AppMessage::View(view::Message::ConnectAccount(
+            view::ConnectAccountMessage::FeaturesLoaded(None, generation),
+        ))));
+        assert!(
+            grant.active(),
+            "routine Connect refresh must preserve the local grant"
+        );
+        app.revoke_claim();
+        drop(app.update(AppMessage::SettingsSaved));
+        assert!(
+            grant.active(),
+            "unrelated claim/settings changes must preserve access"
+        );
+        let config = daemon.config().unwrap().clone();
+        drop(app.spawn_daemon_switch(config));
+        assert!(
+            !grant.active(),
+            "backend switch must revoke before dispatch"
+        );
+        app.stop();
+        drop(app);
+        drop(daemon);
+        super::super::session::close();
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
