@@ -6,6 +6,19 @@ Liquid, Spark, imported non-Vault policies, Bitcoin Blake2b or external daemons
 yet. MCP starts disabled and every new unlocked Cube session
 requires explicit approval. No Connect API or Keychain changes are needed.
 
+## Feature testing on `mcp`
+
+Local MCP access is experimental development work on the `mcp` feature branch.
+Feature PRs target `mcp`, where the Unix implementation and Windows follow-on can
+be integrated and tested together. PR #739 depends on the foundation in #736.
+Build from the feature checkout containing the changes being tested; the commands
+below do not imply that MCP is included in the production release.
+
+Review and CI completion make a PR eligible for human review. Merging feature
+PRs into `mcp`, promoting the feature to `master`, and publishing a release are
+separate owner decisions. Packaged-client interoperability and signed-artifact
+checks remain release gates.
+
 ## Build and install
 
 Use the repository's pinned Rust toolchain and normal desktop prerequisites
