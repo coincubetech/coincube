@@ -3226,7 +3226,7 @@ impl App {
                 coincubed::connect::AdmissionError::MissingAuth.into(),
             )));
         }
-        let (app, task) = Self::new_inner(
+        let (mut app, task) = Self::new_inner(
             cache,
             wallet,
             Some(breez_client),
@@ -3238,7 +3238,7 @@ impl App {
             cube_settings,
             connect_auth,
         );
-        let provision = app.background_managed_node_task();
+        let provision = app.background_managed_node_task(true);
         Ok((app, Task::batch([task, provision])))
     }
 
@@ -3433,11 +3433,17 @@ impl App {
         }
         let split = app.start_pending_split();
         let resume = app.refresh_split_session();
-        let provision = app.background_managed_node_task();
+        let provision = app.background_managed_node_task(true);
         Ok((app, Task::batch([task, split, resume, provision])))
     }
 
-    fn background_managed_node_task(&self) -> Task<Message> {
+    /// Start the managed-node install a Connect-first Vault asked for, unless
+    /// one is already running. `announce` adds the opening toast; a retry from
+    /// Settings → Node is already on the page that shows its progress.
+    fn background_managed_node_task(&mut self, announce: bool) -> Task<Message> {
+        if self.cache.background_node_install.is_running() {
+            return Task::none();
+        }
         let Some(cfg) = self.daemon.as_ref().and_then(|daemon| daemon.config()) else {
             return Task::none();
         };
@@ -3458,30 +3464,37 @@ impl App {
             "KnotsBlake2b" => crate::node::bitcoind::NodeFlavor::KnotsBlake2b,
             _ => return Task::none(),
         };
+        use iced::task::Sipper as _;
+        self.cache.background_node_install = cache::BackgroundNodeInstall::Downloading(None);
         let root = self.datadir.clone();
         let chain = self.cache.chain();
         let client = self.fork_connect_client.clone();
         let cube = self.cube_settings.id.clone();
-        let provision = Task::perform(
-            async move {
-                let result = async {
-                    if chain.is_blake2b() {
-                        crate::chain::require_local_feature(chain, client, &root).await?;
-                    }
-                    crate::installer::step::node::bitcoind::provision_managed_node_in_background(
-                        root, chain, flavor,
-                    )
-                    .await
+        let progress_cube = cube.clone();
+        let provision = Task::sip(
+            iced::task::sipper(async move |progress| {
+                if chain.is_blake2b() {
+                    crate::chain::require_local_feature(chain, client, &root).await?;
                 }
-                .await;
-                Message::BackgroundManagedNodeReady {
-                    cube,
-                    flavor: flavor_name,
-                    result,
-                }
+                crate::installer::step::node::bitcoind::provision_managed_node_in_background(
+                    root, chain, flavor,
+                )
+                .run(progress)
+                .await
+            }),
+            move |progress| Message::BackgroundManagedNodeProgress {
+                cube: progress_cube.clone(),
+                progress,
             },
-            |message| message,
+            move |result| Message::BackgroundManagedNodeReady {
+                cube,
+                flavor: flavor_name,
+                result,
+            },
         );
+        if !announce {
+            return provision;
+        }
         Task::batch([
             Task::done(Message::View(view::Message::ShowToast(
                 log::Level::Info,
@@ -7429,13 +7442,19 @@ impl App {
                 let Some(cfg) = self.daemon.as_ref().and_then(|daemon| daemon.config()) else {
                     return Task::none();
                 };
-                if cube != self.cube_settings.id
-                    || cfg.pending_managed_node_install.as_deref() != Some(flavor.as_str())
+                if cube != self.cube_settings.id {
+                    if let Ok((_, node)) = result {
+                        node.stop();
+                    }
+                    return Task::none();
+                }
+                if cfg.pending_managed_node_install.as_deref() != Some(flavor.as_str())
                     || !matches!(
                         cfg.bitcoin_backend,
                         Some(coincubed::config::BitcoinBackend::Esplora(_))
                     )
                 {
+                    self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
                     if let Ok((_, node)) = result {
                         node.stop();
                     }
@@ -7458,6 +7477,8 @@ impl App {
                 }
                 match result {
                     Ok((node_config, node)) => {
+                        // The pending node's sync card takes over from here.
+                        self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
                         self.internal_bitcoind = Some(node);
                         let mut updated = cfg.clone();
                         updated.pending_bitcoind = Some(node_config);
@@ -7467,14 +7488,34 @@ impl App {
                     }
                     Err(error) => {
                         tracing::warn!("Background managed node setup failed: {error}");
-                        // Leave the request on disk so reopening the Vault retries.
+                        // Leave the request on disk so a retry, here or on
+                        // reopening the Vault, can pick it up.
+                        self.cache.background_node_install =
+                            cache::BackgroundNodeInstall::Failed(error.clone());
                         return Task::done(Message::View(view::Message::ShowToast(
                             log::Level::Warn,
                             format!(
-                                "Local node setup paused: {error}. Connect remains available; setup will retry when you reopen this Vault."
+                                "Local node setup paused: {error}. Connect remains available; retry from Settings → Node."
                             ),
                         )));
                     }
+                }
+            }
+            Message::BackgroundManagedNodeProgress { cube, progress } => {
+                if cube == self.cube_settings.id && self.cache.background_node_install.is_running()
+                {
+                    self.cache.background_node_install = progress;
+                }
+            }
+            Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
+                view::NodeSettingsMessage::RetryBackgroundNodeSetup,
+            ))) => {
+                if matches!(
+                    self.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Failed(_)
+                ) {
+                    self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                    return self.background_managed_node_task(false);
                 }
             }
             Message::View(view::Message::Settings(view::SettingsMessage::NodeSettings(
@@ -11723,6 +11764,123 @@ mod tests {
         assert!(app.fork_connect_client.is_none());
         assert!(app.breez_client.is_none() && app.spark_backend().is_none());
         app
+    }
+
+    /// The Connect-first node install must be visible from start to failure
+    /// and restartable from Settings → Node without reopening the Vault.
+    #[test]
+    fn background_node_install_status_tracks_progress_failure_and_retry() {
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::app::session::test_guard();
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                let root = std::env::temp_dir()
+                    .join(format!("background-node-status-{}", uuid::Uuid::new_v4()));
+                let mut app = local_app(&root);
+                let mut cfg = app.daemon.as_ref().unwrap().config().unwrap().clone();
+                cfg.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
+                    crate::installer::connect_esplora_config(
+                        crate::chain::ChainId::BitcoinBlake2b,
+                        "synthetic-jwt",
+                    ),
+                ));
+                cfg.pending_bitcoind = None;
+                cfg.pending_managed_node_install = Some("KnotsBlake2b".to_string());
+                app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
+                app.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                let cube = app.cube_settings.id.clone();
+                let ready =
+                    |result: Result<_, String>, flavor: &str| Message::BackgroundManagedNodeReady {
+                        cube: cube.clone(),
+                        flavor: flavor.to_string(),
+                        result,
+                    };
+                let retry = || {
+                    Message::View(view::Message::Settings(
+                        view::SettingsMessage::NodeSettings(
+                            view::NodeSettingsMessage::RetryBackgroundNodeSetup,
+                        ),
+                    ))
+                };
+
+                // A retry does nothing while no attempt has failed.
+                let _ = app.update(retry());
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Idle
+                );
+
+                let _ = app.background_managed_node_task(false);
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Downloading(None)
+                );
+                let _ = app.update(Message::BackgroundManagedNodeProgress {
+                    cube: cube.clone(),
+                    progress: cache::BackgroundNodeInstall::Downloading(Some(42.0)),
+                });
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Downloading(Some(42.0))
+                );
+                let _ = app.update(Message::BackgroundManagedNodeProgress {
+                    cube: "another-cube".to_string(),
+                    progress: cache::BackgroundNodeInstall::Starting,
+                });
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Downloading(Some(42.0)),
+                    "another Cube's progress is not this install's"
+                );
+                // A second start while one runs would race it for the node.
+                let _ = app.background_managed_node_task(false);
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Downloading(Some(42.0))
+                );
+
+                let _ = app.update(ready(Err("download refused".to_string()), "KnotsBlake2b"));
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Failed("download refused".to_string())
+                );
+                let _ = app.update(Message::BackgroundManagedNodeProgress {
+                    cube: cube.clone(),
+                    progress: cache::BackgroundNodeInstall::Starting,
+                });
+                assert!(
+                    matches!(
+                        app.cache.background_node_install,
+                        cache::BackgroundNodeInstall::Failed(_)
+                    ),
+                    "late progress cannot hide the failure"
+                );
+
+                let _ = app.update(retry());
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Downloading(None),
+                    "Retry restarts the install in this session"
+                );
+                let _ = app.update(ready(Err("stale".to_string()), "Knots"));
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Idle,
+                    "a result for a request no longer on disk ends the install"
+                );
+                drop(app);
+                let _ = std::fs::remove_dir_all(root);
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]

@@ -37,6 +37,28 @@ pub struct NodeNetStats {
     pub subversion: Option<String>,
 }
 
+/// Where the running App is with a Connect-first Vault's optional managed node
+/// (`daemon.toml`'s `pending_managed_node_install`). Settings → Node reads it so
+/// the install is visible there instead of looking like no node was requested.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub enum BackgroundNodeInstall {
+    /// No background install is running or has failed in this session.
+    #[default]
+    Idle,
+    /// Downloading the node; the percentage once the size is known.
+    Downloading(Option<f32>),
+    /// Verifying, configuring and starting the node.
+    Starting,
+    /// The last attempt failed; the request stays on disk for a retry.
+    Failed(String),
+}
+
+impl BackgroundNodeInstall {
+    pub fn is_running(&self) -> bool {
+        matches!(self, Self::Downloading(_) | Self::Starting)
+    }
+}
+
 /// A Spark Stable Balance condition worth a banner. See
 /// [`Cache::spark_notice`].
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -121,6 +143,8 @@ pub struct Cache {
     /// upload used vs. target, onion address), polled from its RPC on tick.
     /// `None` until the first poll, or when the backend isn't a local node.
     pub node_net_stats: Option<NodeNetStats>,
+    /// The Connect-first managed-node install run by the App, if any.
+    pub background_node_install: BackgroundNodeInstall,
     pub node_history: super::node_history::Status,
     pub node_history_switch_requested: bool,
     pub network: Network,
@@ -380,6 +404,7 @@ impl std::default::Default for Cache {
             node_net_stats: None,
             node_history: super::node_history::Status::default(),
             node_history_switch_requested: false,
+            background_node_install: Default::default(),
             network: Network::Bitcoin,
             last_poll_at_startup: None,
             daemon_cache: DaemonCache::default(),

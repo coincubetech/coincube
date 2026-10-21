@@ -10,6 +10,7 @@ use coincubed::config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth};
 // Not `cfg`-gated: the Bitcoin Core/Knots archives are tar.gz on Unix, and the
 // Tor Expert Bundle is tar.gz on *every* platform, so these are used everywhere.
 use flate2::read::GzDecoder;
+use iced::task::{sipper, Sipper, Straw};
 use iced::{Subscription, Task};
 use pgp::composed::{Deserializable, SignedPublicKey, StandaloneSignature};
 use pgp::types::KeyDetails;
@@ -25,6 +26,7 @@ use coincube_ui::{
 
 use crate::dir::CoincubeDirectory;
 use crate::{
+    app::cache::BackgroundNodeInstall,
     download,
     hw::HardwareWallets,
     installer::{
@@ -1853,25 +1855,44 @@ impl Step for InternalBitcoindStep {
 /// Finish a Connect-first Vault's optional managed node after the Vault has
 /// opened. The request stays in daemon.toml until the caller records the
 /// returned node as pending, so a failed or interrupted download can retry.
-pub(crate) async fn provision_managed_node_in_background(
+/// Reports its stage so Settings → Node can show the install while it runs.
+pub(crate) fn provision_managed_node_in_background(
     root: CoincubeDirectory,
     chain: crate::chain::ChainId,
     flavor: NodeFlavor,
+) -> impl Straw<(BitcoindConfig, Bitcoind), BackgroundNodeInstall, String> {
+    sipper(async move |mut progress| {
+        flavor.check_chain(chain).map_err(|e| e.to_string())?;
+        let family = flavor.chain_family();
+        let executable = bitcoind::internal_bitcoind_exe_path_for(&root, family, flavor.version());
+        let install = if executable.exists() {
+            None
+        } else {
+            progress
+                .send(BackgroundNodeInstall::Downloading(None))
+                .await;
+            let bytes = download::fetch_managed_node_bytes(flavor.download_url())
+                .with(|percent| BackgroundNodeInstall::Downloading(Some(percent)))
+                .run(&progress)
+                .await
+                .map_err(|e| e.to_string())?;
+            let manifest = download::fetch_release_manifest(flavor)
+                .await
+                .map_err(|e| e.to_string())?;
+            Some((bytes, manifest))
+        };
+        progress.send(BackgroundNodeInstall::Starting).await;
+        start_background_managed_node(root, chain, flavor, install).await
+    })
+}
+
+async fn start_background_managed_node(
+    root: CoincubeDirectory,
+    chain: crate::chain::ChainId,
+    flavor: NodeFlavor,
+    install: Option<crate::app::state::vault::settings::bitcoind::ManagedNodeInstall>,
 ) -> Result<(BitcoindConfig, Bitcoind), String> {
-    flavor.check_chain(chain).map_err(|e| e.to_string())?;
     let family = flavor.chain_family();
-    let executable = bitcoind::internal_bitcoind_exe_path_for(&root, family, flavor.version());
-    let install = if executable.exists() {
-        None
-    } else {
-        let bytes = download::fetch_managed_node_bytes(flavor.download_url())
-            .await
-            .map_err(|e| e.to_string())?;
-        let manifest = download::fetch_release_manifest(flavor)
-            .await
-            .map_err(|e| e.to_string())?;
-        Some((bytes, manifest))
-    };
 
     // Bitcoin's existing settings path owns the shared-node and Tor rules.
     if !chain.is_blake2b() {

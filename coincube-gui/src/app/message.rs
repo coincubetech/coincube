@@ -254,6 +254,11 @@ pub enum Message {
         flavor: String,
         result: Result<(coincubed::config::BitcoindConfig, Bitcoind), String>,
     },
+    /// Stage of that background install, for Settings → Node.
+    BackgroundManagedNodeProgress {
+        cube: String,
+        progress: super::cache::BackgroundNodeInstall,
+    },
     /// Fired by the bitcoind-sync subscription to trigger a progress probe.
     PollBitcoindSync,
     NodeHistory(super::node_history::Action),

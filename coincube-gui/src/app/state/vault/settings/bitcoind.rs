@@ -400,6 +400,24 @@ impl BitcoindSettingsState {
         Task::done(Message::LoadDaemonConfig(Box::new(new_cfg)))
     }
 
+    /// The App's background install of the node requested at Vault creation,
+    /// while it runs or after it failed. A failure stops showing once the
+    /// request is gone from the config (e.g. replaced by a manual setup).
+    fn background_install_card<'a>(
+        &self,
+        cache: &'a Cache,
+    ) -> Option<Element<'a, view::NodeSettingsMessage>> {
+        let status = &cache.background_node_install;
+        let requested = self
+            .full_config
+            .as_ref()
+            .is_some_and(|cfg| cfg.pending_managed_node_install.is_some());
+        if !status.is_running() && !requested {
+            return None;
+        }
+        view::vault::settings::background_node_install(status)
+    }
+
     /// Begin (or retry) the COINCUBE-managed local-node setup for the flavour
     /// stored on `pending_node_setup`. Reuses an installed binary if present,
     /// otherwise kicks off the download. Shared by the managed-flavour picker
@@ -695,6 +713,10 @@ impl State for BitcoindSettingsState {
                             }
                         }
                     }
+                    NodeSettingsMessage::RetryBackgroundNodeSetup => {
+                        // The App owns the background install and handles this
+                        // before it reaches the panel.
+                    }
                     NodeSettingsMessage::SwitchToConnect => {
                         // The App-level dispatcher always rewrites this into
                         // either `SwitchToConnectFastPath(jwt)` (if a Connect
@@ -827,6 +849,9 @@ impl State for BitcoindSettingsState {
                                     if let Some(cfg) = daemon.config() {
                                         let mut new_cfg = cfg.clone();
                                         new_cfg.pending_bitcoind = Some(bitcoind_cfg);
+                                        // This node supersedes a failed background
+                                        // install request.
+                                        new_cfg.pending_managed_node_install = None;
                                         // Adopted a freshly set-up node — switch to
                                         // it once synced.
                                         new_cfg.auto_switch_to_pending = Some(true);
@@ -920,6 +945,7 @@ impl State for BitcoindSettingsState {
                                     let mut new_cfg = cfg.clone();
                                     new_cfg.pending_bitcoind =
                                         Some(BitcoindConfig { rpc_auth, addr });
+                                    new_cfg.pending_managed_node_install = None;
                                     // Adopted an existing/external node — switch to
                                     // it once it's reachable and synced.
                                     new_cfg.auto_switch_to_pending = Some(true);
@@ -1280,6 +1306,14 @@ impl State for BitcoindSettingsState {
                 ).map(|msg| view::Message::Settings(view::SettingsMessage::NodeSettings(msg))),
                 coincube_ui::component::text::text("The pruned Bitcoin Knots node uses outbound peer connections. Inbound Tor and node resource editing are unavailable for Bitcoin Blake2b.").into(),
             ];
+            if let Some(card) = self.background_install_card(cache) {
+                panels.insert(
+                    1,
+                    card.map(|msg| {
+                        view::Message::Settings(view::SettingsMessage::NodeSettings(msg))
+                    }),
+                );
+            }
             // This chain's node is always pruned: explain a refused switch here
             // too, as the Bitcoin view does.
             if !local && pending {
@@ -1369,8 +1403,11 @@ impl State for BitcoindSettingsState {
                         && matches!(&cfg.bitcoin_backend, Some(BitcoinBackend::Bitcoind(_)));
                     let ctb = cfg.pending_bitcoind.is_some()
                         && matches!(&cfg.bitcoin_backend, Some(BitcoinBackend::Esplora(_)));
+                    // A running background install is that local node; a
+                    // second setup would race it for the same node.
                     let csl = matches!(&cfg.bitcoin_backend, Some(BitcoinBackend::Esplora(_)))
-                        && cfg.pending_bitcoind.is_none();
+                        && cfg.pending_bitcoind.is_none()
+                        && !cache.background_node_install.is_running();
                     // When the config exists but no backend is configured,
                     // unlock the "Use Connect" / "Set up local node" paths
                     // so the user has a recovery route. Without this the
@@ -1431,6 +1468,9 @@ impl State for BitcoindSettingsState {
                     )
                     .map(map_node_msg),
                 );
+                if let Some(card) = self.background_install_card(cache) {
+                    setting_panels.push(card.map(map_node_msg));
+                }
                 // Standing notice, not just a click-time warning: the
                 // automatic switch is refused too, and the "will switch
                 // once synced" copy above would otherwise go unexplained.
@@ -1720,7 +1760,7 @@ fn provider_serves_network(flavor: NodeFlavor, network: Network) -> Result<(), S
 /// A managed-node install payload: `(archive bytes, optional fetched
 /// (SHA256SUMS, SHA256SUMS.asc) manifest)`. The manifest is `Some` for Knots
 /// (verified against the manifest) and `None` for Core (verified by code hash).
-type ManagedNodeInstall = (Vec<u8>, Option<(String, String)>);
+pub(crate) type ManagedNodeInstall = (Vec<u8>, Option<(String, String)>);
 
 /// Load-or-create the managed `bitcoin.conf`, apply `flavor`,
 /// ensure ports, apply any node-`resources` override, and write it back —
@@ -3039,6 +3079,35 @@ mod tests {
         let empty_state = BitcoindSettingsState::new(None, &cache, false, false);
         assert!(empty_state.bitcoind_settings.is_none());
         assert!(empty_state.electrum_settings.is_none());
+    }
+
+    #[test]
+    fn background_install_card_shows_while_running_or_failed_with_a_request() {
+        use crate::app::cache::BackgroundNodeInstall;
+        let esplora = config_with_backend(Some(BitcoinBackend::Esplora(esplora_config())));
+        let mut requested = esplora.clone();
+        requested.pending_managed_node_install = Some("Knots".to_string());
+        let mut cache = Cache::default();
+        let with_request = BitcoindSettingsState::new(Some(requested), &cache, false, false);
+        let without_request = BitcoindSettingsState::new(Some(esplora), &cache, false, false);
+
+        assert!(with_request.background_install_card(&cache).is_none());
+        for running in [
+            BackgroundNodeInstall::Downloading(None),
+            BackgroundNodeInstall::Downloading(Some(12.0)),
+            BackgroundNodeInstall::Starting,
+        ] {
+            cache.background_node_install = running;
+            assert!(with_request.background_install_card(&cache).is_some());
+            // The config snapshot may lag the install that the App started.
+            assert!(without_request.background_install_card(&cache).is_some());
+        }
+        cache.background_node_install = BackgroundNodeInstall::Failed("refused".to_string());
+        assert!(with_request.background_install_card(&cache).is_some());
+        assert!(
+            without_request.background_install_card(&cache).is_none(),
+            "a failure stops showing once a manual setup replaced the request"
+        );
     }
 
     #[test]
