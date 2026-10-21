@@ -646,6 +646,14 @@ impl GUI {
                 }
                 Task::batch(tasks)
             }
+            // Fork tabs wrap task outputs with their session generation.
+            // After validation/unwrapping, global intents can arrive directly
+            // as tab messages rather than through Pane's task-output mapper.
+            Message::Pane(_, pane::Message::Tab(_, inner))
+                if matches!(inner.as_ref(), tab::Message::ToggleTheme) =>
+            {
+                self.update(Message::ToggleTheme)
+            }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ToggleTheme)) => {
                 self.update(Message::ToggleTheme)
             }
@@ -1649,6 +1657,15 @@ impl GUI {
             panic!("Bitcoin App closed")
         };
         app
+    }
+    pub(crate) fn reviewer_theme_toggle(&mut self, tab_id: usize) -> Task<Message> {
+        self.update(Message::Pane(
+            self.focus.unwrap(),
+            pane::Message::tab(
+                tab_id,
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ToggleTheme)),
+            ),
+        ))
     }
     pub(crate) fn reviewer_account(
         &mut self,
