@@ -774,7 +774,7 @@ pub async fn scan(
     expected: u64,
     generation: watch::Receiver<u64>,
 ) -> Result<TwoChainScan, InventoryError> {
-    run(plan, expected, generation, move |plan, receiver| {
+    run(plan, expected, generation, None, move |plan, receiver| {
         foreign_scan::scan(client.clone(), plan, expected, receiver)
     })
     .await
@@ -788,7 +788,7 @@ pub async fn scan_for_claim(
     expected: u64,
     generation: watch::Receiver<u64>,
 ) -> Result<TwoChainScan, InventoryError> {
-    run(plan, expected, generation, move |plan, receiver| {
+    run(plan, expected, generation, None, move |plan, receiver| {
         foreign_scan::scan_with_timeout(
             client.clone(),
             plan,
@@ -800,10 +800,35 @@ pub async fn scan_for_claim(
     .await
 }
 
+/// Scan every address in both branches of an imported wallet's attested
+/// discovery window, on both chains. A gap never shortens this walk, and
+/// coverage is checked before any inventory is built. This remains evidence,
+/// never signing or Claim authorization.
+pub async fn scan_imported(
+    client: CoincubeClient,
+    plan: ScanPlan,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<TwoChainScan, InventoryError> {
+    let end = foreign_scan::validate_imported_plan(&plan)
+        .map_err(|error| InventoryError::Scan(ChainId::BitcoinBlake2b, error))?;
+    run(
+        plan,
+        expected,
+        generation,
+        Some(end),
+        move |plan, receiver| {
+            foreign_scan::scan_imported_window(client.clone(), plan, expected, receiver)
+        },
+    )
+    .await
+}
+
 async fn run<F, Fut>(
     plan: ScanPlan,
     expected: u64,
     generation: watch::Receiver<u64>,
+    required_coverage: Option<u32>,
     scan_one: F,
 ) -> Result<TwoChainScan, InventoryError>
 where
@@ -830,6 +855,16 @@ where
     )?;
     if *generation.borrow() != expected {
         return Err(InventoryError::Stale);
+    }
+    if let Some(end) = required_coverage {
+        for report in [&btcb2, &bitcoin] {
+            for branch in [Branch::External, Branch::Internal] {
+                let coverage = report.coverage(branch).ok_or(InventoryError::Stale)?;
+                if coverage.start != 0 || coverage.end_exclusive != end {
+                    return Err(InventoryError::Stale);
+                }
+            }
+        }
     }
     let inventory = SplitInventory::join(&btcb2, &bitcoin, expected, external_ranged)?;
     Ok(TwoChainScan {
@@ -1565,7 +1600,7 @@ mod tests {
     #[tokio::test]
     async fn split_incomplete_bitcoin_scan_is_an_error_never_zero() {
         let (_tx, rx) = watch::channel(5);
-        let result = run(btcb2_plan(), 5, rx, |plan, _| async move {
+        let result = run(btcb2_plan(), 5, rx, None, |plan, _| async move {
             match plan.chain {
                 ChainId::BitcoinBlake2b => {
                     Ok(report(ChainId::BitcoinBlake2b, vec![], walk(20, None)))
@@ -1583,7 +1618,7 @@ mod tests {
         );
         // Both complete and empty: an explicit, proven-empty inventory.
         let (_tx, rx) = watch::channel(5);
-        let two = run(btcb2_plan(), 5, rx, |plan, _| async move {
+        let two = run(btcb2_plan(), 5, rx, None, |plan, _| async move {
             Ok(report(plan.chain, vec![], walk(20, None)))
         })
         .await
@@ -1596,7 +1631,7 @@ mod tests {
     async fn split_cancellation_and_stale_generation_discard_results() {
         // Superseded while both scans completed: the joined result is dropped.
         let (tx, rx) = watch::channel(5);
-        let result = run(btcb2_plan(), 5, rx, |plan, _| {
+        let result = run(btcb2_plan(), 5, rx, None, |plan, _| {
             let _ = tx.send(6);
             async move { Ok(report(plan.chain, vec![], walk(20, None))) }
         })
@@ -1620,6 +1655,50 @@ mod tests {
             scan(client, btcb2_plan(), 5, rx).await,
             Err(InventoryError::Scan(_, ScanError::Cancelled))
         ));
+    }
+
+    #[tokio::test]
+    async fn imported_scan_requires_exact_coverage_before_inventory_join() {
+        let mut plan = btcb2_plan();
+        plan.branches[0].end_exclusive = 40;
+        let internal = ScanDescriptor::parse(
+            Branch::Internal,
+            &descriptor()
+                .canonical()
+                .split('#')
+                .next()
+                .unwrap()
+                .replace("/0/*", "/1/*"),
+        )
+        .unwrap();
+        plan.branches.push(BranchRange {
+            descriptor: internal,
+            start: 0,
+            end_exclusive: 40,
+        });
+        let (_sender, receiver) = watch::channel(5);
+        let result = run(plan, 5, receiver, Some(40), |plan, _| async move {
+            Ok(report(
+                plan.chain,
+                vec![],
+                vec![
+                    BranchCoverage {
+                        branch: Branch::External,
+                        start: 0,
+                        end_exclusive: 40,
+                        last_used: None,
+                    },
+                    BranchCoverage {
+                        branch: Branch::Internal,
+                        start: 0,
+                        end_exclusive: 39,
+                        last_used: None,
+                    },
+                ],
+            ))
+        })
+        .await;
+        assert_eq!(result.err(), Some(InventoryError::Stale));
     }
 
     #[tokio::test]

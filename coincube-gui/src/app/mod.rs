@@ -5173,6 +5173,18 @@ impl App {
     /// Re-checked against the same predicate the rail used — the item having
     /// been rendered is not a permission.
     fn enter_claim(&mut self) -> Task<Message> {
+        if self.cache.has_imported_bitcoin {
+            if !crate::app::features::imported_claim_blake2b(
+                self.cube_settings.network,
+                true,
+                self.cache.btcb2_server_enabled,
+            )
+            .is_available()
+            {
+                return Task::none();
+            }
+            return Task::done(Message::View(view::Message::StartImportedClaim));
+        }
         if self.cube_settings.network == crate::chain::ChainId::BitcoinBlake2b {
             if !self.cache.btcb2_server_enabled {
                 return Task::none();
@@ -5232,6 +5244,60 @@ impl App {
                 ])
             }
         }
+    }
+
+    /// Build the imported claim only from the currently open, attested wallet
+    /// and an authenticated account that still has the BTCB2 capability.
+    pub(crate) fn prepare_imported_claim(
+        &self,
+    ) -> Result<
+        (
+            crate::imported_claim::ImportedClaimRequest,
+            crate::services::coincube::CoincubeClient,
+        ),
+        String,
+    > {
+        if !crate::app::features::imported_claim_blake2b(
+            self.cube_settings.network,
+            self.cache.has_imported_bitcoin,
+            self.cache.btcb2_server_enabled
+                && self.panels.connect.account.bitcoin_blake2b_enabled(),
+        )
+        .is_available()
+        {
+            return Err(
+                "Bitcoin Blake2b claim is unavailable for this imported wallet and account.".into(),
+            );
+        }
+        // A sibling tab may have signed out while this tab still holds an
+        // admitted client. Claim's session hold must gate imported sources too.
+        let client = self
+            .claim_connect_session()
+            .map(|session| session.client)
+            .ok_or_else(|| "Sign in to Connect before claiming Bitcoin Blake2b.".to_string())?;
+        let wallet = self
+            .wallet
+            .as_ref()
+            .ok_or_else(|| "Open the imported Bitcoin wallet before claiming.".to_string())?;
+        let attachment = self
+            .cube_settings
+            .bitcoin_import
+            .as_deref()
+            .and_then(|import| import.active_attachment())
+            .ok_or_else(|| "The imported Bitcoin attachment is unavailable.".to_string())?;
+        if !wallet.is_imported()
+            || wallet.chain != crate::chain::ChainId::Bitcoin
+            || wallet.id() != attachment.wallet_id
+        {
+            return Err("The open Bitcoin wallet does not match this imported attachment.".into());
+        }
+        let panel = self.panels.imported_bitcoin.as_ref().ok_or_else(|| {
+            "Open the imported Bitcoin wallet and finish its scan before claiming.".to_string()
+        })?;
+        let source = panel.claim_source(&self.cube_settings)?;
+        let request = crate::imported_claim::ImportedClaimRequest::new(source, &client)?;
+        request.validate(&self.datadir, &client)?;
+        Ok((request, client))
     }
 
     /// The Connect session claim step 1 works under: the account's
@@ -11271,6 +11337,55 @@ mod tests {
                 Menu::Vault(menu::VaultSubMenu::Overview)
             );
         }
+        let claim_route =
+            Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim)));
+        // A direct route never admits the native Vault Claim panel.
+        assert!(task_messages(app.update(claim_route)).is_empty());
+        assert!(app.panels.claim.is_none());
+        assert!(app.prepare_imported_claim().is_err());
+        app.cache.btcb2_server_enabled = true;
+        let messages = task_messages(app.update(Message::View(view::Message::Menu(Menu::Vault(
+            menu::VaultSubMenu::Claim,
+        )))));
+        assert!(messages
+            .iter()
+            .any(|message| matches!(message, Message::View(view::Message::StartImportedClaim))));
+        assert!(app.panels.claim.is_none());
+        assert!(app.prepare_imported_claim().is_err()); // The import is still syncing.
+
+        // A sibling-tab sign-out holds Claim even while this App still has
+        // its old admitted client in memory. Before the hold, preparation
+        // passes the auth gate and reaches the incomplete import guard.
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("synthetic-imported-session");
+        app.panels.connect.install_admitted_client(client);
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "synthetic@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        app.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        app.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        assert!(app.claim_connect_session().is_some());
+        assert!(app
+            .prepare_imported_claim()
+            .unwrap_err()
+            .contains("not ready for a claim"));
+        app.invalidate_claim_session();
+        assert!(app.authenticated_coincube_client().is_some());
+        assert!(app.panels.connect.account.bitcoin_blake2b_enabled());
+        assert!(app.claim_connect_session().is_none());
+        assert!(app
+            .prepare_imported_claim()
+            .unwrap_err()
+            .contains("Sign in to Connect"));
     }
 
     #[test]

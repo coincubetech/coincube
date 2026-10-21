@@ -13,6 +13,7 @@ pub mod help;
 pub mod home;
 pub mod hw;
 pub mod hw_advisory;
+pub mod imported_claim;
 pub mod installer;
 #[cfg(target_os = "linux")]
 pub mod linux_backend;

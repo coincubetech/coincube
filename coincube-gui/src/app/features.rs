@@ -462,6 +462,32 @@ pub fn claim_blake2b(source: ClaimSourceCube) -> Availability {
     Availability::Available
 }
 
+/// Imported Bitcoin policies can fund a fork claim without becoming a Vault.
+/// Keep this separate from `claim_blake2b` so imported descriptors never
+/// acquire the inheritance or Connect `hasVault` capability.
+pub fn imported_claim_blake2b(
+    chain: ChainId,
+    has_imported_bitcoin: bool,
+    server_enabled: bool,
+) -> Availability {
+    let account = bitcoin_blake2b(BitcoinBlake2bServerFlag { server_enabled });
+    if !account.is_available() {
+        return account;
+    }
+    if chain != ChainId::Bitcoin {
+        return Availability::Unavailable {
+            reason: "Only a Bitcoin imported wallet can be claimed onto Bitcoin Blake2b."
+                .to_string(),
+        };
+    }
+    if !has_imported_bitcoin {
+        return Availability::Unavailable {
+            reason: "This Cube has no imported Bitcoin wallet to claim.".to_string(),
+        };
+    }
+    Availability::Available
+}
+
 /// What the claim entry does for this Cube, once [`claim_blake2b`] admits it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimEntry {
@@ -1005,5 +1031,14 @@ mod tests {
             Some("Bitcoin Blake2b isn't enabled for this account.")
         );
         assert!(bitcoin_blake2b_with(RuntimeSupport::Supported, ON).is_available());
+    }
+
+    #[test]
+    fn imported_claim_requires_mainnet_attachment_and_account_grant() {
+        assert!(imported_claim_blake2b(ChainId::Bitcoin, true, true).is_available());
+        assert!(!imported_claim_blake2b(ChainId::Bitcoin, true, false).is_available());
+        assert!(!imported_claim_blake2b(ChainId::Bitcoin, false, true).is_available());
+        assert!(!imported_claim_blake2b(ChainId::BitcoinBlake2b, true, true).is_available());
+        assert!(!imported_claim_blake2b(ChainId::Testnet4, true, true).is_available());
     }
 }
