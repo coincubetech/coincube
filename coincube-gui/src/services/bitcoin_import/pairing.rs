@@ -229,6 +229,30 @@ pub(crate) fn claim_scan_source(
     })
 }
 
+/// Published initialization metadata is sufficient for a still-syncing pair:
+/// do not reopen a database that its daemon may already have running.
+fn validate_syncing_discovery(
+    directory: &NetworkDirectory,
+    target: &CubeSettings,
+) -> Result<(), String> {
+    let import = target
+        .bitcoin_import
+        .as_ref()
+        .ok_or("The paired import is unavailable.")?;
+    let missing = "The unfinished paired wallet has no verified copied discovery range. Finish or resolve its pending import before retrying Claim.";
+    let journal = read_journal(&journal_path(directory, import.operation_id))?.ok_or(missing)?;
+    if journal.cube_id != target.id
+        || journal.operation_id != import.operation_id
+        || Some(&journal.wallet) != import.active_attachment()
+        || journal.restored_discovery_target.is_none()
+        || !matches!(journal.phase, Phase::Published | Phase::Attached)
+        || !owns_directory(&journal.final_path(directory), &journal)?
+    {
+        return Err(missing.into());
+    }
+    Ok(())
+}
+
 /// Create/retry the sole pair for this source, using the normal staged import
 /// journal. Its separate identity never rewrites legacy Split attempts.
 pub async fn install_pair(
@@ -269,7 +293,26 @@ pub async fn install_pair(
             validate_target(source, prior)?;
             if prior.has_imported_bitcoin() {
                 validate_pair(root, prior)?;
+                if !prior
+                    .bitcoin_import
+                    .as_ref()
+                    .is_some_and(|import| import.is_ready())
+                {
+                    validate_syncing_discovery(&target_dir, prior)?;
+                }
                 return Ok(prior.clone());
+            }
+            if read_journal(&journal_path(
+                &target_dir,
+                prior
+                    .bitcoin_import
+                    .as_ref()
+                    .ok_or("The paired import is unavailable.")?
+                    .operation_id,
+            ))?
+            .is_some_and(|journal| journal.restored_discovery_target.is_none())
+            {
+                return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying Claim; no wallet data was changed.".into());
             }
         }
     }
@@ -329,6 +372,16 @@ pub async fn install_pair(
         },
         last_error: None,
     }));
+    let prior = read_journal(&journal_path(
+        &directory,
+        target.bitcoin_import.as_ref().unwrap().operation_id,
+    ))?;
+    if prior
+        .as_ref()
+        .is_some_and(|journal| journal.restored_discovery_target.is_none())
+    {
+        return Err("This unfinished paired wallet has no saved discovery range. Resolve its pending import before retrying Claim; no wallet data was changed.".into());
+    }
     settings::update_settings_file_checked(&directory, |mut saved| {
         if saved.cubes.iter().any(|c|c.id == target.id) { validate_target(source,unique_cube(&saved,&target.id).map_err(SettingsError::WritingFile)?).map_err(SettingsError::WritingFile)?; }
         else {
@@ -365,33 +418,26 @@ pub async fn install_pair(
     );
     config.import_birthday = Some(wallet.birthday);
     config.import_initial_lookahead = Some(wallet.initial_lookahead);
-    let restore_state = read_journal(&journal_path(
-        &directory,
-        target.bitcoin_import.as_ref().unwrap().operation_id,
-    ))?
-    .and_then(|journal| journal.restored_address_state)
-    .unwrap_or(RestoredAddressState {
-        receive_index: address_state.receive_index,
-        change_index: address_state.change_index,
-    });
-    install_restored(
+    let restore_state = prior
+        .as_ref()
+        .and_then(|journal| journal.restored_address_state)
+        .unwrap_or(RestoredAddressState {
+            receive_index: address_state.receive_index,
+            change_index: address_state.change_index,
+        });
+    let discovery = prior
+        .and_then(|journal| journal.restored_discovery_target)
+        .unwrap_or(discovery);
+    install_restored_with_discovery(
         &directory,
         &target.id,
         target.bitcoin_import.as_ref().unwrap().operation_id,
         wallet.clone(),
         config,
         restore_state,
+        discovery,
     )
     .await?;
-    let target_data = directory.coincubed_data_directory(&wallet.wallet_id);
-    let saved_config =
-        Config::from_file(Some(target_data.path().join(CONFIG_FILE))).map_err(|e| e.to_string())?;
-    let target_state = coincubed::read_imported_claim_state(&saved_config, &target_data)
-        .map_err(|e| e.to_string())?;
-    if target_state.discovery_target < discovery {
-        coincubed::expand_imported_discovery(&saved_config, &target_data, discovery)
-            .map_err(|e| e.to_string())?;
-    }
     target = Settings::from_file(&directory)
         .map_err(|e| e.to_string())?
         .cubes
@@ -565,6 +611,254 @@ mod tests {
         assert_eq!(validate(900).unwrap(), 900);
         std::fs::remove_file(&path).unwrap();
         assert!(validate(900).is_err());
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_pair_copies_manual_discovery_before_attachment_and_reuses_syncing_without_sqlite(
+    ) {
+        let (mut source, mut target) = pair();
+        let signer =
+            Signer::generate(coincube_core::miniscript::bitcoin::Network::Bitcoin).unwrap();
+        source.master_signer_fingerprint = Some(signer.fingerprint());
+        source.bitcoin_import.as_mut().unwrap().stage = BitcoinImportStage::Ready {
+            wallet: ImportedWalletAttachment::new(
+                source
+                    .bitcoin_import
+                    .as_ref()
+                    .unwrap()
+                    .attachment()
+                    .unwrap()
+                    .descriptor
+                    .clone(),
+                ChainId::Bitcoin,
+                0,
+                20,
+            )
+            .unwrap(),
+        };
+        target.master_signer_fingerprint = source.master_signer_fingerprint;
+        let binding = source_binding(&source).unwrap();
+        let wallet = paired_wallet(&binding).unwrap();
+        target.imported_claim_source = Some(Box::new(binding));
+        let operation_id = Uuid::parse_str(&target.id).unwrap();
+        target.bitcoin_import = Some(Box::new(BitcoinImport {
+            operation_id,
+            stage: BitcoinImportStage::Installing {
+                wallet: wallet.clone(),
+            },
+            last_error: None,
+        }));
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("pair-discovery-{}", Uuid::new_v4())),
+        );
+        for cube in [&source, &target] {
+            let attachment = cube.bitcoin_import.as_ref().unwrap().attachment().unwrap();
+            let directory = root.network_directory(cube.network);
+            directory.init().unwrap();
+            let metadata = WalletSettings {
+                name: "Synthetic external signer".into(),
+                alias: None,
+                descriptor_checksum: attachment.wallet_id.descriptor_checksum.clone(),
+                pinned_at: attachment.wallet_id.timestamp,
+                keys: Vec::new(),
+                hardware_wallets: Vec::new(),
+                remote_backend_auth: None,
+                start_internal_bitcoind: Some(false),
+                pending_rescan: None,
+                keychain_keys_recorded: false,
+            };
+            std::fs::write(
+                directory.path().join(settings::SETTINGS_FILE_NAME),
+                serde_json::to_vec(&Settings {
+                    cubes: vec![cube.clone()],
+                    wallets: vec![metadata],
+                    ..Default::default()
+                })
+                .unwrap(),
+            )
+            .unwrap();
+        }
+        crate::imported_claim::tests::prepare_storage(&root, &source);
+        let source_wallet = source
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .attachment()
+            .unwrap();
+        let source_data = root
+            .network_directory(ChainId::Bitcoin)
+            .coincubed_data_directory(&source_wallet.wallet_id);
+        let source_config = Config::from_file(Some(source_data.path().join(CONFIG_FILE))).unwrap();
+        coincubed::expand_imported_discovery(&source_config, &source_data, 650).unwrap();
+        coincubed::complete_imported_history_for_test(&source_config, &source_data, 650, 650)
+            .unwrap();
+        let state = coincubed::read_imported_claim_state(&source_config, &source_data).unwrap();
+        assert_eq!(
+            (
+                state.receive_index,
+                state.change_index,
+                state.discovery_target
+            ),
+            (0, 0, 650)
+        );
+        let directory = root.network_directory(ChainId::BitcoinBlake2b);
+        let data = directory.coincubed_data_directory(&wallet.wallet_id);
+        let backend =
+            coincubed::config::BitcoinBackend::Electrum(coincubed::config::ElectrumConfig {
+                addr: "tcp://127.0.0.1:50001".into(),
+                validate_domain: true,
+            });
+        let mut config = Config::new(
+            coincubed::config::BitcoinConfig::new(
+                target.network,
+                std::time::Duration::from_secs(10),
+            ),
+            Some(backend.clone()),
+            log::LevelFilter::Off,
+            WalletDescriptor::Imported(wallet.descriptor.clone()),
+            DataDirectory::new(data.path().to_path_buf()),
+        );
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(20);
+        let address_state = RestoredAddressState {
+            receive_index: 0,
+            change_index: 0,
+        };
+        let mut journal = Journal {
+            version: 1,
+            cube_id: target.id.clone(),
+            operation_id,
+            wallet: wallet.clone(),
+            phase: Phase::Prepared,
+            restored_address_state: Some(address_state),
+            restored_discovery_target: Some(650),
+        };
+        journal.persist(&directory).unwrap();
+        let staged = DataDirectory::new(journal.stage_path(&directory));
+        staged.init().unwrap();
+        write_json(&staged.path().join(OWNER_FILE), &journal).unwrap();
+        coincubed::create_imported_storage(&config, &staged, 0, 20).unwrap();
+        // Model interruption before discovery initialization: only 20 exists,
+        // but the unpublished operation already durably requires 650.
+        assert!(!data.path().exists());
+        assert!(coincubed::restore_imported_discovery_target(&config, &data, 650).is_err());
+        assert!(!data.path().exists());
+        install_restored_with_discovery(
+            &directory,
+            &target.id,
+            operation_id,
+            wallet.clone(),
+            config.clone(),
+            address_state,
+            650,
+        )
+        .await
+        .unwrap();
+        let saved_config = Config::from_file(Some(data.path().join(CONFIG_FILE))).unwrap();
+        let state = coincubed::read_imported_claim_state(&saved_config, &data).unwrap();
+        assert_eq!(
+            (
+                state.receive_index,
+                state.change_index,
+                state.discovery_target
+            ),
+            (0, 0, 650)
+        );
+        assert!(!state.history_complete);
+        assert_eq!(saved_config.import_initial_lookahead, Some(20));
+        journal = read_journal(&journal.path(&directory)).unwrap().unwrap();
+        assert_eq!(journal.restored_discovery_target, Some(650));
+        assert!(owns_directory(data.path(), &journal).unwrap());
+
+        // Model interruption after full staged initialization but before rename.
+        std::fs::rename(data.path(), staged.path()).unwrap();
+        journal.phase = Phase::StorageReady;
+        journal.persist(&directory).unwrap();
+        settings::update_settings_file(&directory, |mut saved| {
+            saved.cubes[0].bitcoin_import.as_mut().unwrap().stage =
+                BitcoinImportStage::Installing {
+                    wallet: wallet.clone(),
+                };
+            Some(saved)
+        })
+        .await
+        .unwrap();
+        resume(&directory, &target.id, operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            coincubed::read_imported_claim_state(&saved_config, &data)
+                .unwrap()
+                .discovery_target,
+            650
+        );
+
+        // The address contract cannot be changed by a retry.
+        assert!(install_restored_with_discovery(
+            &directory,
+            &target.id,
+            operation_id,
+            wallet.clone(),
+            config,
+            address_state,
+            651
+        )
+        .await
+        .is_err());
+        // Model interruption after attachment but before the final journal write.
+        journal.phase = Phase::Published;
+        journal.persist(&directory).unwrap();
+        let before = std::fs::read(data.sqlite_db_file_path()).unwrap();
+        std::fs::write(
+            data.path().join("coincubed.sqlite3-wal"),
+            b"synthetic-running-target",
+        )
+        .unwrap();
+        std::fs::remove_dir_all(source_data.path()).unwrap();
+        for _ in 0..2 {
+            let reused = install_pair(&root, &source, &signer, "1234", backend.clone())
+                .await
+                .unwrap();
+            assert!(matches!(
+                reused.bitcoin_import.unwrap().stage,
+                BitcoinImportStage::Syncing { .. }
+            ));
+        }
+        assert_eq!(std::fs::read(data.sqlite_db_file_path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read(data.path().join("coincubed.sqlite3-wal")).unwrap(),
+            b"synthetic-running-target"
+        );
+        // An old pending pair with no discovery contract cannot silently skip it.
+        journal.restored_discovery_target = None;
+        journal.persist(&directory).unwrap();
+        write_json(&data.path().join(OWNER_FILE), &journal).unwrap();
+        assert!(
+            install_pair(&root, &source, &signer, "1234", backend.clone())
+                .await
+                .unwrap_err()
+                .contains("copied discovery range")
+        );
+        settings::update_settings_file(&directory, |mut saved| {
+            saved.cubes[0].bitcoin_import.as_mut().unwrap().stage =
+                BitcoinImportStage::Installing {
+                    wallet: wallet.clone(),
+                };
+            Some(saved)
+        })
+        .await
+        .unwrap();
+        assert!(install_pair(&root, &source, &signer, "1234", backend)
+            .await
+            .unwrap_err()
+            .contains("no saved discovery range"));
+        assert_eq!(std::fs::read(data.sqlite_db_file_path()).unwrap(), before);
+        assert_eq!(
+            std::fs::read(data.path().join("coincubed.sqlite3-wal")).unwrap(),
+            b"synthetic-running-target"
+        );
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 

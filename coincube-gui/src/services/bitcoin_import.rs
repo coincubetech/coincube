@@ -42,6 +42,9 @@ struct Journal {
     phase: Phase,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restored_address_state: Option<RestoredAddressState>,
+    /// Immutable copied discovery coverage, initialized before publication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restored_discovery_target: Option<u32>,
 }
 
 /// Durable high-water marks from a Recovery Kit; these are allocated indices,
@@ -63,6 +66,19 @@ enum Phase {
 }
 
 impl Journal {
+    fn validate(&self) -> Result<(), String> {
+        if self.version != 1 {
+            return Err("Unsupported wallet import journal version.".into());
+        }
+        if self.restored_discovery_target.is_some_and(|target| {
+            !(self.wallet.initial_lookahead..=10_000).contains(&target)
+                || self.restored_address_state.is_none()
+        }) {
+            return Err("The copied wallet discovery range is invalid.".into());
+        }
+        Ok(())
+    }
+
     fn path(&self, directory: &NetworkDirectory) -> PathBuf {
         journal_path(directory, self.operation_id)
     }
@@ -79,6 +95,7 @@ impl Journal {
             .to_path_buf()
     }
     fn persist(&self, directory: &NetworkDirectory) -> Result<(), String> {
+        self.validate()?;
         write_json(&self.path(directory), self)
     }
 }
@@ -131,9 +148,7 @@ fn read_journal(path: &Path) -> Result<Option<Journal>, String> {
         Ok(bytes) => {
             let value: Journal = serde_json::from_slice(&bytes)
                 .map_err(|e| format!("Invalid import journal: {e}"))?;
-            if value.version != 1 {
-                return Err("Unsupported wallet import journal version.".into());
-            }
+            value.validate()?;
             Ok(Some(value))
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
@@ -243,7 +258,8 @@ fn owns_directory(path: &Path, journal: &Journal) -> Result<bool, String> {
     Ok(owner.cube_id == journal.cube_id
         && owner.operation_id == journal.operation_id
         && owner.wallet == journal.wallet
-        && owner.restored_address_state == journal.restored_address_state)
+        && owner.restored_address_state == journal.restored_address_state
+        && owner.restored_discovery_target == journal.restored_discovery_target)
 }
 
 fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(), String> {
@@ -270,6 +286,16 @@ fn verify_published(directory: &NetworkDirectory, journal: &Journal) -> Result<(
                 .map_err(|e| e.to_string())?;
         if receive < required.receive_index || change < required.change_index {
             return Err("The restored wallet is missing its saved address reservations.".into());
+        }
+    }
+    if let Some(required) = journal.restored_discovery_target {
+        let state = coincubed::read_imported_claim_state(
+            &config,
+            &DataDirectory::new(journal.final_path(directory)),
+        )
+        .map_err(|e| e.to_string())?;
+        if state.discovery_target < required {
+            return Err("The installed wallet is missing its copied discovery range.".into());
         }
     }
     Ok(())
@@ -371,7 +397,7 @@ pub async fn install(
     wallet: ImportedWalletAttachment,
     config: Config,
 ) -> Result<WalletId, String> {
-    install_inner(directory, cube_id, operation_id, wallet, config, None).await
+    install_inner(directory, cube_id, operation_id, wallet, config, None, None).await
 }
 
 /// Recovery installation uses the same journal, adding address reservations
@@ -391,6 +417,30 @@ pub async fn install_restored(
         wallet,
         config,
         Some(address_state),
+        None,
+    )
+    .await
+}
+
+/// A paired Claim copies historical discovery independently of allocated
+/// addresses. Both must be durable in unpublished storage before attachment.
+async fn install_restored_with_discovery(
+    directory: &NetworkDirectory,
+    cube_id: &str,
+    operation_id: Uuid,
+    wallet: ImportedWalletAttachment,
+    config: Config,
+    address_state: RestoredAddressState,
+    discovery_target: u32,
+) -> Result<WalletId, String> {
+    install_inner(
+        directory,
+        cube_id,
+        operation_id,
+        wallet,
+        config,
+        Some(address_state),
+        Some(discovery_target),
     )
     .await
 }
@@ -402,6 +452,7 @@ async fn install_inner(
     wallet: ImportedWalletAttachment,
     config: Config,
     restored_address_state: Option<RestoredAddressState>,
+    restored_discovery_target: Option<u32>,
 ) -> Result<WalletId, String> {
     directory.init().map_err(|e| e.to_string())?;
     let _lock = tokio::fs::OpenOptions::new()
@@ -423,7 +474,9 @@ async fn install_inner(
         wallet,
         phase: Phase::Prepared,
         restored_address_state,
+        restored_discovery_target,
     };
+    journal.validate()?;
     check_cube(
         directory,
         &Settings::from_file(directory).map_err(|e| e.to_string())?,
@@ -445,6 +498,8 @@ async fn install_inner(
             || prior.wallet != journal.wallet
             || (journal.restored_address_state.is_some()
                 && prior.restored_address_state != journal.restored_address_state)
+            || (journal.restored_discovery_target.is_some()
+                && prior.restored_discovery_target != journal.restored_discovery_target)
         {
             return Err("This import operation already names a different wallet.".into());
         }
@@ -498,6 +553,16 @@ async fn install_inner(
             &DataDirectory::new(stage.clone()),
             state.receive_index,
             state.change_index,
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    if let Some(target) = journal.restored_discovery_target {
+        let saved_config =
+            Config::from_file(Some(stage.join(CONFIG_FILE))).map_err(|e| e.to_string())?;
+        coincubed::restore_imported_discovery_target(
+            &saved_config,
+            &DataDirectory::new(stage.clone()),
+            target,
         )
         .map_err(|e| e.to_string())?;
     }
