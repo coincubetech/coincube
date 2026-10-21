@@ -229,30 +229,34 @@ impl GUI {
             }
             message => message,
         };
-        // A newly opened Home must not rotate the shared keyring session while
-        // another tab's fork daemon is bound to it. Reuse an active in-memory
-        // client; the admitted-user load still checks it with Connect.
-        let home_init = match &message {
+        // Reuse a sibling session when opening Home or a Bitcoin Cube. Separate
+        // keyring refreshes race token rotation and can leave older Cubes with
+        // an unauthenticated account panel. Each adopter still checks /user.
+        let session_init = match &message {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
                 if matches!(
                     inner.as_ref(),
                     tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
                         crate::app::view::ConnectAccountMessage::Init
-                    )))
+                    ))) | tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::ConnectAccount(
+                            crate::app::view::ConnectAccountMessage::Init
+                        )
+                    ))
                 ) =>
             {
                 Some((*pane_id, *tab_id))
             }
             _ => None,
         };
-        if let Some((origin_pane, origin_tab)) = home_init {
+        if let Some((origin_pane, origin_tab)) = session_init {
             let active_client = self.panes.iter().find_map(|(&pane_id, pane)| {
                 pane.tabs.iter().find_map(|tab| {
                     if pane_id == origin_pane && tab.id == origin_tab {
                         return None;
                     }
                     (match &tab.state {
-                        tab::State::App(app) => app.authenticated_coincube_client(),
+                        tab::State::App(app) => app.shareable_connect_client(),
                         tab::State::Home(home) => home.connect_account.authenticated_client(),
                         _ => None,
                     })
@@ -265,15 +269,22 @@ impl GUI {
                     .get_mut(origin_pane)
                     .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin_tab))
                 {
-                    if let tab::State::Home(home) = &mut tab.state {
-                        if home.connect_account.can_adopt_shared_session() {
-                            return home.adopt_connect_client(client).map(move |message| {
-                                Message::Pane(
-                                    origin_pane,
-                                    pane::Message::tab(origin_tab, tab::Message::Launch(message)),
-                                )
-                            });
+                    let adopted = match &mut tab.state {
+                        tab::State::Home(home)
+                            if home.connect_account.can_adopt_shared_session() =>
+                        {
+                            Some(home.adopt_connect_client(client).map(tab::Message::Launch))
                         }
+                        tab::State::App(app) if app.can_adopt_shared_connect_session() => Some(
+                            app.adopt_shared_connect_client(client)
+                                .map(tab::Message::Run),
+                        ),
+                        _ => None,
+                    };
+                    if let Some(task) = adopted {
+                        return task.map(move |message| {
+                            Message::Pane(origin_pane, pane::Message::tab(origin_tab, message))
+                        });
                     }
                 }
             }
@@ -405,7 +416,29 @@ impl GUI {
         // Keep those returns inside the helper so invalidation tasks always run.
         auth_tasks.push(self.update_message(message));
         self.refresh_claim_deposit_display();
+        self.refresh_sidebar_session_status();
         Task::batch(auth_tasks)
+    }
+
+    // The footer describes signing in to the app, not the individual Cube's
+    // service readiness. Keep it separate from operation/claim authorization.
+    fn refresh_sidebar_session_status(&mut self) {
+        let signed_in = self.panes.iter().any(|(_, pane)| {
+            pane.tabs.iter().any(|tab| match &tab.state {
+                tab::State::App(app) => {
+                    app.cache().connect_authenticated && app.shareable_connect_client().is_some()
+                }
+                tab::State::Home(home) => home.connect_account.is_authenticated(),
+                _ => false,
+            })
+        });
+        for (_, pane) in self.panes.iter_mut() {
+            for tab in &mut pane.tabs {
+                if let tab::State::App(app) = &mut tab.state {
+                    app.cache_mut().sidebar_connect_signed_in = signed_in;
+                }
+            }
+        }
     }
 
     fn refresh_claim_deposit_display(&mut self) {

@@ -270,6 +270,18 @@ impl Pane {
                 if i < self.tabs.len() {
                     self.focused_tab = i;
                     let tab = &self.tabs[i];
+                    if let tab::State::App(app) = &tab.state {
+                        if app.can_adopt_shared_connect_session() {
+                            return Task::done(Message::tab(
+                                tab.id,
+                                tab::Message::Run(app::Message::View(
+                                    app::view::Message::ConnectAccount(
+                                        app::view::ConnectAccountMessage::Init,
+                                    ),
+                                )),
+                            ));
+                        }
+                    }
                     if let tab::State::Home(home) = &tab.state {
                         let id = tab.id;
                         return home
