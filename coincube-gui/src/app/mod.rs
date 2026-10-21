@@ -941,6 +941,11 @@ pub struct App {
     /// every tick — spawning concurrent daemon starts that race to load the same
     /// watchonly wallet and corrupt it. Cleared by `Message::DaemonRestarted`.
     daemon_switch_in_progress: bool,
+    /// Token of the background managed-node install this App started last.
+    /// Results and progress carrying another token belong to an earlier
+    /// attempt — possibly from an App this one replaced — and must not
+    /// change the status shown in Settings → Node.
+    background_node_attempt: Option<u64>,
     /// Whether a completed full scan has retired this Vault's rescan obligation
     /// this session: set only once the settings write succeeded. See
     /// [`full_scan_settles_rescan_obligation`].
@@ -3465,6 +3470,11 @@ impl App {
             _ => return Task::none(),
         };
         use iced::task::Sipper as _;
+        // Unique across App instances: a replaced App's task keeps running,
+        // and its messages reach whichever App now holds the tab.
+        static NEXT_ATTEMPT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let attempt = NEXT_ATTEMPT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.background_node_attempt = Some(attempt);
         self.cache.background_node_install = cache::BackgroundNodeInstall::Downloading(None);
         let root = self.datadir.clone();
         let chain = self.cache.chain();
@@ -3484,10 +3494,12 @@ impl App {
             }),
             move |progress| Message::BackgroundManagedNodeProgress {
                 cube: progress_cube.clone(),
+                attempt,
                 progress,
             },
             move |result| Message::BackgroundManagedNodeReady {
                 cube,
+                attempt,
                 flavor: flavor_name,
                 result,
             },
@@ -3760,6 +3772,7 @@ impl App {
             claim_session_invalidated: false,
             claim_hold_epoch: 0,
             daemon_switch_in_progress: false,
+            background_node_attempt: None,
             rescan_obligation_retired_by_scan: false,
             rescan_obligation_retire_in_flight: false,
             auto_switch_suppressed: false,
@@ -3999,6 +4012,7 @@ impl App {
                 claim_session_invalidated: false,
                 claim_hold_epoch: 0,
                 daemon_switch_in_progress: false,
+                background_node_attempt: None,
                 rescan_obligation_retired_by_scan: false,
                 rescan_obligation_retire_in_flight: false,
                 auto_switch_suppressed: false,
@@ -7436,9 +7450,13 @@ impl App {
             }
             Message::BackgroundManagedNodeReady {
                 cube,
+                attempt,
                 flavor,
                 result,
             } => {
+                // An earlier attempt's result may still adopt or release its
+                // node, but only the current attempt owns the shown status.
+                let current = self.background_node_attempt == Some(attempt);
                 let Some(cfg) = self.daemon.as_ref().and_then(|daemon| daemon.config()) else {
                     return Task::none();
                 };
@@ -7454,7 +7472,9 @@ impl App {
                         Some(coincubed::config::BitcoinBackend::Esplora(_))
                     )
                 {
-                    self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                    if current {
+                        self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                    }
                     if let Ok((_, node)) = result {
                         node.stop();
                     }
@@ -7468,6 +7488,7 @@ impl App {
                             tokio::time::sleep(Duration::from_secs(5)).await;
                             Message::BackgroundManagedNodeReady {
                                 cube,
+                                attempt,
                                 flavor,
                                 result,
                             }
@@ -7478,7 +7499,9 @@ impl App {
                 match result {
                     Ok((node_config, node)) => {
                         // The pending node's sync card takes over from here.
-                        self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                        if current {
+                            self.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
+                        }
                         self.internal_bitcoind = Some(node);
                         let mut updated = cfg.clone();
                         updated.pending_bitcoind = Some(node_config);
@@ -7488,6 +7511,10 @@ impl App {
                     }
                     Err(error) => {
                         tracing::warn!("Background managed node setup failed: {error}");
+                        if !current {
+                            // A later attempt is running; its own result decides.
+                            return Task::none();
+                        }
                         // Leave the request on disk so a retry, here or on
                         // reopening the Vault, can pick it up.
                         self.cache.background_node_install =
@@ -7501,8 +7528,14 @@ impl App {
                     }
                 }
             }
-            Message::BackgroundManagedNodeProgress { cube, progress } => {
-                if cube == self.cube_settings.id && self.cache.background_node_install.is_running()
+            Message::BackgroundManagedNodeProgress {
+                cube,
+                attempt,
+                progress,
+            } => {
+                if cube == self.cube_settings.id
+                    && self.background_node_attempt == Some(attempt)
+                    && self.cache.background_node_install.is_running()
                 {
                     self.cache.background_node_install = progress;
                 }
@@ -11794,11 +11827,19 @@ mod tests {
                 app.daemon = Some(Arc::new(EmbeddedDaemon::unstarted_for_test(cfg, None)));
                 app.cache.background_node_install = cache::BackgroundNodeInstall::Idle;
                 let cube = app.cube_settings.id.clone();
-                let ready =
-                    |result: Result<_, String>, flavor: &str| Message::BackgroundManagedNodeReady {
+                let ready = |attempt: u64, result: Result<_, String>, flavor: &str| {
+                    Message::BackgroundManagedNodeReady {
                         cube: cube.clone(),
+                        attempt,
                         flavor: flavor.to_string(),
                         result,
+                    }
+                };
+                let progress =
+                    |cube: &str, attempt: u64, progress| Message::BackgroundManagedNodeProgress {
+                        cube: cube.to_string(),
+                        attempt,
+                        progress,
                     };
                 let retry = || {
                     Message::View(view::Message::Settings(
@@ -11820,18 +11861,21 @@ mod tests {
                     app.cache.background_node_install,
                     cache::BackgroundNodeInstall::Downloading(None)
                 );
-                let _ = app.update(Message::BackgroundManagedNodeProgress {
-                    cube: cube.clone(),
-                    progress: cache::BackgroundNodeInstall::Downloading(Some(42.0)),
-                });
+                let first = app.background_node_attempt.unwrap();
+                let _ = app.update(progress(
+                    &cube,
+                    first,
+                    cache::BackgroundNodeInstall::Downloading(Some(42.0)),
+                ));
                 assert_eq!(
                     app.cache.background_node_install,
                     cache::BackgroundNodeInstall::Downloading(Some(42.0))
                 );
-                let _ = app.update(Message::BackgroundManagedNodeProgress {
-                    cube: "another-cube".to_string(),
-                    progress: cache::BackgroundNodeInstall::Starting,
-                });
+                let _ = app.update(progress(
+                    "another-cube",
+                    first,
+                    cache::BackgroundNodeInstall::Starting,
+                ));
                 assert_eq!(
                     app.cache.background_node_install,
                     cache::BackgroundNodeInstall::Downloading(Some(42.0)),
@@ -11839,20 +11883,26 @@ mod tests {
                 );
                 // A second start while one runs would race it for the node.
                 let _ = app.background_managed_node_task(false);
+                assert_eq!(app.background_node_attempt, Some(first));
                 assert_eq!(
                     app.cache.background_node_install,
                     cache::BackgroundNodeInstall::Downloading(Some(42.0))
                 );
 
-                let _ = app.update(ready(Err("download refused".to_string()), "KnotsBlake2b"));
+                let _ = app.update(ready(
+                    first,
+                    Err("download refused".to_string()),
+                    "KnotsBlake2b",
+                ));
                 assert_eq!(
                     app.cache.background_node_install,
                     cache::BackgroundNodeInstall::Failed("download refused".to_string())
                 );
-                let _ = app.update(Message::BackgroundManagedNodeProgress {
-                    cube: cube.clone(),
-                    progress: cache::BackgroundNodeInstall::Starting,
-                });
+                let _ = app.update(progress(
+                    &cube,
+                    first,
+                    cache::BackgroundNodeInstall::Starting,
+                ));
                 assert!(
                     matches!(
                         app.cache.background_node_install,
@@ -11867,7 +11917,29 @@ mod tests {
                     cache::BackgroundNodeInstall::Downloading(None),
                     "Retry restarts the install in this session"
                 );
-                let _ = app.update(ready(Err("stale".to_string()), "Knots"));
+                let second = app.background_node_attempt.unwrap();
+                assert_ne!(first, second);
+                // The first attempt's late messages, or those of an App this
+                // one replaced, cannot move the running attempt's status.
+                let _ = app.update(progress(
+                    &cube,
+                    first,
+                    cache::BackgroundNodeInstall::Downloading(Some(99.0)),
+                ));
+                let _ = app.update(ready(first, Err("old timeout".to_string()), "KnotsBlake2b"));
+                assert_eq!(
+                    app.cache.background_node_install,
+                    cache::BackgroundNodeInstall::Downloading(None),
+                    "a stale attempt neither advances nor fails the current one"
+                );
+                let _ = app.update(retry());
+                assert_eq!(
+                    app.background_node_attempt,
+                    Some(second),
+                    "no Retry while the current attempt runs"
+                );
+
+                let _ = app.update(ready(second, Err("stale".to_string()), "Knots"));
                 assert_eq!(
                     app.cache.background_node_install,
                     cache::BackgroundNodeInstall::Idle,
