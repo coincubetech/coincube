@@ -448,6 +448,18 @@ impl ClaimForkBinding {
     }
 }
 
+/// Suppress only a refusal represented by the same typed chain diagnostic.
+/// A Deadline can originate from the outer paired check, so even a matching
+/// per-chain timeout cannot establish that the global refusal is redundant.
+fn funding_refusal_is_inline(
+    error: crate::services::claim_observation::http::DiscoveryError,
+    proofs: &[FundingProofStatus; 2],
+) -> bool {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    !matches!(error, DiscoveryError::Observation(FailureKind::Deadline))
+        && proofs.contains(&FundingProofStatus::Failed(error))
+}
+
 pub(crate) fn funding_proof_refusal(
     error: crate::services::claim_observation::http::DiscoveryError,
 ) -> &'static str {
@@ -2026,7 +2038,7 @@ impl ClaimStep1Panel {
                     .await
                     .map_err(|error| match error {
                         claim_workflow::ClaimFundingDiscoveryError::Discovery(error) => {
-                            inline_error = proofs.lock().unwrap().iter().any(|status| matches!(status, FundingProofStatus::Failed(_)));
+                            inline_error = funding_refusal_is_inline(error, &proofs.lock().unwrap());
                             #[cfg(all(test, feature = "regtest-harness"))]
                             eprintln!("disposable Claim funding discovery refused: {error:?}");
                             funding_proof_refusal(error).to_string()

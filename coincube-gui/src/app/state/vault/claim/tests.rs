@@ -898,6 +898,91 @@ async fn healthy_claim_entry_loads_deposits_inline_without_a_continue_button() {
 }
 
 #[test]
+fn funding_chain_diagnostics_do_not_hide_a_different_or_paired_timeout_refusal() {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    let structural =
+        DiscoveryError::Structural(coincube_core::claim_ancestry::Error::IncompletePath);
+    let deadline = DiscoveryError::Observation(FailureKind::Deadline);
+    for (proofs, refusal, expected_inline) in [
+        (
+            [
+                FundingProofStatus::Failed(structural),
+                FundingProofStatus::Pending,
+            ],
+            deadline,
+            false,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(structural),
+                FundingProofStatus::Pending,
+            ],
+            structural,
+            true,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(deadline),
+                FundingProofStatus::Pending,
+            ],
+            deadline,
+            false,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(structural),
+                FundingProofStatus::Pending,
+            ],
+            DiscoveryError::Observation(FailureKind::Changed),
+            false,
+        ),
+        (
+            [FundingProofStatus::PathFound; 2],
+            DiscoveryError::Observation(FailureKind::Stale),
+            false,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(DiscoveryError::Structural(
+                    coincube_core::claim_ancestry::Error::WrongTransaction,
+                )),
+                FundingProofStatus::Pending,
+            ],
+            structural,
+            false,
+        ),
+    ] {
+        let (_sender, generation) = watch::channel(7);
+        let mut p = panel(SINGLE_WSH);
+        p.generation = generation;
+        p.connect = Some(ConnectSession {
+            client: CoincubeClient::new(),
+            account: "account".into(),
+        });
+        p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+            bitcoin_deposit: "bitcoin-address".into(),
+            btcb2_deposit: "btcb2-address".into(),
+            bitcoin_minimum_sats: 2_000,
+            btcb2_minimum_sats: 3_000,
+            bitcoin_rate_sat_vb: 2,
+            btcb2_rate_sat_vb: 3,
+        });
+        p.check_seq = 12;
+        p.funding_checking = true;
+        let inline = funding_refusal_is_inline(refusal, &proofs);
+        assert_eq!(inline, expected_inline);
+        drop(p.apply(ClaimEvent::FundingProofChecked(12, 7, 0, proofs, inline)));
+        let reason = funding_proof_refusal(refusal);
+        drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Err(reason.into()))));
+        assert_eq!(p.funding_proofs, proofs);
+        assert_eq!(p.funding_inline_error(), expected_inline);
+        assert_eq!(p.funding_error(), Some(reason));
+        assert!(p.funding_review().is_none());
+        assert!(!p.can_sign_or_submit());
+    }
+}
+
+#[test]
 fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
     let (_sender, receiver) = watch::channel(7);
     let mut p = panel(SINGLE_WSH);
