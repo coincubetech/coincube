@@ -29,6 +29,7 @@ async-hwi = "0.0.32"
 # to fetch even for SDK consumers. SDK Rust source and manifests are unchanged.
 # See COINCUBE_BUILD_PATCH.md at the pinned dependency revision.
 breez-sdk-liquid = { git = "https://github.com/coincubetech/breez-sdk-liquid", rev = "4ac5017c18dd3bb174cb3f193570c0d8b6ef3afa" }
+coincube-mcp = { path = "../coincube-mcp" }
 coincube-core = { path = "../coincube-core" }
 coincube-spark-protocol = { path = "../coincube-spark-protocol" }
 coincubed = { path = "../coincubed", default-features = false, features = [

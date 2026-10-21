@@ -152,6 +152,7 @@ jobs:
         if: matrix.platform == 'linux'
         run: |
           cargo build --package coincube-gui --bin coincube --profile minimal --target ${{ matrix.target }} --locked
+          cargo build --package coincube-mcp --features adapter --profile minimal --target ${{ matrix.target }} --locked
           # The bridge is excluded from the root workspace, so the line above
           # cannot build it — this is the second half of `make build`.
           cargo build --manifest-path coincube-spark-bridge/Cargo.toml --profile minimal --target ${{ matrix.target }} --locked
@@ -168,6 +169,7 @@ jobs:
           stage=tenshu-${{ env.COINCUBE_VERSION }}-${{ matrix.target }}
           mkdir -p "$stage"
           cp target/${{ matrix.target }}/minimal/coincube "$stage/"
+          cp target/${{ matrix.target }}/minimal/tenshu-mcp "$stage/"
           cp coincube-spark-bridge/target/${{ matrix.target }}/minimal/coincube-spark-bridge "$stage/"
           cp LICENCE README.md "$stage/"
           tar czf "$stage.tar.gz" "$stage"
@@ -278,6 +280,7 @@ jobs:
         run: |
           rustup target add ${{ matrix.target }}
           cargo build --package coincube-gui --profile minimal --target ${{ matrix.target }} --locked
+          cargo build --package coincube-mcp --features adapter --profile minimal --target ${{ matrix.target }} --locked
           # The bridge is deliberately excluded from the root workspace, so the
           # line above cannot build it — this is the second half of the
           # Makefile's `build: bridge gui`. Omit it and the bundle ships with no
@@ -305,6 +308,7 @@ jobs:
             || { echo "_coincube-signer._tcp missing from NSBonjourServices"; exit 1; }
 
           mv target/${{ matrix.target }}/minimal/coincube Tenshu.app/Contents/MacOS/Coincube
+          mv target/${{ matrix.target }}/minimal/tenshu-mcp Tenshu.app/Contents/MacOS/tenshu-mcp
           mv contrib/release/macos/Coincube.icns Tenshu.app/Contents/Resources/Coincube.icns
 
           # The gui resolves the Spark bridge as a sibling of its own
@@ -448,6 +452,8 @@ jobs:
         if: matrix.platform == 'macos'
         run: |
           bridge=Tenshu.app/Contents/MacOS/coincube-spark-bridge
+          test -x Tenshu.app/Contents/MacOS/tenshu-mcp
+          codesign --verify --strict Tenshu.app/Contents/MacOS/tenshu-mcp
 
           # (1) Present at all — the failure this exists to catch.
           test -f "$bridge" \

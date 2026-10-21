@@ -6,6 +6,7 @@ pub mod config;
 pub mod error;
 pub mod features;
 mod imported_kit_metadata;
+pub mod local_mcp;
 pub mod local_switch;
 pub mod menu;
 pub mod message;
@@ -846,6 +847,7 @@ pub(crate) struct ClaimPairRequest {
 }
 
 pub struct App {
+    local_mcp: local_mcp::Settings,
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
     imported_kit_metadata: imported_kit_metadata::ImportedKitMetadata,
@@ -3750,6 +3752,7 @@ impl App {
             cache: cache_with_vault,
             daemon: Some(daemon),
             wallet: Some(wallet),
+            local_mcp: Default::default(),
             imported_kit_metadata: Default::default(),
             breez_client,
             fork_connect_client: None,
@@ -3990,6 +3993,7 @@ impl App {
                 cache,
                 daemon: None,
                 wallet: None,
+                local_mcp: Default::default(),
                 imported_kit_metadata: Default::default(),
                 breez_client: Some(breez_client),
                 fork_connect_client: None,
@@ -5461,6 +5465,7 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        self.local_mcp.revoke();
         self.drop_split_port_builds();
         if let Some(panel) = &mut self.split_panel {
             panel.revoke();
@@ -5720,7 +5725,9 @@ impl App {
                     // App::view; no section message is dispatched to the
                     // SettingsState. Side-effect loads (avatar fetch,
                     // members fetch) are kicked below.
-                    menu::CubeSettingsOption::Avatar | menu::CubeSettingsOption::Members => None,
+                    menu::CubeSettingsOption::AiAccess
+                    | menu::CubeSettingsOption::Avatar
+                    | menu::CubeSettingsOption::Members => None,
                 };
                 if let Some(section_msg) = section_msg {
                     // Fire even if daemon is None — the inner settings
@@ -6565,6 +6572,20 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        if let Message::View(view::Message::LocalMcp(message)) = message {
+            let supported = self.mcp_supported();
+            return match self.local_mcp.update(
+                message,
+                self.wallet.clone(),
+                self.daemon.clone(),
+                supported,
+                &self.cube_settings.id,
+            ) {
+                Some(config) => clipboard::write(config),
+                None => Task::none(),
+            };
+        }
+
         // Known metadata changes must not leave a previously healthy Kit
         // fingerprint visible if their subsequent settings reload fails.
         if matches!(
@@ -6572,6 +6593,7 @@ impl App {
             Message::SettingsSaved | Message::LoadWallet(_) | Message::WalletUpdated(_)
         ) {
             self.imported_kit_metadata.invalidate();
+            self.local_mcp.revoke();
         }
         let task = self.update_dispatch(message);
         // Sync *after* dispatch: if this update just mutated
@@ -10255,8 +10277,32 @@ impl App {
         }
     }
 
+    fn mcp_supported(&self) -> bool {
+        !self.cube_settings.network.is_blake2b()
+            && self
+                .wallet
+                .as_ref()
+                .is_some_and(|wallet| wallet.main_descriptor.as_vault().is_some())
+            && self
+                .daemon
+                .as_ref()
+                .is_some_and(|daemon| daemon.backend().is_embedded())
+            && !self.daemon_switch_in_progress
+    }
+
     pub fn view(&self) -> Element<'_, Message> {
-        let view = if self.show_received_celebration {
+        let view = if matches!(
+            self.panels.current,
+            Menu::Cube(menu::CubeSubMenu::Settings(
+                menu::CubeSettingsOption::AiAccess
+            ))
+        ) {
+            view::dashboard(
+                &self.panels.current,
+                &self.cache,
+                self.local_mcp.view(self.mcp_supported()),
+            )
+        } else if self.show_received_celebration {
             // Global celebration overlay takes precedence over the normal panel view
             let celebration = coincube_ui::component::received_celebration_page(
                 &self.received_celebration_context,

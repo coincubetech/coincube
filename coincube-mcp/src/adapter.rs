@@ -1,0 +1,117 @@
+//! Official SDK owns MCP lifecycle, negotiation and JSON-RPC serialization.
+use crate::*;
+use rmcp::{
+    ErrorData, ServerHandler,
+    model::*,
+    service::{RequestContext, RoleServer},
+};
+use serde_json::Value;
+use std::path::PathBuf;
+
+#[derive(Clone)]
+pub struct Adapter {
+    pub socket: PathBuf,
+    pub credential: String,
+}
+fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
+    name: &'static str,
+    description: &'static str,
+) -> Tool {
+    Tool::new(name, description, serde_json::Map::new())
+        .with_input_schema::<I>()
+        .with_output_schema::<O>()
+        .annotate(
+            ToolAnnotations::new()
+                .read_only(true)
+                .destructive(false)
+                .idempotent(true)
+                .open_world(false),
+        )
+}
+pub fn tools() -> Vec<Tool> {
+    vec![
+        tool::<Empty, WalletList>(
+            "tenshu_list_wallets",
+            "List only the Vault explicitly authorized in the current desktop session.",
+        ),
+        tool::<WalletInput, Summary>(
+            "tenshu_get_wallet_summary",
+            "Read authorized Vault balance snapshot in satoshis; inspect sync_state for completeness.",
+        ),
+        tool::<HistoryInput, History>(
+            "tenshu_get_transactions",
+            "Read at most 50 recent confirmed transactions; excludes labels, addresses and scripts.",
+        ),
+        tool::<WalletInput, Policy>(
+            "tenshu_get_wallet_policy_summary",
+            "Deterministic Vault policy analysis without keys or descriptors. Recovery delays are relative blocks, not current eligibility.",
+        ),
+    ]
+}
+fn parse<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ErrorData> {
+    serde_json::from_value(v).map_err(|_| ErrorData::invalid_params("invalid_input", None))
+}
+impl Adapter {
+    pub async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, ErrorData> {
+        let request = match name {
+            "tenshu_list_wallets" => crate::Request::List(parse(arguments)?),
+            "tenshu_get_wallet_summary" => crate::Request::Summary(parse(arguments)?),
+            "tenshu_get_transactions" => crate::Request::History(parse(arguments)?),
+            "tenshu_get_wallet_policy_summary" => crate::Request::Policy(parse(arguments)?),
+            _ => return Err(ErrorData::invalid_params("unknown_tool", None)),
+        };
+        if !request.valid() {
+            return Err(ErrorData::invalid_params("invalid_input", None));
+        }
+        #[cfg(unix)]
+        let result = crate::ipc::call(&self.socket, &self.credential, request).await;
+        #[cfg(not(unix))]
+        let result: Result<Response, Error> = {
+            let _ = request;
+            Err(Error::Unavailable)
+        };
+        match result {
+            Ok(response) => {
+                let value = match response {
+                    Response::List(v) => serde_json::to_value(v),
+                    Response::Summary(v) => serde_json::to_value(v),
+                    Response::History(v) => serde_json::to_value(v),
+                    Response::Policy(v) => serde_json::to_value(v),
+                }
+                .map_err(|_| ErrorData::internal_error("serialization_failed", None))?;
+                Ok(CallToolResult::structured(value))
+            }
+            Err(e) => Ok(CallToolResult::structured_error(
+                serde_json::json!({"error": {"code": e.code()}}),
+            )),
+        }
+    }
+}
+impl ServerHandler for Adapter {
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new("tenshu-mcp", env!("CARGO_PKG_VERSION")))
+    }
+    async fn list_tools(
+        &self,
+        _: Option<PaginatedRequestParams>,
+        _: RequestContext<RoleServer>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult {
+            tools: tools(),
+            ..Default::default()
+        })
+    }
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParams,
+        _: RequestContext<RoleServer>,
+    ) -> Result<CallToolResponse, ErrorData> {
+        self.invoke(
+            &request.name,
+            Value::Object(request.arguments.unwrap_or_default()),
+        )
+        .await
+        .map(Into::into)
+    }
+}

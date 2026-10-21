@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "fuzz",
+    "coincube-mcp",
     "coincube-core",
     "coincube-keychain-ffi",
     "coincubed",
@@ -19,6 +20,7 @@ members = [
 # IPC. See coincube-spark-bridge/Cargo.toml for its own [workspace] block.
 exclude = ["coincube-spark-bridge", "vendor/branta"]
 default-members = [
+    "coincube-mcp",
     "coincube-core",
     "coincube-keychain-ffi",
     "coincubed",
