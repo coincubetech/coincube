@@ -4,9 +4,12 @@ use bitcoin::{
     hashes::Hash,
     secp256k1::Secp256k1,
 };
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Mutex,
+use std::{
+    collections::BTreeMap,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Mutex,
+    },
 };
 
 #[test]
@@ -150,6 +153,213 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
     assert!(matches!(
         collect(&source, &plan(4), 7).await,
         Err(ScanError::Changed)
+    ));
+}
+
+fn imported_plan(end: u32) -> ScanPlan {
+    let external = ScanDescriptor::parse(Branch::External, &ranged()).unwrap();
+    let internal =
+        ScanDescriptor::parse(Branch::Internal, &ranged().replace("/0/*", "/1/*")).unwrap();
+    ScanPlan {
+        chain: ChainId::BitcoinBlake2b,
+        branches: vec![
+            BranchRange {
+                descriptor: external,
+                start: 0,
+                end_exclusive: end,
+            },
+            BranchRange {
+                descriptor: internal,
+                start: 0,
+                end_exclusive: end,
+            },
+        ],
+        gap: 2,
+    }
+}
+
+struct LateHistory {
+    coins: BTreeMap<String, (Utxo, Transaction)>,
+}
+
+impl LateHistory {
+    fn new(plan: &ScanPlan) -> Self {
+        use bitcoin::{absolute, transaction, Amount, TxIn, TxOut};
+        let mut coins = BTreeMap::new();
+        for (offset, branch, index) in [(1, Branch::External, 25), (2, Branch::Internal, 27)] {
+            let descriptor = &plan
+                .branches
+                .iter()
+                .find(|range| range.descriptor.branch() == branch)
+                .unwrap()
+                .descriptor;
+            let script = descriptor.script(index).unwrap();
+            let address = bitcoin::Address::from_script(&script, bitcoin::Network::Bitcoin)
+                .unwrap()
+                .to_string();
+            let previous = Transaction {
+                version: transaction::Version::TWO,
+                lock_time: absolute::LockTime::from_consensus(offset),
+                input: vec![TxIn::default()],
+                output: vec![TxOut {
+                    value: Amount::from_sat(10_000 + u64::from(offset)),
+                    script_pubkey: script,
+                }],
+            };
+            coins.insert(
+                address,
+                (
+                    Utxo {
+                        txid: previous.compute_txid(),
+                        vout: 0,
+                        value: 10_000 + u64::from(offset),
+                        status: Status {
+                            confirmed: true,
+                            block_height: Some(90),
+                            block_hash: Some(BlockHash::from_byte_array([3; 32])),
+                        },
+                    },
+                    previous,
+                ),
+            );
+        }
+        Self { coins }
+    }
+}
+
+#[async_trait]
+impl Source for LateHistory {
+    async fn tip(&self, _: ChainId) -> Result<BlockHash, ScanError> {
+        Ok(BlockHash::from_byte_array([1; 32]))
+    }
+    async fn tip_height(&self, _: ChainId, _: BlockHash) -> Result<u32, ScanError> {
+        Ok(800_000)
+    }
+    async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
+        Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
+    }
+    async fn stats(&self, _: ChainId, address: &str) -> Result<Stats, ScanError> {
+        Ok(Stats {
+            chain_stats: Count {
+                tx_count: u64::from(self.coins.contains_key(address)),
+            },
+            mempool_stats: Count { tx_count: 0 },
+        })
+    }
+    async fn utxos(&self, _: ChainId, address: &str) -> Result<Vec<Utxo>, ScanError> {
+        Ok(self
+            .coins
+            .get(address)
+            .map(|(coin, _)| vec![coin.clone()])
+            .unwrap_or_default())
+    }
+    async fn transaction(&self, _: ChainId, txid: Txid) -> Result<Transaction, ScanError> {
+        self.coins
+            .values()
+            .find(|(_, tx)| tx.compute_txid() == txid)
+            .map(|(_, tx)| tx.clone())
+            .ok_or(ScanError::Prevout)
+    }
+}
+
+#[tokio::test]
+async fn imported_full_window_finds_both_branches_after_an_early_gap() {
+    let plan = imported_plan(40);
+    let source = LateHistory::new(&plan);
+    let ordinary = collect(&source, &plan, 7).await.unwrap();
+    assert_eq!(ordinary.addresses_scanned(), 4);
+    assert!(ordinary.coins().is_empty());
+    let full = collect_mode(&source, &plan, 7, ScanMode::FullImported)
+        .await
+        .unwrap();
+    assert_eq!(full.addresses_scanned(), 80);
+    assert_eq!(
+        full.coins()
+            .iter()
+            .map(|coin| (coin.branch, coin.index))
+            .collect::<Vec<_>>(),
+        [(Branch::External, 25), (Branch::Internal, 27)]
+    );
+    for branch in [Branch::External, Branch::Internal] {
+        assert_eq!(full.coverage(branch).unwrap().end_exclusive, 40);
+    }
+}
+
+#[test]
+fn imported_plan_requires_matching_bounded_full_branches() {
+    assert_eq!(validate_imported_plan(&imported_plan(10_000)), Ok(10_000));
+    for mut bad in [imported_plan(0), imported_plan(10_001), imported_plan(40)] {
+        if bad.branches[0].end_exclusive == 40 {
+            bad.branches[1].end_exclusive = 39;
+        }
+        assert_eq!(validate_imported_plan(&bad), Err(ScanError::InvalidLimits));
+    }
+    let mut bad = imported_plan(40);
+    bad.branches[1].start = 1;
+    assert_eq!(validate_imported_plan(&bad), Err(ScanError::InvalidLimits));
+    let mut bad = imported_plan(40);
+    bad.branches.pop();
+    assert_eq!(validate_imported_plan(&bad), Err(ScanError::InvalidLimits));
+}
+
+#[test]
+fn imported_deadline_scales_with_validated_full_window_and_stays_bounded() {
+    assert_eq!(imported_scan_duration(1), CLAIM_SCAN_DURATION);
+    assert_eq!(imported_scan_duration(360), CLAIM_SCAN_DURATION);
+    assert_eq!(imported_scan_duration(361), Duration::from_secs(91));
+    let windows = [1, 360, 361, 1_000, MAX_IMPORTED_BRANCH_END];
+    let deadlines = windows.map(imported_scan_duration);
+    assert!(deadlines.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(deadlines[4], Duration::from_secs(2_500));
+    assert!(deadlines
+        .iter()
+        .all(|duration| *duration <= Duration::from_secs(2_500)));
+}
+
+#[tokio::test]
+async fn imported_full_window_respects_generation_cancellation() {
+    let (sender, receiver) = watch::channel(7);
+    sender.send(8).unwrap();
+    let mut client = CoincubeClient::new();
+    client.set_token("synthetic-test-session");
+    assert!(matches!(
+        scan_imported_window(client, imported_plan(40), 7, receiver).await,
+        Err(ScanError::Cancelled)
+    ));
+}
+
+struct SpentEverywhere;
+
+#[async_trait]
+impl Source for SpentEverywhere {
+    async fn tip(&self, _: ChainId) -> Result<BlockHash, ScanError> {
+        Ok(BlockHash::from_byte_array([1; 32]))
+    }
+    async fn tip_height(&self, _: ChainId, _: BlockHash) -> Result<u32, ScanError> {
+        Ok(800_000)
+    }
+    async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
+        Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
+    }
+    async fn stats(&self, _: ChainId, _: &str) -> Result<Stats, ScanError> {
+        Ok(Stats {
+            chain_stats: Count { tx_count: 1 },
+            mempool_stats: Count { tx_count: 0 },
+        })
+    }
+    async fn utxos(&self, _: ChainId, _: &str) -> Result<Vec<Utxo>, ScanError> {
+        Ok(Vec::new())
+    }
+    async fn transaction(&self, _: ChainId, _: Txid) -> Result<Transaction, ScanError> {
+        panic!("spent history has no unspent transaction")
+    }
+}
+
+#[tokio::test]
+async fn ordinary_scanner_keeps_its_200_address_budget() {
+    assert!(matches!(
+        collect(&SpentEverywhere, &plan(MAX_ADDRESSES + 1), 7).await,
+        Err(ScanError::AddressLimit)
     ));
 }
 

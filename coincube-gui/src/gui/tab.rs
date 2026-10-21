@@ -607,6 +607,7 @@ pub struct Tab {
     /// Split entry suspended while the ordinary BTCB2 wallet installer creates
     /// the first eligible Vault Cube.
     pending_split_after_install: bool,
+    pending_imported_claim: Option<crate::imported_claim::ImportedClaimRequest>,
 }
 
 impl Tab {
@@ -621,6 +622,7 @@ impl Tab {
             fork_tasks: HashMap::new(),
             next_fork_task: 0,
             pending_split_after_install: false,
+            pending_imported_claim: None,
         }
     }
 
@@ -810,6 +812,8 @@ impl Tab {
         originated: bool,
         capability_revoked: bool,
     ) -> Task<Message> {
+        self.pending_imported_claim = None;
+        self.pending_split_after_install = false;
         if !capability_revoked {
             match &mut self.state {
                 State::App(app)
@@ -845,6 +849,7 @@ impl Tab {
         }
         self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
         self.pending_split_after_install = false;
+        self.pending_imported_claim = None;
         app::split_intent::clear();
         self.fork_save_task.take();
         self.fork_tasks.clear();
@@ -1107,6 +1112,13 @@ impl Tab {
                     command.map(Message::Install)
                 }
                 home::Message::InstallForSplit(datadir, coincube_client) => {
+                    let imported = l.imported_claim_request();
+                    if let Some(request) = &imported {
+                        if let Err(error) = request.validate(&datadir, &coincube_client) {
+                            l.set_error(error);
+                            return Task::none();
+                        }
+                    }
                     let network = crate::chain::ChainId::BitcoinBlake2b;
                     if let Some(reason) = l.connect_chain_availability(network).reason() {
                         l.set_error(reason.to_string());
@@ -1127,11 +1139,13 @@ impl Tab {
                         Ok(result) => result,
                         Err(error) => {
                             self.pending_split_after_install = false;
+                            self.pending_imported_claim = None;
                             l.set_error(error.to_string());
                             return Task::none();
                         }
                     };
                     self.pending_split_after_install = true;
+                    self.pending_imported_claim = imported;
                     self.state = State::Installer(Box::new(install));
                     command.map(Message::Install)
                 }
@@ -1384,6 +1398,7 @@ impl Tab {
             (State::Installer(i), Message::Install(msg)) => {
                 if matches!(msg, installer::Message::CubeSaveFailed(_)) {
                     self.pending_split_after_install = false;
+                    self.pending_imported_claim = None;
                 }
                 if let installer::Message::Exit(settings_opt, internal_bitcoind) = msg {
                     // Associate wallet with cube, and — for the Recovery
@@ -1697,6 +1712,7 @@ impl Tab {
                         Err(err) => {
                             error!("Aborting loader transition due to cube save failure");
                             self.pending_split_after_install = false;
+                            self.pending_imported_claim = None;
                             return i
                                 .update(installer::Message::CubeSaveFailed(err))
                                 .map(Message::Install);
@@ -1748,9 +1764,29 @@ impl Tab {
                         }
                         if self.pending_split_after_install {
                             self.pending_split_after_install = false;
-                            let (mut home, command) =
-                                Home::new_for_chain(i.datadir.clone(), Some(cube.network));
-                            home.request_split_resume();
+                            let imported = self.pending_imported_claim.take();
+                            let (mut home, command) = match imported {
+                                Some(request) => match i.context.coincube_client.clone() {
+                                    Some(client) => {
+                                        Home::new_imported_claim(i.datadir.clone(), request, client)
+                                    }
+                                    None => {
+                                        let (mut home, command) = Home::new_for_chain(
+                                            i.datadir.clone(),
+                                            Some(cube.network),
+                                        );
+                                        home.set_error("Sign in to Connect, then open Claim BTCB2 from your imported wallet again.");
+                                        (home, command)
+                                    }
+                                },
+                                None => {
+                                    let (mut home, command) =
+                                        Home::new_for_chain(i.datadir.clone(), Some(cube.network));
+                                    home.request_split_resume();
+                                    (home, command)
+                                }
+                            };
+                            home.theme_mode = self.theme_mode;
                             self.state = State::Home(home);
                             return command.map(Message::Launch);
                         }
@@ -1763,6 +1799,7 @@ impl Tab {
                             Ok(config) => config,
                             Err(e) => {
                                 self.pending_split_after_install = false;
+                                self.pending_imported_claim = None;
                                 return i
                                     .update(installer::Message::CubeSaveFailed(e.to_string()))
                                     .map(Message::Install);
@@ -1904,6 +1941,7 @@ impl Tab {
                     }
                 } else if let installer::Message::BackToApp(network) = msg {
                     self.pending_split_after_install = false;
+                    self.pending_imported_claim = None;
                     // A claim was launched from a *different* Cube than the one
                     // being built, so there is no `cube_settings` to go back to
                     // — without this the user who backs out of a claim lands on
@@ -6268,14 +6306,67 @@ mod fork_completion_tests {
         installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
         let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
         tab.pending_split_after_install = true;
+        tab.pending_imported_claim = Some(crate::imported_claim::tests::fixture().1);
 
         let _ = tab.update(Message::Install(installer::Message::BackToApp(
             bitcoin::Network::Bitcoin,
         )));
 
         assert!(!tab.pending_split_after_install);
+        assert!(tab.pending_imported_claim.is_none());
         assert!(matches!(tab.state, State::Home(_)));
         let _ = std::fs::remove_dir_all(root_path);
+    }
+
+    #[test]
+    fn imported_claim_source_survives_successful_target_save_only_with_its_client() {
+        let _guard = crate::app::session::test_guard();
+        for authenticated in [true, false] {
+            let root_path = std::env::temp_dir().join(format!(
+                "imported-claim-target-save-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let root = CoincubeDirectory::new(root_path.clone());
+            let (cube, request, client) = crate::imported_claim::tests::fixture();
+            crate::imported_claim::tests::prepare_storage(&root, &cube);
+            let (mut installer, startup) = Installer::new(
+                root,
+                bitcoin::Network::Bitcoin,
+                None,
+                installer::UserFlow::CreateWallet,
+                false,
+                None,
+                None,
+                None,
+                false,
+                None,
+            )
+            .unwrap();
+            drop(startup);
+            installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+            installer.context.coincube_client = authenticated.then_some(client);
+            let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
+            tab.pending_split_after_install = true;
+            tab.pending_imported_claim = Some(request.clone());
+            let target = CubeSettings::new("BTCB2 destination".into(), ChainId::BitcoinBlake2b);
+            drop(tab.update(Message::ForkInstallCompleted(
+                tab.fork_session_generation,
+                installer::Message::CubeSaved(Ok((target, None, None)), None, None),
+            )));
+            assert!(tab.pending_imported_claim.is_none());
+            assert!(!tab.pending_split_after_install);
+            let State::Home(home) = &tab.state else {
+                panic!("target setup must return to Claim selection");
+            };
+            assert_eq!(
+                home.imported_claim_request().map(|r| r.source),
+                authenticated.then_some(request.source)
+            );
+            if !authenticated {
+                assert!(home.error().is_some());
+            }
+            let _ = std::fs::remove_dir_all(root_path);
+        }
     }
 
     /// Exercise the real save completion seam without starting a daemon or

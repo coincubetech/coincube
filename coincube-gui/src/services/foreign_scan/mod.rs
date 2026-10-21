@@ -21,6 +21,10 @@ use std::{collections::BTreeSet, str::FromStr, time::Duration};
 use tokio::sync::watch;
 
 pub const MAX_ADDRESSES: u32 = 200;
+/// Imported wallets may have a daemon-attested history window far beyond the
+/// ordinary gap scan. This bound applies only to their explicit full walk.
+pub const MAX_IMPORTED_ADDRESSES: u32 = 20_000;
+pub const MAX_IMPORTED_BRANCH_END: u32 = 10_000;
 pub const MAX_DURATION: Duration = Duration::from_secs(30);
 /// A known Vault scan covers both branches on two chains and may need more
 /// time than the interactive foreign-wallet discovery limit.
@@ -332,6 +336,45 @@ impl ScanPlan {
     }
 }
 
+/// A full imported-wallet walk has two matching ranged branches. Its caller
+/// supplies the already-attested discovery target; a history gap cannot
+/// shorten this range.
+pub(crate) fn validate_imported_plan(plan: &ScanPlan) -> Result<u32, ScanError> {
+    plan.validate()?;
+    if plan.chain != ChainId::BitcoinBlake2b {
+        return Err(ScanError::InvalidLimits);
+    }
+    validate_imported_shape(plan)
+}
+
+fn validate_imported_shape(plan: &ScanPlan) -> Result<u32, ScanError> {
+    if plan.branches.len() != 2 {
+        return Err(ScanError::InvalidLimits);
+    }
+    let external = plan
+        .branches
+        .iter()
+        .find(|range| range.descriptor.branch() == Branch::External);
+    let internal = plan
+        .branches
+        .iter()
+        .find(|range| range.descriptor.branch() == Branch::Internal);
+    let (Some(external), Some(internal)) = (external, internal) else {
+        return Err(ScanError::InvalidLimits);
+    };
+    if external.start != 0
+        || internal.start != 0
+        || !external.descriptor.is_ranged()
+        || !internal.descriptor.is_ranged()
+        || external.end_exclusive != internal.end_exclusive
+        || external.end_exclusive == 0
+        || external.end_exclusive > MAX_IMPORTED_BRANCH_END
+    {
+        return Err(ScanError::InvalidLimits);
+    }
+    Ok(external.end_exclusive)
+}
+
 #[derive(Debug, Clone)]
 pub struct DiscoveredCoin {
     pub branch: Branch,
@@ -518,8 +561,54 @@ pub async fn scan_with_timeout(
     client: CoincubeClient,
     plan: ScanPlan,
     expected: u64,
+    generation: watch::Receiver<u64>,
+    duration: Duration,
+) -> Result<ScanReport, ScanError> {
+    scan_mode_with_timeout(client, plan, expected, generation, duration, ScanMode::Gap).await
+}
+
+pub(crate) async fn scan_imported_window(
+    client: CoincubeClient,
+    plan: ScanPlan,
+    expected: u64,
+    generation: watch::Receiver<u64>,
+) -> Result<ScanReport, ScanError> {
+    plan.validate()?;
+    let branch_end = validate_imported_shape(&plan)?;
+    scan_mode_with_timeout(
+        client,
+        plan,
+        expected,
+        generation,
+        imported_scan_duration(branch_end),
+        ScanMode::FullImported,
+    )
+    .await
+}
+
+/// One second per eight requested addresses across the two branches, with
+/// Claim's 90-second floor. Validation bounds each branch at 10,000, so this
+/// deadline cannot exceed 2,500 seconds. Both chains scan concurrently and
+/// each gets this same deadline.
+fn imported_scan_duration(branch_end: u32) -> Duration {
+    CLAIM_SCAN_DURATION.max(Duration::from_secs(u64::from(
+        (branch_end * 2).div_ceil(ADDRESS_BATCH),
+    )))
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ScanMode {
+    Gap,
+    FullImported,
+}
+
+async fn scan_mode_with_timeout(
+    client: CoincubeClient,
+    plan: ScanPlan,
+    expected: u64,
     mut generation: watch::Receiver<u64>,
     duration: Duration,
+    mode: ScanMode,
 ) -> Result<ScanReport, ScanError> {
     plan.validate()?;
     if *generation.borrow() != expected || generation.has_changed().is_err() {
@@ -535,7 +624,7 @@ pub async fn scan_with_timeout(
     };
     let result = tokio::select! { biased;
         _ = cancelled => Err(ScanError::Cancelled),
-        result = tokio::time::timeout(duration, collect(&source, &plan, expected)) => result.map_err(|_| ScanError::Deadline)?,
+        result = tokio::time::timeout(duration, collect_mode(&source, &plan, expected, mode)) => result.map_err(|_| ScanError::Deadline)?,
     };
     if *generation.borrow() != expected || generation.has_changed().is_err() {
         return Err(ScanError::Cancelled);
@@ -543,10 +632,20 @@ pub async fn scan_with_timeout(
     result
 }
 
+#[cfg(test)]
 async fn collect(
     source: &impl Source,
     plan: &ScanPlan,
     generation: u64,
+) -> Result<ScanReport, ScanError> {
+    collect_mode(source, plan, generation, ScanMode::Gap).await
+}
+
+async fn collect_mode(
+    source: &impl Source,
+    plan: &ScanPlan,
+    generation: u64,
+    mode: ScanMode,
 ) -> Result<ScanReport, ScanError> {
     plan.validate()?;
     let before = source.tip(plan.chain).await?;
@@ -578,16 +677,26 @@ async fn collect(
         let mut finished = false;
         let mut next = range.start;
         while next < range.end_exclusive {
-            if report.addresses >= MAX_ADDRESSES {
+            let address_limit = if mode == ScanMode::FullImported {
+                MAX_IMPORTED_ADDRESSES
+            } else {
+                MAX_ADDRESSES
+            };
+            if report.addresses >= address_limit {
                 return Err(ScanError::AddressLimit);
             }
             // Never read beyond the current gap boundary or the address cap
             // merely to fill a batch. A used address resets the gap when its
             // result is admitted below, exactly as in the sequential scan.
+            let gap_budget = if mode == ScanMode::Gap {
+                plan.gap.saturating_sub(gap)
+            } else {
+                ADDRESS_BATCH
+            };
             let count = ADDRESS_BATCH
-                .min(plan.gap.saturating_sub(gap))
+                .min(gap_budget)
                 .min(range.end_exclusive - next)
-                .min(MAX_ADDRESSES - report.addresses);
+                .min(address_limit - report.addresses);
             let addresses = (next..next + count)
                 .map(|index| {
                     let script = range.descriptor.script(index)?;
@@ -693,7 +802,9 @@ async fn collect(
                     last_used = Some(index);
                 }
                 gap = if stats.used() { 0 } else { gap + 1 };
-                if gap >= plan.gap || !range.descriptor.descriptor.has_wildcard() {
+                if mode == ScanMode::Gap
+                    && (gap >= plan.gap || !range.descriptor.descriptor.has_wildcard())
+                {
                     report.coverage.push(BranchCoverage {
                         branch: range.descriptor.branch,
                         start: range.start,
@@ -708,6 +819,15 @@ async fn collect(
                 break;
             }
             next += count;
+        }
+        if mode == ScanMode::FullImported && next == range.end_exclusive {
+            report.coverage.push(BranchCoverage {
+                branch: range.descriptor.branch,
+                start: range.start,
+                end_exclusive: range.end_exclusive,
+                last_used,
+            });
+            finished = true;
         }
         if !finished {
             return Err(ScanError::RangeLimit);

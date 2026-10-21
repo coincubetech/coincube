@@ -504,6 +504,66 @@ impl ImportedBitcoinPanel {
             })
     }
 
+    /// Bind a claim to the active public policy and the daemon's completed
+    /// discovery coverage. Allocated receive/change indices also need to fit
+    /// inside the fork scan, including the current next address.
+    pub fn claim_source(
+        &self,
+        cube: &settings::CubeSettings,
+    ) -> Result<crate::imported_claim::ImportedClaimSource, String> {
+        if cube.id != self.cube_id
+            || cube.network != ChainId::Bitcoin
+            || cube.bitcoin_import.as_deref() != Some(&self.import)
+            || !self.is_ready()
+            || self.snapshot_failed
+            || self.sync_failed
+        {
+            return Err("The imported Bitcoin wallet is not ready for a claim. Finish its scan and refresh the wallet.".into());
+        }
+        let wallet = self
+            .import
+            .active_attachment()
+            .ok_or_else(|| "The imported Bitcoin attachment is unavailable.".to_string())?;
+        wallet.validate(ChainId::Bitcoin)?;
+        let info = self
+            .info
+            .as_ref()
+            .ok_or_else(|| "The imported Bitcoin scan is unavailable.".to_string())?;
+        if !self.info_matches_attachment(info) {
+            return Err("The imported Bitcoin scan no longer matches this wallet.".into());
+        }
+        let status = info
+            .imported_wallet
+            .as_ref()
+            .ok_or_else(|| "The imported Bitcoin scan is unavailable.".to_string())?;
+        let address_window = status
+            .discovery_target
+            .max(status.receive_scanned)
+            .max(status.change_scanned)
+            .max(
+                info.receive_index
+                    .checked_add(1)
+                    .ok_or_else(|| "The receive address index is out of range.".to_string())?,
+            )
+            .max(
+                info.change_index
+                    .checked_add(1)
+                    .ok_or_else(|| "The change address index is out of range.".to_string())?,
+            );
+        if address_window == 0 || address_window > 10_000 {
+            return Err(
+                "The imported Bitcoin address window exceeds the supported claim range.".into(),
+            );
+        }
+        Ok(crate::imported_claim::ImportedClaimSource {
+            cube_id: cube.id.clone(),
+            name: cube.name.clone(),
+            external: wallet.descriptor.receive_descriptor().to_string(),
+            internal: wallet.descriptor.change_descriptor().to_string(),
+            address_window,
+        })
+    }
+
     pub fn authoritative_balance(&self) -> Option<coincube_core::miniscript::bitcoin::Amount> {
         self.is_ready()
             .then(|| {
@@ -3437,6 +3497,88 @@ mod tests {
         status.history_complete = true;
         status.discovery_target = 300;
         assert!(!panel.is_ready());
+    }
+
+    #[test]
+    fn claim_source_requires_attested_completed_scan_and_covers_allocated_indices() {
+        let mut panel = ready_import_panel();
+        let mut cube = settings::CubeSettings::new_with_raw_id(
+            "cube-1".into(),
+            "Imported".into(),
+            ChainId::Bitcoin,
+        );
+        cube.bitcoin_import = Some(Box::new(panel.import.clone()));
+        let source = panel.claim_source(&cube).unwrap();
+        assert_eq!(source.address_window, 200);
+        assert_eq!(source.cube_id, cube.id);
+        assert_eq!(
+            source.external,
+            panel
+                .import
+                .active_attachment()
+                .unwrap()
+                .descriptor
+                .receive_descriptor()
+                .to_string()
+        );
+        assert_eq!(
+            source.internal,
+            panel
+                .import
+                .active_attachment()
+                .unwrap()
+                .descriptor
+                .change_descriptor()
+                .to_string()
+        );
+
+        // A harmless background refresh can be in flight while the last
+        // completed snapshot is still authoritative. Claim scans afresh.
+        panel.busy = true;
+        panel.sync_requesting = true;
+        assert!(panel.claim_source(&cube).is_ok());
+        panel.busy = false;
+        panel.sync_requesting = false;
+
+        panel.info.as_mut().unwrap().receive_index = 250;
+        assert_eq!(panel.claim_source(&cube).unwrap().address_window, 251);
+        // Completed discovery can extend beyond both the configured gap and
+        // allocated indices. Claim includes that entire attested history.
+        {
+            let status = panel
+                .info
+                .as_mut()
+                .unwrap()
+                .imported_wallet
+                .as_mut()
+                .unwrap();
+            status.receive_scanned = 450;
+            status.change_scanned = 500;
+        }
+        assert_eq!(panel.claim_source(&cube).unwrap().address_window, 500);
+        panel.info.as_mut().unwrap().change_index = 10_000;
+        assert!(panel.claim_source(&cube).is_err());
+        panel.info.as_mut().unwrap().change_index = 0;
+        panel
+            .info
+            .as_mut()
+            .unwrap()
+            .history_sync
+            .full_scan_in_progress = true;
+        assert!(panel.claim_source(&cube).is_err());
+        panel
+            .info
+            .as_mut()
+            .unwrap()
+            .history_sync
+            .full_scan_in_progress = false;
+        panel.snapshot_failed = true;
+        assert!(panel.claim_source(&cube).is_err());
+        panel.snapshot_failed = false;
+        cube.name = "Renamed".into();
+        assert_eq!(panel.claim_source(&cube).unwrap().name, "Renamed");
+        cube.bitcoin_import = Some(Box::new(BitcoinImport::pending()));
+        assert!(panel.claim_source(&cube).is_err());
     }
 
     #[test]

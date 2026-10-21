@@ -19,6 +19,7 @@ use crate::{
     app::split_intent::SplitIntent,
     chain::ChainId,
     dir::CoincubeDirectory,
+    imported_claim::ImportedClaimSource,
     services::{
         coincube::CoincubeClient,
         foreign_scan::{self, Branch, BranchRange, ForkSide, ScanDescriptor, ScanError, ScanPlan},
@@ -223,6 +224,7 @@ pub struct SplitWalletPanel {
     targets: Vec<TargetCube>,
     selected: Option<TargetCube>,
     source_form: WalletSourceForm,
+    imported_source: Option<ImportedClaimSource>,
     status: Status,
     evidence: Option<Arc<ScanEvidence>>,
     generation: u64,
@@ -236,6 +238,7 @@ impl Default for SplitWalletPanel {
             targets: Vec::new(),
             selected: None,
             source_form: WalletSourceForm::default(),
+            imported_source: None,
             status: Status::Editing,
             evidence: None,
             generation: 0,
@@ -247,6 +250,39 @@ impl Default for SplitWalletPanel {
 impl SplitWalletPanel {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Bind this panel to the public source saved with an imported Bitcoin
+    /// wallet. The caller must revalidate that binding against the active
+    /// wallet before presenting the panel or accepting a handoff.
+    pub fn set_imported_source(&mut self, source: ImportedClaimSource) -> Result<(), String> {
+        let external =
+            ScanDescriptor::parse(Branch::External, &source.external).map_err(scan_error_copy)?;
+        let internal =
+            ScanDescriptor::parse(Branch::Internal, &source.internal).map_err(scan_error_copy)?;
+        let plan = ScanPlan {
+            chain: ChainId::BitcoinBlake2b,
+            branches: vec![external, internal]
+                .into_iter()
+                .map(|descriptor| BranchRange {
+                    descriptor,
+                    start: 0,
+                    end_exclusive: source.address_window,
+                })
+                .collect(),
+            gap: DEFAULT_GAP,
+        };
+        foreign_scan::validate_imported_plan(&plan).map_err(scan_error_copy)?;
+        self.cancel();
+        self.source_form.select_source(Source::Descriptor);
+        self.source_form.edit_external(source.external.clone());
+        self.source_form.edit_internal(source.internal.clone());
+        self.imported_source = Some(source);
+        Ok(())
+    }
+
+    pub fn imported_source(&self) -> Option<&ImportedClaimSource> {
+        self.imported_source.as_ref()
     }
 
     pub fn set_targets(&mut self, targets: Vec<TargetCube>) {
@@ -283,11 +319,15 @@ impl SplitWalletPanel {
 
     /// Device polling runs only while the hardware source is chosen.
     pub fn polls_hardware(&self) -> bool {
-        self.source_form.polls_hardware()
+        self.imported_source.is_none() && self.source_form.polls_hardware()
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
-        self.source_form.subscription().map(Message::from)
+        if self.imported_source.is_some() {
+            Subscription::none()
+        } else {
+            self.source_form.subscription().map(Message::from)
+        }
     }
 
     /// Consume exact scan evidence for the selected target and account
@@ -304,6 +344,7 @@ impl SplitWalletPanel {
         if !matches!(&self.status, Status::Complete(summary) if summary.generation == self.generation)
             || evidence.summary.generation != self.generation
             || !evidence.summary.signable
+            || !self.imported_evidence_matches(&evidence)
         {
             self.cancel();
             return None;
@@ -347,6 +388,9 @@ impl SplitWalletPanel {
     ) -> Task<Message> {
         match message {
             Message::SourceSelected(source) => {
+                if self.imported_source.is_some() {
+                    return Task::none();
+                }
                 if source != self.source_form.source() {
                     self.cancel();
                     self.source_form.select_source(source);
@@ -354,6 +398,9 @@ impl SplitWalletPanel {
                 Task::none()
             }
             Message::Hardware(message) => {
+                if self.imported_source.is_some() {
+                    return Task::none();
+                }
                 let (task, invalidated) = self.source_form.update_hardware(message);
                 if invalidated {
                     // Scan evidence belongs to the account it was built from.
@@ -365,12 +412,18 @@ impl SplitWalletPanel {
                 task.map(Message::from)
             }
             Message::ExternalEdited(value) => {
+                if self.imported_source.is_some() {
+                    return Task::none();
+                }
                 self.cancel();
                 self.source_form.edit_external(value);
                 self.status = Status::Editing;
                 Task::none()
             }
             Message::InternalEdited(value) => {
+                if self.imported_source.is_some() {
+                    return Task::none();
+                }
                 self.cancel();
                 self.source_form.edit_internal(value);
                 self.status = Status::Editing;
@@ -432,10 +485,18 @@ impl SplitWalletPanel {
                     .find(|range| range.descriptor.branch() == Branch::Internal)
                     .map(|range| range.descriptor.clone());
                 self.status = Status::Scanning;
+                let imported = self.imported_source.is_some();
                 Task::perform(
                     async move {
-                        foreign_split_inventory::scan(client, plan, generation, receiver)
+                        let result = if imported {
+                            foreign_split_inventory::scan_imported(
+                                client, plan, generation, receiver,
+                            )
                             .await
+                        } else {
+                            foreign_split_inventory::scan(client, plan, generation, receiver).await
+                        };
+                        result
                             .map_err(inventory_error_copy)
                             .and_then(|two| ScanEvidence::new(two, external, internal))
                             .map(Arc::new)
@@ -444,6 +505,9 @@ impl SplitWalletPanel {
                 )
             }
             Message::Scanned(result, generation, fired_session) => {
+                if self.imported_source.is_some() && !matches!(self.status, Status::Scanning) {
+                    return Task::none();
+                }
                 if generation != self.generation {
                     return Task::none();
                 }
@@ -458,6 +522,13 @@ impl SplitWalletPanel {
                             || evidence.inventory.generation() != generation =>
                     {
                         self.cancel();
+                    }
+                    Ok(evidence) if !self.imported_evidence_matches(&evidence) => {
+                        self.evidence = None;
+                        self.status = Status::Failed(
+                            "The scan did not cover every saved receive and change address on both chains. No balance conclusion was made. Scan again."
+                                .to_string(),
+                        );
                     }
                     Ok(evidence) => {
                         self.status = Status::Complete(evidence.summary.clone());
@@ -475,6 +546,24 @@ impl SplitWalletPanel {
     }
 
     fn plan(&self) -> Result<ScanPlan, ScanError> {
+        if let Some(source) = &self.imported_source {
+            let external = ScanDescriptor::parse(Branch::External, &source.external)?;
+            let internal = ScanDescriptor::parse(Branch::Internal, &source.internal)?;
+            let plan = ScanPlan {
+                chain: ChainId::BitcoinBlake2b,
+                branches: vec![external, internal]
+                    .into_iter()
+                    .map(|descriptor| BranchRange {
+                        descriptor,
+                        start: 0,
+                        end_exclusive: source.address_window,
+                    })
+                    .collect(),
+                gap: DEFAULT_GAP,
+            };
+            foreign_scan::validate_imported_plan(&plan)?;
+            return Ok(plan);
+        }
         if self.source_form.source() == Source::Hardware {
             let account = self
                 .source_form
@@ -516,6 +605,39 @@ impl SplitWalletPanel {
             branches,
             gap: DEFAULT_GAP,
         })
+    }
+
+    fn imported_evidence_matches(&self, evidence: &ScanEvidence) -> bool {
+        let Some(source) = &self.imported_source else {
+            return true;
+        };
+        let Ok(plan) = self.plan() else {
+            return false;
+        };
+        if evidence.report.chain() != ChainId::BitcoinBlake2b
+            || evidence.bitcoin.chain() != ChainId::Bitcoin
+            || evidence.external.canonical() != plan.branches[0].descriptor.canonical()
+            || evidence.internal.as_ref().map(ScanDescriptor::canonical)
+                != Some(plan.branches[1].descriptor.canonical())
+        {
+            return false;
+        }
+        [Branch::External, Branch::Internal]
+            .iter()
+            .copied()
+            .all(|branch| {
+                [
+                    evidence.report.coverage(branch),
+                    evidence.bitcoin.coverage(branch),
+                ]
+                .iter()
+                .copied()
+                .all(|coverage| {
+                    coverage.is_some_and(|walk| {
+                        walk.start == 0 && walk.end_exclusive >= source.address_window
+                    })
+                })
+            })
     }
 
     #[cfg(test)]
@@ -574,13 +696,24 @@ fn scan_error_copy(error: ScanError) -> String {
 }
 
 pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
-    let header = Column::new()
-        .spacing(6)
-        .push(h3("Split a Bitcoin wallet"))
-        .push(
-            p1_regular("Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. This step scans public keys on Bitcoin and Bitcoin Blake2b only; it cannot sign or move funds.")
-                .style(theme::text::secondary),
-        );
+    let imported = panel.imported_source.as_ref();
+    let header = if imported.is_some() {
+        Column::new()
+            .spacing(6)
+            .push(h3("Claim BTCB2"))
+            .push(
+                p1_regular("Scan your selected Bitcoin wallet on both chains, then review any BTCB2 found. Your original wallet or hardware device signs; the destination is a BTCB2 Cube.")
+                    .style(theme::text::secondary),
+            )
+    } else {
+        Column::new()
+            .spacing(6)
+            .push(h3("Split a Bitcoin wallet"))
+            .push(
+                p1_regular("Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. This step scans public keys on Bitcoin and Bitcoin Blake2b only; it cannot sign or move funds.")
+                    .style(theme::text::secondary),
+            )
+    };
 
     let target = iced::widget::pick_list(
         panel.targets.clone(),
@@ -590,22 +723,39 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     .placeholder("Choose a Bitcoin Blake2b Cube")
     .width(Length::Fill);
 
-    let form = Column::new()
+    let mut form = Column::new()
         .spacing(12)
         .push(p1_bold("Destination Cube"))
-        .push(target)
-        .push(
+        .push(target);
+    form = if let Some(source) = imported {
+        form.push(p1_bold("Original Bitcoin wallet"))
+            .push(p1_regular(&source.name))
+            .push(caption(format!(
+                "Selected wallet · receive and change addresses 0–{} will be checked on both chains",
+                source.address_window.saturating_sub(1)
+            )).style(theme::text::secondary))
+    } else {
+        form.push(
             wallet_source_form::view(&panel.source_form, &SourceFormCopy::split())
                 .map(Message::from),
-        );
+        )
+    };
 
     let status: Element<Message> = match &panel.status {
-        Status::Editing => caption("Ready to scan. An incomplete scan is always an error, never a zero balance.")
-            .style(theme::text::secondary)
-            .into(),
-        Status::Scanning => p1_regular("Scanning with fresh, authenticated chain observations…")
-            .style(theme::text::secondary)
-            .into(),
+        Status::Editing => caption(if imported.is_some() {
+            "We’ll check both chains before showing what may be available to claim."
+        } else {
+            "Ready to scan. An incomplete scan is always an error, never a zero balance."
+        })
+        .style(theme::text::secondary)
+        .into(),
+        Status::Scanning => p1_regular(if imported.is_some() {
+            "Checking Bitcoin and Bitcoin Blake2b history…"
+        } else {
+            "Scanning with fresh, authenticated chain observations…"
+        })
+        .style(theme::text::secondary)
+        .into(),
         Status::Failed(error) => p1_regular(error).style(theme::text::warning).into(),
         Status::Complete(summary) => Column::new()
             .spacing(6)
@@ -652,6 +802,8 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                     "Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet."
                 } else if summary.pre_fork == 0 {
                     "No confirmed pre-fork coins were proven. Only pre-fork coins can be split; post-fork or unclassified coins are excluded."
+                } else if imported.is_some() && summary.inventory.splittable == 0 {
+                    "No confirmed pre-fork coins remain unspent on both chains for this claim."
                 } else {
                     "Continue to unlock the destination Cube and review bounded sweep economics. Spending remains locked."
                 })
@@ -661,7 +813,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     };
 
     let scanning = matches!(panel.status, Status::Scanning);
-    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable());
+    let reviewable = matches!(&panel.status, Status::Complete(summary) if summary.reviewable() && (imported.is_none() || summary.inventory.splittable > 0));
     let actions = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -671,7 +823,11 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
                 if scanning {
                     "Scanning…"
                 } else {
-                    "Scan wallet"
+                    if imported.is_some() {
+                        "Scan selected wallet"
+                    } else {
+                        "Scan wallet"
+                    }
                 },
             )
             .on_press_maybe((!scanning).then_some(Message::Scan)),
@@ -780,6 +936,211 @@ mod tests {
             .unwrap(),
         );
         format!("wpkh({xpub}/{branch}/*)")
+    }
+
+    fn imported_source(window: u32) -> ImportedClaimSource {
+        ImportedClaimSource {
+            cube_id: "bitcoin-wallet-1".into(),
+            name: "My Bitcoin wallet".into(),
+            external: ranged_descriptor(0),
+            internal: ranged_descriptor(1),
+            address_window: window,
+        }
+    }
+
+    #[test]
+    fn imported_source_is_prefilled_and_cannot_be_edited_by_messages() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        let source = imported_source(240);
+        panel.set_imported_source(source.clone()).unwrap();
+        assert_eq!(panel.imported_source().unwrap().cube_id, source.cube_id);
+        assert_eq!(panel.source_form.external(), source.external);
+        assert_eq!(panel.source_form.internal(), source.internal);
+        for message in [
+            Message::ExternalEdited("other".into()),
+            Message::InternalEdited("other".into()),
+            Message::SourceSelected(Source::Hardware),
+            Message::Hardware(HardwareMessage::AccountEdited("1".into())),
+        ] {
+            let generation = panel.generation;
+            let _ = panel.update(message, None, 0);
+            assert_eq!(panel.generation, generation);
+            assert_eq!(panel.source_form.external(), source.external);
+            assert_eq!(panel.source_form.internal(), source.internal);
+            assert_eq!(panel.source_form.source(), Source::Descriptor);
+            assert_eq!(panel.imported_source().unwrap().cube_id, source.cube_id);
+        }
+        assert!(!panel.polls_hardware());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn imported_view_names_the_source_and_action_without_edit_controls() {
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
+                self.0.push(text.to_owned());
+            }
+        }
+
+        let renderer = <iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer for the claim view");
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.set_imported_source(imported_source(240)).unwrap();
+        let mut element = view(&panel);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 1400.0)),
+        );
+        let mut labels = Labels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        let labels = labels.0.join(" | ");
+        for visible in [
+            "Claim BTCB2",
+            "Original Bitcoin wallet",
+            "My Bitcoin wallet",
+            "receive and change addresses 0–239",
+            "Destination Cube",
+            "Scan selected wallet",
+        ] {
+            assert!(labels.contains(visible), "missing {}: {}", visible, labels);
+        }
+        for hidden in [
+            "Public descriptor",
+            "Hardware wallet",
+            "External / receive descriptor",
+            "Internal / change descriptor",
+        ] {
+            assert!(
+                !labels.contains(hidden),
+                "unexpected {}: {}",
+                hidden,
+                labels
+            );
+        }
+    }
+
+    #[test]
+    fn imported_source_replacement_invalidates_scan_and_scans_full_window() {
+        let _guard = crate::app::session::test_guard();
+        let mut panel = SplitWalletPanel::new();
+        panel.set_targets(vec![target()]);
+        panel.set_imported_source(imported_source(240)).unwrap();
+        let plan = panel.plan().unwrap();
+        assert_eq!(plan.branches.len(), 2);
+        assert_eq!(plan.branches[0].descriptor.branch(), Branch::External);
+        assert_eq!(plan.branches[1].descriptor.branch(), Branch::Internal);
+        assert!(plan
+            .branches
+            .iter()
+            .all(|range| range.start == 0 && range.end_exclusive == 240));
+        panel.status = Status::Scanning;
+        let stale_generation = panel.generation;
+        panel.set_imported_source(imported_source(300)).unwrap();
+        assert_eq!(panel.generation, stale_generation + 1);
+        assert!(panel.evidence.is_none());
+        assert_eq!(panel.status(), &Status::Editing);
+        let _ = panel.update(
+            Message::Scanned(Err("stale".into()), stale_generation, 0),
+            None,
+            0,
+        );
+        assert_eq!(panel.status(), &Status::Editing);
+        assert_eq!(panel.plan().unwrap().branches[0].end_exclusive, 300);
+        assert!(panel.set_imported_source(imported_source(0)).is_err());
+        assert_eq!(panel.plan().unwrap().branches[0].end_exclusive, 300);
+        assert!(panel.set_imported_source(imported_source(10_001)).is_err());
+    }
+
+    #[test]
+    fn imported_evidence_requires_both_branches_full_coverage_on_both_chains() {
+        let _guard = crate::app::session::test_guard();
+        let source = imported_source(240);
+        let mut panel = SplitWalletPanel::new();
+        panel.set_imported_source(source.clone()).unwrap();
+        let generation = panel.generation;
+        let coverage = |internal_end| {
+            vec![
+                foreign_scan::BranchCoverage {
+                    branch: Branch::External,
+                    start: 0,
+                    end_exclusive: 240,
+                    last_used: None,
+                },
+                foreign_scan::BranchCoverage {
+                    branch: Branch::Internal,
+                    start: 0,
+                    end_exclusive: internal_end,
+                    last_used: None,
+                },
+            ]
+        };
+        let report = foreign_scan::ScanReport::for_test(
+            ChainId::BitcoinBlake2b,
+            generation,
+            BlockHash::from_byte_array([9; 32]),
+            Vec::new(),
+        )
+        .with_fork_height(Some(100))
+        .with_coverage(coverage(240));
+        let bitcoin = foreign_scan::ScanReport::for_test(
+            ChainId::Bitcoin,
+            generation,
+            BlockHash::from_byte_array([8; 32]),
+            Vec::new(),
+        )
+        .with_coverage(coverage(239));
+        let inventory = SplitInventory::join(&report, &bitcoin, generation, true).unwrap();
+        let external = ScanDescriptor::parse(Branch::External, &source.external).unwrap();
+        let internal = ScanDescriptor::parse(Branch::Internal, &source.internal).unwrap();
+        let short = Arc::new(
+            ScanEvidence::new(
+                TwoChainScan {
+                    btcb2: report,
+                    bitcoin,
+                    inventory,
+                },
+                external,
+                Some(internal),
+            )
+            .unwrap(),
+        );
+        assert!(!panel.imported_evidence_matches(&short));
+        let short_for_handoff = short.clone();
+        panel.status = Status::Scanning;
+        let _ = panel.update(Message::Scanned(Ok(short), generation, 0), None, 0);
+        assert!(
+            matches!(panel.status(), Status::Failed(copy) if copy.contains("did not cover every saved receive and change address"))
+        );
+        assert!(panel.evidence.is_none());
+        panel.set_targets(vec![target()]);
+        panel.generation = generation;
+        panel.status = Status::Complete(short_for_handoff.summary.clone());
+        panel.evidence = Some(short_for_handoff);
+        assert!(panel
+            .take_handoff(ChainId::BitcoinBlake2b, 0, &CoincubeClient::new())
+            .is_none());
     }
 
     #[test]

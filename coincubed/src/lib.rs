@@ -37,6 +37,7 @@ use crate::{
         DatabaseConnection, DatabaseInterface,
     },
 };
+pub use database::sqlite::preflight::ImportedClaimState;
 pub use database::sqlite::preflight::{PreflightError, StoredIdentity};
 
 use coincube_core::chain::ChainId;
@@ -225,6 +226,57 @@ pub fn read_imported_address_state(
         )));
     }
     Ok((conn.receive_index().into(), conn.change_index().into()))
+}
+
+/// Read the imported wallet's current discovery and allocation state for a
+/// Claim request. Uses one short read-only SQLite snapshot and refuses a
+/// missing or mismatched database without creating or migrating it.
+pub fn read_imported_claim_state(
+    config: &Config,
+    data_dir: &DataDirectory,
+) -> Result<ImportedClaimState, StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "claim-state lookup requires an imported wallet".into(),
+        ))
+    })?;
+    let expected = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if expected.path() != data_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "claim-state directory does not match imported wallet config".into(),
+        )));
+    }
+    database::sqlite::preflight::read_imported_claim_state(
+        &data_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        config.import_birthday.expect("validated imported birthday"),
+        config
+            .import_initial_lookahead
+            .expect("validated imported lookahead"),
+    )
+    .map_err(StartupError::DbPreflight)
+}
+
+/// Mark a synthetic imported database's historical scan complete for GUI
+/// fixtures. Production callers must obtain coverage from the backend scan.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn complete_imported_history_for_test(
+    config: &Config,
+    data_dir: &DataDirectory,
+    receive_scanned: u32,
+    change_scanned: u32,
+) -> Result<(), StartupError> {
+    read_imported_claim_state(config, data_dir)?;
+    let secp = secp256k1::Secp256k1::verification_only();
+    let db = SqliteDb::new(data_dir.sqlite_db_file_path(), None, &secp)?;
+    let mut conn = db.connection()?;
+    conn.complete_import_history(receive_scanned, change_scanned)
+        .map_err(SqliteDbError::Rusqlite)?;
+    Ok(())
 }
 
 #[cfg(not(test))]

@@ -40,6 +40,7 @@ use std::{
 };
 
 use coincube_core::chain::ChainId;
+use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
 use miniscript::bitcoin::Network;
 
 /// The 100-byte header every SQLite database starts with.
@@ -63,6 +64,114 @@ pub struct StoredIdentity {
     pub chain: ChainId,
     /// The encoding column as stored.
     pub network: Network,
+}
+
+/// One read-only snapshot of the imported wallet's durable claim window.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ImportedClaimState {
+    pub discovery_target: u32,
+    pub receive_scanned: u32,
+    pub change_scanned: u32,
+    pub history_complete: bool,
+    pub receive_index: u32,
+    pub change_index: u32,
+}
+
+/// Read an imported wallet's identity and full discovery state in one short,
+/// read-only transaction. A missing, mismatched, busy or unrecovered database
+/// is a refusal; this never creates or migrates storage.
+pub fn read_imported_claim_state(
+    db_path: &Path,
+    chain: ChainId,
+    descriptor: &ImportedWalletDescriptor,
+    birthday: u32,
+    initial_lookahead: u32,
+) -> Result<ImportedClaimState, PreflightError> {
+    inspect_header(db_path)?;
+    refuse_sidecars(db_path)?;
+    let mut conn = rusqlite::Connection::open_with_flags(
+        db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(|error| sqlite_error(db_path, error))?;
+    conn.busy_timeout(std::time::Duration::from_millis(250))
+        .map_err(|error| sqlite_error(db_path, error))?;
+    conn.pragma_update(None, "query_only", true)
+        .map_err(|error| sqlite_error(db_path, error))?;
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Deferred)
+        .map_err(|error| sqlite_error(db_path, error))?;
+    let version = exactly_one(
+        "version",
+        query_all(&tx, db_path, "SELECT version FROM version", |row| {
+            row.get::<_, i64>(0)
+        })?,
+    )?;
+    if version != DB_VERSION {
+        return Err(PreflightError::UnsupportedVersion(version));
+    }
+    let tip = exactly_one(
+        "tip",
+        query_all(&tx, db_path, "SELECT chain, network FROM tip", |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?,
+    )?;
+    if tip
+        != (
+            chain.dir_name().to_string(),
+            chain.bitcoin_network().to_string(),
+        )
+    {
+        return Err(PreflightError::MalformedIdentity(
+            "imported wallet chain mismatch".into(),
+        ));
+    }
+    let (kind, stored_chain, receive, change, stored_birthday, stored_lookahead, state) =
+        exactly_one(
+            "wallet",
+            query_all(
+                &tx,
+                db_path,
+                "SELECT wallet_kind, import_chain, imported_receive_descriptor,
+                        imported_change_descriptor, import_birthday, import_initial_lookahead,
+                        COALESCE((SELECT target FROM import_discovery WHERE id = 1), import_initial_lookahead),
+                        import_receive_scanned, import_change_scanned, import_history_complete,
+                        deposit_derivation_index, change_derivation_index
+                 FROM wallets",
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, u32>(4)?,
+                        row.get::<_, u32>(5)?,
+                        ImportedClaimState {
+                            discovery_target: row.get(6)?,
+                            receive_scanned: row.get(7)?,
+                            change_scanned: row.get(8)?,
+                            history_complete: row.get(9)?,
+                            receive_index: row.get(10)?,
+                            change_index: row.get(11)?,
+                        },
+                    ))
+                },
+            )?,
+        )?;
+    if kind != "imported"
+        || stored_chain != chain.dir_name()
+        || receive != descriptor.receive_descriptor().to_string()
+        || change != descriptor.change_descriptor().to_string()
+        || stored_birthday != birthday
+        || stored_lookahead != initial_lookahead
+    {
+        return Err(PreflightError::MalformedIdentity(
+            "imported wallet identity does not match its configuration".into(),
+        ));
+    }
+    tx.rollback()
+        .map_err(|error| sqlite_error(db_path, error))?;
+    Ok(state)
 }
 
 #[derive(Debug)]

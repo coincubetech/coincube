@@ -187,9 +187,52 @@ impl Pane {
         self.update(Message::tab(tab_id, tab::Message::Run(app_msg.into())), cfg)
     }
 
+    fn open_imported_claim(&mut self, source_tab: usize) -> Task<Message> {
+        let prepared = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == source_tab)
+            .and_then(|tab| {
+                if let tab::State::App(app) = &tab.state {
+                    Some(
+                        app.prepare_imported_claim()
+                            .map(|(request, client)| (app.datadir().clone(), request, client)),
+                    )
+                } else {
+                    None
+                }
+            });
+        let Some(prepared) = prepared else {
+            return Task::none();
+        };
+        let (root, request, client) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Task::done(Message::tab(
+                    source_tab,
+                    tab::Message::Run(app::Message::View(app::view::Message::ShowError(error))),
+                ))
+            }
+        };
+        let (home, task) = crate::home::Home::new_imported_claim(root, request, client);
+        self.tabs_created += 1;
+        let id = self.tabs_created;
+        let mut tab = tab::Tab::new(id, tab::State::Home(home));
+        tab.set_theme_mode(self.theme_mode);
+        self.tabs.push(tab);
+        self.focused_tab = self.tabs.len() - 1;
+        task.map(move |message| Message::tab(id, tab::Message::Launch(message)))
+    }
+
     pub fn update(&mut self, message: Message, cfg: &Config) -> Task<Message> {
         match message {
             Message::Tab(id, msg) => {
+                if matches!(
+                    msg.as_ref(),
+                    tab::Message::Run(app::Message::View(app::view::Message::StartImportedClaim))
+                ) {
+                    return self.open_imported_claim(id);
+                }
                 return self
                     .tabs
                     .iter_mut()

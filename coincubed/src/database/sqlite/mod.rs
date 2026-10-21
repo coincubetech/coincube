@@ -5253,6 +5253,83 @@ CREATE TABLE labels (
         }
 
         #[test]
+        fn imported_claim_snapshot_tracks_live_discovery_and_allocation() {
+            use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+            use coincube_core::wallet_descriptor::ImportedWalletDescriptor;
+
+            let secp = secp256k1::Secp256k1::new();
+            let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[43; 32]).unwrap();
+            let account = master
+                .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+                .unwrap();
+            let key = format!(
+                "[{}/84h/0h/0h]{}/",
+                master.fingerprint(&secp),
+                Xpub::from_priv(&secp, &account)
+            );
+            let descriptor = ImportedWalletDescriptor::parse(
+                &format!("wpkh({key}0/*)"),
+                Some(&format!("wpkh({key}1/*)")),
+                ChainId::Bitcoin,
+            )
+            .unwrap();
+            let dir = tmp_dir();
+            fs::create_dir_all(&dir).unwrap();
+            let db_path = dir.join("coincubed.sqlite3");
+            assert!(preflight::read_imported_claim_state(
+                &db_path,
+                ChainId::Bitcoin,
+                &descriptor,
+                0,
+                20
+            )
+            .is_err());
+            create_imported_db(&db_path, ChainId::Bitcoin, &descriptor, 0, 20).unwrap();
+            let verify = secp256k1::Secp256k1::verification_only();
+            let db = SqliteDb::new(db_path.clone(), None, &verify).unwrap();
+            let mut conn = db.connection().unwrap();
+            conn.complete_import_history(20, 20).unwrap();
+            let read = || {
+                preflight::read_imported_claim_state(&db_path, ChainId::Bitcoin, &descriptor, 0, 20)
+                    .unwrap()
+            };
+            let state = read();
+            assert_eq!(state.discovery_target, 20);
+            assert!(state.history_complete);
+            assert!(preflight::read_imported_claim_state(
+                &db_path,
+                ChainId::Bitcoin,
+                &descriptor,
+                1,
+                20
+            )
+            .is_err());
+
+            // A normal active rollback journal must not prevent a coherent read.
+            conn.conn
+                .execute_batch("BEGIN IMMEDIATE; UPDATE wallets SET import_history_complete = 0")
+                .unwrap();
+            assert!(read().history_complete);
+            conn.conn.execute_batch("ROLLBACK").unwrap();
+
+            drop(conn);
+            restore_imported_address_state(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 45, 32)
+                .unwrap();
+            let state = read();
+            assert_eq!((state.receive_index, state.change_index), (45, 32));
+            assert!(!state.history_complete);
+            let mut conn = db.connection().unwrap();
+            conn.complete_import_history(65, 52).unwrap();
+            drop(conn);
+            assert!(read().history_complete);
+            expand_imported_discovery(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 40).unwrap();
+            let state = read();
+            assert_eq!(state.discovery_target, 40);
+            assert!(!state.history_complete);
+            fs::remove_dir_all(dir).unwrap();
+        }
+
+        #[test]
         fn a_legacy_layout_fixture_cannot_carry_a_fork_identity() {
             let tmp_dir = tmp_dir();
             fs::create_dir_all(&tmp_dir).unwrap();

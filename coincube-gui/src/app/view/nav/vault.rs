@@ -72,15 +72,24 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
         && ctx.has_vault
         && ctx.btcb2_server_enabled
         && ctx.btcb2_claim_resume;
-    if !ctx.has_imported_bitcoin
-        && (resume_fork
-            || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available())
+    let imported_claim = crate::app::features::imported_claim_blake2b(
+        ctx.network,
+        ctx.has_imported_bitcoin,
+        ctx.btcb2_server_enabled,
+    )
+    .is_available();
+    if imported_claim
+        || (!ctx.has_imported_bitcoin
+            && (resume_fork
+                || crate::app::features::claim_blake2b(ctx.claim_source_cube()).is_available()))
     {
         let settings_at = items.len().saturating_sub(1);
         items.insert(
             settings_at,
             SubItem::new(
-                if resume_fork {
+                if imported_claim {
+                    "Claim BTCB2 imported"
+                } else if resume_fork {
                     "Resume Claim"
                 } else {
                     "Claim BTCB2"
@@ -129,7 +138,7 @@ mod tests {
     }
 
     #[test]
-    fn imported_wallet_uses_common_vault_routes_without_inheritance_actions() {
+    fn imported_wallet_has_claim_without_inheritance_actions() {
         let status = crate::app::ConnectionStatus::default();
         let mut context = ctx(&status, crate::chain::ChainId::Bitcoin, true, false);
         context.has_vault = false;
@@ -143,6 +152,7 @@ mod tests {
                 "Coins",
                 "Transactions",
                 "PSBTs",
+                "Claim BTCB2 imported",
                 "Settings"
             ]
         );
@@ -152,6 +162,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(labels(&settings), ["Node", "Wallet", "Import/Export"]);
+        context.btcb2_server_enabled = false;
+        assert!(!labels(&items(&context)).contains(&"Claim BTCB2 imported"));
+        context.btcb2_server_enabled = true;
+        context.network = crate::chain::ChainId::BitcoinBlake2b;
+        assert!(!labels(&items(&context)).contains(&"Claim BTCB2 imported"));
     }
 
     /// With the account grant the claim entry appears, immediately before
