@@ -10,6 +10,7 @@ pub mod modal;
 pub mod notification;
 pub mod pagination;
 pub mod quote_display;
+pub mod session_status;
 pub mod spinner;
 pub mod tabs;
 pub mod text;

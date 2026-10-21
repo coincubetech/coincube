@@ -4554,7 +4554,7 @@ impl App {
     }
 
     /// A Bitcoin Claim may borrow the paired BTCB2 wallet only while both
-    /// Cubes are open under the same authenticated Connect session.
+    /// Cubes are open under the same authenticated Connect account.
     pub(crate) fn claim_pair_request(&self) -> Option<ClaimPairRequest> {
         if self.cube_settings.network != crate::chain::ChainId::Bitcoin
             || self.claim_session_invalidated
@@ -4576,8 +4576,9 @@ impl App {
         })
     }
 
-    /// Return no daemon unless the open fork Cube, local wallet configuration
-    /// and admitted Connect session all match the Bitcoin Claim request.
+    /// Require the exact fork Cube and Vault, plus an authenticated session
+    /// for the request's account and provider. Credentials remain tab-local:
+    /// the fork daemon must still match its own admitted session.
     pub(crate) fn claim_fork_daemon(
         &self,
         request: &ClaimPairRequest,
@@ -4601,7 +4602,12 @@ impl App {
         let account = self.panels.connect.account.user.as_ref()?.id.to_string();
         if account != request.session.account
             || current.base_url != request.session.client.base_url
-            || current.token() != request.session.client.token()
+            || current.token().is_none_or(|token| token.is_empty())
+            || request
+                .session
+                .client
+                .token()
+                .is_none_or(|token| token.is_empty())
         {
             return None;
         }
@@ -4609,8 +4615,9 @@ impl App {
         let config = daemon.config()?;
         if !crate::chain::is_managed_local_fork(config, &self.datadir)
             && !self.fork_connect_client.as_ref().is_some_and(|bound| {
-                bound.base_url == request.session.client.base_url
-                    && bound.token() == request.session.client.token()
+                // The fork daemon stays bound to its own admitted credential.
+                // A sibling tab can have another valid login for this account.
+                bound.base_url == current.base_url && bound.token() == current.token()
             })
         {
             return None;
@@ -11389,6 +11396,50 @@ mod tests {
     }
 
     #[test]
+    fn fork_theme_toggle_reaches_global_handler_and_updates_all_tabs() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                use coincube_ui::theme::palette::ThemeMode;
+                use iced::futures::StreamExt;
+                let root =
+                    std::env::temp_dir().join(format!("fork-theme-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&root).unwrap();
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(
+                    split_app(&root, false, true),
+                    split_app(&root, false, true),
+                );
+                rt.block_on(async {
+                    for expected in [ThemeMode::Light, ThemeMode::Dark] {
+                        let mut pending = vec![gui.reviewer_theme_toggle(1)];
+                        while let Some(task) = pending.pop() {
+                            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                                while let Some(action) = stream.next().await {
+                                    if let iced_runtime::Action::Output(message) = action {
+                                        pending.push(gui.update(message));
+                                    }
+                                }
+                            }
+                        }
+                        for index in 0..2 {
+                            assert_eq!(gui.reviewer_app_mut(index).cache.theme_mode, expected);
+                        }
+                    }
+                    drop(gui);
+                    std::fs::remove_dir_all(root).unwrap();
+                });
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    #[test]
     fn claim_fork_pairing_requires_exact_open_wallet_and_connect_identity() {
         let root = std::env::temp_dir().join(format!("claim-fork-pair-{}", uuid::Uuid::new_v4()));
         let mut app = split_app(&root, false, true);
@@ -11416,9 +11467,25 @@ mod tests {
         request.session.account = "8".into();
         assert!(app.claim_fork_daemon(&request).is_none());
         request.session.account = "7".into();
-        request.session.client.set_token("other-token");
+        request.session.client.set_token("other-valid-tab-token");
+        assert!(
+            app.claim_fork_daemon(&request).is_some(),
+            "separately authenticated tabs of the same account can pair"
+        );
+        request.session.client.set_token("");
         assert!(app.claim_fork_daemon(&request).is_none());
         request.session.client = app.fork_connect_client.as_ref().unwrap().clone();
+        let admitted = app.panels.connect.account.client.clone();
+        app.panels
+            .connect
+            .account
+            .client
+            .set_token("unadmitted-fork-token");
+        assert!(
+            app.claim_fork_daemon(&request).is_none(),
+            "the fork daemon cannot borrow a credential it was not admitted with"
+        );
+        app.panels.connect.account.client = admitted;
         request.session.client.base_url = "https://other.example/".into();
         assert!(app.claim_fork_daemon(&request).is_none());
         request.session.client = app.fork_connect_client.as_ref().unwrap().clone();

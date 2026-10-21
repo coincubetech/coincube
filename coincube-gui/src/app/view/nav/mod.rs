@@ -29,7 +29,7 @@ use coincube_ui::{
     icon::cube_icon,
     image::{tenshu_wordmark, theme_toggle_button},
     theme,
-    widget::{Button, Column, Element, Row},
+    widget::{Button, Column, ColumnExt, Element, Row},
 };
 use iced::{
     widget::{column, container, row, scrollable, text::Wrapping, Space},
@@ -100,10 +100,18 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Element<'a, Message> {
     let toggle = theme_toggle_row(ctx);
 
     let col: Column<Message> = column![wordmark, identity, rails, toggle]
+        .push_maybe(
+            ctx.connect_authenticated
+                .then(|| coincube_ui::component::session_status::indicator(false)),
+        )
         .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
         .height(Length::Fill)
         .align_x(Alignment::Start);
-    col.into()
+    container(col)
+        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
+        .height(Length::Fill)
+        .style(theme::container::sidebar_primary)
+        .into()
 }
 
 /// Tertiary rail for the current route, to be overlaid on the left
@@ -204,18 +212,16 @@ fn identity_block<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
 /// both rails. Mirrors the placement in the pre-refactor sidebar.
 fn theme_toggle_row<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     let toggle = theme_toggle_button(ctx.theme_mode, Message::ToggleTheme);
-    container(
-        row![
-            Space::new().width(Length::Fill),
-            toggle,
-            Space::new().width(Length::Fill),
-        ]
-        .align_y(Alignment::Center),
-    )
-    .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
-    .padding([10, 0])
-    .style(theme::container::sidebar_primary)
-    .into()
+    container(toggle)
+        .width(Length::Fixed(SIDEBAR_BASE_WIDTH))
+        .padding(iced::Padding {
+            top: 4.0,
+            right: 8.0,
+            bottom: 16.0,
+            left: 8.0,
+        })
+        .style(theme::container::sidebar_primary)
+        .into()
 }
 
 /// Small 8px colored dot showing the Connect realtime-stream health.
@@ -309,6 +315,150 @@ impl NavContext<'_> {
             has_vault: self.has_vault,
             server_enabled: self.btcb2_server_enabled,
             already_claimed: self.btcb2_already_claimed,
+        }
+    }
+}
+
+#[cfg(test)]
+mod footer_tests {
+    use super::*;
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+
+    #[tokio::test]
+    async fn cube_footer_theme_and_session_status_are_visible_and_actionable() {
+        #[derive(Default)]
+        struct Labels(Vec<(String, iced::Rectangle)>);
+        impl Operation for Labels {
+            fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
+                f(self);
+            }
+            fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+                self.0.push((value.to_owned(), bounds));
+            }
+        }
+        for bytes in [
+            coincube_ui::font::REGULAR_BYTES,
+            coincube_ui::font::BOLD_BYTES,
+            coincube_ui::font::BOOTSTRAP_ICONS_BYTE,
+        ] {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(std::borrow::Cow::Borrowed(bytes));
+        }
+        use coincube_ui::theme::palette::ThemeMode;
+        for (mode, label, theme) in [
+            (ThemeMode::Dark, "Light Mode", theme::Theme::dark()),
+            (ThemeMode::Light, "Dark Mode", theme::Theme::light()),
+        ] {
+            for signed_in in [false, true] {
+                let cache = crate::app::cache::Cache {
+                    theme_mode: mode,
+                    connect_authenticated: signed_in,
+                    backup_warning_dismissed: true,
+                    ..Default::default()
+                };
+                let menu = Menu::Cube(crate::app::menu::CubeSubMenu::Overview);
+                let mut element = crate::app::view::dashboard(&menu, &cache, Space::new());
+                let mut renderer = <iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(16.0),
+                    Some("tiny-skia"),
+                )
+                .await
+                .unwrap();
+                let mut tree = Tree::new(element.as_widget());
+                let size = iced::Size::new(900.0, 700.0);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, size),
+                );
+                let mut labels = Labels::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut labels,
+                );
+                let bounds = labels
+                    .0
+                    .iter()
+                    .find(|(text, _)| text == label)
+                    .expect("theme label")
+                    .1;
+                assert!(
+                    bounds.width >= 55.0
+                        && bounds.x >= 0.0
+                        && bounds.x + bounds.width <= SIDEBAR_BASE_WIDTH
+                );
+                assert_eq!(
+                    labels.0.iter().any(|(text, _)| text == "Signed in"),
+                    signed_in
+                );
+                let mut messages = Vec::new();
+                let cursor = iced::mouse::Cursor::Available(bounds.center());
+                for event in [
+                    iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                    iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+                ] {
+                    element.as_widget_mut().update(
+                        &mut tree,
+                        &iced::Event::Mouse(event),
+                        Layout::new(&node),
+                        cursor,
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut iced::advanced::Shell::new(&mut messages),
+                        &iced::Rectangle::with_size(size),
+                    );
+                }
+                assert!(matches!(messages.as_slice(), [Message::ToggleTheme]));
+                if let Ok(directory) = std::env::var("SIDEBAR_PREVIEW_DIR") {
+                    element.as_widget_mut().update(
+                        &mut tree,
+                        &iced::Event::Window(iced::window::Event::RedrawRequested(
+                            std::time::Instant::now(),
+                        )),
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &renderer,
+                        &mut iced::advanced::clipboard::Null,
+                        &mut iced::advanced::Shell::new(&mut Vec::new()),
+                        &iced::Rectangle::with_size(size),
+                    );
+                    element.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &theme,
+                        &iced::advanced::renderer::Style {
+                            text_color: theme.colors.text.primary,
+                        },
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &iced::Rectangle::with_size(size),
+                    );
+                    let pixels = renderer.screenshot(
+                        iced::Size::new(900, 700),
+                        1.0,
+                        theme.colors.general.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(&directory)
+                            .join(format!("cube-footer-{mode:?}-{signed_in}.png")),
+                        &pixels,
+                        900,
+                        700,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
         }
     }
 }

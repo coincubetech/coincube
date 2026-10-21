@@ -5280,34 +5280,7 @@ fn home_sidebar<'a>(home: &'a Home) -> Element<'a, Message> {
 /// Connect session indicator for an authenticated or pending session. It
 /// replaces the Sign In button; a signed-out session needs only that action.
 fn connect_status_row<'a>(account: &ConnectAccountPanel) -> Element<'a, Message> {
-    use coincube_ui::component::text as txt;
-
-    // A pending check must not read as signed out during session restoration.
-    let (label, dot_style): (_, fn(&theme::Theme) -> iced::widget::text::Style) =
-        if account.is_checking_session() {
-            ("Checking…", theme::text::warning)
-        } else {
-            ("Signed in", theme::text::success)
-        };
-
-    // Same geometry as `component::button::menu` (10 button + 10 content
-    // padding, 20px icon slot, 10 spacing) so the dot sits in the icon column
-    // and the label lines up with the menu labels.
-    Container::new(
-        Row::new()
-            .spacing(10)
-            .align_y(iced::alignment::Vertical::Center)
-            .push(icon::dot_icon().size(8).style(dot_style))
-            .push(txt::caption(label).style(theme::text::secondary)),
-    )
-    .padding(iced::Padding {
-        top: 10.0,
-        right: 20.0,
-        bottom: 14.0,
-        left: 20.0,
-    })
-    .width(Length::Fill)
-    .into()
+    coincube_ui::component::session_status::indicator(account.is_checking_session())
 }
 
 #[derive(Clone, Copy)]
