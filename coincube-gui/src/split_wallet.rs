@@ -702,6 +702,10 @@ fn scan_error_copy(error: ScanError) -> String {
     }
 }
 
+/// Render imported Claim setup with its original Bitcoin source first, or the
+/// editable source and destination form for a generic Split. Imported wallet
+/// identity stays read-only; scan, cancel and continuation actions follow the
+/// panel's current state.
 pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     let imported = panel.imported_source.as_ref();
     let header = if imported.is_some() {
@@ -1016,6 +1020,9 @@ mod tests {
         assert!(!panel.polls_hardware());
     }
 
+    /// Check source-first layout and action dispatch at narrow and standard
+    /// widths in both themes, including busy and failed states. Optional preview
+    /// output uses the same layout that the bounds and input assertions inspect.
     #[tokio::test(flavor = "multi_thread")]
     async fn imported_view_names_the_source_and_action_without_edit_controls() {
         use iced::advanced::{
@@ -1027,9 +1034,11 @@ mod tests {
         #[derive(Default)]
         struct Labels(Vec<(String, iced::Rectangle)>);
         impl Operation for Labels {
+            /// Carry the collector through nested source and action rows.
             fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
                 operate(self);
             }
+            /// Keep text bounds to verify ordering, wrapping and containment.
             fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, text: &str) {
                 self.0.push((text.to_owned(), bounds));
             }
@@ -1045,13 +1054,20 @@ mod tests {
                 .unwrap()
                 .load_font(std::borrow::Cow::Borrowed(bytes));
         }
-        let _guard = crate::app::session::test_guard();
         for width in [520, 760] {
             for (appearance, theme) in [
                 ("dark", theme::Theme::dark()),
                 ("light", theme::Theme::light()),
             ] {
                 for state in ["editing", "scanning", "failed"] {
+                    let mut renderer = <iced::Renderer as Headless>::new(
+                        coincube_ui::font::REGULAR,
+                        iced::Pixels(16.0),
+                        Some("tiny-skia"),
+                    )
+                    .await
+                    .expect("software renderer for the claim view");
+                    let _guard = crate::app::session::test_guard();
                     let mut panel = SplitWalletPanel::new();
                     panel.set_targets(vec![TargetCube {
                         id: "cube-1".into(),
@@ -1068,13 +1084,6 @@ mod tests {
                         "failed" => Status::Failed("Bitcoin chain: The scanner is temporarily unavailable. No balance conclusion was made.".into()),
                         _ => Status::Editing,
                     };
-                    let mut renderer = <iced::Renderer as Headless>::new(
-                        coincube_ui::font::REGULAR,
-                        iced::Pixels(16.0),
-                        Some("tiny-skia"),
-                    )
-                    .await
-                    .expect("software renderer for the claim view");
                     let mut element = view(&panel);
                     let mut tree = Tree::new(element.as_widget());
                     let node = element.as_widget_mut().layout(
