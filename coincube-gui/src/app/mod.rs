@@ -15070,6 +15070,259 @@ pub(crate) mod claim_step1_tests {
             .unwrap();
     }
 
+    /// Mock Connect API for a completed Home sign-in. Every bearer is accepted
+    /// by `/user`; `refresh_status` drives the keyring-refresh outcome.
+    async fn signin_server(refresh_status: u16) -> httpmock::MockServer {
+        use httpmock::prelude::*;
+        let server = MockServer::start_async().await;
+        server
+            .mock_async(|when, then| {
+                when.method(POST).path("/api/v1/auth/token/refresh");
+                then.status(refresh_status).json_body(serde_json::json!({
+                    "requires_2fa":false,"token":"refreshed-session",
+                    "refresh_token":"refreshed-refresh",
+                    "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
+                }));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/api/v1/user");
+                then.status(200).json_body(serde_json::json!({
+                    "id":7,"email":"fixture@example.invalid","email_verified":true
+                }));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/api/v1/connect/features");
+                then.status(200)
+                    .json_body(serde_json::json!({"success":true,"data":{"plans":[]}}));
+            })
+            .await;
+        server
+            .mock_async(|when, then| {
+                when.method(GET).path("/api/v1/connect/duress");
+                then.status(200).json_body(serde_json::json!({
+                    "success":true,"data":{"active":false,"enrolled":false,
+                    "thisDeviceRegistered":false}
+                }));
+            })
+            .await;
+        server
+    }
+
+    /// Run every sign-in propagation message through the real GUI until the
+    /// tabs settle. Returns the number of GUI updates it took.
+    async fn settle_signin(gui: &mut crate::gui::GUI, task: Task<crate::gui::Message>) -> usize {
+        use iced::futures::StreamExt;
+        let mut pending = vec![task];
+        let mut updates = 0;
+        while let Some(task) = pending.pop() {
+            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                while let Some(action) = stream.next().await {
+                    if let iced_runtime::Action::Output(message) = action {
+                        if crate::gui::GUI::reviewer_is_session_propagation(&message) {
+                            updates += 1;
+                            assert!(updates < 200, "sign-in propagation did not settle");
+                            pending.push(gui.update(message));
+                        }
+                    }
+                }
+            }
+        }
+        updates
+    }
+
+    fn home_login() -> crate::services::coincube::LoginResponse {
+        serde_json::from_value(serde_json::json!({
+            "requires_2fa":false,"token":"home-session","refresh_token":"home-refresh",
+            "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
+        }))
+        .unwrap()
+    }
+
+    /// L11 (2026-10-21 walkthrough): a Bitcoin Cube already open and signed
+    /// out, then a sign-in completed in a Home tab. The Cube must re-evaluate
+    /// its account-backed settings instead of staying on "Sign in to Connect"
+    /// while the footer, which summarises every tab, says "Signed in".
+    #[test]
+    fn open_signed_out_cube_signs_in_after_home_login() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                let root =
+                    std::env::temp_dir().join(format!("cube-home-signin-{}", uuid::Uuid::new_v4()));
+                rt.block_on(async {
+                    let server = signin_server(200).await;
+                    let (mut cube, _) = bitcoin_app(&root);
+                    cube.panels.connect.account.client =
+                        crate::services::coincube::CoincubeClient::for_test(server.base_url());
+                    let (mut home, _) = crate::home::Home::new_for_chain(
+                        CoincubeDirectory::new(root.clone()),
+                        Some(crate::chain::ChainId::Bitcoin),
+                    );
+                    home.connect_account.client =
+                        crate::services::coincube::CoincubeClient::for_test(server.base_url());
+                    let mut gui = crate::gui::GUI::reviewer_app_home_gui(cube, home);
+                    // The Cube opened with nothing saved: it settles on Login.
+                    let task = gui.reviewer_account(1, view::ConnectAccountMessage::Init);
+                    settle_signin(&mut gui, task).await;
+                    assert!(!gui
+                        .reviewer_app_mut(0)
+                        .panels
+                        .connect
+                        .account
+                        .is_authenticated());
+                    // Home's OTP verification completes.
+                    let epoch = gui.reviewer_home_mut(1).connect_account.auth_epoch();
+                    let task = gui.reviewer_home_account(
+                        2,
+                        view::ConnectAccountMessage::SetSession(home_login(), epoch),
+                    );
+                    let updates = settle_signin(&mut gui, task).await;
+                    assert!(updates <= 40, "sign-in ping-pong: {} updates", updates);
+                    assert!(gui.reviewer_home_mut(1).connect_account.is_authenticated());
+                    let cube = gui.reviewer_app_mut(0);
+                    assert!(cube.cache.sidebar_connect_signed_in);
+                    assert!(
+                        cube.panels.connect.account.is_authenticated(),
+                        "the open Cube must re-evaluate its Connect session after Home signs in"
+                    );
+                    assert!(cube.cache.connect_authenticated);
+                });
+                let _ = std::fs::remove_dir_all(root);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// A transient refresh failure in the open Cube leaves a truthful,
+    /// retryable error instead of a silent "Sign in" prompt or a loop, and
+    /// the Cube's own retry signs it in once the backend recovers.
+    #[test]
+    fn open_cube_shows_retryable_error_when_its_refresh_fails() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                let root = std::env::temp_dir()
+                    .join(format!("cube-refresh-fail-{}", uuid::Uuid::new_v4()));
+                rt.block_on(async {
+                    let failing = signin_server(503).await;
+                    let (mut cube, _) = bitcoin_app(&root);
+                    cube.panels.connect.account.client =
+                        crate::services::coincube::CoincubeClient::for_test(failing.base_url());
+                    let (mut home, _) = crate::home::Home::new_for_chain(
+                        CoincubeDirectory::new(root.clone()),
+                        Some(crate::chain::ChainId::Bitcoin),
+                    );
+                    home.connect_account.client =
+                        crate::services::coincube::CoincubeClient::for_test(failing.base_url());
+                    let mut gui = crate::gui::GUI::reviewer_app_home_gui(cube, home);
+                    let task = gui.reviewer_account(1, view::ConnectAccountMessage::Init);
+                    settle_signin(&mut gui, task).await;
+                    let epoch = gui.reviewer_home_mut(1).connect_account.auth_epoch();
+                    let task = gui.reviewer_home_account(
+                        2,
+                        view::ConnectAccountMessage::SetSession(home_login(), epoch),
+                    );
+                    settle_signin(&mut gui, task).await;
+                    assert!(gui.reviewer_home_mut(1).connect_account.is_authenticated());
+                    let cube = gui.reviewer_app_mut(0);
+                    assert!(!cube.panels.connect.account.is_authenticated());
+                    assert!(!cube.panels.connect.account.is_checking_session());
+                    assert!(
+                        cube.panels.connect.account.error.is_some(),
+                        "a failed check is shown as an error, not as signed out"
+                    );
+                    // The backend recovers; the panel's "Try again" re-runs Init.
+                    let healthy = signin_server(200).await;
+                    gui.reviewer_app_mut(0).panels.connect.account.client =
+                        crate::services::coincube::CoincubeClient::for_test(healthy.base_url());
+                    let task = gui.reviewer_account(1, view::ConnectAccountMessage::Init);
+                    settle_signin(&mut gui, task).await;
+                    let cube = gui.reviewer_app_mut(0);
+                    assert!(cube.panels.connect.account.is_authenticated());
+                    assert!(cube.cache.connect_authenticated);
+                    assert!(gui.reviewer_home_mut(1).connect_account.is_authenticated());
+                });
+                let _ = std::fs::remove_dir_all(root);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    /// The same sequence with the Cube in another split pane: the sign-in
+    /// rebroadcast must reach every pane, not only the one holding Home.
+    #[test]
+    fn signed_out_cube_in_another_pane_signs_in_after_home_login() {
+        std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = rt.enter();
+                let root =
+                    std::env::temp_dir().join(format!("cube-pane-signin-{}", uuid::Uuid::new_v4()));
+                rt.block_on(async {
+                    let server = signin_server(200).await;
+                    let (mut cube, _) = bitcoin_app(&root);
+                    cube.panels.connect.account.client =
+                        crate::services::coincube::CoincubeClient::for_test(server.base_url());
+                    let (mut home, _) = crate::home::Home::new_for_chain(
+                        CoincubeDirectory::new(root.clone()),
+                        Some(crate::chain::ChainId::Bitcoin),
+                    );
+                    home.connect_account.client =
+                        crate::services::coincube::CoincubeClient::for_test(server.base_url());
+                    let (mut gui, cube_pane) =
+                        crate::gui::GUI::reviewer_split_app_home_gui(cube, home);
+                    let task =
+                        gui.reviewer_account_in(cube_pane, 1, view::ConnectAccountMessage::Init);
+                    settle_signin(&mut gui, task).await;
+                    assert!(!gui
+                        .reviewer_app_in(cube_pane)
+                        .panels
+                        .connect
+                        .account
+                        .is_authenticated());
+                    let epoch = gui.reviewer_home_mut(0).connect_account.auth_epoch();
+                    let task = gui.reviewer_home_account(
+                        2,
+                        view::ConnectAccountMessage::SetSession(home_login(), epoch),
+                    );
+                    settle_signin(&mut gui, task).await;
+                    assert!(gui.reviewer_home_mut(0).connect_account.is_authenticated());
+                    let cube = gui.reviewer_app_in(cube_pane);
+                    assert!(
+                        cube.panels.connect.account.is_authenticated(),
+                        "a Cube in another pane must re-evaluate its session too: {:?} {:?}",
+                        cube.panels.connect.account.step,
+                        cube.panels.connect.account.error,
+                    );
+                    assert!(cube.cache.connect_authenticated);
+                });
+                let _ = std::fs::remove_dir_all(root);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
     /// The App acts on a completed full scan: the refresh that first reports it
     /// rewrites the settings file without the restored Vault's rescan marker, and a
     /// refresh while the scan is still running leaves the marker alone.

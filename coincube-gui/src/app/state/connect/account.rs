@@ -1478,6 +1478,19 @@ impl ConnectAccountPanel {
                 if matches!(self.step, ConnectFlowStep::Login { loading: true, .. }) {
                     return iced::Task::none();
                 }
+                // The session is already loaded and its post-sign-in duress
+                // gate is running. A refresh now would abandon that gate and
+                // mint another session, whose sign-in broadcast makes Home
+                // re-adopt and re-announce, which sends this Init again: the
+                // tab would never reach the dashboard.
+                if matches!(
+                    self.step,
+                    ConnectFlowStep::CheckingDuress {
+                        status: DuressGateStatus::Checking
+                    }
+                ) {
+                    return iced::Task::none();
+                }
                 // Clear any previous failure. Past the re-entry guards above,
                 // this path always either starts a refresh or falls back to the
                 // login form, and both make the old card stale: this is also
@@ -7249,6 +7262,45 @@ mod plan_lifecycle_tests {
         panel.pending_campaign_code = Some("FOUNDER".into());
         let _ = panel.update_message(ConnectAccountMessage::Init);
         assert!(panel.pending_campaign_code.is_none());
+    }
+
+    #[test]
+    fn init_during_the_duress_gate_does_not_restart_the_session() {
+        // A sign-in rebroadcast can reach a tab whose own session is loaded and
+        // whose duress gate is still running. A keyring refresh there abandons
+        // the gate and mints a session whose broadcast starts the cycle again.
+        let session = StoredSession {
+            login: serde_json::from_value(serde_json::json!({
+                "requires_2fa":false,"token":"synthetic","refresh_token":"synthetic-refresh",
+                "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
+            }))
+            .unwrap(),
+        };
+        let mut panel = ConnectAccountPanel::new();
+        panel.save_session_to_keyring(&session);
+        panel.step = ConnectFlowStep::CheckingDuress {
+            status: DuressGateStatus::Checking,
+        };
+        assert_eq!(
+            panel.update_message(ConnectAccountMessage::Init).units(),
+            0,
+            "no refresh while the gate is in flight"
+        );
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::CheckingDuress {
+                status: DuressGateStatus::Checking
+            }
+        ));
+        // A settled gate failure is still retried from Init.
+        panel.step = ConnectFlowStep::CheckingDuress {
+            status: DuressGateStatus::Unreachable,
+        };
+        assert!(panel.update_message(ConnectAccountMessage::Init).units() > 0);
+        assert!(matches!(
+            panel.step,
+            ConnectFlowStep::Login { loading: true, .. }
+        ));
     }
 
     #[test]

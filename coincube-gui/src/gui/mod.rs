@@ -679,9 +679,41 @@ impl GUI {
                 }
                 Task::batch(tasks)
             }
+            // A Home sign-in re-checks the Connect session of every open Cube,
+            // in every pane: a split-off Cube is still an open Cube. Each Init
+            // re-enters `update`, so it may adopt the verified sibling client.
+            Message::Pane(_, pane::Message::View(pane::ViewMessage::ConnectSignedIn)) => {
+                let mut tasks = Vec::new();
+                for (&pane_id, pane) in self.panes.iter() {
+                    for tab in &pane.tabs {
+                        if matches!(&tab.state, tab::State::App(_)) {
+                            tasks.push(Task::done(Message::Pane(
+                                pane_id,
+                                pane::Message::tab(
+                                    tab.id,
+                                    tab::Message::Run(AppMessage::View(
+                                        crate::app::view::Message::ConnectAccount(
+                                            crate::app::view::ConnectAccountMessage::Init,
+                                        ),
+                                    )),
+                                ),
+                            )));
+                        }
+                    }
+                }
+                Task::batch(tasks)
+            }
             // Fork tabs wrap task outputs with their session generation.
             // After validation/unwrapping, global intents can arrive directly
             // as tab messages rather than through Pane's task-output mapper.
+            Message::Pane(pane_id, pane::Message::Tab(_, inner))
+                if matches!(inner.as_ref(), tab::Message::ConnectSignedIn) =>
+            {
+                self.update(Message::Pane(
+                    pane_id,
+                    pane::Message::View(pane::ViewMessage::ConnectSignedIn),
+                ))
+            }
             Message::Pane(_, pane::Message::Tab(_, inner))
                 if matches!(inner.as_ref(), tab::Message::ToggleTheme) =>
             {
@@ -1682,6 +1714,103 @@ impl GUI {
             window_config: None,
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
+        }
+    }
+    /// An already-open Bitcoin Cube (tab 1) beside a Home tab (tab 2), in one pane.
+    pub(crate) fn reviewer_app_home_gui(app: crate::app::App, home: home::Home) -> Self {
+        let root = app.datadir().clone();
+        let mut pane = pane::Pane::new_with_tab(tab::State::App(app));
+        pane.tabs.push(tab::Tab::new(2, tab::State::Home(home)));
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        Self {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root, None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        }
+    }
+    /// As [`Self::reviewer_app_home_gui`], with the Cube moved to its own
+    /// split pane. Returns the Cube's pane; Home keeps the focused pane.
+    pub(crate) fn reviewer_split_app_home_gui(
+        app: crate::app::App,
+        home: home::Home,
+    ) -> (Self, pane_grid::Pane) {
+        let mut gui = Self::reviewer_app_home_gui(app, home);
+        let home_pane = gui.focus.unwrap();
+        let cube_tab = gui.panes.get_mut(home_pane).unwrap().tabs.remove(0);
+        let mut cube_pane = pane::Pane::new_with_tab(tab::State::Home(
+            home::Home::new_for_chain(gui.config.coincube_directory.clone(), None).0,
+        ));
+        cube_pane.tabs[0] = cube_tab;
+        let (cube_pane_id, _) = gui
+            .panes
+            .split(pane_grid::Axis::Vertical, home_pane, cube_pane)
+            .unwrap();
+        (gui, cube_pane_id)
+    }
+    pub(crate) fn reviewer_app_in(&mut self, pane: pane_grid::Pane) -> &mut crate::app::App {
+        let tab::State::App(app) = &mut self.panes.get_mut(pane).unwrap().tabs[0].state else {
+            panic!("Bitcoin App closed")
+        };
+        app
+    }
+    pub(crate) fn reviewer_account_in(
+        &mut self,
+        pane: pane_grid::Pane,
+        id: usize,
+        account: crate::app::view::ConnectAccountMessage,
+    ) -> Task<Message> {
+        self.update(Message::Pane(
+            pane,
+            pane::Message::tab(
+                id,
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    account,
+                ))),
+            ),
+        ))
+    }
+    pub(crate) fn reviewer_home_mut(&mut self, index: usize) -> &mut home::Home {
+        let pane = self.panes.get_mut(self.focus.unwrap()).unwrap();
+        let tab::State::Home(home) = &mut pane.tabs[index].state else {
+            panic!("Home closed")
+        };
+        home
+    }
+    pub(crate) fn reviewer_home_account(
+        &mut self,
+        id: usize,
+        account: crate::app::view::ConnectAccountMessage,
+    ) -> Task<Message> {
+        self.update(Message::Pane(
+            self.focus.unwrap(),
+            pane::Message::tab(
+                id,
+                tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                    account,
+                ))),
+            ),
+        ))
+    }
+    /// Account traffic of any tab plus the Home sign-in bubble and its pane
+    /// rebroadcast: the messages that carry a sign-in to other open Cubes.
+    pub(crate) fn reviewer_is_session_propagation(message: &Message) -> bool {
+        match message {
+            Message::Pane(_, pane::Message::View(pane::ViewMessage::ConnectSignedIn)) => true,
+            Message::Pane(_, pane::Message::Tab(_, inner)) => matches!(
+                inner.as_ref(),
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    _
+                ))) | tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
+                    _
+                ))) | tab::Message::Launch(home::Message::ConnectSignedInBubble)
+                    | tab::Message::ConnectSignedIn
+            ),
+            _ => false,
         }
     }
     pub(crate) fn reviewer_app_mut(&mut self, index: usize) -> &mut crate::app::App {
