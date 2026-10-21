@@ -34,6 +34,17 @@ impl ImportedClaimRequest {
         })
     }
 
+    /// Check the accepted account binding without touching wallet storage.
+    pub(crate) fn validate_session(&self, client: &CoincubeClient) -> Result<(), String> {
+        if self.session_binding != bind(client)? {
+            return Err(
+                "The Connect session changed. Open Claim BTCB2 from your imported wallet again."
+                    .into(),
+            );
+        }
+        Ok(())
+    }
+
     /// Recheck the saved attachment and accepted Connect session on resume,
     /// scan and handoff. A replaced/deleted source cannot reuse this selection.
     pub fn validate(
@@ -41,12 +52,7 @@ impl ImportedClaimRequest {
         root: &CoincubeDirectory,
         client: &CoincubeClient,
     ) -> Result<(), String> {
-        if self.session_binding != bind(client)? {
-            return Err(
-                "The Connect session changed. Open Claim BTCB2 from your imported wallet again."
-                    .into(),
-            );
-        }
+        self.validate_session(client)?;
         let saved = settings::Settings::from_file(&root.network_directory(ChainId::Bitcoin))
             .map_err(|_| {
                 "The imported wallet is no longer available. Reopen it before claiming.".to_string()

@@ -87,9 +87,7 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
         items.insert(
             settings_at,
             SubItem::new(
-                if imported_claim {
-                    "Claim BTCB2 imported"
-                } else if resume_fork {
+                if !imported_claim && resume_fork {
                     "Resume Claim"
                 } else {
                     "Claim BTCB2"
@@ -152,7 +150,7 @@ mod tests {
                 "Coins",
                 "Transactions",
                 "PSBTs",
-                "Claim BTCB2 imported",
+                "Claim BTCB2",
                 "Settings"
             ]
         );
@@ -163,10 +161,10 @@ mod tests {
         .unwrap();
         assert_eq!(labels(&settings), ["Node", "Wallet", "Import/Export"]);
         context.btcb2_server_enabled = false;
-        assert!(!labels(&items(&context)).contains(&"Claim BTCB2 imported"));
+        assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
         context.btcb2_server_enabled = true;
         context.network = crate::chain::ChainId::BitcoinBlake2b;
-        assert!(!labels(&items(&context)).contains(&"Claim BTCB2 imported"));
+        assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
     }
 
     /// With the account grant the claim entry appears, immediately before

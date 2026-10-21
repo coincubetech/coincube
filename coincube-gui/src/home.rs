@@ -3025,7 +3025,19 @@ impl Home {
                         .connect_account
                         .authenticated_client()
                         .ok_or_else(|| "Sign in to Connect before claiming.".to_string())
-                        .and_then(|client| request.validate(&self.datadir_path, &client));
+                        .and_then(|client| {
+                            // Passive updates must not discard an active claim
+                            // because the open source wallet is briefly busy.
+                            // Account binding still applies to every message.
+                            if matches!(
+                                msg,
+                                split_wallet::Message::Scan | split_wallet::Message::Continue
+                            ) {
+                                request.validate(&self.datadir_path, &client)
+                            } else {
+                                request.validate_session(&client)
+                            }
+                        });
                     let allowed = matches!(self.active_section, HomeSection::SplitWallet)
                         && self
                             .connect_chain_availability(ChainId::BitcoinBlake2b)
@@ -7353,6 +7365,66 @@ mod tests {
             assert!(home.imported_claim.is_none(), "{}", change);
             assert!(home.split_wallet.imported_source().is_none(), "{}", change);
             assert_ne!(home.active_section, HomeSection::SplitWallet, "{change}");
+            std::fs::remove_dir_all(datadir.path()).unwrap();
+        }
+    }
+
+    #[test]
+    fn imported_claim_passive_updates_skip_storage_but_keep_session_and_capability_guards() {
+        let _guard = crate::app::session::test_guard();
+        for change in ["storage", "session", "capability"] {
+            let datadir = fresh_datadir();
+            let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
+            enable_btcb2(&mut home);
+            arm_imported_claim(&mut home);
+            write_btcb2_vault_target(&home);
+            drop(home.resume_split_if_ready());
+            assert_eq!(home.active_section, HomeSection::SplitWallet);
+            match change {
+                "storage" => {
+                    // A passive update must not read unavailable storage.
+                    // Scan and Continue still validate it in the test below.
+                    std::fs::remove_file(
+                        datadir
+                            .network_directory(ChainId::Bitcoin)
+                            .path()
+                            .join(settings::SETTINGS_FILE_NAME),
+                    )
+                    .unwrap();
+                }
+                "session" => home
+                    .connect_account
+                    .client
+                    .set_token("changed-synthetic-token"),
+                "capability" => {
+                    home.connect_account
+                        .features
+                        .as_mut()
+                        .unwrap()
+                        .bitcoin_blake2b_enabled = Some(false)
+                }
+                _ => unreachable!(),
+            }
+            drop(home.update(Message::View(ViewMessage::SplitWallet(
+                split_wallet::Message::TargetSelected(TargetCube {
+                    id: "split-target".into(),
+                    name: "Split target".into(),
+                }),
+            ))));
+            if change == "storage" {
+                // A late result also avoids wallet I/O while retaining the
+                // panel's own generation checks for stale scan evidence.
+                drop(home.update(Message::View(ViewMessage::SplitWallet(
+                    split_wallet::Message::Scanned(Err("stale result".into()), u64::MAX, u64::MAX),
+                ))));
+                assert_eq!(home.active_section, HomeSection::SplitWallet);
+                assert!(home.imported_claim.is_some());
+                assert!(home.split_wallet.imported_source().is_some());
+            } else {
+                assert_eq!(home.active_section, HomeSection::Cubes);
+                assert!(home.imported_claim.is_none());
+                assert!(home.split_wallet.imported_source().is_none());
+            }
             std::fs::remove_dir_all(datadir.path()).unwrap();
         }
     }

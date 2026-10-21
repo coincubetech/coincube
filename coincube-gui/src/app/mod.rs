@@ -5269,8 +5269,11 @@ impl App {
                 "Bitcoin Blake2b claim is unavailable for this imported wallet and account.".into(),
             );
         }
+        // A sibling tab may have signed out while this tab still holds an
+        // admitted client. Claim's session hold must gate imported sources too.
         let client = self
-            .authenticated_coincube_client()
+            .claim_connect_session()
+            .map(|session| session.client)
             .ok_or_else(|| "Sign in to Connect before claiming Bitcoin Blake2b.".to_string())?;
         let wallet = self
             .wallet
@@ -11349,6 +11352,40 @@ mod tests {
             .any(|message| matches!(message, Message::View(view::Message::StartImportedClaim))));
         assert!(app.panels.claim.is_none());
         assert!(app.prepare_imported_claim().is_err()); // The import is still syncing.
+
+        // A sibling-tab sign-out holds Claim even while this App still has
+        // its old admitted client in memory. Before the hold, preparation
+        // passes the auth gate and reaches the incomplete import guard.
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("synthetic-imported-session");
+        app.panels.connect.install_admitted_client(client);
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "synthetic@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        app.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        app.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        assert!(app.claim_connect_session().is_some());
+        assert!(app
+            .prepare_imported_claim()
+            .unwrap_err()
+            .contains("not ready for a claim"));
+        app.invalidate_claim_session();
+        assert!(app.authenticated_coincube_client().is_some());
+        assert!(app.panels.connect.account.bitcoin_blake2b_enabled());
+        assert!(app.claim_connect_session().is_none());
+        assert!(app
+            .prepare_imported_claim()
+            .unwrap_err()
+            .contains("Sign in to Connect"));
     }
 
     #[test]
