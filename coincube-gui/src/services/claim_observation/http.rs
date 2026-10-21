@@ -57,6 +57,11 @@ impl ObservationContextGuard {
     }
 }
 impl HttpObservationSource {
+    /// Construct a source bound to the supplied provider and session context
+    /// for the supported Bitcoin/BTCB2 pair. Validate the provider URL and
+    /// require a configured client token, while keeping anonymous Esplora reads
+    /// on a separate transport without inherited credentials. Construction
+    /// performs no network read and establishes no current verification.
     pub fn new(
         client: CoincubeClient,
         bitcoin: ChainId,
@@ -110,6 +115,9 @@ impl HttpObservationSource {
         self
     }
 
+    /// Notify the optional observer of a chain-specific diagnostic, or do
+    /// nothing when no observer is installed. The callback cannot manufacture
+    /// a paired proof, signer permit or permission to spend.
     fn report_funding(&self, chain: ChainId, status: FundingProofStatus) {
         if let Some(observer) = &self.funding_observer {
             observer(chain, status);
