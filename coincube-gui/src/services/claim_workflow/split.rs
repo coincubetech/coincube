@@ -66,7 +66,6 @@ use super::*;
 use crate::services::claim_observation::TransactionObservation;
 use coincube_core::{
     claim_ancestry::retained::{RetainedPath, MAX_ENCODED_BYTES},
-    descriptors::CoincubeDescriptor,
     foreign_split::{
         reconstruct_ancestry_split_step1, reconstruct_ancestry_split_step2, AncestrySplitInputs,
         AncestrySplitStep1, AncestrySplitStep2, AncestrySplitStep2Inputs, SplitCoin, SplitSource,
@@ -77,6 +76,7 @@ use coincube_core::{
         bitcoin::{OutPoint, ScriptBuf},
         Descriptor, DescriptorPublicKey,
     },
+    wallet_descriptor::WalletDescriptor,
 };
 use std::str::FromStr;
 
@@ -231,6 +231,31 @@ struct SplitFundingPlan {
     bitcoin_feerate_vb: u64,
     fork_feerate_vb: u64,
     target_descriptor_digest: sha256::Hash,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_address_window: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_target_descriptor: Option<coincube_core::wallet_descriptor::ImportedWalletDescriptor>,
+}
+
+pub(super) fn imported_target_descriptor(
+    intent: &Intent,
+) -> Option<&coincube_core::wallet_descriptor::ImportedWalletDescriptor> {
+    intent
+        .split
+        .as_ref()?
+        .funding
+        .as_ref()?
+        .imported_target_descriptor
+        .as_ref()
+}
+
+pub(super) fn imported_address_window(intent: &Intent) -> Option<u32> {
+    intent
+        .split
+        .as_ref()?
+        .funding
+        .as_ref()?
+        .imported_address_window
 }
 
 pub(super) fn ancestry_step2_unsigned(intent: &Intent) -> Option<&Transaction> {
@@ -518,6 +543,36 @@ fn signs(signed: &Transaction, unsigned_digest: sha256::Hash) -> bool {
 fn validate_ancestry_plan(intent: &Intent, record: &SplitRecord) -> Result<(), Error> {
     let p = &intent.plan;
     let funding = record.funding.as_ref().ok_or(Error::InvalidPlan)?;
+    if funding.imported_address_window.is_some() != funding.imported_target_descriptor.is_some() {
+        return Err(Error::InvalidPlan);
+    }
+    if let Some(imported) = &funding.imported_target_descriptor {
+        let source = record
+            .descriptors
+            .as_ref()
+            .ok_or(Error::InvalidPlan)?
+            .source()?;
+        if imported.chain() != ChainId::BitcoinBlake2b
+            || imported.receive_descriptor() != source.external()
+            || Some(imported.change_descriptor()) != source.internal()
+            || funding.target_descriptor_digest
+                != sha256::Hash::hash(
+                    WalletDescriptor::Imported(imported.clone())
+                        .to_string()
+                        .as_bytes(),
+                )
+        {
+            return Err(Error::InvalidPlan);
+        }
+        let expected = imported
+            .receive_descriptor()
+            .at_derivation_index(record.target_index.ok_or(Error::InvalidPlan)?)
+            .map_err(|_| Error::InvalidPlan)?
+            .script_pubkey();
+        if record.target_script.as_ref() != Some(&expected) {
+            return Err(Error::InvalidPlan);
+        }
+    }
     let bitcoin_path = funding.bitcoin.decode()?;
     let fork_path = funding.fork.decode()?;
     bitcoin_path.reverify().map_err(|_| Error::InvalidJournal)?;
@@ -555,6 +610,17 @@ fn validate_ancestry_plan(intent: &Intent, record: &SplitRecord) -> Result<(), E
             == coincube_core::miniscript::bitcoin::Amount::ZERO
         || record.target_script.as_ref() != Some(&funding.step2_unsigned.output[0].script_pubkey)
         || record.target_index.is_none()
+        || funding.imported_address_window.is_some_and(|window| {
+            !(1..=10_000).contains(&window)
+                || [
+                    funding.bitcoin.index,
+                    funding.fork.index,
+                    record.destination,
+                ]
+                .iter()
+                .any(|index| *index >= window)
+                || record.target_index.is_none_or(|index| index >= window)
+        })
         || !(1..=coincube_core::spend::MAX_FEERATE).contains(&funding.bitcoin_feerate_vb)
         || !(1..=coincube_core::spend::MAX_FEERATE).contains(&funding.fork_feerate_vb)
         || funding.step2_unsigned.input.iter().any(|input| {
@@ -616,10 +682,15 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
         || record.destination >= 1 << 31
         || record.target_index.is_some() != record.target_script.is_some()
         || record.target_index.is_some_and(|index| index >= 1 << 31)
-        || record
-            .target_script
-            .as_ref()
-            .is_some_and(|script| !script.is_p2wsh() && !script.is_p2tr())
+        || record.target_script.as_ref().is_some_and(|script| {
+            !script.is_p2wsh()
+                && !script.is_p2tr()
+                && !(record.kind == SplitKind::Ancestry
+                    && record.funding.as_ref().is_some_and(|funding| {
+                        funding.imported_address_window.is_some()
+                            && funding.imported_target_descriptor.is_some()
+                    }))
+        })
     {
         return Err(Error::InvalidPlan);
     }
@@ -765,6 +836,21 @@ pub(super) fn validate(intent: &Intent) -> Result<(), Error> {
     reorg::validate_history(intent)
 }
 
+fn check_paired_target_source(
+    target: &WalletDescriptor,
+    source: &SplitSource,
+) -> Result<(), Error> {
+    if let Some(imported) = target.as_imported() {
+        if imported.chain() != ChainId::BitcoinBlake2b
+            || imported.receive_descriptor() != source.external()
+            || Some(imported.change_descriptor()) != source.internal()
+        {
+            return Err(Error::WrongIdentity);
+        }
+    }
+    Ok(())
+}
+
 impl Controller {
     /// Atomically record the ordinary `S+B` and `S+F` Split constructions
     /// before any signing. This is structural data only, with no spend right.
@@ -772,7 +858,7 @@ impl Controller {
     pub fn create_ancestry_split(
         directory: &Path,
         target_cube: String,
-        target_descriptor: &CoincubeDescriptor,
+        target_descriptor: &WalletDescriptor,
         target_index: u32,
         bitcoin: &AncestrySplitStep1,
         bitcoin_path: &RetainedPath,
@@ -792,16 +878,22 @@ impl Controller {
         {
             return Err(Error::WrongIdentity);
         }
+        match target_descriptor {
+            WalletDescriptor::Vault(_) if fork.paired_target_index().is_none() => {}
+            WalletDescriptor::Imported(imported)
+                if imported.chain() == ChainId::BitcoinBlake2b
+                    && imported.receive_descriptor() == bitcoin.source().external()
+                    && Some(imported.change_descriptor()) == bitcoin.source().internal()
+                    && fork.paired_target_index() == Some(target_index) => {}
+            _ => return Err(Error::WrongIdentity),
+        }
         let target_index =
             coincube_core::miniscript::bitcoin::bip32::ChildNumber::from_normal_idx(target_index)
                 .map_err(|_| Error::InvalidPlan)?;
         let target_script = target_descriptor
             .receive_descriptor()
-            .derive(
-                target_index,
-                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+            .script_pubkey(u32::from(target_index))
+            .map_err(|_| Error::InvalidPlan)?;
         if fork.target() != target_script.as_script() {
             return Err(Error::WrongIdentity);
         }
@@ -820,6 +912,21 @@ impl Controller {
         let (bitcoin_branch, bitcoin_index) =
             bitcoin.funding_derivation().ok_or(Error::InvalidPlan)?;
         let (fork_branch, fork_index) = fork.funding_derivation().ok_or(Error::InvalidPlan)?;
+        let imported_address_window = if target_descriptor.as_imported().is_some() {
+            super::split_funding::load_split_funding(
+                directory,
+                bitcoin.source(),
+                &target_cube,
+                &context,
+            )?
+            .and_then(|saved| saved.target_binding)
+            .ok_or(Error::InvalidPlan)?
+            .imported_address_window()?
+            .ok_or(Error::InvalidPlan)
+            .map(Some)?
+        } else {
+            None
+        };
         let source_digest = bitcoin.source().digest();
         let step1 = bitcoin.psbt().unsigned_tx.clone();
         let intent = Intent {
@@ -871,6 +978,8 @@ impl Controller {
                     target_descriptor_digest: sha256::Hash::hash(
                         target_descriptor.to_string().as_bytes(),
                     ),
+                    imported_address_window,
+                    imported_target_descriptor: target_descriptor.as_imported().cloned(),
                 }),
                 source_digest,
                 descriptors: Some(StoredDescriptors::new(bitcoin.source())),
@@ -898,7 +1007,7 @@ impl Controller {
     pub fn create_or_reopen_ancestry_split(
         directory: &Path,
         target_cube: String,
-        target_descriptor: &CoincubeDescriptor,
+        target_descriptor: &WalletDescriptor,
         target_index: u32,
         bitcoin: &AncestrySplitStep1,
         bitcoin_path: &RetainedPath,
@@ -955,7 +1064,7 @@ impl Controller {
         &mut self,
         current: &Context,
         source: &SplitSource,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin_shared: &[SplitCoin],
         bitcoin_marker: &SplitCoin,
         bitcoin_tip: u32,
@@ -966,6 +1075,7 @@ impl Controller {
         self.ensure_context(current)?;
         self.clear_check();
         self.construction_verified = false;
+        check_paired_target_source(target, source)?;
         let record = self.record_of(SplitKind::Ancestry)?;
         let funding = record.funding.as_ref().ok_or(Error::InvalidJournal)?;
         if record.source_digest != source.digest()
@@ -975,6 +1085,7 @@ impl Controller {
                 .map(StoredDescriptors::source)
                 .transpose()?
                 != Some(source.clone())
+            || funding.imported_address_window.is_some() != target.as_imported().is_some()
             || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
         {
             return Err(Error::WrongIdentity);
@@ -985,11 +1096,8 @@ impl Controller {
         .map_err(|_| Error::InvalidJournal)?;
         let target_script = target
             .receive_descriptor()
-            .derive(
-                target_index,
-                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+            .script_pubkey(u32::from(target_index))
+            .map_err(|_| Error::InvalidPlan)?;
         if record.target_script.as_ref() != Some(&target_script) {
             return Err(Error::WrongIdentity);
         }
@@ -1018,6 +1126,7 @@ impl Controller {
         .map_err(|_| Error::InvalidPlan)?;
         let fork = reconstruct_ancestry_split_step2(
             &AncestrySplitStep2Inputs {
+                paired_target_index: target.as_imported().map(|_| u32::from(target_index)),
                 chain: self.intent.plan.fork_chain,
                 source,
                 shared: fork_shared,
@@ -1046,7 +1155,7 @@ impl Controller {
         &mut self,
         current: &Context,
         source: &SplitSource,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         fork_shared: &[SplitCoin],
         fork_marker: &SplitCoin,
         fork_tip: u32,
@@ -1054,6 +1163,7 @@ impl Controller {
         self.ensure_context(current)?;
         self.clear_check();
         self.construction_verified = false;
+        check_paired_target_source(target, source)?;
         let record = self.record_of(SplitKind::Ancestry)?;
         let funding = record.funding.as_ref().ok_or(Error::InvalidJournal)?;
         if self.intent.phase != Phase::Intent
@@ -1064,6 +1174,7 @@ impl Controller {
                 .map(StoredDescriptors::source)
                 .transpose()?
                 != Some(source.clone())
+            || funding.imported_address_window.is_some() != target.as_imported().is_some()
             || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
             || !funding.fork.matches_coin(fork_marker)
         {
@@ -1075,11 +1186,8 @@ impl Controller {
         .map_err(|_| Error::InvalidJournal)?;
         let target_script = target
             .receive_descriptor()
-            .derive(
-                target_index,
-                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+            .script_pubkey(u32::from(target_index))
+            .map_err(|_| Error::InvalidPlan)?;
         if record.target_script.as_ref() != Some(&target_script) {
             return Err(Error::WrongIdentity);
         }
@@ -1087,6 +1195,7 @@ impl Controller {
         let dependency = fork_path.reverify().map_err(|_| Error::InvalidJournal)?;
         reconstruct_ancestry_split_step2(
             &AncestrySplitStep2Inputs {
+                paired_target_index: target.as_imported().map(|_| u32::from(target_index)),
                 chain: self.intent.plan.fork_chain,
                 source,
                 shared: fork_shared,
@@ -1111,7 +1220,7 @@ impl Controller {
         &mut self,
         current: &Context,
         observed: &crate::services::claim_observation::http::CollectedSpendInputs,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin_coin: &SplitCoin,
         fork_coin: &SplitCoin,
         bitcoin: &AncestrySplitStep1,
@@ -1123,6 +1232,7 @@ impl Controller {
         self.ensure_context(current)?;
         self.clear_check();
         self.construction_verified = false;
+        check_paired_target_source(target, bitcoin.source())?;
         let record = self.record_of(SplitKind::Ancestry)?;
         let funding = record.funding.as_ref().ok_or(Error::InvalidJournal)?;
         let bitcoin_path = funding.bitcoin.decode()?;
@@ -1142,6 +1252,7 @@ impl Controller {
             || fork.fork_height() != record.fork_height
             || bitcoin.destination() != record.destination
             || bitcoin.claimed_prevouts() != self.intent.plan.claimed_prevouts
+            || funding.imported_address_window.is_some() != target.as_imported().is_some()
             || funding.target_descriptor_digest != sha256::Hash::hash(target.to_string().as_bytes())
             || !funding.bitcoin.matches_coin(bitcoin_coin)
             || !funding.fork.matches_coin(fork_coin)
@@ -1162,11 +1273,8 @@ impl Controller {
         .map_err(|_| Error::InvalidJournal)?;
         let script = target
             .receive_descriptor()
-            .derive(
-                index,
-                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+            .script_pubkey(u32::from(index))
+            .map_err(|_| Error::InvalidPlan)?;
         if record.target_script.as_ref() != Some(&script) || fork.target() != script.as_script() {
             return Err(Error::WrongIdentity);
         }
@@ -1198,7 +1306,7 @@ impl Controller {
         &mut self,
         current: &Context,
         requalified: &super::split_funding::RequalifiedInitialSplit,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin: &AncestrySplitStep1,
         bitcoin_inputs: &AncestrySplitInputs<'_>,
         bitcoin_signed: &coincube_core::miniscript::bitcoin::psbt::Psbt,
@@ -1460,6 +1568,12 @@ impl Controller {
                 .load_split_funding_reservation()?
                 .ok_or(Error::InvalidPlan)?;
             if !reserved.matches(&source, &record.target_cube, &context)
+                || reserved
+                    .target_binding
+                    .as_ref()
+                    .ok_or(Error::InvalidPlan)?
+                    .imported_address_window()?
+                    != funding.imported_address_window
                 || !reserved.target_binding.as_ref().is_some_and(|target| {
                     record.target_index.is_some_and(|index| {
                         record.target_script.as_ref().is_some_and(|script| {

@@ -67,6 +67,7 @@ fn plan(end: u32) -> ScanPlan {
 }
 struct Fake {
     used_first: bool,
+    spent_addresses: BTreeSet<String>,
     changed: bool,
     tips: AtomicUsize,
     coins: Mutex<Vec<Utxo>>,
@@ -76,6 +77,7 @@ impl Fake {
     fn empty() -> Self {
         Self {
             used_first: false,
+            spent_addresses: BTreeSet::new(),
             changed: false,
             tips: AtomicUsize::new(0),
             coins: Mutex::new(vec![]),
@@ -110,7 +112,9 @@ impl Source for Fake {
         Ok(Stats {
             chain_stats: Count {
                 tx_count: u64::from(
-                    (self.used_first && address == first) || self.previous.is_some(),
+                    (self.used_first && address == first)
+                        || self.previous.is_some()
+                        || self.spent_addresses.contains(address),
                 ),
             },
             mempool_stats: Count { tx_count: 0 },
@@ -154,6 +158,61 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
         collect(&source, &plan(4), 7).await,
         Err(ScanError::Changed)
     ));
+}
+
+#[tokio::test]
+async fn imported_paired_target_stays_unused_after_higher_funding_history() {
+    use crate::services::foreign_split_inventory::SplitInventory;
+    let address = |index| {
+        bitcoin::Address::from_script(
+            &ScanDescriptor::parse(Branch::External, &ranged())
+                .unwrap()
+                .script(index)
+                .unwrap(),
+            bitcoin::Network::Bitcoin,
+        )
+        .unwrap()
+        .to_string()
+    };
+    let mut fork_source = Fake::empty();
+    fork_source.spent_addresses.insert(address(208));
+    let mut bitcoin_source = Fake::empty();
+    bitcoin_source.spent_addresses.insert(address(207));
+    let fork = collect_mode(&fork_source, &imported_plan(212), 7, ScanMode::FullImported)
+        .await
+        .unwrap();
+    let mut bitcoin_plan = imported_plan(212);
+    bitcoin_plan.chain = ChainId::Bitcoin;
+    let bitcoin = collect_mode(&bitcoin_source, &bitcoin_plan, 7, ScanMode::FullImported)
+        .await
+        .unwrap();
+    let inventory = SplitInventory::join(&fork, &bitcoin, 7, true).unwrap();
+    assert!(inventory.is_fresh_external(206));
+    assert!(!inventory.is_fresh_external(207));
+    assert!(!inventory.is_fresh_external(208));
+    assert!(!inventory.is_fresh_external(212));
+    assert!(inventory.is_fresh_external(209));
+
+    // Fully spent destination history on either chain must still refuse,
+    // despite neither scan retaining an unspent coin at that index.
+    for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+        let mut used_source = Fake::empty();
+        used_source.spent_addresses.insert(address(206));
+        used_source.spent_addresses.insert(address(209));
+        let mut used_plan = imported_plan(212);
+        used_plan.chain = chain;
+        let used = collect_mode(&used_source, &used_plan, 7, ScanMode::FullImported)
+            .await
+            .unwrap();
+        assert!(used.coins().is_empty());
+        let inventory = if chain == ChainId::Bitcoin {
+            SplitInventory::join(&fork, &used, 7, true)
+        } else {
+            SplitInventory::join(&used, &bitcoin, 7, true)
+        }
+        .unwrap();
+        assert!(!inventory.is_fresh_external(206));
+    }
 }
 
 fn imported_plan(end: u32) -> ScanPlan {

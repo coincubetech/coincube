@@ -774,8 +774,12 @@ async fn new_split_reserves_checked_deposits_without_reopening_retired_routes() 
 #[test]
 fn first_connect_attachment_preserves_funding_target_but_session_change_revokes_it() {
     let scan = Scan::new(Shape::Wpkh);
-    let descriptor =
-        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let descriptor = coincube_core::wallet_descriptor::WalletDescriptor::Vault(
+        coincube_core::descriptors::CoincubeDescriptor::from_str(
+            crate::services::claim_workflow::TEST_WSH_DESC,
+        )
+        .unwrap(),
+    );
     let wallet_id = crate::app::settings::WalletId::new(
         descriptor.to_string().split_once('#').unwrap().1.to_owned(),
         Some(1),
@@ -903,8 +907,12 @@ async fn unsigned_paired_split_reopens_only_with_original_target_and_account() {
     let connect = FakeConnect::new(&scan.coins);
     let temp = Temp::new();
     let directory = step1::journal_directory(&temp.root(), source.digest());
-    let descriptor =
-        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let descriptor = coincube_core::wallet_descriptor::WalletDescriptor::Vault(
+        coincube_core::descriptors::CoincubeDescriptor::from_str(
+            crate::services::claim_workflow::TEST_WSH_DESC,
+        )
+        .unwrap(),
+    );
     let wallet_id = crate::app::settings::WalletId::new(
         descriptor.to_string().split_once('#').unwrap().1.to_owned(),
         Some(1),
@@ -2387,7 +2395,8 @@ fn assert_split_ui_paths_do_no_blocking_work(checkout: fn(&str) -> String) {
     // The UI paths call the blocking helpers only through a task.
     let refresh = body(&app, "    fn refresh_split_session(", "    ");
     let blocking = refresh.find("spawn_blocking(move ||").unwrap();
-    assert!(refresh[blocking..].contains("split_ports(Some(session), generation, daemon, site)"));
+    assert!(refresh[blocking..]
+        .contains("split_ports(Some(session), generation, daemon, site, claim_root)"));
     assert!(!refresh[..blocking].contains("split_ports("));
     for (name, text) in [
         ("new_inner", body(&app, "    fn new_inner(", "    ")),

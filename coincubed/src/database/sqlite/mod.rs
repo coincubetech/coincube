@@ -300,7 +300,7 @@ pub fn create_imported_db(
     birthday: u32,
     initial_lookahead: u32,
 ) -> Result<(), SqliteDbError> {
-    if descriptor.chain() != chain || chain.is_blake2b() {
+    if descriptor.chain() != chain {
         return Err(SqliteDbError::ChainMismatch {
             expected: chain,
             found: descriptor.chain(),
@@ -380,7 +380,7 @@ pub fn restore_imported_address_state(
     change_index: u32,
 ) -> Result<(), SqliteDbError> {
     const MAX_RESTORED_INDEX: u32 = 1_000_000;
-    if descriptor.chain() != chain || chain.is_blake2b() {
+    if descriptor.chain() != chain {
         return Err(SqliteDbError::ChainMismatch {
             expected: chain,
             found: descriptor.chain(),
@@ -500,7 +500,7 @@ pub fn expand_imported_discovery(
     initial_lookahead: u32,
     target: u32,
 ) -> Result<u32, SqliteDbError> {
-    if descriptor.chain() != chain || chain.is_blake2b() {
+    if descriptor.chain() != chain {
         return Err(SqliteDbError::ChainMismatch {
             expected: chain,
             found: descriptor.chain(),
@@ -4323,7 +4323,7 @@ CREATE TABLE labels (
                     )
                     .is_err());
             }
-            for chain in [None, Some("bitcoin-blake2b"), Some("unknown")] {
+            for chain in [None, Some("unknown")] {
                 assert!(conn
                     .execute(
                         "UPDATE wallets SET main_descriptor = NULL, wallet_kind = 'imported',
@@ -5167,6 +5167,54 @@ CREATE TABLE labels (
             fs::create_dir_all(&dir).unwrap();
             let db_path = dir.join("coincubed.sqlite3");
             create_imported_db(&db_path, ChainId::Bitcoin, &descriptor, 0, 20).unwrap();
+            let paired = descriptor.paired_blake2b().unwrap();
+            let paired_path = dir.join("paired.sqlite3");
+            create_imported_db(&paired_path, ChainId::BitcoinBlake2b, &paired, 0, 20).unwrap();
+            let verify = secp256k1::Secp256k1::verification_only();
+            let paired_db = SqliteDb::new(paired_path.clone(), None, &verify).unwrap();
+            let mut paired_conn = paired_db.connection().unwrap();
+            assert_eq!(u32::from(paired_conn.receive_index()), 0);
+            let (address, index) = paired_conn
+                .reserve_imported_receive(ChainId::BitcoinBlake2b, &paired)
+                .unwrap();
+            assert_eq!(u32::from(index), 1);
+            assert_eq!(
+                address.script_pubkey(),
+                paired
+                    .receive_descriptor()
+                    .at_derivation_index(1)
+                    .unwrap()
+                    .script_pubkey()
+            );
+            assert!(paired_conn
+                .reserve_imported_receive(ChainId::Bitcoin, &descriptor)
+                .is_err());
+            let stored_chain: String = paired_conn
+                .conn
+                .query_row("SELECT import_chain FROM wallets", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(stored_chain, ChainId::BitcoinBlake2b.dir_name());
+            drop(paired_conn);
+            restore_imported_address_state(
+                &paired_path,
+                ChainId::BitcoinBlake2b,
+                &paired,
+                0,
+                20,
+                12,
+                8,
+            )
+            .unwrap();
+            assert!(restore_imported_address_state(
+                &paired_path,
+                ChainId::Bitcoin,
+                &descriptor,
+                0,
+                20,
+                12,
+                8
+            )
+            .is_err());
 
             restore_imported_address_state(&db_path, ChainId::Bitcoin, &descriptor, 0, 20, 45, 32)
                 .unwrap();

@@ -608,6 +608,9 @@ pub struct CubeSettings {
     /// Imported Bitcoin wallet setup/attachment. Never implies inheritance or Connect hasVault.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bitcoin_import: Option<Box<BitcoinImport>>,
+    /// Exact public source of a dedicated imported-wallet fork claim.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_claim_source: Option<Box<bitcoin_import::ImportedClaimPair>>,
     /// The vault's descriptor fingerprint
     /// ([`crate::app::wallet::descriptor_id_fingerprint`]), 8 lowercase hex.
     /// The user-facing vault identity — the same value shown in vault
@@ -906,6 +909,7 @@ impl CubeSettings {
             created_at: chrono::Utc::now().timestamp(),
             vault_wallet_id: None,
             bitcoin_import: None,
+            imported_claim_source: None,
             vault_fingerprint: None,
             // Unknown until `/connect/features` answers for this account. A new
             // cube is not granted Liquid; if the account is, the flag lands on

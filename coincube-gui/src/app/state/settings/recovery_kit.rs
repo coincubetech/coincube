@@ -55,6 +55,9 @@ use crate::services::recovery::{
 /// backed-up allocation high-water mark.
 #[derive(Clone)]
 pub struct ImportedBackupSource {
+    pub import_operation_id: uuid::Uuid,
+    pub imported_claim_source: Option<Box<crate::app::settings::bitcoin_import::ImportedClaimPair>>,
+    pub signer_metadata: Option<crate::app::settings::WalletSettings>,
     pub descriptor: ImportedWalletDescriptor,
     pub name: String,
     pub birthday: u32,
@@ -86,7 +89,7 @@ impl ImportedBackupSource {
                 "Imported wallet identity changed; reopen this Cube before backing it up".into(),
             );
         }
-        ImportedDescriptorBlob::new(
+        ImportedDescriptorBlob::new_with_pair(
             cube_uuid.to_string(),
             self.chain,
             ImportedDescriptorBlobWallet {
@@ -97,6 +100,9 @@ impl ImportedBackupSource {
                 receive_index: info.receive_index,
                 change_index: info.change_index,
             },
+            self.imported_claim_source.clone(),
+            self.signer_metadata.clone(),
+            Some(self.import_operation_id),
         )
     }
 }

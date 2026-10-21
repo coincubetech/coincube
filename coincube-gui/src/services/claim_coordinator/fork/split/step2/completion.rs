@@ -34,34 +34,114 @@
 use super::*;
 use crate::{
     app::settings::{
-        update_settings_file_checked, CubeSettings, Settings, SettingsError, SplitFromRecord,
-        WalletId, SETTINGS_FILE_NAME,
+        bitcoin_import::ImportedClaimPair, update_settings_file_checked, CubeSettings,
+        ImportedWalletAttachment, Settings, SettingsError, SplitFromRecord, WalletId,
+        SETTINGS_FILE_NAME,
     },
     dir::CoincubeDirectory,
 };
 use coincube_core::claim::{BlockRef, ForkTransactionPresence, MIN_CONFIRMATIONS};
 use std::sync::{atomic::AtomicBool, Weak};
 
-/// The target Cube a completion is recorded on: its id and the Vault the
-/// recorded step 2 pays, as that Cube's own settings name them
-/// ([`Self::of`]). Every writer matches all three against the file under the
-/// writer lock, and the id against the Split journal's identity, so a Cube
-/// whose Vault changed since, or another Cube's settings, is refused.
+/// The target Cube and wallet a completion is recorded on. Native targets
+/// retain their Vault identity; imported targets additionally bind the exact
+/// paired attachment, source operation and descriptor digest. Writers recheck
+/// that identity under the target settings lock.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionTarget {
     pub cube_id: String,
+    /// The native Vault's id, or the paired imported wallet's distinct id.
     pub vault_wallet_id: WalletId,
+    /// The native Vault fingerprint, or the imported Cube's unlock identity.
     pub vault_fingerprint: String,
+    imported: Option<Box<ImportedCompletionTarget>>,
 }
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ImportedCompletionTarget {
+    source: ImportedClaimPair,
+    wallet: ImportedWalletAttachment,
+    operation_id: uuid::Uuid,
+    source_digest: sha256::Hash,
+}
+
 impl CompletionTarget {
-    /// The completion target of `cube`, or `None` while it has no Vault
-    /// identity (nothing to record a Split into).
+    /// The completion target of a native Vault or a valid dedicated imported
+    /// pair. Unpaired imports and incomplete/conflicting records are refused.
     pub fn of(cube: &CubeSettings) -> Option<Self> {
+        if let Some(source) = cube.imported_claim_source.as_deref() {
+            crate::services::bitcoin_import::pairing::validate_target_record(cube).ok()?;
+            let import = cube.bitcoin_import.as_ref()?;
+            let wallet = import.active_attachment()?.clone();
+            let descriptor = &source.source_wallet.descriptor;
+            let source_digest = coincube_core::foreign_split::SplitSource::new(
+                descriptor.receive_descriptor().clone(),
+                Some(descriptor.change_descriptor().clone()),
+            )
+            .ok()?
+            .digest();
+            return Some(Self {
+                cube_id: cube.id.clone(),
+                vault_wallet_id: wallet.wallet_id.clone(),
+                vault_fingerprint: cube.master_signer_fingerprint?.to_string(),
+                imported: Some(Box::new(ImportedCompletionTarget {
+                    source: source.clone(),
+                    wallet,
+                    operation_id: import.operation_id,
+                    source_digest,
+                })),
+            });
+        }
         Some(Self {
             cube_id: cube.id.clone(),
             vault_wallet_id: cube.vault_wallet_id.clone()?,
             vault_fingerprint: cube.vault_fingerprint.clone()?,
+            imported: None,
         })
+    }
+
+    fn matching_cube<'a>(
+        &self,
+        root: &CoincubeDirectory,
+        settings: &'a mut Settings,
+        chain: ChainId,
+        source_digest: sha256::Hash,
+    ) -> Result<&'a mut CubeSettings, SettingsError> {
+        let Some(imported) = &self.imported else {
+            return matching_completion_cube(
+                settings,
+                chain,
+                &self.cube_id,
+                &self.vault_fingerprint,
+                &self.vault_wallet_id.descriptor_checksum,
+            );
+        };
+        if chain != ChainId::BitcoinBlake2b
+            || source_digest != imported.source_digest
+            || settings
+                .cubes
+                .iter()
+                .filter(|cube| cube.id == self.cube_id)
+                .count()
+                != 1
+        {
+            return Err(SettingsError::Unexpected(
+                "Imported Claim completion no longer matches its source or target Cube".into(),
+            ));
+        }
+        let cube = settings
+            .cubes
+            .iter_mut()
+            .find(|cube| cube.id == self.cube_id)
+            .unwrap();
+        if Self::of(cube).as_ref() != Some(self) {
+            return Err(SettingsError::Unexpected(
+                "Imported Claim completion no longer matches its paired wallet".into(),
+            ));
+        }
+        crate::services::bitcoin_import::pairing::validate_pair(root, cube)
+            .map_err(SettingsError::Unexpected)?;
+        Ok(cube)
     }
 }
 
@@ -157,8 +237,8 @@ impl SplitCompletionEvidence {
     /// directory only: the record is appended unless the same source digest
     /// and step-2 txid are already there, so a retry is a no-op. Refused,
     /// before the file is touched, unless the evidence is live and `target`
-    /// is the journal's Cube with the Vault its settings name; the same
-    /// checks run again under the writer lock. A refusal after the write
+    /// is the journal's Cube with its recorded native or paired imported
+    /// wallet; the same checks run again under the writer lock. A refusal after the write
     /// (the evidence lapsed meanwhile) is reported, and the evidence does not
     /// permit forgetting: check again.
     pub async fn persist(
@@ -173,9 +253,9 @@ impl SplitCompletionEvidence {
         }
         let directory = root.network_directory(self.fork_chain);
         let mut settings = Settings::from_file(&directory)?;
-        self.apply(&mut settings, target)?;
+        self.apply(root, &mut settings, target)?;
         update_settings_file_checked(&directory, |mut settings| {
-            self.apply(&mut settings, target)?;
+            self.apply(root, &mut settings, target)?;
             Ok(Some(settings))
         })
         .await?;
@@ -189,6 +269,7 @@ impl SplitCompletionEvidence {
     }
     fn apply(
         &self,
+        root: &CoincubeDirectory,
         settings: &mut Settings,
         target: &CompletionTarget,
     ) -> Result<(), SettingsError> {
@@ -202,13 +283,7 @@ impl SplitCompletionEvidence {
                 "Split target Cube is not the journal's".into(),
             ));
         }
-        let cube = matching_completion_cube(
-            settings,
-            self.fork_chain,
-            &target.cube_id,
-            &target.vault_fingerprint,
-            &target.vault_wallet_id.descriptor_checksum,
-        )?;
+        let cube = target.matching_cube(root, settings, self.fork_chain, self.source_digest)?;
         let record = self.record();
         if !cube.split_from.iter().any(|existing| {
             existing.descriptor_digest == record.descriptor_digest
@@ -505,13 +580,7 @@ impl SplitStep2Reconciler {
                     "Split reorg check expired or changed".into(),
                 ));
             }
-            let cube = matching_completion_cube(
-                settings,
-                ChainId::BitcoinBlake2b,
-                &target.cube_id,
-                &target.vault_fingerprint,
-                &target.vault_wallet_id.descriptor_checksum,
-            )?;
+            let cube = target.matching_cube(root, settings, ChainId::BitcoinBlake2b, digest)?;
             let before = cube.split_from.len();
             cube.split_from.retain(|record| {
                 !(record.descriptor_digest == digest && record.step2_txid == txid)
@@ -551,11 +620,16 @@ fn recorded_height(
     txid: Txid,
 ) -> Result<Option<u64>, Error> {
     let directory = root.network_directory(ChainId::BitcoinBlake2b);
-    if !directory.path().join(SETTINGS_FILE_NAME).exists() {
+    if !directory.path().join(SETTINGS_FILE_NAME).exists() && target.imported.is_none() {
         return Ok(None);
     }
-    let settings = Settings::from_file(&directory)
+    let mut settings = Settings::from_file(&directory)
         .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+    if target.imported.is_some() {
+        target
+            .matching_cube(root, &mut settings, ChainId::BitcoinBlake2b, digest)
+            .map_err(|error| Error::CompletionPersistence(error.to_string()))?;
+    }
     Ok(settings
         .cubes
         .iter()
@@ -563,4 +637,344 @@ fn recorded_height(
         .flat_map(|cube| cube.split_from.iter())
         .find(|record| record.descriptor_digest == digest && record.step2_txid == txid)
         .map(|record| record.completed_height))
+}
+
+#[cfg(test)]
+mod imported_tests {
+    use super::*;
+    use crate::app::settings::{BitcoinImport, BitcoinImportStage, WalletSettings};
+    use coincube_core::miniscript::bitcoin::hashes::Hash;
+
+    struct PairFixture {
+        root: CoincubeDirectory,
+        source: CubeSettings,
+        target: CubeSettings,
+    }
+    impl Drop for PairFixture {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(self.root.path()).unwrap();
+        }
+    }
+    impl PairFixture {
+        fn new() -> Self {
+            let root = CoincubeDirectory::new(
+                std::env::temp_dir().join(format!("imported-completion-{}", uuid::Uuid::new_v4())),
+            );
+            let (mut source, _, _) = crate::imported_claim::tests::fixture();
+            source.master_signer_fingerprint = Some([1, 2, 3, 4].into());
+            let import = source.bitcoin_import.as_ref().unwrap();
+            let source_wallet = import.active_attachment().unwrap();
+            let wallet = ImportedWalletAttachment::new(
+                source_wallet.descriptor.paired_blake2b().unwrap(),
+                ChainId::BitcoinBlake2b,
+                source_wallet.birthday,
+                source_wallet.initial_lookahead,
+            )
+            .unwrap();
+            let mut target = CubeSettings::new_with_raw_id(
+                crate::services::bitcoin_import::pairing::target_cube_id(&source.id),
+                "Synthetic imported pair".into(),
+                ChainId::BitcoinBlake2b,
+            );
+            target.master_signer_fingerprint = source.master_signer_fingerprint;
+            target.imported_claim_source = Some(Box::new(ImportedClaimPair {
+                source_cube_id: source.id.clone(),
+                source_operation_id: import.operation_id,
+                source_wallet: source_wallet.clone(),
+            }));
+            target.bitcoin_import = Some(Box::new(BitcoinImport {
+                operation_id: uuid::Uuid::parse_str(&target.id).unwrap(),
+                stage: BitcoinImportStage::Ready { wallet },
+                last_error: None,
+            }));
+            let fixture = Self {
+                root,
+                source,
+                target,
+            };
+            for cube in [&fixture.source, &fixture.target] {
+                let wallet = cube
+                    .bitcoin_import
+                    .as_ref()
+                    .unwrap()
+                    .active_attachment()
+                    .unwrap();
+                let metadata = WalletSettings {
+                    name: "Synthetic external signer".into(),
+                    alias: None,
+                    descriptor_checksum: wallet.wallet_id.descriptor_checksum.clone(),
+                    pinned_at: wallet.wallet_id.timestamp,
+                    keys: Vec::new(),
+                    hardware_wallets: Vec::new(),
+                    remote_backend_auth: None,
+                    start_internal_bitcoind: Some(false),
+                    pending_rescan: None,
+                    keychain_keys_recorded: false,
+                };
+                fixture.save(
+                    cube.network,
+                    &Settings {
+                        cubes: vec![cube.clone()],
+                        wallets: vec![metadata],
+                        ..Default::default()
+                    },
+                );
+            }
+            fixture
+        }
+        fn path(&self, chain: ChainId) -> std::path::PathBuf {
+            self.root
+                .network_directory(chain)
+                .path()
+                .join(SETTINGS_FILE_NAME)
+        }
+        fn save(&self, chain: ChainId, settings: &Settings) {
+            let path = self.path(chain);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, serde_json::to_vec_pretty(settings).unwrap()).unwrap();
+        }
+        fn evidence(&self) -> (SplitCompletionEvidence, Arc<()>, watch::Sender<u64>) {
+            let lifetime = Arc::new(());
+            let (sender, generation) = watch::channel(7);
+            let target = CompletionTarget::of(&self.target).unwrap();
+            // Synthetic completion evidence exercises only the settings boundary;
+            // the coordinator's real chain checks retain their separate tests.
+            let evidence = SplitCompletionEvidence {
+                target_cube: target.cube_id.clone(),
+                source_digest: target.imported.as_ref().unwrap().source_digest,
+                fork_chain: ChainId::BitcoinBlake2b,
+                block: BlockRef {
+                    height: 100,
+                    hash: BlockHash::from_byte_array([1; 32]),
+                },
+                txid: Txid::from_byte_array([2; 32]),
+                persisted: AtomicBool::new(false),
+                check_revoker: Revoker::new(),
+                lifetime: Arc::downgrade(&lifetime),
+                generation,
+                expected_generation: 7,
+                revoker: Revoker::new(),
+                not_after: Instant::now() + Duration::from_secs(30),
+            };
+            (evidence, lifetime, sender)
+        }
+    }
+
+    #[tokio::test]
+    async fn imported_completion_record_roundtrips_without_replacing_pair() {
+        let fixture = PairFixture::new();
+        let target = CompletionTarget::of(&fixture.target).unwrap();
+        let source_before = std::fs::read(fixture.path(ChainId::Bitcoin)).unwrap();
+        let (evidence, _lifetime, _sender) = fixture.evidence();
+        evidence.persist(&fixture.root, &target).await.unwrap();
+        let written = std::fs::read(fixture.path(ChainId::BitcoinBlake2b)).unwrap();
+        evidence.persist(&fixture.root, &target).await.unwrap();
+        assert_eq!(
+            std::fs::read(fixture.path(ChainId::BitcoinBlake2b)).unwrap(),
+            written
+        );
+        assert_eq!(
+            std::fs::read(fixture.path(ChainId::Bitcoin)).unwrap(),
+            source_before
+        );
+        let saved =
+            Settings::from_file(&fixture.root.network_directory(ChainId::BitcoinBlake2b)).unwrap();
+        let cube = &saved.cubes[0];
+        assert_eq!(CompletionTarget::of(cube), Some(target.clone()));
+        assert_eq!(cube.bitcoin_import, fixture.target.bitcoin_import);
+        assert_eq!(
+            cube.imported_claim_source,
+            fixture.target.imported_claim_source
+        );
+        assert!(cube.vault_wallet_id.is_none());
+        assert_eq!(cube.split_from, vec![evidence.record()]);
+        assert_eq!(
+            recorded_height(
+                &fixture.root,
+                &target,
+                evidence.source_digest(),
+                evidence.txid()
+            )
+            .unwrap(),
+            Some(100)
+        );
+        assert!(evidence.persisted.load(Ordering::SeqCst));
+        let record = serde_json::to_value(&cube.split_from[0]).unwrap();
+        assert_eq!(record.as_object().unwrap().len(), 3);
+        assert!(record.get("descriptor_digest").is_some());
+        assert!(record.get("completed_height").is_some());
+        assert!(record.get("step2_txid").is_some());
+    }
+
+    #[tokio::test]
+    async fn imported_completion_rejects_changed_pair_source_or_journal() {
+        for case in [
+            "source_operation",
+            "source_wallet",
+            "target_operation",
+            "target_wallet",
+            "target_signer",
+            "source_binding",
+            "signer_metadata",
+            "duplicate_target",
+            "duplicate_source",
+            "unpaired",
+            "native_vault",
+            "journal_source",
+            "journal_target",
+        ] {
+            let fixture = PairFixture::new();
+            let target = CompletionTarget::of(&fixture.target).unwrap();
+            let (mut evidence, _lifetime, _sender) = fixture.evidence();
+            let mut source =
+                Settings::from_file(&fixture.root.network_directory(ChainId::Bitcoin)).unwrap();
+            let mut fork =
+                Settings::from_file(&fixture.root.network_directory(ChainId::BitcoinBlake2b))
+                    .unwrap();
+            match case {
+                "source_operation" => {
+                    source.cubes[0]
+                        .bitcoin_import
+                        .as_mut()
+                        .unwrap()
+                        .operation_id = uuid::Uuid::new_v4()
+                }
+                "source_wallet" => {
+                    let BitcoinImportStage::Ready { wallet } =
+                        &mut source.cubes[0].bitcoin_import.as_mut().unwrap().stage
+                    else {
+                        unreachable!()
+                    };
+                    wallet.birthday += 1;
+                }
+                "target_operation" => {
+                    fork.cubes[0].bitcoin_import.as_mut().unwrap().operation_id =
+                        uuid::Uuid::new_v4()
+                }
+                "target_wallet" => {
+                    let BitcoinImportStage::Ready { wallet } =
+                        &mut fork.cubes[0].bitcoin_import.as_mut().unwrap().stage
+                    else {
+                        unreachable!()
+                    };
+                    wallet.initial_lookahead += 1;
+                }
+                "target_signer" => {
+                    fork.cubes[0].master_signer_fingerprint = Some([9, 9, 9, 9].into())
+                }
+                "source_binding" => {
+                    fork.cubes[0]
+                        .imported_claim_source
+                        .as_mut()
+                        .unwrap()
+                        .source_operation_id = uuid::Uuid::new_v4()
+                }
+                "signer_metadata" => fork.wallets[0].keychain_keys_recorded = true,
+                "duplicate_target" => fork.cubes.push(fork.cubes[0].clone()),
+                "duplicate_source" => source.cubes.push(source.cubes[0].clone()),
+                "unpaired" => fork.cubes[0].imported_claim_source = None,
+                "native_vault" => {
+                    fork.cubes[0].vault_wallet_id = Some(target.vault_wallet_id.clone())
+                }
+                "journal_source" => evidence.source_digest = sha256::Hash::from_byte_array([0; 32]),
+                "journal_target" => evidence.target_cube = "another-cube".into(),
+                _ => unreachable!(),
+            }
+            fixture.save(ChainId::Bitcoin, &source);
+            fixture.save(ChainId::BitcoinBlake2b, &fork);
+            let before = std::fs::read(fixture.path(ChainId::BitcoinBlake2b)).unwrap();
+            assert!(
+                evidence.persist(&fixture.root, &target).await.is_err(),
+                "{}",
+                case
+            );
+            assert!(!evidence.persisted.load(Ordering::SeqCst), "{}", case);
+            assert_eq!(
+                std::fs::read(fixture.path(ChainId::BitcoinBlake2b)).unwrap(),
+                before,
+                "{}",
+                case
+            );
+            if case != "journal_target" {
+                assert!(
+                    recorded_height(
+                        &fixture.root,
+                        &target,
+                        evidence.source_digest(),
+                        evidence.txid()
+                    )
+                    .is_err(),
+                    "{}",
+                    case
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn native_completion_target_keeps_existing_vault_matching() {
+        let cube = CubeSettings::new_with_raw_id(
+            "native-target".into(),
+            "Synthetic native Vault".into(),
+            ChainId::BitcoinBlake2b,
+        )
+        .with_vault(crate::app::settings::VaultIdentity {
+            wallet_id: WalletId::new("synthetic-checksum".into(), Some(1)),
+            fingerprint: Some("0123abcd".into()),
+        });
+        let target = CompletionTarget::of(&cube).unwrap();
+        assert!(target.imported.is_none());
+        assert_eq!(Some(&target.vault_wallet_id), cube.vault_wallet_id.as_ref());
+        assert_eq!(
+            Some(&target.vault_fingerprint),
+            cube.vault_fingerprint.as_ref()
+        );
+        let mut settings = Settings {
+            cubes: vec![cube.clone()],
+            ..Default::default()
+        };
+        // Native matching continues to require no imported source or metadata.
+        let root =
+            CoincubeDirectory::new(std::env::temp_dir().join(uuid::Uuid::new_v4().to_string()));
+        let digest = sha256::Hash::from_byte_array([3; 32]);
+        assert_eq!(
+            target
+                .matching_cube(&root, &mut settings, ChainId::BitcoinBlake2b, digest)
+                .unwrap()
+                .id,
+            cube.id
+        );
+        settings.cubes[0].vault_fingerprint = Some("changed".into());
+        assert!(target
+            .matching_cube(&root, &mut settings, ChainId::BitcoinBlake2b, digest)
+            .is_err());
+        settings.cubes[0] = cube;
+        settings.cubes[0]
+            .vault_wallet_id
+            .as_mut()
+            .unwrap()
+            .descriptor_checksum = "changed".into();
+        assert!(target
+            .matching_cube(&root, &mut settings, ChainId::BitcoinBlake2b, digest)
+            .is_err());
+    }
+
+    #[test]
+    fn imported_completion_requires_installed_dedicated_pair() {
+        let fixture = PairFixture::new();
+        assert!(CompletionTarget::of(&fixture.source).is_none());
+        let mut pending = fixture.target.clone();
+        let wallet = pending
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .attachment()
+            .unwrap()
+            .clone();
+        pending.bitcoin_import.as_mut().unwrap().stage = BitcoinImportStage::Installing { wallet };
+        assert!(CompletionTarget::of(&pending).is_none());
+        let mut arbitrary = fixture.target.clone();
+        arbitrary.id = uuid::Uuid::new_v4().to_string();
+        assert!(CompletionTarget::of(&arbitrary).is_none());
+    }
 }

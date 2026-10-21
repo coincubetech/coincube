@@ -25,6 +25,14 @@ pub struct ImportedDescriptorBlob {
     pub kind: ImportedBlobKind,
     pub cube: DescriptorBlobCube,
     pub wallet: ImportedDescriptorBlobWallet,
+    /// Stable staged-import identity, also bound by a paired fork's source record.
+    /// Older Kits omit it and retain their existing unpaired restore behavior.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub import_operation_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub imported_claim_source: Option<Box<crate::app::settings::bitcoin_import::ImportedClaimPair>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_metadata: Option<crate::app::settings::WalletSettings>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -68,7 +76,21 @@ impl ImportedDescriptorBlob {
         chain: ChainId,
         wallet: ImportedDescriptorBlobWallet,
     ) -> Result<Self, String> {
+        Self::new_with_pair(cube_uuid, chain, wallet, None, None, None)
+    }
+
+    pub fn new_with_pair(
+        cube_uuid: String,
+        chain: ChainId,
+        wallet: ImportedDescriptorBlobWallet,
+        imported_claim_source: Option<Box<crate::app::settings::bitcoin_import::ImportedClaimPair>>,
+        signer_metadata: Option<crate::app::settings::WalletSettings>,
+        import_operation_id: Option<uuid::Uuid>,
+    ) -> Result<Self, String> {
         let blob = Self {
+            import_operation_id,
+            imported_claim_source,
+            signer_metadata,
             version: IMPORTED_BLOB_VERSION,
             kind: ImportedBlobKind::Imported,
             cube: DescriptorBlobCube {
@@ -83,7 +105,6 @@ impl ImportedDescriptorBlob {
 
     pub fn validate(&self, chain: ChainId) -> Result<(), String> {
         if self.version != IMPORTED_BLOB_VERSION
-            || chain.is_blake2b()
             || self.cube.uuid.is_empty()
             || self.cube.network != chain.api_str()
             || self.wallet.descriptor.chain() != chain
@@ -96,8 +117,67 @@ impl ImportedDescriptorBlob {
                 "Imported Recovery Kit has inconsistent wallet identity or address state".into(),
             );
         }
+        if let Some(metadata) = &self.signer_metadata {
+            let id = crate::app::settings::WalletId::for_imported(&self.wallet.descriptor, chain)
+                .map_err(|e| e.to_string())?;
+            if metadata.wallet_id() != id || metadata.remote_backend_auth.is_some() {
+                return Err(
+                    "Imported Recovery Kit signer metadata belongs to another wallet.".into(),
+                );
+            }
+        }
+        match (&self.imported_claim_source, chain.is_blake2b()) {
+            (Some(binding), true) => {
+                binding.source_wallet.validate(ChainId::Bitcoin)?;
+                let descriptor = binding
+                    .source_wallet
+                    .descriptor
+                    .paired_blake2b()
+                    .map_err(|e| e.to_string())?;
+                if chain != ChainId::BitcoinBlake2b
+                    || self.cube.uuid
+                        != crate::services::bitcoin_import::pairing::target_cube_id(
+                            &binding.source_cube_id,
+                        )
+                    || self.wallet.descriptor != descriptor
+                    || self.wallet.birthday != binding.source_wallet.birthday
+                    || self.wallet.initial_lookahead != binding.source_wallet.initial_lookahead
+                    || self.signer_metadata.is_none()
+                {
+                    return Err(
+                        "The paired imported Recovery Kit source binding is inconsistent.".into(),
+                    );
+                }
+            }
+            (None, false) => (),
+            _ => return Err("The imported Recovery Kit has an invalid Claim pairing.".into()),
+        }
         Ok(())
     }
+}
+
+/// Local signer configuration for the authenticated encrypted Kit only.
+/// Device policy-registration tokens remain inside the ciphertext; account
+/// credentials and machine-specific node/rescan choices are excluded.
+pub fn encrypted_signer_metadata(
+    directory: &crate::dir::NetworkDirectory,
+    wallet_id: &crate::app::settings::WalletId,
+) -> Result<crate::app::settings::WalletSettings, String> {
+    let saved = crate::app::settings::Settings::from_file(directory).map_err(|e| e.to_string())?;
+    let mut matches = saved
+        .wallets
+        .into_iter()
+        .filter(|wallet| &wallet.wallet_id() == wallet_id);
+    let mut metadata = matches
+        .next()
+        .ok_or("Imported wallet signer metadata is unavailable.")?;
+    if matches.next().is_some() {
+        return Err("Duplicate imported wallet signer metadata.".into());
+    }
+    metadata.remote_backend_auth = None;
+    metadata.start_internal_bitcoind = Some(false);
+    metadata.pending_rescan = None;
+    Ok(metadata)
 }
 
 /// Drift includes allocated addresses so a Kit becomes stale after an unused
@@ -169,6 +249,27 @@ mod tests {
         assert!(advanced.validate(ChainId::Signet).is_err());
         assert!(!format!("{advanced:?}").contains("xpub"));
         assert!(!format!("{advanced:?}").contains("My wallet"));
+    }
+
+    #[test]
+    fn import_operation_identity_is_optional_for_legacy_kits_and_tracks_drift() {
+        let legacy = sample();
+        let bytes = serde_json::to_vec(&legacy).unwrap();
+        assert!(!String::from_utf8(bytes.clone())
+            .unwrap()
+            .contains("import_operation_id"));
+        let mut restored: ImportedDescriptorBlob = serde_json::from_slice(&bytes).unwrap();
+        restored.validate(ChainId::Bitcoin).unwrap();
+        assert!(restored.import_operation_id.is_none());
+        let legacy_fingerprint = imported_descriptor_blob_fingerprint(&restored);
+        restored.import_operation_id = Some(uuid::Uuid::new_v4());
+        assert_ne!(
+            legacy_fingerprint,
+            imported_descriptor_blob_fingerprint(&restored)
+        );
+        let decoded: ImportedDescriptorBlob =
+            serde_json::from_slice(&serde_json::to_vec(&restored).unwrap()).unwrap();
+        assert_eq!(decoded.import_operation_id, restored.import_operation_id);
     }
 
     #[test]
@@ -290,5 +391,60 @@ mod tests {
                 );
             }
         }
+    }
+    #[test]
+    fn paired_kit_roundtrip_retains_exact_binding_and_external_metadata() {
+        let original = sample();
+        let source_wallet = crate::app::settings::ImportedWalletAttachment::new(
+            original.wallet.descriptor.clone(),
+            ChainId::Bitcoin,
+            original.wallet.birthday,
+            original.wallet.initial_lookahead,
+        )
+        .unwrap();
+        let binding = crate::app::settings::bitcoin_import::ImportedClaimPair {
+            source_cube_id: original.cube.uuid.clone(),
+            source_operation_id: uuid::Uuid::new_v4(),
+            source_wallet,
+        };
+        let mut wallet = original.wallet;
+        wallet.descriptor = wallet.descriptor.paired_blake2b().unwrap();
+        let id = crate::app::settings::WalletId::for_imported(
+            &wallet.descriptor,
+            ChainId::BitcoinBlake2b,
+        )
+        .unwrap();
+        let metadata = crate::app::settings::WalletSettings {
+            name: "Synthetic external wallet".into(),
+            alias: None,
+            descriptor_checksum: id.descriptor_checksum,
+            pinned_at: None,
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
+        let blob = ImportedDescriptorBlob::new_with_pair(
+            crate::services::bitcoin_import::pairing::target_cube_id(&binding.source_cube_id),
+            ChainId::BitcoinBlake2b,
+            wallet,
+            Some(Box::new(binding.clone())),
+            Some(metadata),
+            None,
+        )
+        .unwrap();
+        let bytes = serde_json::to_vec(&blob).unwrap();
+        let mut restored: ImportedDescriptorBlob = serde_json::from_slice(&bytes).unwrap();
+        restored.validate(ChainId::BitcoinBlake2b).unwrap();
+        assert_eq!(restored.imported_claim_source.as_deref(), Some(&binding));
+        restored
+            .imported_claim_source
+            .as_mut()
+            .unwrap()
+            .source_wallet
+            .birthday += 1;
+        assert!(restored.validate(ChainId::BitcoinBlake2b).is_err());
     }
 }

@@ -624,11 +624,6 @@ impl Config {
                         "Imported wallet descriptor belongs to another chain".into(),
                     ));
                 }
-                if self.bitcoin_config.chain.is_blake2b() {
-                    return Err(ConfigError::Unexpected(
-                        "Imported wallets require a Bitcoin chain".into(),
-                    ));
-                }
             }
         }
 
@@ -713,6 +708,24 @@ mod tests {
         assert!(serialized.contains("example.com/secondary"));
         // Authentication remains available to this process while the disk copy is public.
         assert!(toml::to_string(&config).unwrap().contains("jwt-primary"));
+        // Pairing keeps the external wallet policy while rebinding its chain.
+        let paired = config
+            .main_descriptor
+            .as_imported()
+            .unwrap()
+            .paired_blake2b()
+            .unwrap();
+        config.main_descriptor = WalletDescriptor::Imported(paired);
+        config.bitcoin_config =
+            BitcoinConfig::new(ChainId::BitcoinBlake2b, Duration::from_secs(30));
+        config.import_birthday = Some(0);
+        config.import_initial_lookahead = Some(20);
+        config.check().unwrap();
+        let restored: Config =
+            toml::from_str(&toml::to_string(&config.for_persistence()).unwrap()).unwrap();
+        assert_eq!(restored.main_descriptor, config.main_descriptor);
+        config.bitcoin_config = BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30));
+        assert!(config.check().is_err());
     }
 
     /// Regression: an orphan `fallback_token` (no matching

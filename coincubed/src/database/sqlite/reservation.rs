@@ -38,7 +38,7 @@ impl SqliteConn {
         expected: Option<ChildNumber>,
     ) -> Result<Option<(bitcoin::Address, ChildNumber)>, ReservationError> {
         use ReservationError::{Exhausted, IdentityMismatch, Storage};
-        if chain != descriptor.chain() || chain.is_blake2b() {
+        if chain != descriptor.chain() {
             return Err(IdentityMismatch);
         }
         self.conn

@@ -233,6 +233,7 @@ fn ancestry_pair(
         fork_height: request.fork_height,
         claimed: bitcoin.claimed_prevouts(),
         target: &target,
+        paired_target_index: None,
     };
     let btcb2 = create_ancestry_split_step2(
         &inputs_b,

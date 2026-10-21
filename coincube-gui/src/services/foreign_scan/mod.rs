@@ -433,14 +433,34 @@ pub struct ScanReport {
     fork_height: Option<u64>,
     addresses: u32,
     coverage: Vec<BranchCoverage>,
+    /// Exact addresses whose stable chain and mempool histories were empty.
+    /// A later used address must not erase an earlier unused reservation.
+    unused_addresses: BTreeSet<(Branch, u32)>,
     coins: Vec<DiscoveredCoin>,
 }
 impl ScanReport {
     pub fn coverage(&self, branch: Branch) -> Option<BranchCoverage> {
         self.coverage.iter().copied().find(|c| c.branch == branch)
     }
+    pub(crate) fn observed_unused(&self, branch: Branch, index: u32) -> bool {
+        self.coverage(branch)
+            .is_some_and(|range| range.contains(index))
+            && self.unused_addresses.contains(&(branch, index))
+    }
     #[cfg(test)]
     pub(crate) fn with_coverage(mut self, coverage: Vec<BranchCoverage>) -> Self {
+        // Synthetic coverage alone only proves the suffix above last_used.
+        self.unused_addresses = coverage
+            .iter()
+            .flat_map(|range| {
+                let start = range
+                    .last_used
+                    .and_then(|index| index.checked_add(1))
+                    .unwrap_or(range.start)
+                    .max(range.start);
+                (start..range.end_exclusive).map(move |index| (range.branch, index))
+            })
+            .collect();
         self.coverage = coverage;
         self
     }
@@ -501,6 +521,7 @@ impl ScanReport {
             fork_height: None,
             addresses: 1,
             coverage: Vec::new(),
+            unused_addresses: BTreeSet::new(),
             coins,
         }
     }
@@ -667,6 +688,7 @@ async fn collect_mode(
         fork_height,
         addresses: 0,
         coverage: Vec::new(),
+        unused_addresses: BTreeSet::new(),
         coins: Vec::new(),
     };
     let mut outpoints = BTreeSet::new();
@@ -800,6 +822,10 @@ async fn collect_mode(
                 report.addresses += 1;
                 if stats.used() {
                     last_used = Some(index);
+                } else {
+                    report
+                        .unused_addresses
+                        .insert((range.descriptor.branch, index));
                 }
                 gap = if stats.used() { 0 } else { gap + 1 };
                 if mode == ScanMode::Gap

@@ -23,6 +23,16 @@ use crate::{
     wallet_descriptor::ImportedWalletDescriptor,
 };
 
+const FORK_SPEND_UNAVAILABLE: &str =
+    "Ordinary imported Bitcoin Blake2b spending is not available yet";
+
+fn require_bitcoin_wallet(wallet: &ImportedWalletDescriptor) -> Result<(), SpendCreationError> {
+    if wallet.chain().is_blake2b() {
+        return Err(invalid(FORK_SPEND_UNAVAILABLE));
+    }
+    Ok(())
+}
+
 fn invalid(reason: &'static str) -> SpendCreationError {
     SpendCreationError::InvalidImportedWallet(reason)
 }
@@ -79,6 +89,7 @@ pub fn create_imported_spend(
     change_addr: SpendOutputAddress,
     locktime: LockTime,
 ) -> Result<CreateSpendRes, SpendCreationError> {
+    require_bitcoin_wallet(wallet)?;
     let (feerate, replaced_fee) = match fees {
         SpendTxFees::Regular(rate) => (rate, None),
         SpendTxFees::Rbf(rate, fee) => (rate, Some(fee)),
@@ -246,6 +257,7 @@ pub fn verify_imported_spend_before_broadcast(
     wallet: &ImportedWalletDescriptor,
     psbt: &Psbt,
 ) -> Result<(), SpendCreationError> {
+    require_bitcoin_wallet(wallet)?;
     let tx = &psbt.unsigned_tx;
     if tx.input.is_empty()
         || tx.output.is_empty()
@@ -663,6 +675,61 @@ mod tests {
         )
         .unwrap();
         (wallet, signers, created)
+    }
+
+    #[test]
+    fn imported_blake2b_ordinary_spend_entry_points_refuse_without_signatures() {
+        let (wallet, _, draft) = draft("wpkh");
+        let fork = ImportedWalletDescriptor::from_descriptors(
+            wallet.receive_descriptor().clone(),
+            wallet.change_descriptor().clone(),
+            ChainId::BitcoinBlake2bTestnet4,
+        )
+        .unwrap();
+        let original = draft.psbt.clone();
+        let secp = secp256k1::Secp256k1::verification_only();
+        assert!(matches!(
+            verify_imported_spend_before_broadcast(&fork, &draft.psbt),
+            Err(SpendCreationError::InvalidImportedWallet(
+                FORK_SPEND_UNAVAILABLE
+            ))
+        ));
+        assert!(verify_imported_signatures(&fork, &draft.psbt, &draft.psbt, &secp).is_err());
+        assert!(finalize_imported_spend(&fork, &draft.psbt, &draft.psbt, &secp).is_err());
+        let change = SpendOutputAddress {
+            addr: address(
+                fork.change_descriptor()
+                    .at_derivation_index(1)
+                    .unwrap()
+                    .script_pubkey(),
+            ),
+            info: Some(AddrInfo {
+                index: ChildNumber::Normal { index: 1 },
+                is_change: true,
+            }),
+        };
+        let previous = draft.psbt.inputs[0].non_witness_utxo.clone().unwrap();
+        assert!(matches!(
+            create_imported_spend(
+                &fork,
+                &secp,
+                &mut OneTx(previous),
+                &[],
+                &[],
+                SpendTxFees::Regular(1),
+                change,
+                LockTime::ZERO
+            ),
+            Err(SpendCreationError::InvalidImportedWallet(
+                FORK_SPEND_UNAVAILABLE
+            ))
+        ));
+        assert_eq!(draft.psbt, original);
+        assert!(draft
+            .psbt
+            .inputs
+            .iter()
+            .all(|input| input.partial_sigs.is_empty()));
     }
 
     fn add_signature(psbt: &mut Psbt, signer: &Xpriv) {

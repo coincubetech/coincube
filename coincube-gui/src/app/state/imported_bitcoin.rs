@@ -27,7 +27,7 @@ use coincube_core::{
 use coincube_ui::{
     component::{button, date_picker, spinner, text::*},
     theme,
-    widget::{Column, ColumnExt, Element, Row},
+    widget::{Column, ColumnExt, Element, Row, RowExt},
 };
 use coincubed::{
     commands::{CoinStatus, CreateSpendResult, ListSpendEntry},
@@ -145,7 +145,7 @@ fn sample_receive_address(descriptor: &ImportedWalletDescriptor) -> Result<Strin
         .at_derivation_index(0)
         .map_err(|error| error.to_string())?
         .script_pubkey();
-    Address::from_script(&script, Network::Bitcoin)
+    Address::from_script(&script, descriptor.chain().bitcoin_network())
         .map(|address| address.to_string())
         .map_err(|error| error.to_string())
 }
@@ -413,6 +413,12 @@ pub struct ImportedBitcoinPanel {
 }
 
 impl ImportedBitcoinPanel {
+    fn chain(&self) -> ChainId {
+        self.import
+            .attachment()
+            .map(|w| w.descriptor.chain())
+            .unwrap_or(ChainId::Bitcoin)
+    }
     pub fn new(directory: NetworkDirectory, cube_id: String, import: BitcoinImport) -> Self {
         let review = import.attachment().cloned();
         let generation = fresh_generation();
@@ -477,9 +483,9 @@ impl ImportedBitcoinPanel {
             && self.info.as_ref().is_some_and(|info| {
                 info.imported_wallet.as_ref().is_some_and(|status| {
                     status.history_complete
-                        && info.chain_id == Some(ChainId::Bitcoin)
-                        && info.network == Network::Bitcoin
-                        && status.chain_id == ChainId::Bitcoin
+                        && info.chain_id == Some(self.chain())
+                        && info.network == self.chain().bitcoin_network()
+                        && status.chain_id == self.chain()
                         && status.discovery_target >= status.initial_lookahead
                         && status.discovery_target <= 10_000
                         // The daemon attests to the initial/restored/wider full
@@ -583,8 +589,8 @@ impl ImportedBitcoinPanel {
         let wallet = self.import.active_attachment()?;
         let info = self.info.as_ref()?;
         let status = info.imported_wallet.as_ref()?;
-        (info.chain_id == Some(ChainId::Bitcoin)
-            && status.chain_id == ChainId::Bitcoin
+        (info.chain_id == Some(wallet.descriptor.chain())
+            && status.chain_id == wallet.descriptor.chain()
             && wallet.wallet_id.descriptor_checksum
                 == format!("imported-v1-{}", status.wallet_identity)
             && wallet.birthday == status.birthday
@@ -600,9 +606,9 @@ impl ImportedBitcoinPanel {
             return false;
         };
         matches!(&info.descriptors.main, WalletDescriptor::Imported(descriptor) if descriptor == &wallet.descriptor)
-            && info.network == Network::Bitcoin
-            && info.chain_id == Some(ChainId::Bitcoin)
-            && status.chain_id == ChainId::Bitcoin
+            && info.network == wallet.descriptor.chain().bitcoin_network()
+            && info.chain_id == Some(wallet.descriptor.chain())
+            && status.chain_id == wallet.descriptor.chain()
             && wallet.wallet_id.descriptor_checksum
                 == format!("imported-v1-{}", status.wallet_identity)
             && status.birthday == wallet.birthday
@@ -729,6 +735,10 @@ impl ImportedBitcoinPanel {
         }
         match menu {
             Menu::Vault(VaultSubMenu::Send | VaultSubMenu::PSBTs(_)) => {
+                if self.chain().is_blake2b() {
+                    self.error = Some("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.".into());
+                    return Task::none();
+                }
                 self.error = self.ensure_hardware_wallets().err();
                 if let Menu::Vault(VaultSubMenu::PSBTs(Some(id))) = menu {
                     self.select_saved_draft(*id);
@@ -766,7 +776,7 @@ impl ImportedBitcoinPanel {
             .map_err(|_| "Enter a valid Bitcoin address.".to_string())?;
         unchecked
             .clone()
-            .require_network(Network::Bitcoin)
+            .require_network(self.chain().bitcoin_network())
             .map_err(|_| "The recipient address belongs to another Bitcoin network.".to_string())?;
         let amount = self
             .send_amount
@@ -826,7 +836,7 @@ impl ImportedBitcoinPanel {
         let wallet = self.import_descriptor()?;
         let policy = imported_policy(&wallet).map_err(|error| error.to_string())?;
         self.hardware_wallets = Some(
-            HardwareWallets::new(root, Network::Bitcoin)
+            HardwareWallets::new(root, self.chain().bitcoin_network())
                 .with_public_policy(policy.name().to_owned(), policy.descriptor().to_owned()),
         );
         Ok(())
@@ -958,6 +968,25 @@ impl ImportedBitcoinPanel {
         connect_epoch: u64,
     ) -> Task<Message> {
         self.set_connect_client(client.as_ref());
+        if self.chain().is_blake2b()
+            && matches!(
+                message,
+                ImportMessage::ShowSend
+                    | ImportMessage::CreateDraft
+                    | ImportMessage::SelectDraft(_)
+                    | ImportMessage::CopyPsbt
+                    | ImportMessage::SignedPsbtEdited(_)
+                    | ImportMessage::ImportSignedPsbt
+                    | ImportMessage::SavePsbt
+                    | ImportMessage::LoadSignedPsbt
+                    | ImportMessage::Broadcast
+                    | ImportMessage::Hardware(_)
+                    | ImportMessage::SignWithDevice(_)
+            )
+        {
+            self.error = Some("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.".into());
+            return Task::none();
+        }
         if self.busy && (!matches!(&message, ImportMessage::PollProgress) || self.address_reserving)
         {
             return Task::none();
@@ -2059,6 +2088,14 @@ impl ImportedBitcoinPanel {
         if self.daemon.is_some() {
             return self.refresh();
         }
+        if self.chain().is_blake2b() {
+            self.sync_failed = true;
+            self.error = Some(
+                "Reopen this paired Cube to restore its authenticated Bitcoin Blake2b session."
+                    .into(),
+            );
+            return Task::none();
+        }
         let Some(wallet) = self.import.active_attachment() else {
             return Task::none();
         };
@@ -2078,7 +2115,7 @@ impl ImportedBitcoinPanel {
         };
         if let Err(error) = crate::loader::authenticate_imported_connect_provider(
             &mut config,
-            ChainId::Bitcoin,
+            self.chain(),
             self.connect_token.as_deref(),
         ) {
             self.sync_failed = true;
@@ -2120,7 +2157,7 @@ impl ImportedBitcoinPanel {
     fn hydrate_provider_from_config(&mut self, config: &Config) -> Result<(), &'static str> {
         match config.bitcoin_backend.as_ref() {
             Some(BitcoinBackend::Esplora(esplora))
-                if esplora.addr == crate::installer::connect_url(ChainId::Bitcoin) =>
+                if esplora.addr == crate::installer::connect_url(self.chain()) =>
             {
                 self.provider = Provider::Connect;
                 self.endpoint = esplora.addr.clone();
@@ -2509,7 +2546,7 @@ impl ImportedBitcoinPanel {
                 .push(p1_regular("The signing keys remain in your original wallet or hardware devices. Your Cube recovery seed cannot sign for this Bitcoin wallet."))
                 .push(p1_regular("Update the Cube Recovery Kit now that this wallet is attached."))
                 .push(Row::new().spacing(10)
-                    .push(button::primary(None, "Send").on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend)))
+                    .push_maybe((!self.chain().is_blake2b()).then(||button::primary(None, "Send").on_press(view::Message::ImportedBitcoin(ImportMessage::ShowSend))))
                     .push(button::primary(None, "Receive").on_press(view::Message::ImportedBitcoin(ImportMessage::Receive)))
                     .push(button::secondary(None, "Refresh").on_press(view::Message::ImportedBitcoin(ImportMessage::Refresh))));
             if let Some(address) = &self.address {
@@ -2661,6 +2698,9 @@ impl ImportedBitcoinPanel {
     }
 
     fn send_view(&self, psbts_only: bool) -> Element<'_, view::Message> {
+        if self.chain().is_blake2b() {
+            return Column::new().spacing(16).push(h2("Send")).push(p1_regular("Sending from paired imported BTCB2 wallets is not available yet. Use the paired Claim flow.")).into();
+        }
         let mut content = Column::new()
             .spacing(14)
             .push(h2(if psbts_only { "PSBTs" } else { "Send Bitcoin" }))

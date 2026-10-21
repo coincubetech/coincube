@@ -110,24 +110,51 @@ impl TargetAddressEvidence {
         if cube.id.is_empty()
             || cube.network != ChainId::BitcoinBlake2b
             || wallet.chain != ChainId::BitcoinBlake2b
-            || cube.vault_wallet_id.as_ref() != Some(&wallet.id())
         {
             return Err(ForeignPsbtError::TargetChanged);
         }
-        let vault = wallet
-            .inheritance_descriptor()
-            .ok_or(ForeignPsbtError::TargetChanged)?;
-        let vault_fingerprint = descriptor_id_fingerprint(vault).to_string();
-        if cube.vault_fingerprint.as_deref() != Some(vault_fingerprint.as_str())
-            || reserved.derivation_index.is_hardened()
-        {
+        let vault_fingerprint = match &wallet.main_descriptor {
+            coincube_core::wallet_descriptor::WalletDescriptor::Vault(vault) => {
+                let fingerprint = descriptor_id_fingerprint(vault).to_string();
+                if cube.vault_wallet_id.as_ref() != Some(&wallet.id())
+                    || cube.vault_fingerprint.as_deref() != Some(fingerprint.as_str())
+                {
+                    return Err(ForeignPsbtError::TargetChanged);
+                }
+                fingerprint
+            }
+            coincube_core::wallet_descriptor::WalletDescriptor::Imported(imported) => {
+                let pair = cube
+                    .imported_claim_source
+                    .as_ref()
+                    .ok_or(ForeignPsbtError::TargetChanged)?;
+                let attachment = cube
+                    .bitcoin_import
+                    .as_ref()
+                    .and_then(|import| import.active_attachment())
+                    .ok_or(ForeignPsbtError::TargetChanged)?;
+                if attachment.wallet_id != wallet.id()
+                    || &attachment.descriptor != imported
+                    || pair.source_wallet.descriptor.paired_blake2b().as_ref() != Ok(imported)
+                {
+                    return Err(ForeignPsbtError::TargetChanged);
+                }
+                imported
+                    .identity(wallet.chain)
+                    .map_err(|_| ForeignPsbtError::TargetChanged)?
+                    .to_string()
+            }
+        };
+        if reserved.derivation_index.is_hardened() {
             return Err(ForeignPsbtError::TargetChanged);
         }
-        let secp = bitcoin::secp256k1::Secp256k1::verification_only();
-        let derived = vault
+        let derived = wallet
+            .main_descriptor
             .receive_descriptor()
-            .derive(reserved.derivation_index, &secp)
-            .address(wallet.chain.bitcoin_network());
+            .derive(u32::from(reserved.derivation_index))
+            .map_err(|_| ForeignPsbtError::TargetAddress)?
+            .address(wallet.chain.bitcoin_network())
+            .map_err(|_| ForeignPsbtError::TargetAddress)?;
         if derived != reserved.address {
             return Err(ForeignPsbtError::TargetAddress);
         }
@@ -178,7 +205,7 @@ fn check_target_fresh(
 ) -> Result<(), ForeignPsbtError> {
     let info = &reservation.info;
     if info.chain_id != Some(ChainId::BitcoinBlake2b)
-        || info.descriptors.main.as_vault() != wallet.inheritance_descriptor()
+        || info.descriptors.main != wallet.main_descriptor
     {
         return Err(ForeignPsbtError::TargetChanged);
     }
@@ -771,6 +798,77 @@ mod tests {
         )
         .with_vault(VaultIdentity::new(wallet.id(), Some(&descriptor)));
         (descriptor, wallet, cube)
+    }
+
+    #[test]
+    fn imported_target_authentication_requires_exact_pair_and_fresh_descriptor() {
+        use crate::app::settings::bitcoin_import::{
+            BitcoinImport, BitcoinImportStage, ImportedClaimPair, ImportedWalletAttachment,
+        };
+        use bitcoin::bip32::{DerivationPath, Xpriv, Xpub};
+        use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
+        let secp = secp256k1::Secp256k1::new();
+        let master = Xpriv::new_master(bitcoin::Network::Bitcoin, &[92; 32]).unwrap();
+        let account = master
+            .derive_priv(&secp, &DerivationPath::from_str("m/84h/0h/0h").unwrap())
+            .unwrap();
+        let source = ImportedWalletDescriptor::parse(
+            &format!(
+                "wpkh([{}/84h/0h/0h]{}/<0;1>/*)",
+                master.fingerprint(&secp),
+                Xpub::from_priv(&secp, &account)
+            ),
+            None,
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        let target = source.paired_blake2b().unwrap();
+        let wallet = Wallet::new(target.clone()).with_chain(ChainId::BitcoinBlake2b);
+        let attachment = ImportedWalletAttachment {
+            wallet_id: wallet.id(),
+            descriptor: target.clone(),
+            birthday: 0,
+            initial_lookahead: 20,
+        };
+        let source_wallet = ImportedWalletAttachment {
+            wallet_id: WalletId::for_imported(&source, ChainId::Bitcoin).unwrap(),
+            descriptor: source,
+            birthday: 0,
+            initial_lookahead: 20,
+        };
+        let (native, _, mut cube) = target_context("paired-target");
+        cube.vault_wallet_id = None;
+        cube.vault_fingerprint = None;
+        cube.bitcoin_import = Some(Box::new(BitcoinImport {
+            operation_id: uuid::Uuid::new_v4(),
+            stage: BitcoinImportStage::Ready { wallet: attachment },
+            last_error: None,
+        }));
+        cube.imported_claim_source = Some(Box::new(ImportedClaimPair {
+            source_cube_id: "source".into(),
+            source_operation_id: uuid::Uuid::new_v4(),
+            source_wallet,
+        }));
+        let mut reservation = fresh_reservation(&native, 11);
+        reservation.info.descriptors.main = WalletDescriptor::Imported(target);
+        reservation.reserved.address = wallet
+            .main_descriptor
+            .receive_descriptor()
+            .derive(11)
+            .unwrap()
+            .address(bitcoin::Network::Bitcoin)
+            .unwrap();
+        TargetAddressEvidence::authenticate(&cube, &wallet, &reservation, 1).unwrap();
+        reservation.info.descriptors.main = native.into();
+        assert_eq!(
+            TargetAddressEvidence::authenticate(&cube, &wallet, &reservation, 1),
+            Err(ForeignPsbtError::TargetChanged)
+        );
+        cube.imported_claim_source = None;
+        assert_eq!(
+            TargetAddressEvidence::authenticate(&cube, &wallet, &reservation, 1),
+            Err(ForeignPsbtError::TargetChanged)
+        );
     }
 
     fn target_evidence(cube_id: &str, index: u32, generation: u64) -> TargetAddressEvidence {
@@ -1592,10 +1690,11 @@ mod tests {
         );
         let binding = crate::services::claim_workflow::SplitTargetBinding::from_evidence(
             &evidence,
-            &descriptor,
+            &descriptor.clone().into(),
+            None,
         )
         .unwrap();
-        assert!(binding.matches_vault(&wallet.id(), &descriptor));
+        assert!(binding.matches_vault(&wallet.id(), &descriptor.clone().into()));
         assert_eq!(binding.receive_index(), 11);
         assert_eq!(
             binding.script_pubkey().unwrap().as_script(),

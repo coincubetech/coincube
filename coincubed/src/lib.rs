@@ -1176,7 +1176,7 @@ impl DaemonHandle {
         )
     }
 
-    /// Start an embedded native-P2WSH fork wallet with ephemeral authenticated Connect
+    /// Start an embedded native-P2WSH or imported fork wallet with ephemeral authenticated Connect
     /// authority. Generic daemon startup and external JSON-RPC remain unavailable for forks.
     /// Admission and existing database identity checks still precede every write.
     pub fn start_with_connect(
@@ -1187,16 +1187,14 @@ impl DaemonHandle {
         if !config.bitcoin_config.chain.is_blake2b()
             || with_rpc_server
             || config.pending_bitcoind.is_some()
-            || !matches!(
-                config
-                    .main_descriptor
-                    .as_vault()
-                    .map(|vault| vault.descriptor())
-                    .ok_or(StartupError::ConnectAdmission(
-                        connect::AdmissionError::InvalidBackend
-                    ))?,
-                miniscript::Descriptor::Wsh(_)
-            )
+            || !match &config.main_descriptor {
+                coincube_core::wallet_descriptor::WalletDescriptor::Vault(vault) => {
+                    matches!(vault.descriptor(), miniscript::Descriptor::Wsh(_))
+                }
+                // Imported descriptors retain their externally controlled policy;
+                // Config::check below binds their exact chain and history bounds.
+                coincube_core::wallet_descriptor::WalletDescriptor::Imported(_) => true,
+            }
         {
             return Err(StartupError::ConnectAdmission(
                 connect::AdmissionError::InvalidBackend,
@@ -1209,7 +1207,7 @@ impl DaemonHandle {
             false,
             Some(backend),
             false,
-            // Only this authenticated, embedded, native-P2WSH entry point opens
+            // Only this authenticated, embedded entry point opens
             // the fork runtime. start/start_default retain chain_runtime_gate.
             |_| Ok(()),
         )

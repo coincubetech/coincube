@@ -475,6 +475,7 @@ fn ancestry_step2_builds_exact_shared_plus_funding_and_signs_every_shape() {
             fork_height: FORK,
             claimed: &claimed,
             target: target.as_script(),
+            paired_target_index: None,
         };
         let step = create_ancestry_split_step2(&inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
         let tx = &step.psbt().unsigned_tx;
@@ -575,6 +576,7 @@ fn ancestry_pair_finalizes_only_matching_signed_transactions() {
             fork_height: FORK,
             claimed: bitcoin.claimed_prevouts(),
             target: target.as_script(),
+            paired_target_index: None,
         };
         let fork = create_ancestry_split_step2(&fork_inputs, FEERATE, LockTime::ZERO, TIP).unwrap();
         let bitcoin_signed = sign(bitcoin.psbt(), &wallet.signers);
@@ -839,6 +841,7 @@ fn ancestry_step2_refuses_wrong_claimed_or_funding_and_changed_fee() {
         fork_height: FORK,
         claimed: &claimed,
         target: target.as_script(),
+        paired_target_index: None,
     };
     let create = |inputs: &AncestrySplitStep2Inputs<'_>| {
         create_ancestry_split_step2(inputs, FEERATE, LockTime::ZERO, TIP)
@@ -897,6 +900,7 @@ fn ancestry_step2_refuses_wrong_claimed_or_funding_and_changed_fee() {
     assert!(matches!(
         create(&AncestrySplitStep2Inputs {
             target: invalid_target.as_script(),
+            paired_target_index: None,
             ..inputs
         }),
         Err(Error::InvalidTarget)
@@ -924,6 +928,67 @@ fn ancestry_step2_refuses_wrong_claimed_or_funding_and_changed_fee() {
         .unwrap_err(),
         FinalizeError::CoinsChanged
     );
+}
+
+#[test]
+fn paired_ancestry_target_requires_exact_fresh_source_descriptor_index() {
+    for shape in SHAPES {
+        let wallet = wallet(shape);
+        let shared = coins(&wallet.source);
+        let (mut funding, dependency) = ancestry_funding(&wallet.source);
+        funding.bitcoin_block = None;
+        funding.btcb2_block = Some(block(FORK + 20));
+        let claimed: Vec<_> = shared.iter().map(|coin| coin.outpoint).collect();
+        let index = 2000;
+        let target = wallet
+            .source
+            .derive(SplitBranch::External, index)
+            .unwrap()
+            .script_pubkey();
+        let inputs = AncestrySplitStep2Inputs {
+            chain: ChainId::BitcoinBlake2b,
+            source: &wallet.source,
+            shared: &shared,
+            funding: &funding,
+            dependency: &dependency,
+            fork_height: FORK,
+            claimed: &claimed,
+            target: target.as_script(),
+            paired_target_index: Some(index),
+        };
+        let create = |inputs: &AncestrySplitStep2Inputs<'_>| {
+            create_ancestry_split_step2(inputs, FEERATE, LockTime::ZERO, TIP)
+        };
+        let step = create(&inputs).unwrap();
+        assert_eq!(step.target(), target.as_script());
+        assert!(matches!(
+            create(&AncestrySplitStep2Inputs {
+                paired_target_index: Some(index + 1),
+                ..inputs
+            }),
+            Err(Error::InvalidTarget)
+        ));
+        let spent = wallet
+            .source
+            .derive(shared[0].branch, shared[0].index)
+            .unwrap()
+            .script_pubkey();
+        assert!(matches!(
+            create(&AncestrySplitStep2Inputs {
+                target: spent.as_script(),
+                paired_target_index: Some(shared[0].index),
+                ..inputs
+            }),
+            Err(Error::InvalidTarget)
+        ));
+        let mut recorded = step.psbt().unsigned_tx.clone();
+        recorded.output[0].script_pubkey = wallet
+            .source
+            .derive(SplitBranch::External, index + 1)
+            .unwrap()
+            .script_pubkey();
+        assert!(reconstruct_ancestry_split_step2(&inputs, &recorded, FEERATE, TIP).is_err());
+    }
 }
 
 #[test]

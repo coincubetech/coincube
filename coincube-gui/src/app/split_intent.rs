@@ -39,6 +39,7 @@ pub struct SplitIntent {
     pub inventory: SplitInventory,
     pub external: ScanDescriptor,
     pub internal: Option<ScanDescriptor>,
+    pub(crate) imported_claim: Option<crate::imported_claim::ImportedClaimRequest>,
 }
 
 impl SplitIntent {
@@ -84,7 +85,25 @@ impl SplitIntent {
             inventory,
             external,
             internal,
+            imported_claim: None,
         })
+    }
+
+    /// Retain the originating attachment and session through unlock and review.
+    pub(crate) fn bind_imported_source(
+        mut self,
+        source: crate::imported_claim::ImportedClaimSource,
+        client: &CoincubeClient,
+    ) -> Option<Self> {
+        if self.external.descriptor().to_string() != source.external
+            || self.internal.as_ref()?.descriptor().to_string() != source.internal
+            || !self.matches_client(client)
+        {
+            return None;
+        }
+        self.imported_claim =
+            Some(crate::imported_claim::ImportedClaimRequest::new(source, client).ok()?);
+        Some(self)
     }
 
     pub fn target_cube_id(&self) -> &str {
@@ -299,6 +318,44 @@ mod tests {
         ] {
             assert!(make(scan).is_none());
         }
+    }
+
+    #[test]
+    fn imported_handoff_keeps_both_source_branches_and_session_after_unlock() {
+        use crate::services::foreign_scan::Branch;
+        let (cube, request, client) = crate::imported_claim::tests::fixture();
+        let make = |source: crate::imported_claim::ImportedClaimSource,
+                    session: &CoincubeClient| {
+            SplitIntent::new(
+                "paired-cube".into(),
+                ChainId::BitcoinBlake2b,
+                7,
+                &client,
+                empty_scan_for_test(11),
+                ScanDescriptor::parse(Branch::External, &request.source.external).unwrap(),
+                Some(ScanDescriptor::parse(Branch::Internal, &request.source.internal).unwrap()),
+            )
+            .unwrap()
+            .bind_imported_source(source, session)
+        };
+        let intent = make(request.source.clone(), &client).unwrap();
+        arm(intent);
+        let opened = take_for_open("paired-cube", ChainId::BitcoinBlake2b).unwrap();
+        let bound = opened.imported_claim.unwrap();
+        assert_eq!(bound.source, request.source);
+        assert_eq!(bound.source.cube_id, cube.id);
+        bound.validate_session(&client).unwrap();
+        assert!(take_for_open("paired-cube", ChainId::BitcoinBlake2b).is_none());
+
+        let mut changed = request.source.clone();
+        changed.internal = changed.external.clone();
+        assert!(make(changed, &client).is_none());
+        let mut changed = request.source.clone();
+        changed.external = changed.internal.clone();
+        assert!(make(changed, &client).is_none());
+        let mut other_session = client.clone();
+        other_session.set_token("synthetic-other-session");
+        assert!(make(request.source.clone(), &other_session).is_none());
     }
 
     #[test]
