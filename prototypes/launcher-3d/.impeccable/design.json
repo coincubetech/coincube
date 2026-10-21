@@ -1,0 +1,70 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-21T22:55:50Z",
+  "title": "Design System: Tenshu 3D Launcher Lab",
+  "extensions": {
+    "motion": [
+      {
+        "name": "selection-lift",
+        "value": "0.25 world units * (1 - exp(-elapsed_seconds * 18)); redraw window 350 ms",
+        "purpose": "Native GPU selection response; Reduce motion applies the lift immediately. This is a Rust scene expression, not a CSS animation."
+      },
+      {
+        "name": "optional-float",
+        "value": "sin(time_seconds * 1.2 + cube_id * 0.4) * 0.07 world Y units",
+        "purpose": "Explicit Float experiment; paused while unfocused and disabled by Reduce motion. Labels and contact shadows remain stationary."
+      }
+    ],
+    "typographyMeta": {
+      "headline": {
+        "displayName": "Native heading",
+        "purpose": "Tenshu heading; embedded IBM Plex Sans Regular. Size strings in DESIGN.md are Iced logical pixels."
+      },
+      "caption": {
+        "displayName": "Native supporting text",
+        "purpose": "Metrics, notices and catalog context; no CSS font stack or extra loaded weight is implied."
+      }
+    }
+  },
+  "components": [],
+  "narrative": {
+    "northStar": "Tangible Cubes, readable controls",
+    "overview": "This is a descriptive inventory of the standalone Iced/wgpu prototype at source commit e72aacfc9d093a5e1af84cb10114a0597b90cb8f, not a new identity or global Tenshu design policy. The fixed-camera floor makes synthetic Cube containers tangible; ordinary desktop controls and the right-hand catalog carry names, network identity and actions. Orange connects creation, selection and preview. IBM Plex Sans preserves the existing Tenshu type identity.",
+    "keyCharacteristics": [
+      "A dominant 3D floor paired with a persistent text catalog.",
+      "Dark default and switchable light mode; custom warm label/action treatments over standard Iced themes.",
+      "Network identity in both geometry color and readable text.",
+      "Explicit synthetic-data language and CPU/redraw measurement limits."
+    ],
+    "rules": [
+      {
+        "name": "The Text-Supported Identity Rule",
+        "body": "Every catalog entry names its network. Color alone never carries the catalog's network or backup meaning.",
+        "section": "colors"
+      },
+      {
+        "name": "The Single-Face Rule",
+        "body": "Preserve the embedded regular IBM Plex Sans identity when extending this prototype; do not infer extra loaded weights from heading roles.",
+        "section": "typography"
+      },
+      {
+        "name": "The Catalog Continuity Rule",
+        "body": "The regular catalog remains available when object labels are reduced or absent at higher counts.",
+        "section": "layout"
+      }
+    ],
+    "dos": [
+      "Do retain text-supported network and protection identity alongside 3D color.",
+      "Do use the regular embedded IBM Plex Sans and the observed native units.",
+      "Do keep the catalog available at scene densities where on-floor labels disappear.",
+      "Do label synthetic actions and measurement scope as explicitly as the current lab.",
+      "Do treat this inventory as a local source snapshot and recheck source when the prototype changes."
+    ],
+    "donts": [
+      "Don't promote this lab's fixed layout or inherited Iced blue controls into global Tenshu rules.",
+      "Don't translate shader material vectors into asserted UI hex colors or contact shading into CSS shadows.",
+      "Don't represent selection/preview as authentication, or redraw cadence as GPU performance.",
+      "Don't canonize compact overlap, missing focus/AT proof, rectangular shader clipping or absent fallback as intended future behavior."
+    ]
+  }
+}

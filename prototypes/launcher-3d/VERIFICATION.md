@@ -9,16 +9,22 @@ Synthetic standalone Launcher only. The native application was built and opened 
 - Release build and macOS local bundle/ad-hoc signing succeeded.
 - `cargo fmt --manifest-path prototypes/launcher-3d/Cargo.toml -- --check` passed.
 - `cargo clippy --locked --manifest-path prototypes/launcher-3d/Cargo.toml --all-targets -- -D warnings` passed.
-- `cargo test --locked --manifest-path prototypes/launcher-3d/Cargo.toml`: 7 passed.
-- Tests cover filter semantics, unique synthetic identity and capacity, bounded measurements, finite mesh geometry, projected picking at two scene sizes and 1/4/20/100 counts, and camera depth range through 500 Cubes.
+- `cargo test --locked --manifest-path prototypes/launcher-3d/Cargo.toml`: 8 passed.
+- Tests cover filter semantics, unique synthetic identity and capacity, bounded measurements, finite mesh geometry, projected picking at two scene sizes and 1/4/20/100 counts, camera depth range through 500 Cubes, and discarding timing samples when Clear filters changes scene load.
 
 ## Native observations
 
-The final release build renders the four-Cube catalog, beveled geometry, floor, network labels and selection. Arrow-key selection was confirmed in the final app. An earlier native compact-window check revealed overlapping object labels; source now limits compact object labels to the selected Cube while retaining the catalog. Final compact recapture is pending because native pointer automation stopped resolving the app window, although keyboard input and screenshots remained available intermittently. Do not treat this as a completed compact acceptance check.
+The final release build renders the four-Cube catalog, beveled geometry, floor, network labels and selection. Arrow-key selection and Enter open preview were confirmed in the release app. An earlier native compact-window check revealed overlapping object labels; source now limits compact object labels to the selected Cube while retaining the catalog. Final compact recapture is pending because native pointer automation stopped resolving the app window, although keyboard input and screenshots remained available intermittently. Do not treat this as a completed compact acceptance check.
 
-An earlier debug capture displayed 20 Cubes with Float and Benchmark enabled: approximately 59.8 redraw events/s, mean interval 16.72 ms, p95 interval 19.60 ms. These are observational debug-build redraw measurements, not a release benchmark or presented GPU FPS. A controlled release 100-Cube sample remains pending. No GPU execution, presentation latency, memory peak, power or cross-device measurements were made.
+An earlier debug capture displayed 20 Cubes with Float and Benchmark enabled: approximately 59.8 redraw events/s, mean interval 16.72 ms, p95 interval 19.60 ms. These are observational debug-build redraw measurements, not a release benchmark or presented GPU FPS. A subsequent release sample with 100 shown, Benchmark on and Float off recorded 60.0 redraws/s, mean 16.67 ms, p95 17.16 ms, CPU prepare 0.147 ms and CPU encode 0.009 ms at 1440 × 900 logical window size (2880 × 1864 captured pixels including title bar). This single-machine sample does not establish a performance target. No GPU execution, presentation latency, memory peak, power or cross-device measurements were made.
 
-Local task captures are outside the repository to keep private UX-review material out of Git. The final ordinary release capture is `launcher-3d-release-final.jpg`; earlier compact and debug-20 captures are intermediate evidence, not final acceptance.
+Local task captures are outside the repository to keep private UX-review material out of Git. The final ordinary release capture is `launcher-3d-release-final.jpg`; `launcher-3d-release-100.jpg` records the release stress sample. Earlier compact and debug-20 captures are intermediate evidence, not final acceptance.
+
+## Independent review
+
+Fresh capable Codex subagent `/root/launcher_independent_review` reviewed frozen code `e72aacfc9d093a5e1af84cb10114a0597b90cb8f` after writer release. Its only confirmed code finding was Clear filters retaining timing samples from the previous load. A regression test failed before the repair (render count remained1), then passed after resetting samples when Clear changes the filter. All8 tests, Clippy, formatting and release packaging pass after this bounded first repair batch. Exact repaired-head review is recorded on the draft PR.
+
+Impeccable finish disposition: **recapture**. The ordinary capture is valid; final compact evidence is pending. Release100 benchmark evidence was subsequently captured after click input recovered, while native resize input remained blocked. No visual ship verdict is claimed.
 
 ## Review boundary
 

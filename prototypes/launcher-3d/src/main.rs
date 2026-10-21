@@ -174,7 +174,12 @@ impl App {
                     self.notice=format!("Preview: {} · {}. The real app would now request PIN/passkey and validate this Cube’s network. No unlock was performed.",cube.name,cube.network);
                 }
             }
-            Message::Clear => self.filter = Filter::All,
+            Message::Clear => {
+                if self.filter != Filter::All {
+                    self.filter = Filter::All;
+                    self.reset_metrics();
+                }
+            }
             Message::PrintMetrics => {
                 if let Ok(metrics) = self.metrics.lock() {
                     println!("Launcher lab | visible={} | filter={} | float={} | benchmark={} | {} | CPU timings only; GPU execution not measured",self.catalog.visible(self.filter).len(),self.filter,self.float,self.benchmark,metrics.summary());
@@ -573,5 +578,35 @@ fn label_style(light: bool, selected: bool, status: button::Status) -> button::S
             radius: border::Radius::from(7.),
         },
         ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clearing_a_filter_discards_timings_from_the_previous_scene_load() {
+        let mut app = App::new();
+        app.update(Message::Filter(Filter::Bitcoin));
+        let before = app.catalog.visible(app.filter).len();
+        let at = Instant::now();
+        {
+            let mut metrics = app.metrics.lock().unwrap();
+            metrics.redraw(at);
+            metrics.redraw(at + Duration::from_millis(20));
+            metrics.prepared(0.1);
+            metrics.encoded(0.2);
+        }
+        assert!(app.metrics.lock().unwrap().summary().starts_with("50.0"));
+
+        app.update(Message::Clear);
+
+        assert!(app.catalog.visible(app.filter).len() > before);
+        assert_eq!(app.metrics.lock().unwrap().renders, 0);
+        assert_eq!(
+            app.metrics.lock().unwrap().summary(),
+            "Start benchmark to sample redraw cadence"
+        );
     }
 }
