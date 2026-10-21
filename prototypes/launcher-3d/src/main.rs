@@ -17,7 +17,7 @@ use iced::{
     Theme,
 };
 use metrics::{Metrics, SharedMetrics};
-use model::{Catalog, Filter, Network, Protection, MAX_CUBES};
+use model::{Catalog, Filter, Network, Protection, MAX_PER_NETWORK};
 
 fn main() -> iced::Result {
     iced::application(App::new, App::update, App::view)
@@ -128,7 +128,7 @@ impl App {
             }
             Message::CreationNetwork(network) => self.creation_network = network,
             Message::Create => {
-                if self.catalog.cubes.len() < MAX_CUBES {
+                if self.catalog.can_create(self.creation_network) {
                     let Some(id) = self.catalog.create(self.creation_network) else {
                         return;
                     };
@@ -267,14 +267,24 @@ impl App {
                 .on_press(Message::Clear)
                 .style(button::text),
             Space::new().width(Fill),
-            text("Create on").size(14).color(muted),
+            text(format!(
+                "{}/{} on",
+                self.catalog.network_count(self.creation_network),
+                MAX_PER_NETWORK
+            ))
+            .size(14)
+            .color(muted),
             pick_list(
                 Network::ALL,
                 Some(self.creation_network),
                 Message::CreationNetwork
             ),
             button("+ Create Cube")
-                .on_press_maybe((self.catalog.cubes.len() < MAX_CUBES).then_some(Message::Create))
+                .on_press_maybe(
+                    self.catalog
+                        .can_create(self.creation_network)
+                        .then_some(Message::Create)
+                )
                 .style(primary)
         ]
         .spacing(12)
@@ -290,11 +300,11 @@ impl App {
             button("4")
                 .on_press(Message::Reset(4))
                 .style(button::secondary),
+            button("12")
+                .on_press(Message::Reset(12))
+                .style(button::secondary),
             button("20")
                 .on_press(Message::Reset(20))
-                .style(button::secondary),
-            button("100")
-                .on_press(Message::Reset(100))
                 .style(button::secondary),
             Space::new().width(Fill),
             checkbox(self.float)

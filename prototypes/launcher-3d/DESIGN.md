@@ -133,7 +133,7 @@ Line height is inherited from Iced; text is not assigned CSS line-height, tracki
 
 The centered desktop window starts at (1440 × 900) with a minimum of (1024 × 700). A full-window column has shell inset and section spacing from the frontmatter. Its vertical order is identity header, network/create toolbar, fixture/motion toolbar, expanding scene/catalog row, selection details, notice, performance row, then measurement caveat. There is no page-level scroll container.
 
-The header puts the product name/subtitle at left and the synthetic-lab label and Light theme checkbox at right. The first toolbar puts visibility filtering/counts/Clear filters at left and Create on/network/Create Cube at right. The fixture row places Empty/1/4/20/100 at left and Float/Benchmark/Reduce motion at right. Flexible spacers split these groups; rows do not implement wrap or a compact variant.
+The header puts the product name/subtitle at left and the synthetic-lab label and Light theme checkbox at right. The first toolbar puts visibility filtering/counts/Clear filters at left and Create on/network/Create Cube at right. The fixture row places Empty/1/4/12/20 at left and Float/Benchmark/Reduce motion at right. Flexible spacers split these groups; rows do not implement wrap or a compact variant.
 
 The scene fills remaining width and height. The catalog stays fixed at (260) wide, separated from the scene by `scene-catalog` spacing. Only its list scrolls. Entries have padding (12), catalog item spacing and catalog line spacing from the frontmatter. The selected-detail row uses spacing (18), with metadata separated by (22) and internal title/metadata spacing from `detail-lines`.
 
@@ -165,9 +165,9 @@ The Cube silhouette is authored geometry: each face is subdivided at `[-1, -0.96
 
 ### Action and experiment controls
 
-Create Cube and Open preview share the primary style: orange fill, dark ink and native primary-control radius. Hovered and Pressed share the lighter orange; Disabled uses the muted disabled fill. Creation disables at (500) synthetic Cubes. Default padding and other inherited behavior come from Iced's button implementation, not a prototype-defined control-height system. No custom focus ring is authored.
+Create Cube and Open preview share the primary style: orange fill, dark ink and native primary-control radius. Hovered and Pressed share the lighter orange; Disabled uses the muted disabled fill. Creation disables at (7) synthetic Cubes on the chosen network; its count appears beside the network selector. Three fixture networks permit (21) total. Default padding and other inherited behavior come from Iced's button implementation, not a prototype-defined control-height system. No custom focus ring is authored.
 
-Empty/1/4/20/100 use Iced secondary buttons. Clear filters and Print metrics use Iced text buttons. The two pick lists and four checkboxes use built-in theme styling; custom CSS-like states must not be inferred. Fixture buttons replace the in-memory catalog, rather than acting as persistent navigation tabs.
+Empty/1/4/12/20 use Iced secondary buttons. Clear filters and Print metrics use Iced text buttons. The two pick lists and four checkboxes use built-in theme styling; custom CSS-like states must not be inferred. Fixture buttons replace the in-memory catalog, rather than acting as persistent navigation tabs.
 
 ### Cube selection and preview
 
@@ -185,7 +185,7 @@ Notices remain inline beneath selection details. Metrics use a compact text row 
 
 ### Capability boundary
 
-The shader scene has no native accessibility node model of its own. Regular text/catalog controls and global key shortcuts provide alternate interaction paths but do not establish VoiceOver or other assistive-technology conformance; focus order, semantic exposure and text scaling remain unverified. No dedicated compact, 2.5D or GPU-unavailable fallback is implemented. The verification record contains one observed release 100-Cube CPU/redraw sample; cross-device GPU/power acceptance remains unmeasured. Those gaps remain defects or unverified acceptance, not reusable design invariants.
+The shader scene has no native accessibility node model of its own. Regular text/catalog controls and global key shortcuts provide alternate interaction paths but do not establish VoiceOver or other assistive-technology conformance; focus order, semantic exposure and text scaling remain unverified. No dedicated compact, 2.5D or GPU-unavailable fallback is implemented. The verification record retains a historical100-Cube stress sample from before the Estate-limit clarification; current design targets10–20 total Cubes; cross-device GPU/power acceptance remains unmeasured. Those gaps remain defects or unverified acceptance, not reusable design invariants.
 
 ## Do's and Don'ts
 

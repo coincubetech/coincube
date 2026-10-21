@@ -8,7 +8,7 @@ THESIS: The Launcher makes Cubes tangible while keeping network identity, creati
 
 OWN-WORLD: Existing Tenshu IBM Plex Sans and orange action/selection treatment, dark and warm light surfaces, softly beveled colored objects and standard desktop controls. Network text accompanies every meaningful catalog entry.
 
-STORY: The user sees all synthetic Cubes, filters visibility, creates a fixture on an explicit network, selects an object and previews its opening. Larger fixture presets reveal performance/legibility tradeoffs.
+STORY: The user sees all synthetic Cubes, filters visibility, creates a fixture on an explicit network, selects an object and previews its opening. Presets through20 reveal performance/legibility tradeoffs for realistic10–20 totals; synthetic creation models Robert’s7-per-network Estate limit.
 
 FIRST VIEWPORT: Compact identity header, network/create row and experiment controls above a dominant 3D floor. A readable catalog sits at the right; selected-Cube information and honest CPU/redraw metrics sit below. Empty floor offers Create Cube.
 
@@ -18,4 +18,4 @@ FINISH: unreviewed and undocumented is unfinished; this build ends with the fini
 
 ## Acceptance and limits
 
-Build, exercise the actual native scene, capture ordinary/compact and stress states, validate filters/creation/picking and measurement calculations, and obtain independent exact-code review. Performance claims distinguish redraw/CPU instrumentation from GPU/presentation/power. No wallet data, network client or production integration. No invented feature or security guarantee. Native accessibility and fallback capability remain explicit limitations rather than implied passes.
+Build, exercise the actual native scene, capture ordinary/compact and realistic12/20-Cube states, validate filters/creation/picking and measurement calculations, and obtain independent exact-code review. Performance claims distinguish redraw/CPU instrumentation from GPU/presentation/power. No wallet data, network client or production integration. No invented feature or security guarantee. Native accessibility and fallback capability remain explicit limitations rather than implied passes.

@@ -394,7 +394,7 @@ impl shader::Pipeline for GpuScene {
             shadow: vertex_buffer("Contact shadow", &plane(1.6)),
             instances: device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("Cube instances"),
-                size: (std::mem::size_of::<Instance>() * 1002) as u64,
+                size: (std::mem::size_of::<Instance>() * (crate::model::MAX_CUBES * 2 + 1)) as u64,
                 usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             }),
@@ -574,7 +574,7 @@ mod tests {
     #[test]
     fn picking_hits_cube_centers_at_supported_sizes_and_counts() {
         for size in [Size::new(600., 400.), Size::new(1100., 600.)] {
-            for count in [1, 4, 20, 100] {
+            for count in [1, 4, 12, 20, crate::model::MAX_CUBES as u32] {
                 let cubes: Vec<_> = (0..count).map(fixture).collect();
                 let (matrix, _) = camera(cubes.len(), size);
                 for center in placements(cubes.len()) {
@@ -598,7 +598,7 @@ mod tests {
 
     #[test]
     fn stress_layout_stays_inside_camera_depth_range() {
-        for count in [1, 20, 100, crate::model::MAX_CUBES] {
+        for count in [1, 4, 12, 20, crate::model::MAX_CUBES] {
             let (matrix, _) = camera(count, Size::new(800., 500.));
             for center in placements(count) {
                 for offset in [Vec3::ONE, -Vec3::ONE] {

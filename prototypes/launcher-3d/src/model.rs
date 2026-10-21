@@ -1,6 +1,7 @@
 use std::fmt;
 
-pub const MAX_CUBES: usize = 500;
+pub const MAX_PER_NETWORK: usize = 7;
+pub const MAX_CUBES: usize = MAX_PER_NETWORK * Network::ALL.len();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Network {
@@ -133,6 +134,17 @@ pub struct Catalog {
 }
 
 impl Catalog {
+    pub fn network_count(&self, network: Network) -> usize {
+        self.cubes
+            .iter()
+            .filter(|cube| cube.network == network)
+            .count()
+    }
+
+    pub fn can_create(&self, network: Network) -> bool {
+        self.network_count(network) < MAX_PER_NETWORK
+    }
+
     pub fn reset(&mut self, count: u32) {
         let count = count.min(MAX_CUBES as u32);
         self.cubes = (0..count).map(fixture).collect();
@@ -140,7 +152,7 @@ impl Catalog {
     }
 
     pub fn create(&mut self, network: Network) -> Option<u32> {
-        if self.cubes.len() >= MAX_CUBES {
+        if !self.can_create(network) {
             return None;
         }
         let id = self.next_id;
@@ -201,5 +213,24 @@ mod tests {
         assert_eq!(catalog.cubes.len(), MAX_CUBES);
         assert_eq!(catalog.create(Network::Bitcoin), None);
         assert_eq!(catalog.cubes.len(), MAX_CUBES);
+    }
+
+    #[test]
+    fn estate_fixture_limit_applies_independently_to_each_network() {
+        let mut catalog = Catalog::default();
+        for network in Network::ALL {
+            for _ in 0..MAX_PER_NETWORK {
+                assert!(catalog.create(network).is_some());
+            }
+            assert_eq!(catalog.network_count(network), MAX_PER_NETWORK);
+            assert!(!catalog.can_create(network));
+            assert_eq!(catalog.create(network), None);
+        }
+        assert_eq!(catalog.cubes.len(), MAX_CUBES);
+        catalog.reset(20);
+        assert!(!catalog.can_create(Network::Bitcoin));
+        assert!(!catalog.can_create(Network::Blake2b));
+        assert!(catalog.create(Network::Testnet).is_some());
+        assert!(!catalog.can_create(Network::Testnet));
     }
 }
