@@ -5138,6 +5138,8 @@ CREATE TABLE labels (
             changed.inputs[0].sighash_type = Some(bitcoin::sighash::EcdsaSighashType::All.into());
             assert!(conn.store_imported_construction(&changed).is_err());
             assert_eq!(conn.db_spend(&draft_txid).unwrap().psbt, signed);
+            // Close the SQLite file before directory removal on Windows.
+            drop(conn);
             fs::remove_dir_all(tmp_dir).unwrap();
         }
 
