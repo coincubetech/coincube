@@ -16,6 +16,11 @@ use super::tab;
 pub enum Message {
     Tab(usize, Box<tab::Message>),
     View(ViewMessage),
+    ImportedPairReady {
+        source_tab: usize,
+        request: crate::imported_claim::ImportedClaimRequest,
+        result: Result<(), String>,
+    },
 }
 
 impl Message {
@@ -214,18 +219,88 @@ impl Pane {
                 ))
             }
         };
-        let (home, task) = crate::home::Home::new_imported_claim(root, request, client);
-        self.tabs_created += 1;
-        let id = self.tabs_created;
-        let mut tab = tab::Tab::new(id, tab::State::Home(home));
-        tab.set_theme_mode(self.theme_mode);
-        self.tabs.push(tab);
-        self.focused_tab = self.tabs.len() - 1;
-        task.map(move |message| Message::tab(id, tab::Message::Launch(message)))
+        let credentials = self.tabs.iter().find(|t| t.id == source_tab).and_then(|t| {
+            let tab::State::App(app) = &t.state else {
+                return None;
+            };
+            let cube = app.cube_settings().clone();
+            let signer = app::session::unlocked_signer(&cube.id, cube.master_signer_fingerprint?)?;
+            let pin = app::session::pin_for(&cube.id)?;
+            Some((cube, crate::signer::Signer::new(signer), pin))
+        });
+        let Some((source, signer, pin)) = credentials else {
+            return Task::done(Message::tab(
+                source_tab,
+                tab::Message::Run(app::Message::View(app::view::Message::ShowError(
+                    "Unlock the source Cube with its PIN again before claiming.".into(),
+                ))),
+            ));
+        };
+        let backend =
+            coincubed::config::BitcoinBackend::Esplora(crate::installer::connect_esplora_config(
+                crate::chain::ChainId::BitcoinBlake2b,
+                client.token().unwrap_or_default(),
+            ));
+        Task::perform(
+            async move {
+                crate::services::bitcoin_import::pairing::install_pair(
+                    &root, &source, &signer, &pin, backend,
+                )
+                .await
+                .map(|_| ())
+            },
+            move |result| Message::ImportedPairReady {
+                source_tab,
+                request: request.clone(),
+                result,
+            },
+        )
     }
 
     pub fn update(&mut self, message: Message, cfg: &Config) -> Task<Message> {
         match message {
+            Message::ImportedPairReady {
+                source_tab,
+                request,
+                result,
+            } => {
+                let prepared = self.tabs.iter().find(|t| t.id == source_tab).and_then(|t| {
+                    let tab::State::App(app) = &t.state else {
+                        return None;
+                    };
+                    Some(app.prepare_imported_claim().and_then(|(current, client)| {
+                        request.validate_session(&client)?;
+                        if current.source != request.source {
+                            return Err("The source changed. Open Claim again.".into());
+                        }
+                        result?;
+                        request.validate(app.datadir(), &client)?;
+                        Ok((app.datadir().clone(), current, client))
+                    }))
+                });
+                let Some(prepared) = prepared else {
+                    return Task::none();
+                };
+                let (root, request, client) = match prepared {
+                    Ok(v) => v,
+                    Err(error) => {
+                        return Task::done(Message::tab(
+                            source_tab,
+                            tab::Message::Run(app::Message::View(app::view::Message::ShowError(
+                                error,
+                            ))),
+                        ))
+                    }
+                };
+                let (home, task) = crate::home::Home::new_imported_claim(root, request, client);
+                self.tabs_created += 1;
+                let id = self.tabs_created;
+                let mut tab = tab::Tab::new(id, tab::State::Home(home));
+                tab.set_theme_mode(self.theme_mode);
+                self.tabs.push(tab);
+                self.focused_tab = self.tabs.len() - 1;
+                return task.map(move |message| Message::tab(id, tab::Message::Launch(message)));
+            }
             Message::Tab(id, msg) => {
                 if matches!(
                     msg.as_ref(),

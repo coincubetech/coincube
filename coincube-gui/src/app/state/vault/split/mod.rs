@@ -77,11 +77,11 @@ use iced::Task;
 use coincube_core::{
     chain::ChainId,
     claim::{Assessment, BlockRef, MIN_CONFIRMATIONS},
-    descriptors::CoincubeDescriptor,
     foreign_split::{AncestrySplitStep1, AncestrySplitStep2, SplitCoin, SplitSource, SplitStep1},
     miniscript::bitcoin::{
         consensus::encode::serialize_hex, hashes::sha256, psbt::Psbt, OutPoint, Transaction, Txid,
     },
+    wallet_descriptor::WalletDescriptor,
 };
 
 use crate::{
@@ -627,7 +627,7 @@ pub enum SplitMessage {
 
 pub struct SplitPanel {
     target_cube: String,
-    target_vault: Option<(crate::app::settings::WalletId, CoincubeDescriptor)>,
+    target_vault: Option<(crate::app::settings::WalletId, WalletDescriptor)>,
     journal_root: PathBuf,
     connect: Option<Arc<dyn SplitConnect>>,
     seq: u64,
@@ -885,7 +885,7 @@ impl SplitPanel {
     pub(crate) fn bind_target_vault(
         &mut self,
         wallet_id: crate::app::settings::WalletId,
-        descriptor: CoincubeDescriptor,
+        descriptor: WalletDescriptor,
     ) {
         self.target_vault = Some((wallet_id, descriptor));
     }
@@ -1318,6 +1318,8 @@ impl SplitPanel {
             let directory = step1::journal_directory(&self.journal_root, source.digest());
             let target = self.target_cube.clone();
             let target_binding = self.funding_target_binding.clone();
+            let reservation_root = self.device_datadir().cloned();
+            let reservation_wallet = self.target_vault.as_ref().map(|(id, _)| id.clone());
             self.stage = Stage::Working(Work::ReservingFunding);
             return self.spawn(
                 async move {
@@ -1332,33 +1334,76 @@ impl SplitPanel {
                     let for_reservation = source.clone();
                     let for_directory = directory.clone();
                     let for_target = target.clone();
-                    tokio::task::spawn_blocking(move || match target_binding {
-                        Some(binding) => {
-                            crate::services::claim_workflow::reserve_split_funding_with_target(
-                                &for_directory,
-                                &for_reservation,
-                                &for_target,
-                                &context,
-                                &inventory,
-                                &binding,
-                            )
+                    tokio::task::spawn_blocking(move || {
+                        let imported_minimum = target_binding.as_ref()
+                            .map(|binding| binding.imported_address_window())
+                            .transpose()
+                            .map_err(|_| "The imported Claim scan range is invalid.".to_string())?
+                            .flatten();
+                        let reserve = |allocation_floor| {
+                            match target_binding {
+                                Some(binding) => {
+                                    crate::services::claim_workflow::reserve_split_funding_with_target(
+                                        &for_directory,
+                                        &for_reservation,
+                                        &for_target,
+                                        &context,
+                                        &inventory,
+                                        &binding,
+                                        allocation_floor,
+                                    )
+                                }
+                                None if cfg!(test) => {
+                                    crate::services::claim_workflow::reserve_split_funding(
+                                        &for_directory,
+                                        &for_reservation,
+                                        &for_target,
+                                        &context,
+                                        &inventory,
+                                    )
+                                }
+                                None => Err(crate::services::claim_workflow::Error::InvalidPlan),
+                            }
+                            .map_err(|_| {
+                                "The funding addresses could not be reserved for this wallet."
+                                    .to_string()
+                            })
+                        };
+                        match (reservation_root, reservation_wallet) {
+                            (Some(root), Some(wallet)) => {
+                                crate::services::bitcoin_import::pairing::legacy::with_source_reservation_lock(
+                                    &root,
+                                    &for_reservation,
+                                    || {
+                                        crate::services::bitcoin_import::pairing::legacy::refuse_conflicting_claim(
+                                            &root,
+                                            &for_reservation,
+                                            &for_target,
+                                            &wallet,
+                                        )?;
+                                        let floor = match imported_minimum {
+                                            Some(minimum) => {
+                                                let current = crate::services::bitcoin_import::pairing::claim_scan_state(
+                                                    &root, &for_target, &for_reservation, minimum,
+                                                )?;
+                                                if !inventory.covers_address_window(current.source.address_window) {
+                                                    return Err("The imported wallet allocation changed beyond the accepted scan. Scan the source wallet again.".into());
+                                                }
+                                                Some(current.receive_allocation_floor)
+                                            }
+                                            None => None,
+                                        };
+                                        reserve(floor)
+                                    },
+                                )
+                            }
+                            _ if cfg!(test) => reserve(None),
+                            _ => Err("Reopen this Cube before reserving Claim deposit addresses."
+                                .to_string()),
                         }
-                        None if cfg!(test) => {
-                            crate::services::claim_workflow::reserve_split_funding(
-                                &for_directory,
-                                &for_reservation,
-                                &for_target,
-                                &context,
-                                &inventory,
-                            )
-                        }
-                        None => Err(crate::services::claim_workflow::Error::InvalidPlan),
                     })
                     .await
-                    .map_err(|_| "Saving the funding addresses was interrupted.".to_string())?
-                    .map_err(|_| {
-                        "The funding addresses could not be reserved for this wallet.".to_string()
-                    })?;
+                    .map_err(|_| "Saving the funding addresses was interrupted.".to_string())??;
                     step1::check_reserved_funding_addresses(&*connect, directory, &source, &target)
                         .await
                 },

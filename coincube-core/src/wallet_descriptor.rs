@@ -41,7 +41,9 @@ pub enum ImportedWalletError {
 impl fmt::Display for ImportedWalletError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
-            Self::UnsupportedChain => "Imported wallets require a Bitcoin chain",
+            Self::UnsupportedChain => {
+                "This Bitcoin chain has no supported paired Bitcoin Blake2b chain"
+            }
             Self::Descriptor => "Unsupported public wallet descriptor",
             Self::MissingChange => "A complete receive/change descriptor pair is required",
             Self::WrongBranch => "Receive and change keys must end in /0/* and /1/*",
@@ -72,9 +74,6 @@ impl ImportedWalletDescriptor {
         change: Option<&str>,
         chain: ChainId,
     ) -> Result<Self, ImportedWalletError> {
-        if chain.is_blake2b() {
-            return Err(ImportedWalletError::UnsupportedChain);
-        }
         if receive.len() > 16_384 || change.is_some_and(|text| text.len() > 16_384) {
             return Err(ImportedWalletError::Descriptor);
         }
@@ -107,10 +106,7 @@ impl ImportedWalletDescriptor {
         change: Descriptor<DescriptorPublicKey>,
         chain: ChainId,
     ) -> Result<Self, ImportedWalletError> {
-        if chain.is_blake2b() {
-            return Err(ImportedWalletError::UnsupportedChain);
-        }
-        let network = if chain == ChainId::Bitcoin {
+        let network = if chain.bitcoin_network() == bitcoin::Network::Bitcoin {
             NetworkKind::Main
         } else {
             NetworkKind::Test
@@ -135,6 +131,21 @@ impl ImportedWalletDescriptor {
             chain,
             receive,
             change,
+        })
+    }
+
+    /// Reuse this wallet's exact public branches on its corresponding fork.
+    /// The Cube unlock seed grants no signing authority over this wallet.
+    pub fn paired_blake2b(&self) -> Result<Self, ImportedWalletError> {
+        let chain = match self.chain {
+            ChainId::Bitcoin => ChainId::BitcoinBlake2b,
+            ChainId::Testnet4 => ChainId::BitcoinBlake2bTestnet4,
+            _ => return Err(ImportedWalletError::UnsupportedChain),
+        };
+        Ok(Self {
+            chain,
+            receive: self.receive.clone(),
+            change: self.change.clone(),
         })
     }
 
@@ -248,6 +259,19 @@ impl fmt::Display for PublicBranchRef<'_> {
 pub enum WalletDescriptor {
     Vault(CoincubeDescriptor),
     Imported(ImportedWalletDescriptor),
+}
+
+impl fmt::Display for WalletDescriptor {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Vault(vault) => fmt::Display::fmt(vault, f),
+            Self::Imported(wallet) => write!(
+                f,
+                "imported-v1:{}:{}:{}",
+                wallet.chain, wallet.receive, wallet.change
+            ),
+        }
+    }
 }
 
 impl From<CoincubeDescriptor> for WalletDescriptor {
@@ -467,6 +491,83 @@ mod tests {
     }
 
     #[test]
+    fn paired_fork_preserves_scripts_and_signers_with_separate_identity() {
+        for (source_chain, network, fork_chain) in [
+            (ChainId::Bitcoin, Network::Bitcoin, ChainId::BitcoinBlake2b),
+            (
+                ChainId::Testnet4,
+                Network::Testnet4,
+                ChainId::BitcoinBlake2bTestnet4,
+            ),
+        ] {
+            let source = ImportedWalletDescriptor::parse(
+                &single(0, network, true),
+                Some(&single(1, network, true)),
+                source_chain,
+            )
+            .unwrap();
+            let fork = source.paired_blake2b().unwrap();
+            assert_eq!(fork.chain(), fork_chain);
+            assert_eq!(source.receive_descriptor(), fork.receive_descriptor());
+            assert_eq!(source.change_descriptor(), fork.change_descriptor());
+            assert_ne!(
+                source.identity(source_chain).unwrap(),
+                fork.identity(fork_chain).unwrap()
+            );
+            assert!(WalletDescriptor::Imported(fork.clone())
+                .as_vault()
+                .is_none());
+            let restored: ImportedWalletDescriptor =
+                serde_json::from_str(&serde_json::to_string(&fork).unwrap()).unwrap();
+            assert_eq!(restored, fork);
+            for index in [0, 1, 1000] {
+                assert_eq!(
+                    WalletDescriptor::Imported(source.clone())
+                        .receive_descriptor()
+                        .script_pubkey(index)
+                        .unwrap(),
+                    WalletDescriptor::Imported(fork.clone())
+                        .receive_descriptor()
+                        .script_pubkey(index)
+                        .unwrap()
+                );
+                assert_eq!(
+                    WalletDescriptor::Imported(source.clone())
+                        .change_descriptor()
+                        .script_pubkey(index)
+                        .unwrap(),
+                    WalletDescriptor::Imported(fork.clone())
+                        .change_descriptor()
+                        .script_pubkey(index)
+                        .unwrap()
+                );
+            }
+            assert_eq!(
+                fork.paired_blake2b(),
+                Err(ImportedWalletError::UnsupportedChain)
+            );
+        }
+        let source = ImportedWalletDescriptor::parse(
+            &single(0, Network::Regtest, true),
+            Some(&single(1, Network::Regtest, true)),
+            ChainId::Regtest,
+        )
+        .unwrap();
+        assert_eq!(
+            source.paired_blake2b(),
+            Err(ImportedWalletError::UnsupportedChain)
+        );
+        assert_eq!(
+            ImportedWalletDescriptor::parse(
+                &single(0, Network::Bitcoin, true),
+                Some(&single(1, Network::Bitcoin, true)),
+                ChainId::BitcoinBlake2bTestnet4
+            ),
+            Err(ImportedWalletError::WrongNetwork)
+        );
+    }
+
+    #[test]
     fn admission_rejects_missing_change_wrong_branch_origin_network_and_checksum() {
         let receive = single(0, Network::Bitcoin, true);
         let change = single(1, Network::Bitcoin, true);
@@ -477,10 +578,6 @@ mod tests {
         assert_eq!(
             ImportedWalletDescriptor::parse(&receive, Some(&receive), ChainId::Bitcoin),
             Err(ImportedWalletError::WrongBranch)
-        );
-        assert_eq!(
-            ImportedWalletDescriptor::parse(&receive, Some(&change), ChainId::BitcoinBlake2b),
-            Err(ImportedWalletError::UnsupportedChain)
         );
         assert_eq!(
             ImportedWalletDescriptor::parse(

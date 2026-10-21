@@ -177,3 +177,12 @@ mod tests {
         assert_eq!(restored.bitcoin_import.unwrap().operation_id, Uuid::nil());
     }
 }
+
+/// Immutable source binding. This is public wallet metadata, never signing authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImportedClaimPair {
+    pub source_cube_id: String,
+    pub source_operation_id: Uuid,
+    pub source_wallet: ImportedWalletAttachment,
+}

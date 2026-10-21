@@ -18,6 +18,10 @@ pub struct AncestrySplitStep2Inputs<'a> {
     /// caller. This module checks only the script shape and foreign-source
     /// collision window.
     pub target: &'a bitcoin::Script,
+    /// Explicit descriptor-preserving paired target. The caller durably reserves
+    /// this fresh receive index; core verifies the exact source-wallet script.
+    /// None retains the foreign Vault target policy.
+    pub paired_target_index: Option<u32>,
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +36,7 @@ pub struct AncestrySplitStep2 {
     maximum_signed_vbytes: u64,
     feerate_vb: u64,
     total: u64,
+    paired_target_index: Option<u32>,
 }
 
 impl AncestrySplitStep2 {
@@ -61,6 +66,9 @@ impl AncestrySplitStep2 {
     }
     pub fn fork_height(&self) -> u64 {
         self.fork_height
+    }
+    pub fn paired_target_index(&self) -> Option<u32> {
+        self.paired_target_index
     }
     pub fn target(&self) -> &bitcoin::Script {
         &self.psbt.unsigned_tx.output[0].script_pubkey
@@ -139,7 +147,16 @@ fn plan(inputs: &AncestrySplitStep2Inputs<'_>) -> Result<Plan2, Error> {
         definite,
     });
     selected.sort_by_key(|input| input.outpoint);
-    if !(inputs.target.is_p2wsh() || inputs.target.is_p2tr())
+    if let Some(index) = inputs.paired_target_index {
+        let target = inputs.source.derive(SplitBranch::External, index)?;
+        if target.script_pubkey() != *inputs.target
+            || selected
+                .iter()
+                .any(|input| input.output.script_pubkey == *inputs.target)
+        {
+            return Err(Error::InvalidTarget);
+        }
+    } else if !(inputs.target.is_p2wsh() || inputs.target.is_p2tr())
         || super::super::step2::is_source_script(inputs.source, &selected, inputs.target)?
     {
         return Err(Error::InvalidTarget);
@@ -175,7 +192,12 @@ fn build(
         }],
         locktime,
     );
-    let psbt = psbt_for(tx, &plan.selected)?;
+    let mut psbt = psbt_for(tx, &plan.selected)?;
+    if let Some(index) = inputs.paired_target_index {
+        let target = inputs.source.derive(SplitBranch::External, index)?;
+        psbt.update_output_with_descriptor(0, &target)
+            .map_err(|_| Error::InvalidTarget)?;
+    }
     Ok(AncestrySplitStep2 {
         psbt,
         chain: inputs.chain,
@@ -191,6 +213,7 @@ fn build(
         maximum_signed_vbytes: plan.maximum_signed_vbytes,
         feerate_vb,
         total: plan.total,
+        paired_target_index: inputs.paired_target_index,
     })
 }
 
@@ -285,6 +308,7 @@ pub(super) fn check_bound(
         && rebuilt.funding == construction.funding
         && rebuilt.source == construction.source
         && rebuilt.fork_height == construction.fork_height
+        && rebuilt.paired_target_index == construction.paired_target_index
     {
         Ok(())
     } else {

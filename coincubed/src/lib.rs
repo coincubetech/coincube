@@ -150,6 +150,40 @@ pub fn restore_imported_address_state(
     Ok(())
 }
 
+/// Copy a historical discovery range into unpublished imported storage.
+/// The immutable config still names the final directory; a live wallet's
+/// database is never an eligible target for this initialization operation.
+pub fn restore_imported_discovery_target(
+    config: &Config,
+    staged_dir: &DataDirectory,
+    target: u32,
+) -> Result<u32, StartupError> {
+    config.check().map_err(StartupError::Config)?;
+    let imported = config.main_descriptor.as_imported().ok_or_else(|| {
+        StartupError::Config(ConfigError::Unexpected(
+            "discovery restore requires an imported wallet".into(),
+        ))
+    })?;
+    let final_dir = config
+        .data_directory()
+        .ok_or(StartupError::DefaultDataDirNotFound)?;
+    if final_dir.path() == staged_dir.path() {
+        return Err(StartupError::Config(ConfigError::Unexpected(
+            "discovery restore storage must remain staged until initialization is complete".into(),
+        )));
+    }
+    Ok(database::sqlite::expand_imported_discovery(
+        &staged_dir.sqlite_db_file_path(),
+        config.bitcoin_config.chain,
+        imported,
+        config.import_birthday.expect("validated imported birthday"),
+        config
+            .import_initial_lookahead
+            .expect("validated imported lookahead"),
+        target,
+    )?)
+}
+
 /// Queue a wider historical scan while the imported daemon is stopped. The
 /// immutable initial lookahead stays bound to config; the separate target and
 /// incomplete marker survive restart and cause a full scan on next startup.
@@ -1176,7 +1210,7 @@ impl DaemonHandle {
         )
     }
 
-    /// Start an embedded native-P2WSH fork wallet with ephemeral authenticated Connect
+    /// Start an embedded native-P2WSH or imported fork wallet with ephemeral authenticated Connect
     /// authority. Generic daemon startup and external JSON-RPC remain unavailable for forks.
     /// Admission and existing database identity checks still precede every write.
     pub fn start_with_connect(
@@ -1187,16 +1221,14 @@ impl DaemonHandle {
         if !config.bitcoin_config.chain.is_blake2b()
             || with_rpc_server
             || config.pending_bitcoind.is_some()
-            || !matches!(
-                config
-                    .main_descriptor
-                    .as_vault()
-                    .map(|vault| vault.descriptor())
-                    .ok_or(StartupError::ConnectAdmission(
-                        connect::AdmissionError::InvalidBackend
-                    ))?,
-                miniscript::Descriptor::Wsh(_)
-            )
+            || !match &config.main_descriptor {
+                coincube_core::wallet_descriptor::WalletDescriptor::Vault(vault) => {
+                    matches!(vault.descriptor(), miniscript::Descriptor::Wsh(_))
+                }
+                // Imported descriptors retain their externally controlled policy;
+                // Config::check below binds their exact chain and history bounds.
+                coincube_core::wallet_descriptor::WalletDescriptor::Imported(_) => true,
+            }
         {
             return Err(StartupError::ConnectAdmission(
                 connect::AdmissionError::InvalidBackend,
@@ -1209,7 +1241,7 @@ impl DaemonHandle {
             false,
             Some(backend),
             false,
-            // Only this authenticated, embedded, native-P2WSH entry point opens
+            // Only this authenticated, embedded entry point opens
             // the fork runtime. start/start_default retain chain_runtime_gate.
             |_| Ok(()),
         )

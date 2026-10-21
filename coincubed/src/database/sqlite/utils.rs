@@ -621,7 +621,7 @@ fn migrate_v9_to_v10(conn: &mut rusqlite::Connection) -> Result<(), SqliteDbErro
                 OR
                 (wallet_kind = 'imported' AND main_descriptor IS NULL
                     AND import_chain IS NOT NULL
-                    AND import_chain IN ('bitcoin', 'testnet', 'testnet4', 'signet', 'regtest')
+                    AND import_chain IN ('bitcoin', 'testnet', 'testnet4', 'signet', 'regtest', 'bitcoin-blake2b', 'bitcoin-blake2b-testnet4')
                     AND imported_receive_descriptor IS NOT NULL AND imported_change_descriptor IS NOT NULL
                     AND import_birthday IS NOT NULL AND import_birthday BETWEEN 0 AND 4294967295
                     AND import_history_complete IS NOT NULL

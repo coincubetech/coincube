@@ -246,7 +246,6 @@ impl SplitPanel {
         self.device.datadir = Some(datadir);
     }
 
-    #[cfg(test)]
     pub(crate) fn device_datadir(&self) -> Option<&CoincubeDirectory> {
         self.device.datadir.as_ref()
     }

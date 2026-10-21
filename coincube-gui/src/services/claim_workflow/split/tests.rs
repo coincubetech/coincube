@@ -269,6 +269,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .script_pubkey();
     let fork = create_ancestry_split_step2(
         &AncestrySplitStep2Inputs {
+            paired_target_index: None,
             chain: ChainId::BitcoinBlake2b,
             source: &wallet.source,
             shared: &shared,
@@ -288,7 +289,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         Controller::create_ancestry_split(
             &temp.0,
             TARGET.into(),
-            &target,
+            &target.clone().into(),
             4,
             &bitcoin,
             &bitcoin_path,
@@ -328,7 +329,8 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         Some(1),
     );
     let other = Temp::new();
-    let wrong_target = super::super::SplitTargetBinding::for_test(target_id.clone(), &target, 5);
+    let wrong_target =
+        super::super::SplitTargetBinding::for_test(target_id.clone(), &target.clone().into(), 5);
     super::super::reserve_split_funding_with_target(
         &other.0,
         &wallet.source,
@@ -336,13 +338,14 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         &inventory,
         &wrong_target,
+        None,
     )
     .unwrap();
     assert!(matches!(
         Controller::create_ancestry_split(
             &other.0,
             TARGET.into(),
-            &target,
+            &target.clone().into(),
             4,
             &bitcoin,
             &bitcoin_path,
@@ -352,7 +355,8 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         ),
         Err(Error::InvalidPlan)
     ));
-    let target_binding = super::super::SplitTargetBinding::for_test(target_id, &target, 4);
+    let target_binding =
+        super::super::SplitTargetBinding::for_test(target_id, &target.clone().into(), 4);
     super::super::reserve_split_funding_with_target(
         &temp.0,
         &wallet.source,
@@ -360,6 +364,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         &inventory,
         &target_binding,
+        None,
     )
     .unwrap();
     let mut changed_account = context();
@@ -368,7 +373,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         Controller::create_ancestry_split(
             &temp.0,
             TARGET.into(),
-            &target,
+            &target.clone().into(),
             4,
             &bitcoin,
             &bitcoin_path,
@@ -381,7 +386,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     let controller = Controller::create_ancestry_split(
         &temp.0,
         TARGET.into(),
-        &target,
+        &target.clone().into(),
         4,
         &bitcoin,
         &bitcoin_path,
@@ -399,7 +404,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
     let same = Controller::create_or_reopen_ancestry_split(
         &temp.0,
         TARGET.into(),
-        &target,
+        &target.clone().into(),
         4,
         &bitcoin,
         &bitcoin_path,
@@ -415,7 +420,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         Controller::create_or_reopen_ancestry_split(
             &temp.0,
             TARGET.into(),
-            &target,
+            &target.clone().into(),
             5,
             &bitcoin,
             &bitcoin_path,
@@ -445,7 +450,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .restore_ancestry_split_pair(
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &shared,
             &bitcoin_marker,
             TIP,
@@ -460,7 +465,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .restore_ancestry_split_fork(
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &shared,
             &fork_marker,
             TIP,
@@ -481,6 +486,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         destination: 4,
     };
     let fork_inputs = AncestrySplitStep2Inputs {
+        paired_target_index: None,
         chain: ChainId::BitcoinBlake2b,
         source: &wallet.source,
         shared: &shared,
@@ -691,7 +697,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         .restore_unattempted_split_pair_from_scan(
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &fresh_inventory,
         )
         .unwrap();
@@ -972,7 +978,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             .restore_ancestry_split_fork(
                 &context(),
                 &wallet.source,
-                &target,
+                &target.clone().into(),
                 &shared,
                 &fork_marker,
                 TIP,
@@ -1001,7 +1007,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             &mut reopened,
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &recovered_inputs,
             &bitcoin_marker,
             &bitcoin_path,
@@ -1026,7 +1032,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
             &mut reopened,
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &crate::services::foreign_split_inventory::PostBitcoinSplitCoins {
                 shared: shared.clone(),
                 funding: changed_fork_marker,
@@ -1317,7 +1323,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         reopened.restore_ancestry_split_pair(
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &shared,
             &bitcoin_marker,
             TIP,
@@ -1331,7 +1337,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         reopened.restore_ancestry_split_fork(
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &shared,
             &wrong_marker,
             TIP,
@@ -1342,7 +1348,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         reopened.restore_ancestry_split_fork(
             &context(),
             &wallet.source,
-            &target,
+            &target.clone().into(),
             &[],
             &fork_marker,
             TIP,
@@ -2672,6 +2678,10 @@ fn split_b0_journal_api_has_no_gui_callers() {
                         && !panel_unified
                         && !gate
                         && !unified
+                        // The pairing collision guard only reads existing
+                        // journals; it cannot create, sign, or submit them.
+                        && !(file == "src/services/bitcoin_import/pairing/legacy.rs"
+                            && ["peek_split_journal", "SplitJournalSummary"].contains(&ident))
                     {
                         unexpected.push((file.clone(), ident.to_owned()));
                     }
@@ -4260,4 +4270,281 @@ fn fork_only_record_never_carries_a_step1_conflict() {
     )
     .unwrap();
     assert!(reopen_unified(&temp, &wallet, context()).is_err());
+}
+
+#[test]
+fn imported_ancestry_journal_keeps_the_accepted_scan_minimum_on_reopen() {
+    use crate::services::{
+        foreign_scan::{Branch, BranchCoverage, ScanReport},
+        foreign_split_inventory::SplitInventory,
+    };
+    use coincube_core::{
+        claim_ancestry::{retained::RetainedPath, search::OwnedLink},
+        foreign_split::{
+            create_ancestry_split_step1, create_ancestry_split_step2, AncestrySplitInputs,
+            AncestrySplitStep2Inputs,
+        },
+        miniscript::bitcoin::consensus::serialize,
+        wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
+    };
+    for (shape, sorted) in [
+        (Shape::Pkh, false),
+        (Shape::Wpkh, false),
+        (Shape::ShWpkh, false),
+        (Shape::WshMulti, false),
+        (Shape::WshMulti, true),
+    ] {
+        let mut wallet = make_wallet(shape, 96);
+        if sorted {
+            let receive = wallet
+                .source
+                .external()
+                .to_string()
+                .split('#')
+                .next()
+                .unwrap()
+                .replace("wsh(multi(", "wsh(sortedmulti(");
+            let change = wallet
+                .source
+                .internal()
+                .unwrap()
+                .to_string()
+                .split('#')
+                .next()
+                .unwrap()
+                .replace("wsh(multi(", "wsh(sortedmulti(");
+            let canonical =
+                ImportedWalletDescriptor::parse(&receive, Some(&change), ChainId::Bitcoin).unwrap();
+            wallet.source = SplitSource::new(
+                canonical.receive_descriptor().clone(),
+                Some(canonical.change_descriptor().clone()),
+            )
+            .unwrap();
+        }
+        let target = WalletDescriptor::Imported(
+            ImportedWalletDescriptor::from_descriptors(
+                wallet.source.external().clone(),
+                wallet.source.internal().unwrap().clone(),
+                ChainId::Bitcoin,
+            )
+            .unwrap()
+            .paired_blake2b()
+            .unwrap(),
+        );
+        let shared = vec![coin(&wallet.source, SplitBranch::External, 0, 250_000)];
+        let marker = |index, chain| {
+            let mut coin = coin(&wallet.source, SplitBranch::External, index, 150_000);
+            coin.previous.input[0].previous_output = OutPoint::null();
+            coin.outpoint = OutPoint::new(coin.previous.compute_txid(), 0);
+            let block = Some(BlockRef {
+                height: FORK + 1,
+                hash: hash(index as u8),
+            });
+            coin.bitcoin_block = (chain == ChainId::Bitcoin).then_some(block).flatten();
+            coin.btcb2_block = (chain == ChainId::BitcoinBlake2b)
+                .then_some(block)
+                .flatten();
+            coin
+        };
+        let bitcoin_marker = marker(7, ChainId::Bitcoin);
+        let fork_marker = marker(8, ChainId::BitcoinBlake2b);
+        let path = |marker: &SplitCoin| {
+            RetainedPath::new(
+                marker.outpoint,
+                vec![OwnedLink {
+                    transaction: serialize(&marker.previous),
+                    parent_input: None,
+                }],
+            )
+            .unwrap()
+        };
+        let bitcoin_path = path(&bitcoin_marker);
+        let fork_path = path(&fork_marker);
+        let bitcoin = create_ancestry_split_step1(
+            &AncestrySplitInputs {
+                chain: ChainId::Bitcoin,
+                source: &wallet.source,
+                shared: &shared,
+                funding: &bitcoin_marker,
+                dependency: &bitcoin_path.reverify().unwrap(),
+                fork_height: FORK,
+                destination: 9,
+            },
+            2,
+            LockTime::from_height(TIP).unwrap(),
+            TIP,
+        )
+        .unwrap();
+        let target_script = target.receive_descriptor().script_pubkey(6).unwrap();
+        let fork = create_ancestry_split_step2(
+            &AncestrySplitStep2Inputs {
+                paired_target_index: Some(6),
+                chain: ChainId::BitcoinBlake2b,
+                source: &wallet.source,
+                shared: &shared,
+                funding: &fork_marker,
+                dependency: &fork_path.reverify().unwrap(),
+                fork_height: FORK,
+                claimed: bitcoin.claimed_prevouts(),
+                target: &target_script,
+            },
+            2,
+            LockTime::from_height(TIP).unwrap(),
+            TIP,
+        )
+        .unwrap();
+        let report = |chain| {
+            ScanReport::for_test(chain, 1, hash(3), Vec::new())
+                .with_fork_height(Some(FORK))
+                .with_coverage(vec![BranchCoverage {
+                    branch: Branch::External,
+                    start: 0,
+                    end_exclusive: 200,
+                    last_used: Some(1),
+                }])
+        };
+        let inventory = SplitInventory::join(
+            &report(ChainId::BitcoinBlake2b),
+            &report(ChainId::Bitcoin),
+            1,
+            true,
+        )
+        .unwrap();
+        let target_id = crate::app::settings::WalletId::for_imported(
+            target.as_imported().unwrap(),
+            ChainId::BitcoinBlake2b,
+        )
+        .unwrap();
+        let binding = super::super::SplitTargetBinding::for_test(target_id, &target, 6);
+        let temp = Temp::new();
+        super::super::reserve_split_funding_with_target(
+            &temp.0,
+            &wallet.source,
+            TARGET,
+            &context(),
+            &inventory,
+            &binding,
+            Some(6),
+        )
+        .unwrap();
+        let controller = Controller::create_ancestry_split(
+            &temp.0,
+            TARGET.into(),
+            &target,
+            6,
+            &bitcoin,
+            &bitcoin_path,
+            &fork,
+            &fork_path,
+            context(),
+        )
+        .unwrap();
+        assert_eq!(
+            super::imported_address_window(&controller.intent),
+            Some(200)
+        );
+        let mut wrong = controller.intent.clone();
+        wrong.split.as_mut().unwrap().target_index = Some(7);
+        assert!(super::validate(&wrong).is_err());
+        let mut wrong = controller.intent.clone();
+        wrong
+            .split
+            .as_mut()
+            .unwrap()
+            .funding
+            .as_mut()
+            .unwrap()
+            .imported_target_descriptor = None;
+        assert!(super::validate(&wrong).is_err()); // a minimum alone cannot enable imported policy
+        let mut wrong = controller.intent.clone();
+        let other = make_wallet(shape, 98);
+        let other_descriptor = ImportedWalletDescriptor::from_descriptors(
+            other.source.external().clone(),
+            other.source.internal().unwrap().clone(),
+            ChainId::BitcoinBlake2b,
+        )
+        .unwrap();
+        wrong
+            .split
+            .as_mut()
+            .unwrap()
+            .funding
+            .as_mut()
+            .unwrap()
+            .imported_target_descriptor = Some(other_descriptor);
+        assert!(super::validate(&wrong).is_err());
+        if shape == Shape::Pkh {
+            let mut native = controller.intent.clone();
+            let funding = native.split.as_mut().unwrap().funding.as_mut().unwrap();
+            funding.imported_address_window = None;
+            funding.imported_target_descriptor = None;
+            assert!(super::validate(&native).is_err());
+        }
+        if shape == Shape::Wpkh {
+            // Taproot is scan-only and remains outside imported spend policy.
+            let key = account(&master(100), "m/86'/0'/0'");
+            let receive = Descriptor::from_str(&format!("tr({key}/0/*)")).unwrap();
+            let change = Descriptor::from_str(&format!("tr({key}/1/*)")).unwrap();
+            assert!(ImportedWalletDescriptor::from_descriptors(
+                receive.clone(),
+                change.clone(),
+                ChainId::BitcoinBlake2b,
+            )
+            .is_err());
+            assert!(SplitSource::new(receive.clone(), Some(change)).is_err());
+            assert!(
+                !crate::services::foreign_scan::ScanDescriptor::parse(
+                    Branch::External,
+                    &receive.to_string(),
+                )
+                .unwrap()
+                .capabilities()
+                .signing
+                .psbt_file
+            );
+        }
+        let identity = controller.identity().clone();
+        drop(controller);
+        let reopened = Controller::reopen_settling_blocking(&temp.0, &identity, context()).unwrap();
+        assert_eq!(super::imported_address_window(&reopened.intent), Some(200));
+        drop(reopened);
+        assert_eq!(
+            super::super::load_split_funding(&temp.0, &wallet.source, TARGET, &context())
+                .unwrap()
+                .unwrap()
+                .target_binding
+                .unwrap()
+                .imported_address_window()
+                .unwrap(),
+            Some(200)
+        );
+        let journal = temp.0.join("intent.json");
+        let mut changed: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&journal).unwrap()).unwrap();
+        changed["split"]["funding"]["imported_address_window"] = 100.into();
+        std::fs::write(journal, serde_json::to_vec(&changed).unwrap()).unwrap();
+        assert!(
+            super::super::load_split_funding(&temp.0, &wallet.source, TARGET, &context()).is_err()
+        );
+    }
+}
+
+#[test]
+fn paired_target_source_requires_exact_receive_and_change_branches() {
+    use coincube_core::wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor};
+    let wallet = make_wallet(Shape::Wpkh, 93);
+    let imported = ImportedWalletDescriptor::from_descriptors(
+        wallet.source.external().clone(),
+        wallet.source.internal().unwrap().clone(),
+        ChainId::Bitcoin,
+    )
+    .unwrap()
+    .paired_blake2b()
+    .unwrap();
+    let target = WalletDescriptor::Imported(imported);
+    super::check_paired_target_source(&target, &wallet.source).unwrap();
+    let other = make_wallet(Shape::Wpkh, 94);
+    assert!(super::check_paired_target_source(&target, &other.source).is_err());
+    let omitted_change = SplitSource::new(wallet.source.external().clone(), None).unwrap();
+    assert!(super::check_paired_target_source(&target, &omitted_change).is_err());
 }

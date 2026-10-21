@@ -319,14 +319,18 @@ impl CompletionCore for FakeCompletion {
 fn site() -> CompletionSite {
     CompletionSite {
         root: crate::dir::CoincubeDirectory::new(std::env::temp_dir().join("split-b5b-unused")),
-        target: CompletionTarget {
-            cube_id: TARGET.into(),
-            vault_wallet_id: crate::app::settings::WalletId {
-                timestamp: None,
-                descriptor_checksum: "abcdefgh".into(),
-            },
-            vault_fingerprint: "f5acc2fd".into(),
-        },
+        target: CompletionTarget::of(
+            &crate::app::settings::CubeSettings::new_with_raw_id(
+                TARGET.into(),
+                TARGET.into(),
+                ChainId::BitcoinBlake2b,
+            )
+            .with_vault(crate::app::settings::VaultIdentity {
+                wallet_id: crate::app::settings::WalletId::new("abcdefgh".into(), None),
+                fingerprint: Some("f5acc2fd".into()),
+            }),
+        )
+        .unwrap(),
     }
 }
 fn recon_driver(core: FakeCompletion) -> ReconcilerDriver<FakeCompletion> {

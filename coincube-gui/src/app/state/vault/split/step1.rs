@@ -398,6 +398,9 @@ pub struct OpenRequest {
 #[async_trait]
 pub trait SplitConnect: Send + Sync {
     fn context(&self) -> Context;
+    fn imported_claim_root(&self) -> Option<CoincubeDirectory> {
+        None
+    }
     /// The current session's two-chain reader for exact recorded witnesses.
     /// Alternative transports cannot silently skip this read.
     fn paired_observation(&self) -> Option<&HttpObservationSource> {
@@ -416,7 +419,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source_digest: sha256::Hash,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
     ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
         Err("The two-chain broadcast review is unavailable for this session.".into())
     }
@@ -427,7 +430,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source_digest: sha256::Hash,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         _displayed: &claim_workflow::InitialPairReviewSnapshot,
     ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
         Err("The two-chain broadcast action is unavailable for this session.".into())
@@ -439,7 +442,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source_digest: sha256::Hash,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
     ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
         Err("The post-Bitcoin broadcast review is unavailable for this session.".into())
     }
@@ -450,7 +453,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source_digest: sha256::Hash,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         _displayed: &claim_workflow::InitialPairReviewSnapshot,
     ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
         Err("The post-Bitcoin broadcast action is unavailable for this session.".into())
@@ -476,7 +479,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source: &SplitSource,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
     ) -> Result<SplitDepositProgress, String> {
         Err("Two-chain funding checks are unavailable for this session.".into())
     }
@@ -490,7 +493,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source: &SplitSource,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         _bitcoin: &AncestrySplitStep1,
         _fork: &AncestrySplitStep2,
         _rates: (u64, u64),
@@ -505,7 +508,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source: &SplitSource,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         _bitcoin: &AncestrySplitStep1,
         _bitcoin_signed: &Psbt,
         _fork: &AncestrySplitStep2,
@@ -522,7 +525,7 @@ pub trait SplitConnect: Send + Sync {
         _directory: PathBuf,
         _source: &SplitSource,
         _target_cube: &str,
-        _target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        _target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         _bitcoin: &AncestrySplitStep1,
         _bitcoin_returns: &[Psbt],
         _fork: &AncestrySplitStep2,
@@ -648,6 +651,39 @@ impl SplitDepositProgress {
     }
 }
 
+fn checked_imported_allocation(
+    root: &CoincubeDirectory,
+    source: &SplitSource,
+    target_cube: &str,
+    saved: &claim_workflow::SplitFundingReservation,
+) -> Result<crate::services::bitcoin_import::pairing::ClaimScanState, String> {
+    let minimum = saved
+        .target_binding
+        .as_ref()
+        .ok_or("The imported target binding is missing.")?
+        .imported_address_window()
+        .map_err(|_| "The imported Claim scan range is invalid.".to_string())?
+        .ok_or("The imported Claim scan range is missing.")?;
+    let state = crate::services::bitcoin_import::pairing::claim_scan_state(
+        root,
+        target_cube,
+        source,
+        minimum,
+    )?;
+    if !saved.is_released()
+        && [
+            saved.indices.bitcoin_deposit,
+            saved.indices.btcb2_deposit,
+            saved.indices.bitcoin_return,
+        ]
+        .iter()
+        .any(|index| *index <= state.receive_allocation_floor)
+    {
+        return Err("A reserved funding address was already allocated by an imported wallet. The saved plan was preserved; review it before sending funds.".into());
+    }
+    Ok(state)
+}
+
 pub async fn check_reserved_funding_addresses(
     connect: &dyn SplitConnect,
     directory: PathBuf,
@@ -670,6 +706,35 @@ pub async fn check_reserved_funding_addresses(
     .map_err(|_| "Reading the saved funding addresses was interrupted.".to_string())?
     .map_err(|_| "The saved funding addresses could not be verified.".to_string())?
     .ok_or_else(|| "No funding addresses were reserved for this wallet.".to_string())?;
+    // Lock order is source guard, then short database snapshots/journal reads.
+    // Never hold a journal lock while acquiring this guard. Keep Receive from
+    // allocating into a new plan until the durable release is complete.
+    let allocation_guard = if saved
+        .target_binding
+        .as_ref()
+        .is_some_and(|binding| binding.imported_descriptor().is_some())
+    {
+        let root = connect
+            .imported_claim_root()
+            .ok_or("The imported Claim source is not bound to this open Cube.")?;
+        let source = source.clone();
+        let target = target_cube.to_owned();
+        let saved = saved.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let guard =
+                    crate::services::bitcoin_import::pairing::legacy::source_reservation_lock(
+                        &root, &source,
+                    )?;
+                let state = checked_imported_allocation(&root, &source, &target, &saved)?;
+                Ok::<_, String>((root, guard, state.source.address_window))
+            })
+            .await
+            .map_err(|_| "Checking imported address allocations was interrupted.".to_string())??,
+        )
+    } else {
+        None
+    };
     let [bitcoin_deposit, btcb2_deposit, bitcoin_return] = saved
         .addresses()
         .map_err(|_| "The saved funding addresses are invalid.".to_string())?;
@@ -703,6 +768,20 @@ pub async fn check_reserved_funding_addresses(
     if !connect.session_current() || connect.context() != context {
         return Err("The Connect session changed during the address check.".into());
     }
+    if let Some((root, _, scanned_window)) = allocation_guard.as_ref() {
+        let root = root.clone();
+        let source = source.clone();
+        let target = target_cube.to_owned();
+        let saved = saved.clone();
+        let scanned_window = *scanned_window;
+        tokio::task::spawn_blocking(move || {
+            let current = checked_imported_allocation(&root, &source, &target, &saved)?;
+            if current.source.address_window > scanned_window {
+                return Err("The imported wallet address window changed during the funding check. Try again.".to_string());
+            }
+            Ok(())
+        }).await.map_err(|_| "Rechecking imported address allocations was interrupted.".to_string())??;
+    }
     if !saved.is_released() {
         tokio::task::spawn_blocking(move || {
             claim_workflow::release_split_funding(&directory, &saved)
@@ -730,7 +809,7 @@ pub async fn recover_funding_addresses(
     directory: PathBuf,
     digest: sha256::Hash,
     target_cube: &str,
-    target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+    target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
 ) -> Result<(SplitSource, CheckedFundingAddresses), String> {
     if !connect.session_current() {
         return Err("The Connect session changed before recovering deposit addresses.".into());
@@ -771,7 +850,7 @@ pub async fn recover_unsigned_paired_funding_addresses(
     directory: PathBuf,
     source: &SplitSource,
     target_cube: &str,
-    target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+    target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
 ) -> Result<CheckedFundingAddresses, String> {
     let context = connect.context();
     let (wallet_id, descriptor) = target_vault
@@ -813,9 +892,141 @@ pub struct ProductionConnect {
     observation: HttpObservationSource,
     esplora: ConnectEsplora,
     evidence: ConnectSplitEvidence,
+    claim_root: Option<CoincubeDirectory>,
 }
 
 impl ProductionConnect {
+    pub(crate) fn with_claim_root(mut self, root: Option<CoincubeDirectory>) -> Self {
+        self.claim_root = root;
+        self
+    }
+
+    fn validate_imported_source(
+        &self,
+        source: &SplitSource,
+        target_cube: &str,
+        target: &coincube_core::wallet_descriptor::WalletDescriptor,
+    ) -> Result<(), String> {
+        if target.as_imported().is_none() {
+            return Ok(());
+        }
+        let root = self
+            .claim_root
+            .as_ref()
+            .ok_or("The imported Claim source is not bound to this open Cube.")?;
+        let source = crate::services::bitcoin_import::pairing::claim_scan_source(
+            root,
+            target_cube,
+            source,
+            1,
+        )?;
+        crate::imported_claim::ImportedClaimRequest::new(source, &self.session.client)?
+            .validate(root, &self.session.client)
+    }
+
+    async fn scan_funding_binding(
+        &self,
+        source: &SplitSource,
+        target_cube: &str,
+        binding: &claim_workflow::SplitTargetBinding,
+    ) -> Result<foreign_split_inventory::TwoChainScan, String> {
+        let minimum = binding
+            .imported_address_window()
+            .map_err(|_| "The saved Claim scan range is invalid.".to_string())?;
+        let imported = match minimum {
+            Some(minimum) => {
+                let root = self
+                    .claim_root
+                    .as_ref()
+                    .ok_or("The imported Claim source is not bound to this open Cube.")?;
+                let source = crate::services::bitcoin_import::pairing::claim_scan_source(
+                    root,
+                    target_cube,
+                    source,
+                    minimum,
+                )?;
+                let request =
+                    crate::imported_claim::ImportedClaimRequest::new(source, &self.session.client)?;
+                request.validate(root, &self.session.client)?;
+                Some(request)
+            }
+            None => None,
+        };
+        let plan = split_funding_scan_plan(
+            source,
+            imported
+                .as_ref()
+                .map(|request| request.source.address_window),
+        )?;
+        let scan = if imported.is_some() {
+            foreign_split_inventory::scan_imported(
+                self.session.client.clone(),
+                plan,
+                self.expected,
+                self.generation.clone(),
+            )
+            .await
+        } else {
+            foreign_split_inventory::scan(
+                self.session.client.clone(),
+                plan,
+                self.expected,
+                self.generation.clone(),
+            )
+            .await
+        }
+        .map_err(|error| format!("The two-chain source scan did not complete: {error:?}"))?;
+        if let Some(request) = imported {
+            let root = self
+                .claim_root
+                .as_ref()
+                .ok_or("The imported Claim root is unavailable.")?;
+            let current = crate::services::bitcoin_import::pairing::claim_scan_source(
+                root,
+                target_cube,
+                source,
+                minimum.ok_or("The saved Claim scan range is missing.")?,
+            )?;
+            if current.cube_id != request.source.cube_id
+                || current.external != request.source.external
+                || current.internal != request.source.internal
+                || current.address_window > request.source.address_window
+            {
+                return Err("The imported Claim source changed during its scan. Try again.".into());
+            }
+            request.validate(root, &self.session.client)?;
+        }
+        if !self.session_current() {
+            return Err("The Connect session changed during the source scan.".into());
+        }
+        Ok(scan)
+    }
+
+    async fn scan_reserved_source(
+        &self,
+        directory: &std::path::Path,
+        source: &SplitSource,
+        target_cube: &str,
+        target: &coincube_core::wallet_descriptor::WalletDescriptor,
+    ) -> Result<foreign_split_inventory::TwoChainScan, String> {
+        let saved =
+            claim_workflow::load_split_funding(directory, source, target_cube, &self.context())
+                .map_err(|_| "The saved funding reservation changed.".to_string())?
+                .ok_or("The saved funding reservation is unavailable.")?;
+        let binding = saved
+            .target_binding
+            .as_ref()
+            .ok_or("The saved target binding is unavailable.")?;
+        let minimum = binding
+            .imported_address_window()
+            .map_err(|_| "The saved Claim scan range is invalid.".to_string())?;
+        if target.as_imported().is_some() != minimum.is_some() {
+            return Err("The saved Claim scan range does not match its target wallet.".into());
+        }
+        self.scan_funding_binding(source, target_cube, binding)
+            .await
+    }
+
     async fn recorded_paired_source(
         &self,
         directory: PathBuf,
@@ -882,6 +1093,7 @@ impl ProductionConnect {
             observation,
             esplora,
             evidence,
+            claim_root: None,
         })
     }
 
@@ -896,7 +1108,7 @@ impl ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target: &coincube_core::descriptors::CoincubeDescriptor,
+        target: &coincube_core::wallet_descriptor::WalletDescriptor,
     ) -> Result<(AncestrySplitStep1, AncestrySplitStep2, (u64, u64)), String> {
         if !self.session_current() {
             return Err("The Connect session changed before reopening this split.".into());
@@ -924,14 +1136,10 @@ impl ProductionConnect {
                 format!("This signed pair cannot be prepared for a first send: {error:?}")
             })?;
         drop(controller);
-        let scan = foreign_split_inventory::scan(
-            self.session.client.clone(),
-            split_funding_scan_plan(source)?,
-            self.expected,
-            self.generation.clone(),
-        )
-        .await
-        .map_err(|error| format!("The two-chain source scan did not complete: {error:?}"))?;
+        let scan = self
+            .scan_reserved_source(&directory, source, target_cube, target)
+            .await
+            .map_err(|error| format!("The two-chain source scan did not complete: {error:?}"))?;
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during the split scan.".into());
         }
@@ -951,6 +1159,7 @@ impl ProductionConnect {
                 format!("The saved Split pair no longer matches the source scan: {error:?}")
             })?;
         drop(controller);
+        self.validate_imported_source(source, target_cube, target)?;
         Ok((pair.0, pair.1, (plan.bitcoin_rate_vb, plan.fork_rate_vb)))
     }
 
@@ -964,7 +1173,7 @@ impl ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: &(WalletId, coincube_core::descriptors::CoincubeDescriptor),
+        target_vault: &(WalletId, coincube_core::wallet_descriptor::WalletDescriptor),
     ) -> Result<(Controller, claim_workflow::InitialPairReview), String> {
         let context = self.context();
         let (bitcoin, fork, rates) = self
@@ -1002,6 +1211,7 @@ impl ProductionConnect {
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during Split broadcast review.".into());
         }
+        self.validate_imported_source(source, target_cube, &target_vault.1)?;
         Ok((controller, review))
     }
 
@@ -1013,7 +1223,7 @@ impl ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: &(WalletId, coincube_core::descriptors::CoincubeDescriptor),
+        target_vault: &(WalletId, coincube_core::wallet_descriptor::WalletDescriptor),
     ) -> Result<(Controller, claim_workflow::PostBitcoinPairReview), String> {
         if !self.session_current() {
             return Err("The Connect session changed before BTCB2 review.".into());
@@ -1027,14 +1237,10 @@ impl ProductionConnect {
             .recorded_post_bitcoin_pair_plan(&context)
             .map_err(|error| format!("The BTCB2 send cannot be prepared: {error:?}"))?;
         drop(controller);
-        let scan = foreign_split_inventory::scan(
-            self.session.client.clone(),
-            split_funding_scan_plan(source)?,
-            self.expected,
-            self.generation.clone(),
-        )
-        .await
-        .map_err(|error| format!("The post-Bitcoin source scan did not complete: {error:?}"))?;
+        let scan = self
+            .scan_reserved_source(&directory, source, target_cube, &target_vault.1)
+            .await
+            .map_err(|error| format!("The post-Bitcoin source scan did not complete: {error:?}"))?;
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during the Split scan.".into());
         }
@@ -1177,22 +1383,31 @@ impl ProductionConnect {
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during BTCB2 review.".into());
         }
+        self.validate_imported_source(source, target_cube, &target_vault.1)?;
         Ok((controller, review))
     }
 }
 
-fn split_funding_scan_plan(source: &SplitSource) -> Result<ScanPlan, String> {
+fn split_funding_scan_plan(
+    source: &SplitSource,
+    imported_window: Option<u32>,
+) -> Result<ScanPlan, String> {
     // Match the bounded foreign-wallet scan that first selected the receive
     // indices. A deposited output beyond this walk is unavailable, not proof
     // of zero funds or permission to choose a different address.
     const RANGE_END: u32 = 100;
     const GAP: u32 = 20;
+    let range_end = match imported_window {
+        Some(window) if (1..=10_000).contains(&window) => window,
+        Some(_) => return Err("The imported Claim scan range is invalid.".into()),
+        None => RANGE_END,
+    };
     let branch = |kind, descriptor: String| -> Result<BranchRange, String> {
         let descriptor = ScanDescriptor::parse(kind, &descriptor)
             .map_err(|_| "The saved source descriptor cannot be scanned.".to_string())?;
         Ok(BranchRange {
             start: 0,
-            end_exclusive: descriptor.end_exclusive(RANGE_END),
+            end_exclusive: descriptor.end_exclusive(range_end),
             descriptor,
         })
     };
@@ -1269,6 +1484,9 @@ impl SplitConnect for ProductionConnect {
     fn context(&self) -> Context {
         self.context.clone()
     }
+    fn imported_claim_root(&self) -> Option<CoincubeDirectory> {
+        self.claim_root.clone()
+    }
     fn paired_observation(&self) -> Option<&HttpObservationSource> {
         Some(&self.observation)
     }
@@ -1284,7 +1502,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source_digest: sha256::Hash,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
     ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
         if claim_ancestry_gate::authorization().is_none() {
             return Err("The paired split is not ready for broadcast.".into());
@@ -1316,7 +1534,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source_digest: sha256::Hash,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         displayed: &claim_workflow::InitialPairReviewSnapshot,
     ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
         if claim_ancestry_gate::authorization().is_none() {
@@ -1339,6 +1557,7 @@ impl SplitConnect for ProductionConnect {
             },
         )
         .map_err(|error| format!("The Connect broadcast check is unavailable: {error:?}"))?;
+        self.validate_imported_source(&source, target_cube, &target_vault.1)?;
         review
             .confirm_exact_snapshot_and_submit(
                 displayed,
@@ -1355,7 +1574,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source_digest: sha256::Hash,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
     ) -> Result<claim_workflow::InitialPairReviewSnapshot, String> {
         if claim_ancestry_gate::authorization().is_none() {
             return Err("The paired BTCB2 split is not ready for broadcast.".into());
@@ -1387,7 +1606,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source_digest: sha256::Hash,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         displayed: &claim_workflow::InitialPairReviewSnapshot,
     ) -> Result<claim_workflow::InitialPairSubmissionOutcome, String> {
         if claim_ancestry_gate::authorization().is_none() {
@@ -1410,6 +1629,7 @@ impl SplitConnect for ProductionConnect {
             },
         )
         .map_err(|error| format!("The Connect broadcast check is unavailable: {error:?}"))?;
+        self.validate_imported_source(&source, target_cube, &target_vault.1)?;
         review
             .confirm_exact_snapshot_and_submit(
                 displayed,
@@ -1458,14 +1678,10 @@ impl SplitConnect for ProductionConnect {
         let target_script = target
             .script_pubkey()
             .map_err(|_| "The saved BTCB2 destination is invalid.".to_string())?;
-        let scan = foreign_split_inventory::scan(
-            self.session.client.clone(),
-            split_funding_scan_plan(source)?,
-            self.expected,
-            self.generation.clone(),
-        )
-        .await
-        .map_err(|error| format!("The wallet scan for the funding quote failed: {error:?}"))?;
+        let scan = self
+            .scan_funding_binding(source, &reservation.target_cube, target)
+            .await
+            .map_err(|error| format!("The wallet scan for the funding quote failed: {error:?}"))?;
         if !self.session_current() {
             return Err("The Connect session changed during the funding quote.".into());
         }
@@ -1498,21 +1714,19 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
     ) -> Result<SplitDepositProgress, String> {
         if !self.session_current() {
             return Err("The Connect session changed before checking deposits.".into());
         }
         let context = self.context();
-        let plan = split_funding_scan_plan(source)?;
-        let scan = foreign_split_inventory::scan(
-            self.session.client.clone(),
-            plan,
-            self.expected,
-            self.generation.clone(),
-        )
-        .await
-        .map_err(|error| format!("The two-chain wallet scan did not complete: {error:?}"))?;
+        let target_descriptor = &target_vault
+            .ok_or("The target Claim wallet is unavailable.")?
+            .1;
+        let scan = self
+            .scan_reserved_source(&directory, source, target_cube, target_descriptor)
+            .await
+            .map_err(|error| format!("The two-chain wallet scan did not complete: {error:?}"))?;
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during the deposit scan.".into());
         }
@@ -1539,9 +1753,11 @@ impl SplitConnect for ProductionConnect {
             let Some((wallet_id, descriptor)) = target_vault else {
                 return Err("The target Vault is unavailable for this deposit check.".into());
             };
-            if !binding.matches_vault(wallet_id, descriptor) {
+            if !binding.matches_vault(wallet_id, descriptor)
+                || !binding.target_fresh_in(&scan.inventory)
+            {
                 return Err(
-                    "The target Vault changed since the deposit addresses were reserved.".into(),
+                    "The target wallet changed or its reserved address was used since the deposit addresses were reserved.".into(),
                 );
             }
         }
@@ -1642,6 +1858,7 @@ impl SplitConnect for ProductionConnect {
                         source,
                         reservation.indices.bitcoin_return,
                         target_script.as_script(),
+                        target_vault.and_then(|(_, descriptor)| descriptor.as_imported()).and_then(|_| reservation.target_binding.as_ref().map(|binding| binding.receive_index())),
                         bitcoin_rate,
                         fork_rate,
                         context,
@@ -1729,7 +1946,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
         rates: (u64, u64),
@@ -1740,14 +1957,10 @@ impl SplitConnect for ProductionConnect {
         let context = self.context();
         let (wallet_id, descriptor) = target_vault
             .ok_or_else(|| "The target BTCB2 Vault is unavailable for this split.".to_string())?;
-        let scan = foreign_split_inventory::scan(
-            self.session.client.clone(),
-            split_funding_scan_plan(source)?,
-            self.expected,
-            self.generation.clone(),
-        )
-        .await
-        .map_err(|error| format!("The two-chain wallet scan did not complete: {error:?}"))?;
+        let scan = self
+            .scan_reserved_source(&directory, source, target_cube, descriptor)
+            .await
+            .map_err(|error| format!("The two-chain wallet scan did not complete: {error:?}"))?;
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during the split scan.".into());
         }
@@ -1825,12 +2038,15 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() || self.context() != context {
             return Err("The Connect session changed during split verification.".into());
         }
+        self.validate_imported_source(source, target_cube, descriptor)?;
         let descriptor = descriptor.clone();
         let bitcoin = bitcoin.clone();
         let fork = fork.clone();
         let bitcoin_path = funding.funding().bitcoin_path.clone();
         let fork_path = funding.funding().fork_path.clone();
+        let validation_target = descriptor.clone();
         let target_cube = target_cube.to_owned();
+        let validation_cube = target_cube.clone();
         let result = tokio::task::spawn_blocking(move || {
             let controller = Controller::create_or_reopen_ancestry_split(
                 &directory,
@@ -1854,6 +2070,7 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() {
             return Err("The Connect session changed while recording the split intent.".into());
         }
+        self.validate_imported_source(source, &validation_cube, &validation_target)?;
         result.map(|()| SplitSignerCheck {
             requalified: funding,
             generation: self.generation.clone(),
@@ -1864,7 +2081,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         bitcoin: &AncestrySplitStep1,
         bitcoin_signed: &Psbt,
         fork: &AncestrySplitStep2,
@@ -1930,7 +2147,7 @@ impl SplitConnect for ProductionConnect {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: Option<&(WalletId, coincube_core::descriptors::CoincubeDescriptor)>,
+        target_vault: Option<&(WalletId, coincube_core::wallet_descriptor::WalletDescriptor)>,
         bitcoin: &AncestrySplitStep1,
         bitcoin_returns: &[Psbt],
         fork: &AncestrySplitStep2,
@@ -1965,6 +2182,7 @@ impl SplitConnect for ProductionConnect {
         if !self.session_current() || self.context() != *check.context() {
             return Err("The Connect session changed while checking the signed files.".into());
         }
+        self.validate_imported_source(source, target_cube, target_descriptor)?;
         Ok(combined)
     }
     fn open(&self, request: OpenRequest) -> Result<Box<dyn Step1Driver>, claim_coordinator::Error> {

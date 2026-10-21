@@ -91,3 +91,55 @@ gate. It still needs full paired GUI create/sign/confirm/restart acceptance,
 real hardware-signer smoke tests and independent review. No production signer
 gate or service configuration has been opened. Never delete an uncertain
 broadcast record automatically.
+
+
+## Imported-wallet pairs
+
+Claim from an imported Bitcoin wallet creates a dedicated Bitcoin Blake2b Cube,
+just as native Vault Claim creates a dedicated pair. Reopening Claim resumes
+that source's deterministic pair; it does not offer unrelated destination Cubes.
+The original Bitcoin Cube and wallet are retained.
+
+The paired imported wallet preserves the exact receive and change descriptors,
+key origins, and external signer references. The Cube's unlock seed, PIN
+protection and backup identity are preserved separately: its seed is never
+substituted for an imported spending key. The fork Cube has no Spark wallet.
+Wallet IDs, databases, history and address allocation are chain-specific. Initial
+allocation/discovery bounds are copied, but subsequent scans run independently.
+
+Pair creation uses the staged import journal. Retries reuse a completed pair
+without rewriting its database, or resume the same pending installation using
+its original allocation snapshot. Conflicting or duplicate records fail closed.
+The encrypted imported Recovery Kits carry the import operation identity,
+pairing and signer metadata. Restoring the source preserves the operation ID
+bound by the target, so restoring both Kits can revalidate the original pair.
+Older Kits without that optional identity remain readable; restoration never
+invents a matching pair identity or replaces a conflicting existing operation.
+An imported wallet backed up before these fields were included needs a one-time
+Recovery Kit update to carry its stable import operation and external signer
+metadata. Its old backup remains readable, but its stored fingerprint correctly
+shows drift until each backup copy is updated. Fingerprints include the full
+new payload; an old backup is never relabeled as containing the missing fields.
+Restoring the fork wallet alone permits history viewing, while Claim requires
+both source and target records to pass revalidation.
+
+The shared Split engine binds the exact paired descriptors and a receive index
+whose script has no transaction history on either chain. The destination must
+be inside both authenticated scans and distinct from the three funding/return
+addresses. History at another index, including a higher funding address, does
+not make this unused destination stale.
+
+Imported Claim records retain the minimum source range that must be scanned.
+Reopening, funding checks and signing requalification also reload the source's
+current complete receive/change range and verify its durable wallet identity,
+descriptors and import bounds. Both chains must cover the saved minimum and the
+current source range; a growing source cannot be checked using an older, shorter
+snapshot. The destination's own unused history is checked again before
+construction and signing requalification. Existing native target journal fields
+and unrelated legacy Split attempts remain unchanged; older arbitrary-destination
+attempts are not silently converted into paired claims.
+
+Ordinary Send, PSBT update/finalization and broadcast remain unavailable for an
+imported fork wallet until they have fork-specific protections. Claim continues
+through the protected shared Split path. This pairing support does not enable
+production signing or broadcast or bypass the existing capability/session gates.

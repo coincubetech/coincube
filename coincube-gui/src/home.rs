@@ -938,7 +938,21 @@ impl Home {
                     .cubes
                     .into_iter()
                     .filter(|cube| {
-                        cube.network == ChainId::BitcoinBlake2b && cube.vault_wallet_id.is_some()
+                        if let Some(request) = &self.imported_claim {
+                            cube.id
+                                == crate::services::bitcoin_import::pairing::target_cube_id(
+                                    &request.source.cube_id,
+                                )
+                                && crate::services::bitcoin_import::pairing::validate_pair(
+                                    &self.datadir_path,
+                                    cube,
+                                )
+                                .is_ok_and(|source| source.id == request.source.cube_id)
+                                && cube.has_imported_bitcoin()
+                        } else {
+                            cube.network == ChainId::BitcoinBlake2b
+                                && cube.vault_wallet_id.is_some()
+                        }
                     })
                     .map(|cube| TargetCube {
                         id: cube.id,
@@ -992,7 +1006,8 @@ impl Home {
         self.resume_split_after_install = false;
         if targets.is_empty() {
             if self.imported_claim.is_some() {
-                return Task::done(Message::InstallForSplit(self.datadir_path.clone(), client));
+                self.set_error("The paired imported Claim Cube is unavailable. Open Claim from the source wallet again.");
+                return Task::none();
             }
             self.set_error(
                 "The new Bitcoin Blake2b Cube has no Vault available for Split.".to_string(),
@@ -3090,6 +3105,22 @@ impl Home {
                         self.split_wallet.cancel();
                         return Task::none();
                     };
+                    if let Some(request) = &self.imported_claim {
+                        let paired = crate::services::bitcoin_import::pairing::validate_pair(
+                            &self.datadir_path,
+                            &cube,
+                        );
+                        if cube.id
+                            != crate::services::bitcoin_import::pairing::target_cube_id(
+                                &request.source.cube_id,
+                            )
+                            || !paired.is_ok_and(|source| source.id == request.source.cube_id)
+                        {
+                            self.split_wallet.cancel();
+                            self.set_error("The imported Claim destination changed. Open Claim from its source wallet again.");
+                            return Task::none();
+                        }
+                    }
                     if source != ChainId::BitcoinBlake2b || cube.network != source {
                         self.set_error(
                             "The selected destination Cube no longer belongs to Bitcoin Blake2b."
@@ -7216,8 +7247,84 @@ mod tests {
         .unwrap();
     }
 
+    fn write_btcb2_imported_target(home: &Home) -> CubeSettings {
+        let source_directory = home.datadir_path.network_directory(ChainId::Bitcoin);
+        let source_settings = settings::Settings::from_file(&source_directory).unwrap();
+        let source = &source_settings.cubes[0];
+        let import = source.bitcoin_import.as_ref().unwrap();
+        let source_wallet = import.active_attachment().unwrap();
+        let target_wallet = settings::ImportedWalletAttachment::new(
+            source_wallet.descriptor.paired_blake2b().unwrap(),
+            ChainId::BitcoinBlake2b,
+            source_wallet.birthday,
+            source_wallet.initial_lookahead,
+        )
+        .unwrap();
+        let mut target = CubeSettings::new_with_raw_id(
+            crate::services::bitcoin_import::pairing::target_cube_id(&source.id),
+            "Imported wallet · BTCB2".into(),
+            ChainId::BitcoinBlake2b,
+        );
+        target.master_signer_fingerprint = source.master_signer_fingerprint;
+        target.backed_up = source.backed_up;
+        target.mfa_done = source.mfa_done;
+        target.imported_claim_source =
+            Some(Box::new(settings::bitcoin_import::ImportedClaimPair {
+                source_cube_id: source.id.clone(),
+                source_operation_id: import.operation_id,
+                source_wallet: source_wallet.clone(),
+            }));
+        target.bitcoin_import = Some(Box::new(settings::BitcoinImport {
+            operation_id: uuid::Uuid::parse_str(&target.id).unwrap(),
+            stage: settings::BitcoinImportStage::Ready {
+                wallet: target_wallet.clone(),
+            },
+            last_error: None,
+        }));
+        let mut metadata = source_settings.wallets[0].clone();
+        metadata.descriptor_checksum = target_wallet.wallet_id.descriptor_checksum.clone();
+        metadata.pinned_at = target_wallet.wallet_id.timestamp;
+        let directory = home.datadir_path.network_directory(ChainId::BitcoinBlake2b);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let mut saved = settings::Settings::from_file(&directory).unwrap_or_default();
+        saved.cubes.push(target.clone());
+        saved.wallets.push(metadata);
+        std::fs::write(
+            directory.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec_pretty(&saved).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            crate::services::bitcoin_import::pairing::validate_pair(&home.datadir_path, &target)
+                .unwrap()
+                .id,
+            source.id
+        );
+        target
+    }
+
     fn arm_imported_claim(home: &mut Home) -> crate::imported_claim::ImportedClaimRequest {
-        let (cube, request, _) = crate::imported_claim::tests::fixture();
+        let (mut cube, request, _) = crate::imported_claim::tests::fixture();
+        cube.master_signer_fingerprint = Some([1, 2, 3, 4].into());
+        cube.backed_up = true;
+        let wallet = cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .unwrap();
+        let metadata = settings::WalletSettings {
+            name: "Synthetic external signer".into(),
+            alias: None,
+            descriptor_checksum: wallet.wallet_id.descriptor_checksum.clone(),
+            pinned_at: wallet.wallet_id.timestamp,
+            keys: Vec::new(),
+            hardware_wallets: Vec::new(),
+            remote_backend_auth: None,
+            start_internal_bitcoind: Some(false),
+            pending_rescan: None,
+            keychain_keys_recorded: false,
+        };
         crate::imported_claim::tests::prepare_storage(&home.datadir_path, &cube);
         let directory = home.datadir_path.network_directory(ChainId::Bitcoin);
         std::fs::create_dir_all(directory.path()).unwrap();
@@ -7225,6 +7332,7 @@ mod tests {
             directory.path().join(settings::SETTINGS_FILE_NAME),
             serde_json::to_vec(&settings::Settings {
                 cubes: vec![cube],
+                wallets: vec![metadata],
                 ..Default::default()
             })
             .unwrap(),
@@ -7247,23 +7355,31 @@ mod tests {
         let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
         enable_btcb2(&mut home);
         let request = arm_imported_claim(&mut home);
-        assert!(matches!(
-            drain(home.resume_split_if_ready()).as_slice(),
-            [Message::InstallForSplit(_, _)]
-        ));
+        write_btcb2_vault_target(&home);
+        assert!(home.split_wallet_targets().is_empty());
+        // An imported Claim must wait for its dedicated pair; it cannot
+        // dispatch the ordinary installer to create an arbitrary Vault.
+        assert!(drain(home.resume_split_if_ready()).is_empty());
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        assert!(home.error().is_some());
         assert_eq!(
             home.imported_claim_request().unwrap().source,
             request.source
         );
         assert!(!home.resume_split_after_install);
 
-        // The installer returns the public selection; the new Home must still
-        // obtain its own authenticated account feature result before resuming.
+        // Reopening the dedicated Claim surface must still obtain its own
+        // authenticated account feature result before resuming.
         let client = home.connect_account.authenticated_client().unwrap();
         let (mut resumed, startup) =
             Home::new_imported_claim(datadir.clone(), request.clone(), client);
         drop(startup);
+        // Even with an unrelated native Vault present, only this source's
+        // descriptor-identical imported pair is eligible for Claim.
         write_btcb2_vault_target(&resumed);
+        let target = write_btcb2_imported_target(&resumed);
+        assert_eq!(resumed.split_wallet_targets().len(), 1);
+        assert_eq!(resumed.split_wallet_targets()[0].id, target.id);
         assert!(drain(resumed.resume_split_if_ready()).is_empty());
         assert_eq!(resumed.active_section, HomeSection::Cubes);
         enable_btcb2(&mut resumed);
@@ -7275,7 +7391,7 @@ mod tests {
         );
         assert_eq!(
             resumed.split_wallet.selected_target_id(),
-            Some("split-target")
+            Some(target.id.as_str())
         );
         // The ordinary Split tool remains editable after leaving this claim.
         drop(resumed.update(Message::View(ViewMessage::GoToSection(
@@ -7300,7 +7416,7 @@ mod tests {
             let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
             enable_btcb2(&mut home);
             arm_imported_claim(&mut home);
-            write_btcb2_vault_target(&home);
+            write_btcb2_imported_target(&home);
             match change {
                 "session" => {
                     let mut client = CoincubeClient::new();
@@ -7350,7 +7466,7 @@ mod tests {
             let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
             enable_btcb2(&mut home);
             arm_imported_claim(&mut home);
-            write_btcb2_vault_target(&home);
+            let target = write_btcb2_imported_target(&home);
             drop(home.resume_split_if_ready());
             assert_eq!(home.active_section, HomeSection::SplitWallet);
             match change {
@@ -7380,8 +7496,8 @@ mod tests {
             }
             drop(home.update(Message::View(ViewMessage::SplitWallet(
                 split_wallet::Message::TargetSelected(TargetCube {
-                    id: "split-target".into(),
-                    name: "Split target".into(),
+                    id: target.id.clone(),
+                    name: target.name.clone(),
                 }),
             ))));
             if change == "storage" {
@@ -7410,7 +7526,7 @@ mod tests {
             let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::BitcoinBlake2b)).0;
             enable_btcb2(&mut home);
             arm_imported_claim(&mut home);
-            write_btcb2_vault_target(&home);
+            write_btcb2_imported_target(&home);
             drop(home.resume_split_if_ready());
             assert_eq!(home.active_section, HomeSection::SplitWallet);
             std::fs::write(

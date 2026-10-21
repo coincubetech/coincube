@@ -1435,6 +1435,10 @@ fn validate_imported_open(
             ))
         };
     };
+    if cube.network.is_blake2b() {
+        crate::services::bitcoin_import::pairing::validate_target_record(cube)
+            .map_err(Error::Unexpected)?;
+    }
     attachment
         .validate(cube.network)
         .map_err(Error::Unexpected)?;

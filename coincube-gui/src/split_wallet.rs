@@ -370,6 +370,10 @@ impl SplitWalletPanel {
             external,
             internal,
         );
+        let intent = match self.imported_source.clone() {
+            Some(source) => intent.and_then(|intent| intent.bind_imported_source(source, client)),
+            None => intent,
+        };
         self.generation = self.generation.wrapping_add(1);
         let _ = self.cancel.send(self.generation);
         self.status = Status::Editing;
@@ -430,6 +434,9 @@ impl SplitWalletPanel {
                 Task::none()
             }
             Message::TargetSelected(target) => {
+                if self.imported_source.is_some() {
+                    return Task::none();
+                }
                 if self
                     .targets
                     .iter()
@@ -702,7 +709,7 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
             .spacing(6)
             .push(h3("Claim BTCB2"))
             .push(
-                p1_regular("Scan your selected Bitcoin wallet on both chains, then review any BTCB2 found. Your original wallet or hardware device signs; the destination is a BTCB2 Cube.")
+                p1_regular("Scan your wallet on both chains, then review any BTCB2 found. Your paired Bitcoin Blake2b wallet uses the same descriptors and original signers. Its Cube has no Spark wallet.")
                     .style(theme::text::secondary),
             )
     } else {
@@ -723,10 +730,17 @@ pub fn view(panel: &SplitWalletPanel) -> Element<'_, Message> {
     .placeholder("Choose a Bitcoin Blake2b Cube")
     .width(Length::Fill);
 
-    let mut form = Column::new()
-        .spacing(12)
-        .push(p1_bold("Destination Cube"))
-        .push(target);
+    let mut form = if imported.is_some() {
+        Column::new().spacing(12)
+            .push(p1_bold("Paired Bitcoin Blake2b Cube"))
+            .push(p1_regular(panel.selected.as_ref().map(|target| target.name.as_str()).unwrap_or("Preparing paired Cube…")))
+            .push(caption("Same wallet descriptors and signers. Bitcoin and Bitcoin Blake2b history are stored separately.").style(theme::text::secondary))
+    } else {
+        Column::new()
+            .spacing(12)
+            .push(p1_bold("Destination Cube"))
+            .push(target)
+    };
     form = if let Some(source) = imported {
         form.push(p1_bold("Original Bitcoin wallet"))
             .push(p1_regular(&source.name))
@@ -953,6 +967,12 @@ mod tests {
         let _guard = crate::app::session::test_guard();
         let mut panel = SplitWalletPanel::new();
         let source = imported_source(240);
+        let paired_target = target();
+        let other_target = TargetCube {
+            id: "unrelated-cube".into(),
+            name: "Unrelated BTCB2 Cube".into(),
+        };
+        panel.set_targets(vec![paired_target.clone(), other_target.clone()]);
         panel.set_imported_source(source.clone()).unwrap();
         assert_eq!(panel.imported_source().unwrap().cube_id, source.cube_id);
         assert_eq!(panel.source_form.external(), source.external);
@@ -961,6 +981,7 @@ mod tests {
             Message::ExternalEdited("other".into()),
             Message::InternalEdited("other".into()),
             Message::SourceSelected(Source::Hardware),
+            Message::TargetSelected(other_target),
             Message::Hardware(HardwareMessage::AccountEdited("1".into())),
         ] {
             let generation = panel.generation;
@@ -970,6 +991,7 @@ mod tests {
             assert_eq!(panel.source_form.internal(), source.internal);
             assert_eq!(panel.source_form.source(), Source::Descriptor);
             assert_eq!(panel.imported_source().unwrap().cube_id, source.cube_id);
+            assert_eq!(panel.selected_target_id(), Some(paired_target.id.as_str()));
         }
         assert!(!panel.polls_hardware());
     }
@@ -1021,7 +1043,7 @@ mod tests {
             "Original Bitcoin wallet",
             "My Bitcoin wallet",
             "receive and change addresses 0–239",
-            "Destination Cube",
+            "Paired Bitcoin Blake2b Cube",
             "Scan selected wallet",
         ] {
             assert!(labels.contains(visible), "missing {}: {}", visible, labels);

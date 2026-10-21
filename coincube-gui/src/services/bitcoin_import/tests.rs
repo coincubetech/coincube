@@ -618,3 +618,31 @@ async fn recovery_kit_restore_refuses_another_cube_before_mutation() {
         .coincubed_data_directory(&f.wallet.wallet_id)
         .exists());
 }
+
+#[tokio::test]
+async fn discovery_journal_is_optional_for_legacy_imports_and_bound_to_owner() {
+    let f = Fixture::new().await;
+    f.install().await.unwrap();
+    let journal = read_journal(&journal_path(&f.directory, f.operation()))
+        .unwrap()
+        .unwrap();
+    assert!(journal.restored_discovery_target.is_none());
+    let legacy = serde_json::to_value(&journal).unwrap();
+    assert!(legacy.get("restored_discovery_target").is_none());
+    let decoded: Journal = serde_json::from_value(legacy).unwrap();
+    assert_eq!(decoded, journal);
+    decoded.validate().unwrap();
+    let mut changed = decoded;
+    changed.restored_discovery_target = Some(650);
+    assert!(changed.validate().is_err()); // discovery restore needs allocation state too
+    changed.restored_address_state = Some(RestoredAddressState {
+        receive_index: 0,
+        change_index: 0,
+    });
+    changed.validate().unwrap();
+    assert!(!owns_directory(&journal.final_path(&f.directory), &changed).unwrap());
+    for invalid in [199, 10_001] {
+        changed.restored_discovery_target = Some(invalid);
+        assert!(changed.validate().is_err());
+    }
+}

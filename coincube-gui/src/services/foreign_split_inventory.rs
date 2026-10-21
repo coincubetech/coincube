@@ -148,6 +148,9 @@ pub struct SplitInventory {
     btcb2_funding_candidates: BTreeMap<OutPoint, SplitCoin>,
     pending: Vec<InventoryCoin>,
     fresh_receive: FreshIndex,
+    fresh_external_range: Option<std::ops::Range<u32>>,
+    complete_address_window: Option<u32>,
+    unused_external_indices: BTreeSet<u32>,
     fresh_funding_addresses: Option<FreshFundingAddresses>,
     fresh_deposit_addresses: Option<FreshDepositAddresses>,
 }
@@ -296,6 +299,40 @@ impl SplitInventory {
     pub fn fresh_funding_addresses(&self) -> Option<FreshFundingAddresses> {
         self.fresh_funding_addresses
     }
+
+    /// Scan-time proof that this receive address has no history on either chain.
+    pub fn is_fresh_external(&self, index: u32) -> bool {
+        self.unused_external_indices.contains(&index)
+    }
+
+    /// A paired destination shares the source descriptors. Keep its receive
+    /// address separate from all three funding/return addresses, and require
+    /// all four addresses to be unused inside both authenticated scan walks.
+    pub fn fresh_funding_addresses_excluding(
+        &self,
+        target_index: u32,
+        allocation_floor: u32,
+    ) -> Option<FreshFundingAddresses> {
+        if !self.is_fresh_external(target_index) {
+            return None;
+        }
+        let mut indices = self
+            .fresh_external_range
+            .clone()?
+            .filter(|index| *index > target_index.max(allocation_floor));
+        Some(FreshFundingAddresses {
+            bitcoin_deposit: indices.next()?,
+            btcb2_deposit: indices.next()?,
+            bitcoin_return: indices.next()?,
+        })
+    }
+
+    /// Complete receive/change coverage on both chains for imported Claim.
+    pub(crate) fn covers_address_window(&self, window: u32) -> bool {
+        self.complete_address_window
+            .is_some_and(|covered| covered >= window)
+    }
+
     pub fn fresh_deposit_addresses(&self) -> Option<FreshDepositAddresses> {
         self.fresh_deposit_addresses
     }
@@ -342,6 +379,29 @@ impl SplitInventory {
             btcb2_funding_candidates: BTreeMap::new(),
             pending: Vec::new(),
             fresh_receive: fresh_receive(btcb2, bitcoin, external_ranged),
+            fresh_external_range: fresh_external_range(btcb2, bitcoin, external_ranged),
+            complete_address_window: [Branch::External, Branch::Internal]
+                .iter()
+                .flat_map(|branch| [btcb2.coverage(*branch), bitcoin.coverage(*branch)])
+                .try_fold(u32::MAX, |end, coverage| {
+                    let coverage = coverage.filter(|coverage| coverage.start == 0)?;
+                    Some(end.min(coverage.end_exclusive))
+                }),
+            unused_external_indices: btcb2
+                .coverage(Branch::External)
+                .into_iter()
+                .flat_map(|range| range.start..range.end_exclusive)
+                .filter(|index| {
+                    external_ranged
+                        && btcb2.observed_unused(Branch::External, *index)
+                        && bitcoin.observed_unused(Branch::External, *index)
+                        && !btcb2
+                            .coins()
+                            .iter()
+                            .chain(bitcoin.coins())
+                            .any(|coin| coin.branch == Branch::External && coin.index == *index)
+                })
+                .collect(),
             fresh_deposit_addresses: fresh_receive_indices(btcb2, bitcoin, external_ranged, 2)
                 .and_then(|indices| {
                     Some(FreshDepositAddresses {
@@ -521,6 +581,36 @@ fn fresh_receive(btcb2: &ScanReport, bitcoin: &ScanReport, external_ranged: bool
     fresh_receive_indices(btcb2, bitcoin, true, 1)
         .and_then(|indices| indices.first().copied())
         .map_or(FreshIndex::NotProven, FreshIndex::Proven)
+}
+
+fn fresh_external_range(
+    btcb2: &ScanReport,
+    bitcoin: &ScanReport,
+    external_ranged: bool,
+) -> Option<std::ops::Range<u32>> {
+    if !external_ranged {
+        return None;
+    }
+    let a = btcb2.coverage(Branch::External)?;
+    let b = bitcoin.coverage(Branch::External)?;
+    if a.start != 0 || b.start != 0 {
+        return None;
+    }
+    let start = match a.last_used.max(b.last_used) {
+        Some(index) => index.checked_add(1)?,
+        None => 0,
+    };
+    let range = start..a.end_exclusive.min(b.end_exclusive);
+    if range.is_empty()
+        || btcb2
+            .coins()
+            .iter()
+            .chain(bitcoin.coins())
+            .any(|coin| coin.branch == Branch::External && range.contains(&coin.index))
+    {
+        return None;
+    }
+    Some(range)
 }
 
 fn fresh_receive_indices(
@@ -1128,6 +1218,28 @@ mod tests {
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
         assert_eq!(
+            inventory.fresh_funding_addresses_excluding(6, 0),
+            Some(FreshFundingAddresses {
+                bitcoin_deposit: 7,
+                btcb2_deposit: 8,
+                bitcoin_return: 9,
+            })
+        );
+        assert_eq!(
+            inventory.fresh_funding_addresses_excluding(7, 0),
+            Some(FreshFundingAddresses {
+                bitcoin_deposit: 8,
+                btcb2_deposit: 9,
+                bitcoin_return: 10,
+            })
+        );
+        assert_eq!(inventory.fresh_funding_addresses_excluding(5, 0), None);
+        assert_eq!(
+            inventory.fresh_funding_addresses_excluding(u32::MAX, 0),
+            None
+        );
+
+        assert_eq!(
             inventory.fresh_deposit_addresses(),
             Some(FreshDepositAddresses {
                 bitcoin_deposit: 6,
@@ -1518,6 +1630,7 @@ mod tests {
         .unwrap();
         assert_eq!(too_narrow.fresh_receive(), FreshIndex::Proven(8));
         assert_eq!(too_narrow.fresh_funding_addresses(), None);
+        assert_eq!(too_narrow.fresh_funding_addresses_excluding(8, 0), None);
         // A coin at the candidate index contradicts "unused": refuse it.
         let inventory = SplitInventory::join(
             &report(

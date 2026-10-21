@@ -32,13 +32,13 @@ use coincube_core::{
     },
     miniscript::{
         bitcoin::{
-            bip32::ChildNumber,
             hashes::{sha256, Hash},
             psbt::Psbt,
             Address, Network, OutPoint, ScriptBuf, Transaction,
         },
         Descriptor, DescriptorPublicKey,
     },
+    wallet_descriptor::{ImportedWalletDescriptor, WalletDescriptor},
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -80,7 +80,7 @@ pub enum SplitPostBitcoinError {
 #[allow(dead_code)] // The production Split signer transition is still gated.
 pub(crate) struct RequalifiedInitialSplit {
     pub(super) funding: OwnedSplitFunding,
-    target_descriptor: CoincubeDescriptor,
+    target_descriptor: WalletDescriptor,
     bitcoin_psbt: Psbt,
     fork_psbt: Psbt,
     shared: Vec<SplitCoin>,
@@ -98,7 +98,7 @@ impl RequalifiedInitialSplit {
     pub(crate) fn prepare_recorded_pair_review(
         &self,
         controller: &mut Controller,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
         policy: Policy,
@@ -128,7 +128,7 @@ impl RequalifiedInitialSplit {
 
     pub(super) fn matches_pair(
         &self,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
     ) -> bool {
@@ -167,6 +167,7 @@ impl RequalifiedInitialSplit {
             destination: bitcoin.destination(),
         };
         let fork_inputs = AncestrySplitStep2Inputs {
+            paired_target_index: fork.paired_target_index(),
             chain: fork.chain(),
             source: fork.source(),
             shared: &self.shared,
@@ -223,7 +224,7 @@ impl RequalifiedInitialSplit {
     pub(crate) fn finalize_signed_pair_for_record(
         &self,
         controller: &mut Controller,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin: &AncestrySplitStep1,
         bitcoin_signed: &Psbt,
         fork: &AncestrySplitStep2,
@@ -266,6 +267,7 @@ impl RequalifiedInitialSplit {
             destination: bitcoin.destination(),
         };
         let fork_inputs = AncestrySplitStep2Inputs {
+            paired_target_index: fork.paired_target_index(),
             chain: fork.chain(),
             source: fork.source(),
             shared: &self.shared,
@@ -308,7 +310,7 @@ impl RequalifiedInitialSplit {
     fn reverify_recorded_pair_for_review(
         &self,
         controller: &mut Controller,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin: &AncestrySplitStep1,
         fork: &AncestrySplitStep2,
         policy: Policy,
@@ -345,6 +347,7 @@ impl RequalifiedInitialSplit {
             destination: bitcoin.destination(),
         };
         let fork_inputs = AncestrySplitStep2Inputs {
+            paired_target_index: fork.paired_target_index(),
             chain: fork.chain(),
             source: fork.source(),
             shared: &self.shared,
@@ -397,7 +400,7 @@ impl RequalifiedInitialSplit {
     /// final recording repeats the live scan and journal check.
     pub(crate) fn combine_signer_returns(
         &self,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         bitcoin: &AncestrySplitStep1,
         bitcoin_returns: &[Psbt],
         fork: &AncestrySplitStep2,
@@ -428,6 +431,7 @@ impl RequalifiedInitialSplit {
             destination: bitcoin.destination(),
         };
         let fork_inputs = AncestrySplitStep2Inputs {
+            paired_target_index: fork.paired_target_index(),
             chain: fork.chain(),
             source: fork.source(),
             shared: &self.shared,
@@ -467,7 +471,7 @@ impl Controller {
         &mut self,
         current: &Context,
         source: &SplitSource,
-        target: &CoincubeDescriptor,
+        target: &WalletDescriptor,
         inventory: &SplitInventory,
     ) -> Result<(AncestrySplitStep1, AncestrySplitStep2), Error> {
         let plan = self.recorded_initial_pair_plan(current)?;
@@ -504,7 +508,7 @@ pub struct RequalifiedPostBitcoinSplit {
     /// The stage-two coordinator must still reverify the saved signed pair.
     pub(super) fork_coins: PostBitcoinSplitCoins,
     source: SplitSource,
-    target_descriptor: CoincubeDescriptor,
+    target_descriptor: WalletDescriptor,
     bitcoin_path: RetainedPath,
     fork_path: RetainedPath,
     context: Context,
@@ -553,7 +557,7 @@ pub(super) fn reverify_post_bitcoin_split_pair(
     controller: &mut Controller,
     current: &Context,
     source: &SplitSource,
-    target: &CoincubeDescriptor,
+    target: &WalletDescriptor,
     fork_coins: &PostBitcoinSplitCoins,
     bitcoin_funding: &SplitCoin,
     bitcoin_path: &RetainedPath,
@@ -593,6 +597,7 @@ pub(super) fn reverify_post_bitcoin_split_pair(
         destination: bitcoin.destination(),
     };
     let fork_inputs = AncestrySplitStep2Inputs {
+        paired_target_index: fork.paired_target_index(),
         chain: ChainId::BitcoinBlake2b,
         source,
         shared: &fork_coins.shared,
@@ -620,6 +625,10 @@ pub(super) fn reverify_post_bitcoin_split_pair(
 pub struct SplitTargetBinding {
     vault_id: WalletId,
     descriptor: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_descriptor: Option<ImportedWalletDescriptor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    imported_address_window: Option<u32>,
     receive_index: u32,
     script_hex: String,
 }
@@ -627,7 +636,8 @@ pub struct SplitTargetBinding {
 impl SplitTargetBinding {
     pub fn from_evidence(
         target: &TargetAddressEvidence,
-        descriptor: &CoincubeDescriptor,
+        descriptor: &WalletDescriptor,
+        imported_address_window: Option<u32>,
     ) -> Result<Self, Error> {
         let index = target.derivation_index();
         if index.is_hardened() {
@@ -636,6 +646,8 @@ impl SplitTargetBinding {
         let binding = Self {
             vault_id: target.vault_id().clone(),
             descriptor: descriptor.to_string(),
+            imported_descriptor: descriptor.as_imported().cloned(),
+            imported_address_window,
             receive_index: u32::from(index),
             script_hex: hex::encode(target.script_pubkey().as_bytes()),
         };
@@ -654,29 +666,49 @@ impl SplitTargetBinding {
         {
             return Err(Error::InvalidPlan);
         }
-        if self
-            .descriptor
-            .split_once('#')
-            .map(|(_, checksum)| checksum)
-            != Some(self.vault_id.descriptor_checksum.as_str())
+        if self.imported_descriptor.is_none()
+            && self
+                .descriptor
+                .split_once('#')
+                .map(|(_, checksum)| checksum)
+                != Some(self.vault_id.descriptor_checksum.as_str())
         {
             return Err(Error::InvalidPlan);
+        }
+        if self.imported_descriptor.is_some() != self.imported_address_window.is_some()
+            || self.imported_address_window.is_some_and(|window| {
+                !(1..=10_000).contains(&window) || self.receive_index >= window
+            })
+        {
+            return Err(Error::InvalidPlan);
+        }
+        if let Some(imported) = &self.imported_descriptor {
+            if WalletId::for_imported(imported, imported.chain()).map_err(|_| Error::InvalidPlan)?
+                != self.vault_id
+            {
+                return Err(Error::InvalidPlan);
+            }
         }
         self.script().map(|_| ())
     }
 
     fn script(&self) -> Result<ScriptBuf, Error> {
-        let descriptor =
-            CoincubeDescriptor::from_str(&self.descriptor).map_err(|_| Error::InvalidPlan)?;
+        let descriptor = match &self.imported_descriptor {
+            Some(imported) if imported.chain() == ChainId::BitcoinBlake2b => {
+                WalletDescriptor::Imported(imported.clone())
+            }
+            Some(_) => return Err(Error::InvalidPlan),
+            None => WalletDescriptor::Vault(
+                CoincubeDescriptor::from_str(&self.descriptor).map_err(|_| Error::InvalidPlan)?,
+            ),
+        };
+        if descriptor.to_string() != self.descriptor {
+            return Err(Error::InvalidPlan);
+        }
         let script = descriptor
             .receive_descriptor()
-            .derive(
-                ChildNumber::Normal {
-                    index: self.receive_index,
-                },
-                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+            .script_pubkey(self.receive_index)
+            .map_err(|_| Error::InvalidPlan)?;
         if hex::encode(script.as_bytes()) != self.script_hex {
             return Err(Error::InvalidPlan);
         }
@@ -684,10 +716,26 @@ impl SplitTargetBinding {
     }
 
     /// A reopened funding plan must still belong to the loaded target Vault.
-    pub fn matches_vault(&self, vault_id: &WalletId, descriptor: &CoincubeDescriptor) -> bool {
+    pub fn matches_vault(&self, vault_id: &WalletId, descriptor: &WalletDescriptor) -> bool {
         self.vault_id == *vault_id
             && self.descriptor == descriptor.to_string()
+            && self.imported_descriptor.as_ref() == descriptor.as_imported()
             && self.validate().is_ok()
+    }
+
+    /// Imported paired targets share the source's branch. A fresh two-chain
+    /// source scan must still prove the reserved output index unused.
+    pub(crate) fn target_fresh_in(&self, inventory: &SplitInventory) -> bool {
+        self.imported_descriptor.is_none() || inventory.is_fresh_external(self.receive_index)
+    }
+
+    pub(crate) fn imported_descriptor(&self) -> Option<&ImportedWalletDescriptor> {
+        self.imported_descriptor.as_ref()
+    }
+
+    pub(crate) fn imported_address_window(&self) -> Result<Option<u32>, Error> {
+        self.validate()?;
+        Ok(self.imported_address_window)
     }
 
     pub fn receive_index(&self) -> u32 {
@@ -710,21 +758,16 @@ impl SplitTargetBinding {
     }
 
     #[cfg(test)]
-    pub(crate) fn for_test(
-        vault_id: WalletId,
-        descriptor: &CoincubeDescriptor,
-        index: u32,
-    ) -> Self {
+    pub(crate) fn for_test(vault_id: WalletId, descriptor: &WalletDescriptor, index: u32) -> Self {
         let script = descriptor
             .receive_descriptor()
-            .derive(
-                ChildNumber::Normal { index },
-                &coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+            .script_pubkey(index)
+            .unwrap();
         Self {
             vault_id,
             descriptor: descriptor.to_string(),
+            imported_descriptor: descriptor.as_imported().cloned(),
+            imported_address_window: descriptor.as_imported().map(|_| 200.max(index + 1)),
             receive_index: index,
             script_hex: hex::encode(script.as_bytes()),
         }
@@ -812,6 +855,19 @@ impl SplitFundingReservation {
         let source = self.source()?;
         if let Some(target) = &self.target_binding {
             target.validate()?;
+            if let Some(imported) = &target.imported_descriptor {
+                if imported.receive_descriptor() != source.external()
+                    || Some(imported.change_descriptor()) != source.internal()
+                    || [bitcoin, fork, returning].contains(&target.receive_index)
+                    || target.imported_address_window.is_none_or(|window| {
+                        [bitcoin, fork, returning]
+                            .iter()
+                            .any(|index| *index >= window)
+                    })
+                {
+                    return Err(Error::InvalidPlan);
+                }
+            }
         }
         if !source.external().has_wildcard() || source.digest() != self.source_digest {
             return Err(Error::InvalidPlan);
@@ -890,7 +946,13 @@ impl SplitFundingReservation {
         let saved = load_split_funding(directory, source, &self.target_cube, context)
             .map_err(SplitFundingDiscoveryError::InvalidReservation)?
             .ok_or(SplitFundingDiscoveryError::Changed)?;
-        if saved != *self || !saved.matches(source, &self.target_cube, context) {
+        if saved != *self
+            || !saved.matches(source, &self.target_cube, context)
+            || self
+                .target_binding
+                .as_ref()
+                .is_some_and(|binding| !binding.target_fresh_in(inventory))
+        {
             return Err(SplitFundingDiscoveryError::Changed);
         }
         Ok(inventory
@@ -989,7 +1051,7 @@ impl SplitFundingReservation {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: (&WalletId, &CoincubeDescriptor),
+        target_vault: (&WalletId, &WalletDescriptor),
         context: &Context,
         inventory: &SplitInventory,
         observations: &HttpObservationSource,
@@ -1005,7 +1067,10 @@ impl SplitFundingReservation {
         let binding = self
             .target_binding
             .as_ref()
-            .filter(|binding| binding.matches_vault(target_vault.0, target_vault.1))
+            .filter(|binding| {
+                binding.matches_vault(target_vault.0, target_vault.1)
+                    && binding.target_fresh_in(inventory)
+            })
             .ok_or(SplitPairRequalificationError::Changed)?;
         let target = binding
             .script_pubkey()
@@ -1068,6 +1133,10 @@ impl SplitFundingReservation {
                 source,
                 self.indices.bitcoin_return,
                 target.as_script(),
+                target_vault
+                    .1
+                    .as_imported()
+                    .map(|_| binding.receive_index()),
                 rates.0,
                 rates.1,
                 review,
@@ -1126,7 +1195,7 @@ impl SplitFundingReservation {
         directory: PathBuf,
         source: &SplitSource,
         target_cube: &str,
-        target_vault: (&WalletId, &CoincubeDescriptor),
+        target_vault: (&WalletId, &WalletDescriptor),
         context: &Context,
         scan: &TwoChainScan,
         observations: &HttpObservationSource,
@@ -1143,7 +1212,10 @@ impl SplitFundingReservation {
         let target = self
             .target_binding
             .as_ref()
-            .filter(|binding| binding.matches_vault(target_vault.0, target_vault.1))
+            .filter(|binding| {
+                binding.matches_vault(target_vault.0, target_vault.1)
+                    && binding.target_fresh_in(&scan.inventory)
+            })
             .ok_or(SplitPostBitcoinError::Changed)?
             .script_pubkey()
             .map_err(|_| SplitPostBitcoinError::Changed)?;
@@ -1314,7 +1386,15 @@ pub fn reserve_split_funding(
     context: &Context,
     inventory: &SplitInventory,
 ) -> Result<SplitFundingReservation, Error> {
-    reserve_split_funding_inner(directory, source, target_cube, context, inventory, None)
+    reserve_split_funding_inner(
+        directory,
+        source,
+        target_cube,
+        context,
+        inventory,
+        None,
+        None,
+    )
 }
 
 /// Production reservation binds the already authenticated target Vault
@@ -1326,6 +1406,7 @@ pub fn reserve_split_funding_with_target(
     context: &Context,
     inventory: &SplitInventory,
     target: &SplitTargetBinding,
+    imported_allocation_floor: Option<u32>,
 ) -> Result<SplitFundingReservation, Error> {
     target.validate()?;
     reserve_split_funding_inner(
@@ -1335,6 +1416,7 @@ pub fn reserve_split_funding_with_target(
         context,
         inventory,
         Some(target),
+        imported_allocation_floor,
     )
 }
 
@@ -1345,7 +1427,11 @@ fn reserve_split_funding_inner(
     context: &Context,
     inventory: &SplitInventory,
     target: Option<&SplitTargetBinding>,
+    imported_allocation_floor: Option<u32>,
 ) -> Result<SplitFundingReservation, Error> {
+    if target.is_some_and(|binding| !binding.target_fresh_in(inventory)) {
+        return Err(Error::InvalidPlan);
+    }
     super::prepare_directory(directory)?;
     let mut journal = Journal::open(directory)?;
     if journal.load()?.is_some()
@@ -1363,9 +1449,15 @@ fn reserve_split_funding_inner(
             Err(Error::WrongIdentity)
         };
     }
-    let indices = inventory
-        .fresh_funding_addresses()
-        .ok_or(Error::InvalidPlan)?;
+    let indices = match target.filter(|target| target.imported_descriptor.is_some()) {
+        Some(target) => inventory.fresh_funding_addresses_excluding(
+            target.receive_index,
+            imported_allocation_floor.ok_or(Error::InvalidPlan)?,
+        ),
+        None if imported_allocation_floor.is_none() => inventory.fresh_funding_addresses(),
+        None => return Err(Error::InvalidPlan),
+    }
+    .ok_or(Error::InvalidPlan)?;
     let mut requested = SplitFundingReservation::new(source, target_cube, context, indices)?;
     if let Some(target) = target {
         requested.version = 3;
@@ -1392,6 +1484,23 @@ pub fn load_split_funding(
         return Err(Error::Conflict);
     }
     let saved = journal.load_split_funding_reservation()?;
+    if let (Some(intent), Some(saved)) = (journal.load()?, saved.as_ref()) {
+        let minimum = saved
+            .target_binding
+            .as_ref()
+            .map(|binding| binding.imported_address_window())
+            .transpose()?
+            .flatten();
+        if super::split::imported_address_window(&intent) != minimum
+            || super::split::imported_target_descriptor(&intent)
+                != saved
+                    .target_binding
+                    .as_ref()
+                    .and_then(|binding| binding.imported_descriptor())
+        {
+            return Err(Error::InvalidJournal);
+        }
+    }
     match saved {
         Some(saved) if saved.matches(source, target_cube, context) => Ok(Some(saved)),
         Some(_) => Err(Error::WrongIdentity),
@@ -1487,7 +1596,62 @@ mod tests {
         .unwrap()
     }
 
-    fn target_binding() -> (SplitTargetBinding, WalletId, CoincubeDescriptor) {
+    #[test]
+    fn native_target_binding_keeps_legacy_json_shape() {
+        let (binding, id, descriptor) = target_binding();
+        let value = serde_json::to_value(&binding).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert!(value.get("imported_descriptor").is_none());
+        let reopened: SplitTargetBinding = serde_json::from_value(value).unwrap();
+        assert!(reopened.matches_vault(&id, &descriptor));
+    }
+
+    #[test]
+    fn imported_target_binding_preserves_exact_branches_chain_and_index() {
+        use coincube_core::miniscript::bitcoin::bip32::{Xpriv, Xpub};
+        let secp = Secp256k1::new();
+        let master = Xpriv::new_master(Network::Bitcoin, &[91; 32]).unwrap();
+        let path = DerivationPath::from_str("m/84h/0h/0h").unwrap();
+        let account = master.derive_priv(&secp, &path).unwrap();
+        let xpub = Xpub::from_priv(&secp, &account);
+        let source = ImportedWalletDescriptor::parse(
+            &format!(
+                "wpkh([{}/84h/0h/0h]{xpub}/<0;1>/*)",
+                master.fingerprint(&secp)
+            ),
+            None,
+            ChainId::Bitcoin,
+        )
+        .unwrap();
+        let target = WalletDescriptor::Imported(source.paired_blake2b().unwrap());
+        let id =
+            WalletId::for_imported(target.as_imported().unwrap(), ChainId::BitcoinBlake2b).unwrap();
+        let binding = SplitTargetBinding::for_test(id.clone(), &target, 11);
+        binding.validate().unwrap();
+        let saved = serde_json::to_vec(&binding).unwrap();
+        let reopened: SplitTargetBinding = serde_json::from_slice(&saved).unwrap();
+        assert!(reopened.matches_vault(&id, &target));
+        assert_eq!(reopened.imported_address_window().unwrap(), Some(200));
+        let mut legacy = serde_json::to_value(&reopened).unwrap();
+        legacy
+            .as_object_mut()
+            .unwrap()
+            .remove("imported_address_window");
+        let missing: SplitTargetBinding = serde_json::from_value(legacy).unwrap();
+        assert!(missing.validate().is_err());
+        let mut narrowed = reopened.clone();
+        narrowed.imported_address_window = Some(11);
+        assert!(narrowed.validate().is_err());
+        assert!(!reopened.matches_vault(&id, &WalletDescriptor::Imported(source.clone())));
+        let mut changed = reopened.clone();
+        changed.receive_index += 1;
+        assert!(changed.validate().is_err());
+        changed = reopened;
+        changed.imported_descriptor = Some(source);
+        assert!(changed.validate().is_err());
+    }
+
+    fn target_binding() -> (SplitTargetBinding, WalletId, WalletDescriptor) {
         let secp = Secp256k1::new();
         let keys: Vec<_> = [81_u8, 82]
             .iter()
@@ -1505,13 +1669,14 @@ mod tests {
                 .unwrap()
             })
             .collect();
-        let descriptor = CoincubeDescriptor::new(
+        let descriptor: WalletDescriptor = CoincubeDescriptor::new(
             CoincubePolicy::new_legacy(
                 PathInfo::Single(keys[0].clone()),
                 std::iter::once((46, PathInfo::Single(keys[1].clone()))).collect(),
             )
             .unwrap(),
-        );
+        )
+        .into();
         let vault_id = WalletId::new(
             descriptor
                 .to_string()
@@ -1521,21 +1686,120 @@ mod tests {
                 .to_string(),
             Some(42),
         );
-        let script = descriptor
-            .receive_descriptor()
-            .derive(
-                ChildNumber::Normal { index: 11 },
-                &Secp256k1::verification_only(),
-            )
-            .script_pubkey();
+        let script = descriptor.receive_descriptor().script_pubkey(11).unwrap();
         let binding = SplitTargetBinding {
             vault_id: vault_id.clone(),
             descriptor: descriptor.to_string(),
+            imported_descriptor: descriptor.as_imported().cloned(),
+            imported_address_window: None,
             receive_index: 11,
             script_hex: hex::encode(script.as_bytes()),
         };
         binding.validate().unwrap();
         (binding, vault_id, descriptor)
+    }
+
+    #[test]
+    fn imported_funding_above_both_allocation_watermarks_keeps_released_indices_on_retry() {
+        let (cube, _, _) = crate::imported_claim::tests::fixture();
+        let wallet = cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .unwrap();
+        let source = SplitSource::new(
+            wallet.descriptor.receive_descriptor().clone(),
+            Some(wallet.descriptor.change_descriptor().clone()),
+        )
+        .unwrap();
+        let imported =
+            coincube_core::wallet_descriptor::ImportedWalletDescriptor::from_descriptors(
+                source.external().clone(),
+                source.internal().unwrap().clone(),
+                ChainId::Bitcoin,
+            )
+            .unwrap()
+            .paired_blake2b()
+            .unwrap();
+        let id = WalletId::for_imported(&imported, ChainId::BitcoinBlake2b).unwrap();
+        let descriptor = WalletDescriptor::Imported(imported);
+        let binding = SplitTargetBinding::for_test(id, &descriptor, 6);
+        let report = |chain, byte| {
+            ScanReport::for_test(chain, 1, BlockHash::from_byte_array([byte; 32]), Vec::new())
+                .with_fork_height(Some(2))
+                .with_coverage(
+                    [Branch::External, Branch::Internal]
+                        .iter()
+                        .map(|branch| BranchCoverage {
+                            branch: *branch,
+                            start: 0,
+                            end_exclusive: 200,
+                            last_used: Some(3),
+                        })
+                        .collect(),
+                )
+        };
+        let inventory = SplitInventory::join(
+            &report(ChainId::BitcoinBlake2b, 3),
+            &report(ChainId::Bitcoin, 4),
+            1,
+            true,
+        )
+        .unwrap();
+        assert!(inventory.covers_address_window(200));
+        assert!(!inventory.covers_address_window(201));
+        let directory = std::env::temp_dir().join(format!(
+            "imported-funding-watermark-{}",
+            uuid::Uuid::new_v4()
+        ));
+        // The destination remains index6, source has allocated through40 and
+        // target through50; no chain history alone can reveal either fact.
+        assert!(matches!(
+            reserve_split_funding_with_target(
+                &directory,
+                &source,
+                "cube-a",
+                &context(),
+                &inventory,
+                &binding,
+                None,
+            ),
+            Err(Error::InvalidPlan)
+        ));
+        let saved = reserve_split_funding_with_target(
+            &directory,
+            &source,
+            "cube-a",
+            &context(),
+            &inventory,
+            &binding,
+            Some(50),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.indices,
+            FreshFundingAddresses {
+                bitcoin_deposit: 51,
+                btcb2_deposit: 52,
+                bitcoin_return: 53,
+            }
+        );
+        let saved = release_split_funding(&directory, &saved).unwrap();
+        let before = serde_json::to_vec(&saved).unwrap();
+        let reopened = reserve_split_funding_with_target(
+            &directory,
+            &source,
+            "cube-a",
+            &context(),
+            &inventory,
+            &binding,
+            Some(170),
+        )
+        .unwrap();
+        assert_eq!(reopened, saved);
+        assert_eq!(serde_json::to_vec(&reopened).unwrap(), before);
+        std::fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
@@ -1554,6 +1818,7 @@ mod tests {
             &context(),
             &inventory(3),
             &binding,
+            None,
         )
         .unwrap();
         assert_eq!(saved.target_binding.as_ref(), Some(&binding));
@@ -1583,6 +1848,7 @@ mod tests {
                 &later,
                 &inventory(3),
                 &changed,
+                None,
             ),
             Err(Error::WrongIdentity)
         ));
