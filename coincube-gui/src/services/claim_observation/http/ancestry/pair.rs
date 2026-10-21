@@ -553,6 +553,67 @@ mod tests {
                     );
                     assert_eq!(pair.generation(), 4);
                     assert!(pair.observed_at() <= source.now());
+                    if matches!(case, "valid" | "fork-valid") {
+                        use crate::services::claim_observation::http::{
+                            DiscoveryError, FundingProofStatus,
+                        };
+                        let reports = std::sync::Arc::new(std::sync::Mutex::new(
+                            [FundingProofStatus::Pending; 2],
+                        ));
+                        let observed = reports.clone();
+                        let observed_source = HttpObservationSource::new(
+                            source.authenticated.clone(),
+                            ChainId::Bitcoin,
+                            ChainId::BitcoinBlake2b,
+                            CollectionContext {
+                                expected_generation: source.expected,
+                                generation: source.generation.clone(),
+                            },
+                        )
+                        .unwrap()
+                        .with_funding_observer(std::sync::Arc::new(move |chain, status| {
+                            observed.lock().unwrap()
+                                [usize::from(chain == ChainId::BitcoinBlake2b)] = status;
+                        }));
+                        let invalid = FundingProofStatus::Failed(DiscoveryError::Structural(
+                            claim_ancestry::Error::InvalidOutput,
+                        ));
+                        let bitcoin_good = case == "valid";
+                        if !bitcoin_good {
+                            fresh_mock(&server, &format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}", fork.compute_txid()),
+                                json!({"txid":fork.compute_txid(), "status":{"confirmed":true,"block_height":root_height,"block_hash":fork_block}}).to_string());
+                        }
+                        let bitcoin_candidate = OutPoint::new(
+                            bitcoin.compute_txid(),
+                            if bitcoin_good { 0 } else { u32::MAX },
+                        );
+                        let fork_candidate = OutPoint::new(
+                            fork.compute_txid(),
+                            if bitcoin_good { u32::MAX } else { 0 },
+                        );
+                        let result = observed_source
+                            .discover_spend_inputs(
+                                &[bitcoin_candidate],
+                                &[fork_candidate],
+                                &[OutPoint::new(bitcoin.compute_txid(), 1)],
+                                policy,
+                            )
+                            .await;
+                        assert!(matches!(
+                            result,
+                            Err(DiscoveryError::Structural(
+                                claim_ancestry::Error::InvalidOutput
+                            ))
+                        ));
+                        assert_eq!(
+                            *reports.lock().unwrap(),
+                            if bitcoin_good {
+                                [FundingProofStatus::PathFound, invalid]
+                            } else {
+                                [invalid, FundingProofStatus::PathFound]
+                            }
+                        );
+                    }
                     if matches!(case, "valid" | "rdts-absent") {
                         // The funding collector requires a fresh current UTXO
                         // read in addition to the already paired coinbase roots.

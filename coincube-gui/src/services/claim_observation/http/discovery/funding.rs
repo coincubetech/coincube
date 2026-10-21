@@ -536,11 +536,22 @@ impl HttpObservationSource {
             .funding()
             .bitcoin()
             .validate_claim_coin(&bitcoin_path, &bitcoin, descriptor)
-            .and_then(|_| {
-                inputs
-                    .funding()
-                    .fork()
-                    .validate_claim_coin(&fork_path, &fork, descriptor)
+            .inspect_err(|error| {
+                self.report_funding(
+                    ChainId::Bitcoin,
+                    FundingProofStatus::Failed(DiscoveryError::Observation(*error)),
+                )
+            })
+            .map_err(DiscoveryError::Observation)?;
+        inputs
+            .funding()
+            .fork()
+            .validate_claim_coin(&fork_path, &fork, descriptor)
+            .inspect_err(|error| {
+                self.report_funding(
+                    ChainId::BitcoinBlake2b,
+                    FundingProofStatus::Failed(DiscoveryError::Observation(*error)),
+                )
             })
             .map_err(DiscoveryError::Observation)?;
         if inputs.shared_outputs.len() != shared.len()
@@ -1323,10 +1334,22 @@ impl HttpObservationSource {
         tokio::time::timeout(MAX_COLLECTION_TIME, async {
             let bitcoin = snapshot
                 .collect_funding_coin(bitcoin_path, ChainId::Bitcoin, policy)
-                .await?;
+                .await
+                .inspect_err(|error| {
+                    snapshot.report_funding(
+                        ChainId::Bitcoin,
+                        FundingProofStatus::Failed(DiscoveryError::Observation(*error)),
+                    )
+                })?;
             let fork = snapshot
                 .collect_funding_coin(fork_path, ChainId::BitcoinBlake2b, policy)
-                .await?;
+                .await
+                .inspect_err(|error| {
+                    snapshot.report_funding(
+                        ChainId::BitcoinBlake2b,
+                        FundingProofStatus::Failed(DiscoveryError::Observation(*error)),
+                    )
+                })?;
             let a = bitcoin.ancestry.pair();
             let b = fork.ancestry.pair();
             let anchor_a = a.anchor();

@@ -63,6 +63,18 @@ pub enum DiscoveryError {
     Structural(claim_ancestry::Error),
     Observation(FailureKind),
 }
+/// Display-only search diagnostics. Even PathFound is not a paired proof or
+/// permission to sign. A missing result must never imply the other chain passed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FundingProofStatus {
+    #[default]
+    Pending,
+    PathFound,
+    NoQualifyingAncestry,
+    Failed(DiscoveryError),
+}
+pub(crate) type FundingProofObserver = Arc<dyn Fn(ChainId, FundingProofStatus) + Send + Sync>;
+
 #[derive(Debug)]
 pub struct DiscoveredAncestry {
     provider: String,
@@ -96,6 +108,7 @@ impl HttpObservationSource {
     fn discovery_snapshot(&self) -> Self {
         Self {
             authenticated: self.authenticated.clone(),
+            funding_observer: self.funding_observer.clone(),
             anonymous: self.anonymous.clone(),
             base: self.base.clone(),
             generation: self.generation.clone(),

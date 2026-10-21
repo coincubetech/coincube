@@ -898,6 +898,91 @@ async fn healthy_claim_entry_loads_deposits_inline_without_a_continue_button() {
 }
 
 #[test]
+fn funding_chain_diagnostics_do_not_hide_a_different_or_paired_timeout_refusal() {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    let structural =
+        DiscoveryError::Structural(coincube_core::claim_ancestry::Error::IncompletePath);
+    let deadline = DiscoveryError::Observation(FailureKind::Deadline);
+    for (proofs, refusal, expected_inline) in [
+        (
+            [
+                FundingProofStatus::Failed(structural),
+                FundingProofStatus::Pending,
+            ],
+            deadline,
+            false,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(structural),
+                FundingProofStatus::Pending,
+            ],
+            structural,
+            true,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(deadline),
+                FundingProofStatus::Pending,
+            ],
+            deadline,
+            false,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(structural),
+                FundingProofStatus::Pending,
+            ],
+            DiscoveryError::Observation(FailureKind::Changed),
+            false,
+        ),
+        (
+            [FundingProofStatus::PathFound; 2],
+            DiscoveryError::Observation(FailureKind::Stale),
+            false,
+        ),
+        (
+            [
+                FundingProofStatus::Failed(DiscoveryError::Structural(
+                    coincube_core::claim_ancestry::Error::WrongTransaction,
+                )),
+                FundingProofStatus::Pending,
+            ],
+            structural,
+            false,
+        ),
+    ] {
+        let (_sender, generation) = watch::channel(7);
+        let mut p = panel(SINGLE_WSH);
+        p.generation = generation;
+        p.connect = Some(ConnectSession {
+            client: CoincubeClient::new(),
+            account: "account".into(),
+        });
+        p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+            bitcoin_deposit: "bitcoin-address".into(),
+            btcb2_deposit: "btcb2-address".into(),
+            bitcoin_minimum_sats: 2_000,
+            btcb2_minimum_sats: 3_000,
+            bitcoin_rate_sat_vb: 2,
+            btcb2_rate_sat_vb: 3,
+        });
+        p.check_seq = 12;
+        p.funding_checking = true;
+        let inline = funding_refusal_is_inline(refusal, &proofs);
+        assert_eq!(inline, expected_inline);
+        drop(p.apply(ClaimEvent::FundingProofChecked(12, 7, 0, proofs, inline)));
+        let reason = funding_proof_refusal(refusal);
+        drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Err(reason.into()))));
+        assert_eq!(p.funding_proofs, proofs);
+        assert_eq!(p.funding_inline_error(), expected_inline);
+        assert_eq!(p.funding_error(), Some(reason));
+        assert!(p.funding_review().is_none());
+        assert!(!p.can_sign_or_submit());
+    }
+}
+
+#[test]
 fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
     let (_sender, receiver) = watch::channel(7);
     let mut p = panel(SINGLE_WSH);
@@ -919,6 +1004,35 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         p.funding_checking = true;
         p.check_seq = 12;
         let revocations = p.revocations;
+        let proofs = [
+            FundingProofStatus::Failed(
+                crate::services::claim_observation::http::DiscoveryError::Structural(
+                    coincube_core::claim_ancestry::Error::IncompletePath,
+                ),
+            ),
+            FundingProofStatus::PathFound,
+        ];
+        for (seq, generation, revocation) in [
+            (11, 7, revocations),
+            (12, 8, revocations),
+            (12, 7, revocations + 1),
+        ] {
+            drop(p.apply(ClaimEvent::FundingProofChecked(
+                seq, generation, revocation, proofs, true,
+            )));
+            assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+        }
+        drop(p.apply(ClaimEvent::FundingProofChecked(
+            12,
+            7,
+            revocations,
+            proofs,
+            true,
+        )));
+        assert_eq!(p.funding_proofs, proofs);
+        assert!(p.funding_inline_error());
+        assert!(p.funding_review().is_none());
+        assert!(!p.can_sign_or_submit());
         drop(p.apply(ClaimEvent::FundingCheckProgress(
             11,
             7,
@@ -947,6 +1061,16 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
             p.cancel();
         }
         assert!(p.funding_task.is_none());
+        assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+        assert!(!p.funding_inline_error());
+        drop(p.apply(ClaimEvent::FundingProofChecked(
+            12,
+            7,
+            revocations,
+            proofs,
+            true,
+        )));
+        assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
         assert!(!p.funding_checking);
         assert!(matches!(p.stage, Stage::Preconditions));
         drop(p.apply(ClaimEvent::FundingCheckProgress(
@@ -5900,9 +6024,27 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         Stage::FundingDeposits(addresses) => addresses.clone(),
         _ => unreachable!(),
     };
+    let paired_daemon: Arc<dyn Daemon + Send + Sync> = Arc::new(Recording::default());
+    let paired_wallet =
+        Arc::new(Wallet::new(p.wallet.main_descriptor.clone()).with_chain(ChainId::BitcoinBlake2b));
+    let (_paired_sender, paired_generation) = watch::channel(1);
     for (width, expanded, scenario) in [
         (1400, false, "deposits"),
         (900, true, "deposits"),
+        (1400, false, "proof-bitcoin"),
+        (900, false, "proof-bitcoin"),
+        (1400, false, "proof-btcb2"),
+        (900, false, "proof-btcb2"),
+        (1400, false, "proof-paths"),
+        (900, false, "proof-paths"),
+        (1400, false, "proof-both"),
+        (900, false, "proof-both"),
+        (1400, false, "proof-service"),
+        (900, false, "proof-service"),
+        (1400, false, "proof-bounded"),
+        (900, false, "proof-bounded"),
+        (1400, false, "proof-none"),
+        (900, false, "proof-none"),
         (1400, false, "setup"),
         (1400, false, "loading"),
         (1400, false, "error"),
@@ -5915,7 +6057,9 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
         (1400, false, "ready"),
     ] {
         p.stage = match scenario {
-            "deposits" => Stage::FundingDeposits(addresses.clone()),
+            scenario if scenario == "deposits" || scenario.starts_with("proof-") => {
+                Stage::FundingDeposits(addresses.clone())
+            }
             "loading" => Stage::FundingChecking,
             _ => Stage::Preconditions,
         };
@@ -5950,11 +6094,49 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                 .then(|| "An older deposit check failed.".to_owned())
             });
         p.deposit_details_override = Some(expanded);
+        p.bind_fork_daemon(
+            (scenario == "deposits" || scenario.starts_with("proof-")).then(|| {
+                ClaimForkBinding::new(&paired_daemon, &paired_wallet, paired_generation.clone())
+            }),
+        );
+        p.funding_checking = scenario == "deposits";
+        use crate::services::claim_observation::http::DiscoveryError;
+        let failed = FundingProofStatus::Failed(DiscoveryError::Structural(
+            coincube_core::claim_ancestry::Error::IncompletePath,
+        ));
+        p.funding_proofs = match scenario {
+            "proof-bitcoin" => [failed, FundingProofStatus::PathFound],
+            "proof-btcb2" => [FundingProofStatus::PathFound, failed],
+            "proof-paths" => [FundingProofStatus::PathFound; 2],
+            "proof-both" => [failed; 2],
+            "proof-service" => [
+                FundingProofStatus::Failed(DiscoveryError::Observation(
+                    crate::services::claim_observation::FailureKind::Http(503),
+                )),
+                FundingProofStatus::Pending,
+            ],
+            "proof-bounded" => [
+                FundingProofStatus::Pending,
+                FundingProofStatus::Failed(DiscoveryError::Structural(
+                    coincube_core::claim_ancestry::Error::PathLimit,
+                )),
+            ],
+            "proof-none" => [FundingProofStatus::NoQualifyingAncestry; 2],
+            _ => [FundingProofStatus::Pending; 2],
+        };
+        p.funding_inline_error = scenario.starts_with("proof-");
+        if p.funding_inline_error {
+            p.funding_error = Some("Ambiguous global deposit error".into());
+        }
         if expanded {
             drop(p.apply(ClaimEvent::FundingProofExpired(p.check_seq, 1, 0)));
             assert!(p.funding_status().unwrap().contains("expired"));
         } else {
-            p.funding_status = Some("Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into());
+            p.funding_status = Some(if scenario == "deposits" {
+                "Verifying both deposits and their ancestry…".into()
+            } else {
+                "Bitcoin deposit: post-fork candidate found. Bitcoin Blake2b deposit: no confirmed candidate at the reserved address.".into()
+            });
         }
         let mut renderer = <iced::Renderer as Headless>::new(
             coincube_ui::font::REGULAR,
@@ -6001,7 +6183,7 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             .any(|label| label.contains("post-fork candidate")));
         if scenario == "deposits" {
             for expected in [
-                "verifying replay protection",
+                "Verifying replay protection",
                 "Funds received at both addresses",
                 "Available after both deposits are verified.",
             ] {
@@ -6018,6 +6200,49 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                     .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
                 expanded
             );
+        } else if scenario.starts_with("proof-") {
+            assert!(p.paired_vault_ready());
+            assert!(!labels
+                .0
+                .iter()
+                .any(|label| label.contains("Open and unlock the paired")));
+            assert!(labels.0.iter().any(|label| label == "Retry verification"));
+            assert!(!labels
+                .0
+                .iter()
+                .any(|label| label.contains("Ambiguous global")));
+            assert!(!labels
+                .0
+                .iter()
+                .any(|label| label.contains("replay protected")));
+            let failures = labels
+                .0
+                .iter()
+                .filter(|label| {
+                    label.contains("Could not verify a link to a post-fork mining reward")
+                })
+                .count();
+            if ["proof-bitcoin", "proof-btcb2"].contains(&scenario) {
+                assert_eq!(failures, 1);
+            }
+            if scenario == "proof-both" {
+                assert_eq!(failures, 2);
+            }
+            if scenario == "proof-service" {
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|label| label.contains("Fresh indexer data is unavailable")));
+            }
+            if scenario == "proof-bounded" {
+                assert!(labels.0.iter().any(|label| label.contains("safety limit")));
+            }
+            if scenario == "proof-none" {
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|label| label.contains("No qualifying post-fork ancestry")));
+            }
         } else if scenario == "error" {
             assert!(labels
                 .0
@@ -6104,12 +6329,17 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                 &mut iced::advanced::Shell::new(&mut messages),
                 &iced::Rectangle::with_size(size),
             );
+            let preview_theme = if width == 900 {
+                coincube_ui::theme::Theme::light()
+            } else {
+                coincube_ui::theme::Theme::dark()
+            };
             element.as_widget().draw(
                 &tree,
                 &mut renderer,
-                &coincube_ui::theme::Theme::dark(),
+                &preview_theme,
                 &iced::advanced::renderer::Style {
-                    text_color: iced::Color::WHITE,
+                    text_color: preview_theme.colors.text.primary,
                 },
                 Layout::new(&node),
                 iced::mouse::Cursor::Unavailable,
@@ -6118,7 +6348,11 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
             let pixels = renderer.screenshot(
                 iced::Size::new(width, 1500),
                 1.0,
-                iced::Color::from_rgb8(22, 22, 22),
+                if width == 900 {
+                    iced::Color::WHITE
+                } else {
+                    iced::Color::from_rgb8(22, 22, 22)
+                },
             );
             image::save_buffer(
                 std::path::Path::new(&directory).join(format!("claim-{scenario}-{width}.png")),

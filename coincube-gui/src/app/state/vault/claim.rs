@@ -35,6 +35,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
+use crate::services::claim_observation::http::FundingProofStatus;
 use iced::{futures::SinkExt, Task};
 use tokio::sync::watch;
 
@@ -447,6 +448,18 @@ impl ClaimForkBinding {
     }
 }
 
+/// Suppress only a refusal represented by the same typed chain diagnostic.
+/// A Deadline can originate from the outer paired check, so even a matching
+/// per-chain timeout cannot establish that the global refusal is redundant.
+fn funding_refusal_is_inline(
+    error: crate::services::claim_observation::http::DiscoveryError,
+    proofs: &[FundingProofStatus; 2],
+) -> bool {
+    use crate::services::claim_observation::{http::DiscoveryError, FailureKind};
+    !matches!(error, DiscoveryError::Observation(FailureKind::Deadline))
+        && proofs.contains(&FundingProofStatus::Failed(error))
+}
+
 pub(crate) fn funding_proof_refusal(
     error: crate::services::claim_observation::http::DiscoveryError,
 ) -> &'static str {
@@ -561,6 +574,8 @@ pub enum ClaimEvent {
     ),
     FundingChecked(u64, u64, u64, Result<ClaimDepositProgress, String>),
     FundingCheckProgress(u64, u64, u64, &'static str),
+    /// Display diagnostics only; never consulted by signing or submission.
+    FundingProofChecked(u64, u64, u64, [FundingProofStatus; 2], bool),
     DepositPoll,
     DepositStatusChecked(u64, u64, u64, DepositStatus),
     /// A read-only ancestry status is only a short-lived observation.
@@ -811,6 +826,8 @@ pub struct ClaimStep1Panel {
     funding_review: Option<view::vault::ancestry_coins::VerifiedCoinPairReview>,
     prepared_pair: Option<Box<PreparedClaimPair>>,
     funding_checking: bool,
+    funding_proofs: [FundingProofStatus; 2],
+    funding_inline_error: bool,
     funding_task: Option<iced::task::Handle>,
     paired_signing_pending: bool,
     paired_sign_seq: u64,
@@ -873,6 +890,8 @@ impl ClaimStep1Panel {
             funding_review: None,
             prepared_pair: None,
             funding_checking: false,
+            funding_proofs: [FundingProofStatus::Pending; 2],
+            funding_inline_error: false,
             funding_task: None,
             paired_signing_pending: false,
             paired_sign_seq: 0,
@@ -1043,6 +1062,25 @@ impl ClaimStep1Panel {
         self.setup_details_expanded
     }
 
+    pub fn funding_proof_status(&self, chain: ChainId) -> FundingProofStatus {
+        if !matches!(self.stage, Stage::FundingDeposits(_)) || !self.backend_ready() {
+            return FundingProofStatus::Pending;
+        }
+        self.funding_proofs[usize::from(chain == ChainId::BitcoinBlake2b)]
+    }
+
+    pub fn funding_proof_needs_retry(&self) -> bool {
+        self.funding_review().is_none()
+            && self
+                .funding_proofs
+                .iter()
+                .any(|proof| *proof != FundingProofStatus::Pending)
+    }
+
+    pub fn funding_inline_error(&self) -> bool {
+        self.funding_inline_error
+    }
+
     pub fn funding_checking(&self) -> bool {
         self.funding_checking
     }
@@ -1114,6 +1152,8 @@ impl ClaimStep1Panel {
             self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
             self.last_full_check = None;
             self.funding_review = None;
+            self.funding_proofs = [FundingProofStatus::Pending; 2];
+            self.funding_inline_error = false;
             self.prepared_pair = None;
             self.funding_checking = false;
         }
@@ -1863,11 +1903,20 @@ impl ClaimStep1Panel {
         self.funding_status = Some("Verifying both deposits and their ancestry…".into());
         self.funding_error = None;
         self.funding_review = None;
+        self.funding_proofs = [FundingProofStatus::Pending; 2];
+        self.funding_inline_error = false;
         self.prepared_pair = None;
         let task = Task::stream(iced::stream::channel(
             8,
             move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
                 let mut phase = "Reading the Bitcoin Vault";
+                let proofs = Arc::new(std::sync::Mutex::new([FundingProofStatus::Pending; 2]));
+                let observed_proofs = proofs.clone();
+                let observer = Arc::new(move |chain, status| {
+                    observed_proofs.lock().unwrap()
+                        [usize::from(chain == ChainId::BitcoinBlake2b)] = status;
+                });
+                let mut inline_error = false;
                 let result = tokio::time::timeout(Duration::from_secs(150), async {
                 let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
@@ -1971,7 +2020,8 @@ impl ClaimStep1Panel {
                         generation: generation.clone(),
                     },
                 )
-                .map_err(|_| "The two-chain observation source is unavailable.".to_string())?;
+                .map_err(|_| "The two-chain observation source is unavailable.".to_string())?
+                .with_funding_observer(observer);
                 phase = "Verifying both deposits’ chain-specific ancestry";
                 let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 let proof = saved
@@ -1988,6 +2038,7 @@ impl ClaimStep1Panel {
                     .await
                     .map_err(|error| match error {
                         claim_workflow::ClaimFundingDiscoveryError::Discovery(error) => {
+                            inline_error = funding_refusal_is_inline(error, &proofs.lock().unwrap());
                             #[cfg(all(test, feature = "regtest-harness"))]
                             eprintln!("disposable Claim funding discovery refused: {error:?}");
                             funding_proof_refusal(error).to_string()
@@ -2168,6 +2219,16 @@ impl ClaimStep1Panel {
                 if let Err(reason) = &result {
                     log::warn!("Claim deposit verification stopped at {phase}: {reason}");
                 }
+                let proof_status = *proofs.lock().unwrap();
+                let _ = output
+                    .send(Message::Claim(ClaimEvent::FundingProofChecked(
+                        seq,
+                        expected,
+                        revocations,
+                        proof_status,
+                        inline_error,
+                    )))
+                    .await;
                 let _ = output
                     .send(Message::Claim(ClaimEvent::FundingChecked(
                         seq,
@@ -3462,6 +3523,8 @@ impl ClaimStep1Panel {
                 self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                 self.last_full_check = None;
                 self.funding_review = None;
+                self.funding_proofs = [FundingProofStatus::Pending; 2];
+                self.funding_inline_error = false;
                 self.prepared_pair = None;
                 self.stage = Stage::Preconditions;
             }
@@ -3719,6 +3782,18 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
+            ClaimEvent::FundingProofChecked(seq, generation, revocations, proofs, inline_error) => {
+                if seq == self.check_seq
+                    && self.funding_checking
+                    && matches!(self.stage, Stage::FundingDeposits(_))
+                    && self.authorized(generation, revocations)
+                    && self.backend_ready()
+                {
+                    self.funding_proofs = proofs;
+                    self.funding_inline_error = inline_error;
+                }
+                Task::none()
+            }
             ClaimEvent::FundingChecked(seq, generation, revocations, mut result) => {
                 if seq != self.check_seq || !matches!(self.stage, Stage::FundingDeposits(_)) {
                     return Task::none();
@@ -3732,6 +3807,8 @@ impl ClaimStep1Panel {
                     self.stage = Stage::Preconditions;
                     self.funding_status = None;
                     self.funding_review = None;
+                    self.funding_proofs = [FundingProofStatus::Pending; 2];
+                    self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_error =
                         Some("The Claim session changed during the deposit check.".into());
@@ -3740,6 +3817,8 @@ impl ClaimStep1Panel {
                 let proof_complete = matches!(&result, Ok(progress) if progress.both_verified);
                 if proof_complete && !self.fork_pair_current() {
                     self.funding_review = None;
+                    self.funding_proofs = [FundingProofStatus::Pending; 2];
+                    self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = None;
                     self.funding_error = Some(
@@ -3803,6 +3882,8 @@ impl ClaimStep1Panel {
                     && self.authorized(generation, revocations)
                 {
                     self.funding_review = None;
+                    self.funding_proofs = [FundingProofStatus::Pending; 2];
+                    self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = Some(
                         "The deposit proof has expired. Watching the deposits and refreshing verification automatically."
@@ -3826,6 +3907,8 @@ impl ClaimStep1Panel {
                 match result {
                     Ok(addresses) => {
                         self.stage = Stage::FundingDeposits(addresses);
+                        self.funding_proofs = [FundingProofStatus::Pending; 2];
+                        self.funding_inline_error = false;
                         self.deposit_status = None;
                         self.deposit_details_override = None;
                         self.deposit_polling = false;
@@ -3911,6 +3994,8 @@ impl ClaimStep1Panel {
                         self.deposit_polling = false;
                         self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_review = None;
+                        self.funding_proofs = [FundingProofStatus::Pending; 2];
+                        self.funding_inline_error = false;
                         self.prepared_pair = None;
                         self.funding_status = Some(
                             "The recorded Claim pair is unsigned. Watching both deposits and refreshing verification before signing."
