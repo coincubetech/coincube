@@ -621,11 +621,32 @@ mod tests {
                     .unwrap_err(),
                 wire::Error::AccessDenied
             );
-            // App owns Settings; locking/dropping the App drops this exact guard.
+            // Reapprove in the new session so Settings drop is tested independently
+            // of the old session's already-revoked grant.
+            settings.update(
+                Message::Approve,
+                Some(wallet.clone()),
+                Some(daemon.clone()),
+                true,
+                "mcp-fixture",
+            );
+            let server = settings.server.as_ref().unwrap();
+            let grant = server.grant.clone();
+            let socket = server.socket.clone();
+            let credential = grant.credential().to_owned();
+            wire::ipc::call(&socket, &credential, wire::Request::List(wire::Empty {}))
+                .await
+                .unwrap();
+            assert!(grant.active());
+            // App owns Settings; dropping it revokes synchronously on both OSes.
+            // Windows pipe handles are closed when the aborted task is polled;
+            // only Unix has a socket file that must be removed immediately.
             drop(settings);
+            assert!(!grant.active());
+            #[cfg(unix)]
             assert!(!socket.exists());
             assert!(
-                wire::ipc::call(&socket, &credential, wire::Request::Summary(input(id)))
+                wire::ipc::call(&socket, &credential, wire::Request::List(wire::Empty {}))
                     .await
                     .is_err()
             );
