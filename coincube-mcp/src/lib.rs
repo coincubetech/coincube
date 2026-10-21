@@ -5,7 +5,7 @@ use std::{future::Future, pin::Pin};
 
 #[cfg(feature = "adapter")]
 pub mod adapter;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 pub mod ipc;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]

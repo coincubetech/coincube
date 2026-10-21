@@ -1,7 +1,7 @@
 //! Trusted Cube settings and read-only projections. Never serializes wallet objects.
 use super::{view, wallet::Wallet};
 use crate::daemon::Daemon;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use coincube_mcp as wire;
 use coincube_ui::{
     component::text::{h3, text},
@@ -9,7 +9,7 @@ use coincube_ui::{
 };
 use iced::widget::{button, checkbox, column, text_input};
 use std::sync::Arc;
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::time::Duration;
 
 #[derive(Debug, Clone)]
@@ -30,12 +30,12 @@ pub struct Settings {
     client_name: String,
     approved_name: String,
     failed: bool,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     server: Option<wire::ipc::Server>,
 }
 impl Settings {
     pub fn revoke(&mut self) {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             self.server.take();
         }
@@ -52,7 +52,7 @@ impl Settings {
         match message {
             Message::Enable(value) => {
                 self.revoke();
-                self.enabled = value && cfg!(unix);
+                self.enabled = value && cfg!(any(unix, windows));
             }
             Message::Wallet(value) => {
                 self.revoke();
@@ -78,7 +78,7 @@ impl Settings {
                 {
                     return None;
                 }
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 if let (Some(wallet), Some(daemon)) = (wallet, daemon) {
                     if wallet.main_descriptor.as_vault().is_none()
                         || !daemon.backend().is_embedded()
@@ -111,13 +111,16 @@ impl Settings {
                         Err(_) => self.failed = true,
                     }
                 }
-                #[cfg(not(unix))]
+                #[cfg(not(any(unix, windows)))]
                 let _ = (wallet, daemon, cube_id);
             }
             Message::CopyConfig => {
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 if let Some(server) = self.server.as_ref().filter(|s| s.grant.active()) {
-                    let executable = std::env::current_exe().ok()?.parent()?.join("tenshu-mcp");
+                    let executable = std::env::current_exe()
+                        .ok()?
+                        .parent()?
+                        .join(format!("tenshu-mcp{}", std::env::consts::EXE_SUFFIX));
                     return serde_json::to_string_pretty(&serde_json::json!({"mcpServers": {"tenshu": {
                         "command": executable,
                         "env": {"TENSHU_MCP_SOCKET": server.socket, "TENSHU_MCP_CREDENTIAL": server.grant.credential()}
@@ -135,8 +138,8 @@ impl Settings {
             text("Connect a local AI client to this Cube's Vault. Your AI provider may receive financial information. Only enable access for a client you trust."),
             text("Read-only. No keys, signing, payments or wallet changes. Grants expire after one hour and end when the Cube locks or closes."),
         ].spacing(16);
-        if !cfg!(unix) || !supported {
-            return content.push(text("MCP currently supports Bitcoin Vaults on macOS and Linux. This wallet is unavailable for MCP.")).into();
+        if !cfg!(any(unix, windows)) || !supported {
+            return content.push(text("MCP currently supports Bitcoin Vaults on macOS, Linux and Windows. This wallet is unavailable for MCP.")).into();
         }
         content = content.push(
             checkbox(self.enabled)
@@ -177,7 +180,7 @@ impl Settings {
                     .then(|| message(Message::Approve)),
                 ),
             );
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if let Some(server) = &self.server {
                 let calls = server
                     .grant
@@ -210,7 +213,7 @@ impl Settings {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 #[derive(Clone)]
 struct VaultReader {
     read_slots: Arc<tokio::sync::Semaphore>,
@@ -219,7 +222,7 @@ struct VaultReader {
     daemon: Arc<dyn Daemon + Send + Sync>,
     wallet_id: String,
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl wire::Reader for VaultReader {
     fn read(
         &self,
@@ -247,7 +250,7 @@ impl wire::Reader for VaultReader {
         })
     }
 }
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 impl VaultReader {
     async fn read_wallet(&self, request: wire::Request) -> Result<wire::Response, wire::Error> {
         // Defense in depth: the IPC gate enforces the same opaque identity.
@@ -372,7 +375,7 @@ impl VaultReader {
     }
 }
 
-#[cfg(all(test, unix))]
+#[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
     use coincube_core::{

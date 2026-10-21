@@ -37,7 +37,7 @@ new adapter executable.
 - Cube Settings → AI access: opt-in, wallet scope and capability selection,
   expiring access credential, configuration and immediate revocation.
 
-MVP supports macOS/Linux and the embedded Bitcoin Vault daemon only. External
+MVP supports macOS/Linux/Windows and the embedded Bitcoin Vault daemon only. External
 daemon clients log raw RPC responses at debug level and are excluded; imported
 non-Vault policies, Liquid, Spark and Bitcoin Blake2b are also excluded. Unix sockets live in a randomly created mode-0700
 session directory; no TCP/HTTP listener exists. A 256-bit random bearer secret,
@@ -45,8 +45,8 @@ separate from all wallet/Connect credentials, authenticates each request. Client
 names are display labels, never authentication. The UI issues one client grant
 per unlocked Cube; replacing it revokes the previous grant. Grants expire after
 one hour and are never persisted. Unlock/restart requires fresh consent. Other
-Cubes require separate grants. Windows remains disabled until a named-pipe ACL
-and peer-validation implementation is tested; there is no TCP fallback.
+Cubes require separate grants. Windows uses a protected named pipe with logon-session ACLs and server-PID
+verification (see the extension below); there is no TCP fallback.
 
 ## Trust and threat model
 
@@ -103,3 +103,23 @@ Official sources checked: [Rust SDK](https://github.com/modelcontextprotocol/rus
 Use the SDK's actual supported protocol negotiation; do not claim support for a
 revision merely because it appears in a planning reference. Rust avoids adding
 a Node runtime; TypeScript SDK v2 is not applicable to this codebase.
+
+## Windows transport extension (Phase 2)
+
+The Windows adapter retains the same grant checks and wire protocol. A random
+local `\\.\pipe\tenshu-mcp-<desktop-pid>-<random>` endpoint is created with
+first-instance protection and remote-client rejection. Its protected DACL allows
+only the desktop process's logon SID, excluding other users and logon sessions;
+no default permissive pipe ACL is used. Missing logon identity fails closed.
+Before sending any credential, the adapter validates the local endpoint format
+and verifies its server process ID with the OS. Client SQOS permits identification
+only, preventing server-side impersonation of the adapter. These controls do not
+claim protection from arbitrary malware already controlling the same OS session.
+
+Shared input limits, deadlines, bounded workers, grant expiry and session
+revocation apply unchanged. Windows CI must execute named-pipe and STDIO tests;
+cross-compilation alone is insufficient. The desktop and MSI install the `.exe`
+companion as a sibling. No TCP fallback or remotely addressable endpoint is added.
+
+References: [Microsoft pipe security](https://learn.microsoft.com/en-us/windows/win32/ipc/named-pipe-security-and-access-rights),
+[Tokio named pipes](https://docs.rs/tokio/latest/tokio/net/windows/named_pipe/index.html).

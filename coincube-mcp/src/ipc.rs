@@ -1,10 +1,9 @@
-//! Authenticated Unix-only IPC. Every request checks the live grant twice.
+//! Authenticated local IPC. Every request checks the live grant twice.
 use crate::{Error, Reader, Request, Response};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
     io,
-    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     sync::{
         Arc,
@@ -15,9 +14,18 @@ use std::{
 use subtle::ConstantTimeEq;
 use tokio::{
     io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader},
-    net::{UnixListener, UnixStream},
-    task::{JoinHandle, JoinSet},
+    task::JoinHandle,
 };
+
+#[cfg(unix)]
+use std::os::unix::fs::PermissionsExt;
+#[cfg(unix)]
+use tokio::{
+    net::{UnixListener, UnixStream},
+    task::JoinSet,
+};
+#[cfg(windows)]
+mod windows;
 
 pub const REQUEST_LIMIT: usize = 4096;
 pub const RESPONSE_LIMIT: usize = 65536;
@@ -87,9 +95,14 @@ pub struct Server {
     pub grant: Arc<Grant>,
     pub socket: PathBuf,
     task: JoinHandle<()>,
-    _directory: tempfile::TempDir,
+    _directory: Option<tempfile::TempDir>,
 }
 impl Server {
+    #[cfg(windows)]
+    pub fn start(reader: Arc<dyn Reader>, grant: Grant) -> io::Result<Self> {
+        windows::start(reader, grant)
+    }
+    #[cfg(unix)]
     pub fn start(reader: Arc<dyn Reader>, grant: Grant) -> io::Result<Self> {
         // /tmp keeps sockaddr_un paths short even on macOS. tempfile creates
         // the directory atomically with 0700; never chmod an existing path.
@@ -127,7 +140,7 @@ impl Server {
             grant,
             socket,
             task,
-            _directory: directory,
+            _directory: Some(directory),
         })
     }
 }
@@ -149,8 +162,8 @@ pub async fn line<R: tokio::io::AsyncRead + Unpin>(reader: R, max: usize) -> io:
     }
     Ok(bytes)
 }
-async fn serve(
-    mut stream: UnixStream,
+async fn serve<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    mut stream: S,
     reader: Arc<dyn Reader>,
     grant: Arc<Grant>,
 ) -> io::Result<()> {
@@ -177,12 +190,26 @@ async fn serve(
         bytes = serde_json::to_vec(&Err::<Response, _>(Error::Unavailable))?;
     }
     bytes.push(b'\n');
-    stream.write_all(&bytes).await
+    stream.write_all(&bytes).await?;
+    // A Windows pipe server must keep its handle alive until the client has
+    // consumed the reply. The client closes after its single response; the
+    // existing deadline bounds peers that leave their handle open.
+    #[cfg(windows)]
+    {
+        let mut end = [0u8; 1];
+        let _ = stream.read(&mut end).await;
+    }
+    Ok(())
 }
 /// Client configuration is trusted host configuration, never a tool argument.
 pub async fn call(socket: &Path, credential: &str, request: Request) -> Result<Response, Error> {
     let operation = async {
+        #[cfg(unix)]
         let mut stream = UnixStream::connect(socket)
+            .await
+            .map_err(|_| Error::Unavailable)?;
+        #[cfg(windows)]
+        let mut stream = windows::connect(socket)
             .await
             .map_err(|_| Error::Unavailable)?;
         let envelope = Envelope {

@@ -9,7 +9,7 @@ async fn main() {
     }
 }
 async fn run() -> Result<(), ()> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Err(());
     }
     let socket = std::env::var_os("TENSHU_MCP_SOCKET").ok_or(())?.into();

@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -254,11 +254,13 @@ jobs:
           python3 contrib/test_keyring_supervision.py --live-kill
           dbus-run-session -- python3 contrib/with_test_keyring.py -- cargo test --color always -- --nocapture
       - name: Real wallet through installed STDIO companion
-        if: matrix.toolchain == 'pinned' && runner.os != 'Windows'
+        if: matrix.toolchain == 'pinned'
         shell: bash
         run: |
           cargo build -p coincube-mcp --features adapter --locked
-          TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+          adapter="$PWD/target/debug/tenshu-mcp"
+          if [ "${{ runner.os }}" = "Windows" ]; then adapter="$adapter.exe"; fi
+          TENSHU_MCP_TEST_ADAPTER="$adapter" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
       - name: Preserve Secret Service fixture diagnostics
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4
