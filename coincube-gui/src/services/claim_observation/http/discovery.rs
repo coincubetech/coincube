@@ -67,10 +67,20 @@ pub enum DiscoveryError {
 /// permission to sign. A missing result must never imply the other chain passed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FundingProofStatus {
+    /// No final chain diagnostic is retained for this attempt. Work may be
+    /// unattempted, reset or interrupted; this never means verification passed.
     #[default]
     Pending,
+    /// One candidate has qualifying ancestry, while ownership, current wallet
+    /// state and the complete paired review may still require verification.
+    /// The current paired review supplies completed-verification UI separately.
     PathFound,
+    /// The bounded candidate search returned no qualifying path. This alone is
+    /// not a general proof of deposit unsuitability or advice to send more funds.
     NoQualifyingAncestry,
+    /// A typed refusal from this chain's search or known validation step.
+    /// Its cause can be incomplete evidence or a positive incompatibility;
+    /// callers must not treat every refusal as proof of unsuitable funds.
     Failed(DiscoveryError),
 }
 pub(crate) type FundingProofObserver = Arc<dyn Fn(ChainId, FundingProofStatus) + Send + Sync>;
@@ -105,6 +115,10 @@ impl DiscoveredAncestry {
     }
 }
 impl HttpObservationSource {
+    /// Copy provider/session context and the diagnostic observer for one read.
+    /// An operation's first snapshot allocates its bounded collection budget;
+    /// nested and parallel snapshots share the existing request/byte counters
+    /// rather than multiplying allowances. This does not refresh evidence.
     fn discovery_snapshot(&self) -> Self {
         Self {
             authenticated: self.authenticated.clone(),

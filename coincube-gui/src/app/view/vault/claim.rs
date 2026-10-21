@@ -348,6 +348,9 @@ fn workflow_page<'a>(active: usize, body: impl Into<Element<'a, Message>>) -> El
     workflow_parts(active, bodies)
 }
 
+/// Render deposits and the paired review workflow. Only the panel's matching
+/// paired review selects completed-verification rows and the signing review;
+/// search diagnostics alone never do. Controls emit intents the panel rechecks.
 fn funding_view<'a>(
     panel: &'a ClaimStep1Panel,
     addresses: &'a crate::services::claim_workflow::CheckedClaimFundingAddresses,
@@ -532,6 +535,9 @@ fn deposit_heading(status: Option<&DepositStatus>, verified: bool) -> &'static s
     }
 }
 
+/// Present address arrival observations independently from proof diagnostics.
+/// A current matching paired review overrides diagnostic rows with the exact
+/// replay-protected coin rows, even if the retained search hint is PathFound.
 fn deposit_status_view<'a>(
     panel: &ClaimStep1Panel,
     bitcoin_minimum: u64,
@@ -582,6 +588,9 @@ fn deposit_status_view<'a>(
     .into()
 }
 
+/// Render one chain's address observation and its separate proof diagnostic.
+/// Amounts and confirmations do not establish replay protection. The caller
+/// renders completed paired verification through verified coin rows instead.
 fn deposit_row<'a>(
     label: &'static str,
     observed: Option<
@@ -667,6 +676,10 @@ fn deposit_row<'a>(
         .into()
 }
 
+/// Format a typed search or validation diagnostic without promoting it to a
+/// completed paired proof. PathFound describes the ancestry subcheck; accepted
+/// paired reviews bypass this helper. A bounded search finding no qualifying
+/// path, or unavailable evidence, is not by itself advice to send more funds.
 pub(crate) fn deposit_proof_detail(
     proof: crate::services::claim_observation::http::FundingProofStatus,
     checking: bool,

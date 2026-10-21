@@ -1062,6 +1062,10 @@ impl ClaimStep1Panel {
         self.setup_details_expanded
     }
 
+    /// Return the retained Bitcoin or BTCB2 diagnostic for display only.
+    /// Outside the deposit stage or with an unavailable backend, return Pending;
+    /// missing diagnostics never establish replay protection. A current paired
+    /// review supplies the completed-verification presentation separately.
     pub fn funding_proof_status(&self, chain: ChainId) -> FundingProofStatus {
         if !matches!(self.stage, Stage::FundingDeposits(_)) || !self.backend_ready() {
             return FundingProofStatus::Pending;
@@ -1069,6 +1073,9 @@ impl ClaimStep1Panel {
         self.funding_proofs[usize::from(chain == ChainId::BitcoinBlake2b)]
     }
 
+    /// Indicate whether retained diagnostics warrant the funding Retry control
+    /// while no current matching paired review is available. This is a display
+    /// affordance, not a finding that either deposit is safe or unsuitable.
     pub fn funding_proof_needs_retry(&self) -> bool {
         self.funding_review().is_none()
             && self
@@ -1077,6 +1084,9 @@ impl ClaimStep1Panel {
                 .any(|proof| *proof != FundingProofStatus::Pending)
     }
 
+    /// Whether matching typed chain diagnostics represent the final refusal,
+    /// allowing the view to omit its duplicate global card. Paired deadlines
+    /// remain global because a chain timeout cannot identify their provenance.
     pub fn funding_inline_error(&self) -> bool {
         self.funding_inline_error
     }
