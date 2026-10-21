@@ -5,6 +5,7 @@ pub mod claim_intent;
 pub mod config;
 pub mod error;
 pub mod features;
+mod imported_kit_metadata;
 pub mod local_switch;
 pub mod menu;
 pub mod message;
@@ -847,6 +848,7 @@ pub(crate) struct ClaimPairRequest {
 pub struct App {
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
+    imported_kit_metadata: imported_kit_metadata::ImportedKitMetadata,
     breez_client: Option<Arc<BreezClient>>,
     fork_connect_client: Option<crate::services::coincube::CoincubeClient>,
     local_feature_valid: bool,
@@ -1209,12 +1211,22 @@ fn unix_now_secs() -> u32 {
 async fn reserve_split_target(
     daemon: Arc<dyn Daemon + Sync + Send>,
     poll_bound: Duration,
+    receive_context: Option<(
+        CoincubeDirectory,
+        coincube_core::wallet_descriptor::WalletDescriptor,
+    )>,
 ) -> Result<crate::services::foreign_psbt::TargetReservation, String> {
     let requested_at = unix_now_secs();
-    let reserved = daemon
-        .get_new_address()
-        .await
-        .map_err(|error| error.to_string())?;
+    let reserved = match receive_context {
+        Some((root, descriptor)) => {
+            state::imported_bitcoin::reserve_receive_address(root, descriptor, daemon.clone())
+                .await?
+        }
+        None => daemon
+            .get_new_address()
+            .await
+            .map_err(|error| error.to_string())?,
+    };
     // A failed nudge is not fatal: the poller may still run on its own, and
     // the poll-time check below fails closed either way.
     if let Err(error) = daemon.request_sync().await {
@@ -3713,6 +3725,7 @@ impl App {
             cache: cache_with_vault,
             daemon: Some(daemon),
             wallet: Some(wallet),
+            imported_kit_metadata: Default::default(),
             breez_client,
             fork_connect_client: None,
             local_feature_valid: true,
@@ -3761,6 +3774,8 @@ impl App {
             connect_email,
             connect_stream_config: None,
         };
+        app.imported_kit_metadata
+            .reload(&app.datadir, &app.cube_settings);
         // A Cube opened for the first time on a build that persists the Vault's
         // identity: compute it now, while the descriptor is in scope, and
         // converge both the local settings and Connect
@@ -3949,6 +3964,7 @@ impl App {
                 cache,
                 daemon: None,
                 wallet: None,
+                imported_kit_metadata: Default::default(),
                 breez_client: Some(breez_client),
                 fork_connect_client: None,
                 local_feature_valid: true,
@@ -4914,10 +4930,14 @@ impl App {
         let generation = self.split_handoff_generation;
         self.split_handoff = Some(SplitHandoff::Reserving(intent));
         let fees = split_fee_source(self.fork_connect_client.clone());
+        let receive_context = Some((
+            self.datadir.clone(),
+            self.wallet.as_ref().unwrap().main_descriptor.clone(),
+        ));
         Task::perform(
             async move {
                 let (reservation, feerate) = tokio::join!(
-                    reserve_split_target(daemon, SPLIT_TARGET_POLL_BOUND),
+                    reserve_split_target(daemon, SPLIT_TARGET_POLL_BOUND, receive_context),
                     crate::services::foreign_psbt::btcb2_sweep_feerate(&*fees)
                 );
                 Ok((Box::new(reservation?), feerate))
@@ -5381,6 +5401,12 @@ impl App {
             return Err("The wallet exceeds the supported Claim scan range.".into());
         }
         source.address_window = source.address_window.saturating_add(4).min(10_000);
+        source.address_window = crate::services::bitcoin_import::pairing::existing_claim_window(
+            &self.datadir,
+            &self.cube_settings.id,
+            &source_policy,
+            source.address_window,
+        )?;
         let request = crate::imported_claim::ImportedClaimRequest::new(source, &client)?;
         request.validate(&self.datadir, &client)?;
         Ok((request, client))
@@ -6512,6 +6538,14 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        // Known metadata changes must not leave a previously healthy Kit
+        // fingerprint visible if their subsequent settings reload fails.
+        if matches!(
+            &message,
+            Message::SettingsSaved | Message::LoadWallet(_) | Message::WalletUpdated(_)
+        ) {
+            self.imported_kit_metadata.invalidate();
+        }
         let task = self.update_dispatch(message);
         // Sync *after* dispatch: if this update just mutated
         // `self.panels.connect.cube.server_cube_id` (e.g. a
@@ -6560,40 +6594,15 @@ impl App {
             let network = self.cache.chain().api_str();
             rk::live_descriptor_fingerprint(w.as_ref(), &self.cube_settings.id, network)
         } else {
-            self.cube_settings
-                .bitcoin_import
-                .as_ref()
-                .and_then(|import| {
-                    let wallet = import.active_attachment()?;
-                    let (receive_index, change_index) = self
-                        .panels
-                        .imported_bitcoin
-                        .as_ref()?
-                        .verified_address_state()?;
-                    let blob = crate::services::recovery::ImportedDescriptorBlob::new_with_pair(
-                        self.cube_settings.id.clone(),
-                        self.cache.chain(),
-                        crate::services::recovery::ImportedDescriptorBlobWallet {
-                            name: self.cube_settings.name.clone(),
-                            descriptor: wallet.descriptor.clone(),
-                            birthday: wallet.birthday,
-                            initial_lookahead: wallet.initial_lookahead,
-                            receive_index,
-                            change_index,
-                        },
-                        self.cube_settings.imported_claim_source.clone(),
-                        Some(
-                            crate::services::recovery::imported::encrypted_signer_metadata(
-                                &self.datadir.network_directory(self.cache.chain()),
-                                &wallet.wallet_id,
-                            )
-                            .ok()?,
-                        ),
-                        Some(import.operation_id),
-                    )
-                    .ok()?;
-                    crate::services::recovery::imported_descriptor_blob_fingerprint(&blob)
-                })
+            self.imported_kit_metadata.fingerprint(
+                &self.datadir,
+                &self.cube_settings,
+                self.cache.chain(),
+                self.panels
+                    .imported_bitcoin
+                    .as_ref()
+                    .and_then(|panel| panel.verified_address_state()),
+            )
         };
     }
 
@@ -6725,6 +6734,14 @@ impl App {
                     }
                     return Task::none();
                 }
+                if matches!(
+                    event.as_ref(),
+                    state::imported_bitcoin::ImportEvent::Installed(_, Ok(()))
+                        | state::imported_bitcoin::ImportEvent::Resumed(_, Ok(Some(_)))
+                        | state::imported_bitcoin::ImportEvent::Opened(_, Ok(_))
+                ) {
+                    self.imported_kit_metadata.invalidate();
+                }
                 let refresh_cube = matches!(
                     event.as_ref(),
                     state::imported_bitcoin::ImportEvent::Installed(_, Ok(()))
@@ -6774,9 +6791,11 @@ impl App {
                     ) {
                         if let Some(cube) = settings
                             .cubes
-                            .into_iter()
+                            .iter()
                             .find(|cube| cube.id == self.cube_settings.id)
                         {
+                            self.imported_kit_metadata
+                                .replace(&self.datadir, cube, &settings);
                             self.cache
                                 .recovery_kit_last_backed_up_descriptor_fingerprint = cube
                                 .recovery_kit_last_backed_up_descriptor_fingerprint
@@ -6785,7 +6804,7 @@ impl App {
                                 .recovery_kit_last_backed_up_keychain_descriptor_fingerprint = cube
                                 .recovery_kit_last_backed_up_keychain_descriptor_fingerprint
                                 .clone();
-                            self.cube_settings = cube;
+                            self.cube_settings = cube.clone();
                             self.panels.global_home.imported_installed = self
                                 .cube_settings
                                 .bitcoin_import
@@ -7916,6 +7935,11 @@ impl App {
                     .datadir_path
                     .network_directory(self.cube_settings.network);
                 if let Ok(settings) = settings::Settings::from_file(&network_dir) {
+                    self.imported_kit_metadata.replace(
+                        &self.datadir,
+                        &self.cube_settings,
+                        &settings,
+                    );
                     if let Some(cube) = settings
                         .cubes
                         .iter()
@@ -8526,6 +8550,8 @@ impl App {
                     self.cache.node_history_switch_requested = false;
                 }
                 self.wallet = Some(wallet.clone());
+                self.imported_kit_metadata
+                    .reload(&self.datadir, &self.cube_settings);
                 self.cache.has_vault = wallet.supports_inheritance();
                 self.cache.has_imported_bitcoin = wallet.is_imported();
 
@@ -10976,6 +11002,7 @@ mod tests {
                 .block_on(reserve_split_target(
                     daemon.clone(),
                     Duration::from_millis(50),
+                    None,
                 ))
                 .unwrap();
             let calls = daemon.calls.lock().unwrap().clone();
@@ -12284,7 +12311,11 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
-            .block_on(reserve_split_target(daemon, Duration::from_millis(50)))
+            .block_on(reserve_split_target(
+                daemon,
+                Duration::from_millis(50),
+                None,
+            ))
             .unwrap();
         // It authenticates for this Cube's Vault, so a review can form.
         crate::services::foreign_psbt::TargetAddressEvidence::authenticate(

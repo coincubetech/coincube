@@ -56,6 +56,38 @@ use crate::{
     wallet_source_form::{self, Source, SourceFormCopy, WalletSourceForm},
 };
 
+/// Coordinate local imported receive allocation with Claim's address selection.
+/// Source and paired target descriptors have the same source digest. The guard
+/// is released before callers request a poll; it never owns daemon shutdown.
+pub(crate) async fn reserve_receive_address(
+    root: CoincubeDirectory,
+    descriptor: WalletDescriptor,
+    daemon: Arc<dyn Daemon + Send + Sync>,
+) -> Result<model::GetAddressResult, String> {
+    let source = descriptor.as_imported().and_then(|imported| {
+        coincube_core::foreign_split::SplitSource::new(
+            imported.receive_descriptor().clone(),
+            Some(imported.change_descriptor().clone()),
+        )
+        .ok()
+    });
+    // Scan-only policies cannot enter Claim and retain ordinary Receive.
+    let _guard = match source {
+        Some(source) => Some(
+            tokio::task::spawn_blocking(move || {
+                bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source)
+            })
+            .await
+            .map_err(|_| "Reserving the receive address was interrupted.".to_string())??,
+        ),
+        None => None,
+    };
+    daemon
+        .get_new_address()
+        .await
+        .map_err(|error| error.to_string())
+}
+
 fn birthday_timestamp(date: chrono::NaiveDate) -> Result<u32, String> {
     if date < chrono::NaiveDate::from_ymd_opt(2009, 1, 3).unwrap()
         || date > chrono::Utc::now().date_naive()
@@ -967,6 +999,13 @@ impl ImportedBitcoinPanel {
         client: Option<CoincubeClient>,
         connect_epoch: u64,
     ) -> Task<Message> {
+        if self.chain().is_blake2b() && matches!(message, ImportMessage::ExpandDiscovery) {
+            self.error = Some(
+                "Search more addresses in the original Bitcoin Cube before continuing paired Claim."
+                    .into(),
+            );
+            return Task::none();
+        }
         self.set_connect_client(client.as_ref());
         if self.chain().is_blake2b()
             && matches!(
@@ -1259,6 +1298,15 @@ impl ImportedBitcoinPanel {
                 let Some(daemon) = self.daemon.clone() else {
                     return Task::none();
                 };
+                let Some(root) = self.hardware_root.clone() else {
+                    self.error =
+                        Some("Reopen this Cube before reserving a receive address.".into());
+                    return Task::none();
+                };
+                let Some(wallet) = self.import.active_attachment() else {
+                    return Task::none();
+                };
+                let descriptor = WalletDescriptor::Imported(wallet.descriptor.clone());
                 // A successful reservation changes the Kit fingerprint. Hide
                 // the previous daemon snapshot until its new durable index is
                 // read back, even if the address request fails midway.
@@ -1272,7 +1320,7 @@ impl ImportedBitcoinPanel {
                 self.busy = true;
                 let generation = self.generation;
                 Task::perform(
-                    async move { daemon.get_new_address().await.map_err(|e| e.to_string()) },
+                    async move { reserve_receive_address(root, descriptor, daemon).await },
                     move |result| {
                         Message::ImportedBitcoin(Box::new(ImportEvent::Address(generation, result)))
                     },
@@ -2598,7 +2646,7 @@ impl ImportedBitcoinPanel {
                 .as_ref()
                 .and_then(|info| info.imported_wallet.as_ref())
             {
-                if status.discovery_target < 10_000 {
+                if !self.chain().is_blake2b() && status.discovery_target < 10_000 {
                     content = content
                         .push(iced::widget::Space::new().height(8))
                         .push(p1_bold("Missing an older transaction?"))
@@ -2914,7 +2962,7 @@ impl ImportedBitcoinPanel {
                         "History checked: receive {} · change {} · target {} per branch",
                         status.receive_scanned, status.change_scanned, status.discovery_target
                     )));
-                    if status.discovery_target < 10_000 {
+                    if !self.chain().is_blake2b() && status.discovery_target < 10_000 {
                         content = content.push(
                             button::secondary(None, "Search 200 more addresses").on_press_maybe(
                                 (self.is_ready() && !self.busy).then_some(
@@ -3212,6 +3260,9 @@ mod tests {
         import.stage = BitcoinImportStage::Ready { wallet };
         let directory = NetworkDirectory::new(std::env::temp_dir().join("import-ready-test"));
         let mut panel = ImportedBitcoinPanel::new(directory, "cube-1".into(), import);
+        panel.set_hardware_root(CoincubeDirectory::new(
+            std::env::temp_dir().join("import-ready-root-test"),
+        ));
         panel.info = Some(model::GetInfoResult {
             version: "test".into(),
             network: Network::Bitcoin,
@@ -3242,6 +3293,111 @@ mod tests {
         });
         panel.coins = Some(ListCoinsResult { coins: Vec::new() });
         panel
+    }
+
+    #[tokio::test]
+    async fn imported_receive_shares_source_claim_lock_and_releases_after_daemon_error() {
+        let panel = ready_import_panel();
+        let imported = panel.import.active_attachment().unwrap().descriptor.clone();
+        let source = coincube_core::foreign_split::SplitSource::new(
+            imported.receive_descriptor().clone(),
+            Some(imported.change_descriptor().clone()),
+        )
+        .unwrap();
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("receive-claim-lock-{}", uuid::Uuid::new_v4())),
+        );
+        let config = Config::new(
+            BitcoinConfig::new(ChainId::Bitcoin, Duration::from_secs(30)),
+            None,
+            log::LevelFilter::Off,
+            WalletDescriptor::Imported(imported.clone()),
+            root.network_directory(ChainId::Bitcoin)
+                .coincubed_data_directory(&panel.import.active_attachment().unwrap().wallet_id),
+        );
+        let daemon: Arc<dyn Daemon + Send + Sync> =
+            Arc::new(EmbeddedDaemon::unstarted_for_test(config, None));
+        let guard =
+            bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source).unwrap();
+        for descriptor in [imported.clone(), imported.paired_blake2b().unwrap()] {
+            let error = reserve_receive_address(root.clone(), descriptor.into(), daemon.clone())
+                .await
+                .unwrap_err();
+            assert!(error.contains("reserving addresses"), "{}", error);
+        }
+        drop(guard);
+        // A failed daemon request must drop the allocation guard too. The
+        // source and paired target can each retry rather than keep a stale lock.
+        for descriptor in [imported.clone(), imported.paired_blake2b().unwrap()] {
+            let error = reserve_receive_address(root.clone(), descriptor.into(), daemon.clone())
+                .await
+                .unwrap_err();
+            assert!(!error.contains("reserving addresses"), "{}", error);
+            assert!(
+                bitcoin_import::pairing::legacy::source_reservation_lock(&root, &source).is_ok()
+            );
+        }
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn paired_imported_discovery_refusal_preserves_shared_runtime_and_snapshot() {
+        let mut panel = ready_import_panel();
+        let original = panel.import.active_attachment().unwrap();
+        let descriptor = original.descriptor.paired_blake2b().unwrap();
+        let wallet = ImportedWalletAttachment::new(
+            descriptor.clone(),
+            ChainId::BitcoinBlake2b,
+            original.birthday,
+            original.initial_lookahead,
+        )
+        .unwrap();
+        panel.import.stage = BitcoinImportStage::Ready { wallet };
+        let info = panel.info.as_mut().unwrap();
+        info.chain_id = Some(ChainId::BitcoinBlake2b);
+        info.network = ChainId::BitcoinBlake2b.bitcoin_network();
+        info.descriptors.main = WalletDescriptor::Imported(descriptor.clone());
+        let status = info.imported_wallet.as_mut().unwrap();
+        status.chain_id = ChainId::BitcoinBlake2b;
+        status.wallet_identity = descriptor
+            .identity(ChainId::BitcoinBlake2b)
+            .unwrap()
+            .to_string();
+        let daemon: Arc<dyn Daemon + Send + Sync> =
+            Arc::new(crate::daemon::client::Coincubed::new(NoRpcClient));
+        panel.daemon = Some(daemon.clone());
+        panel.owns_daemon = false;
+        assert!(panel.is_ready());
+        assert!(panel.verified_address_state().is_some());
+        let generation = panel.generation;
+        let before = serde_json::to_value(panel.info.as_ref().unwrap()).unwrap();
+        let _ = panel.update_view(ImportMessage::ExpandDiscovery, None, 0);
+        assert!(Arc::ptr_eq(panel.daemon.as_ref().unwrap(), &daemon));
+        assert!(!panel.owns_daemon);
+        assert_eq!(panel.generation, generation);
+        assert_eq!(panel.generation_gate.load(Ordering::SeqCst), generation);
+        assert_eq!(
+            serde_json::to_value(panel.info.as_ref().unwrap()).unwrap(),
+            before
+        );
+        assert!(panel.coins.is_some());
+        assert!(panel.is_ready());
+        assert!(!panel.busy);
+        assert!(panel
+            .error
+            .as_deref()
+            .unwrap()
+            .contains("original Bitcoin Cube"));
+
+        // The original Bitcoin wallet retains the supported expansion route.
+        let mut bitcoin = ready_import_panel();
+        bitcoin.daemon = Some(daemon);
+        let generation = bitcoin.generation;
+        let _ = bitcoin.update_view(ImportMessage::ExpandDiscovery, None, 0);
+        assert!(bitcoin.daemon.is_none());
+        assert_ne!(bitcoin.generation, generation);
+        assert!(bitcoin.info.is_none());
+        assert!(bitcoin.busy);
     }
 
     #[test]

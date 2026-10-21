@@ -149,6 +149,7 @@ pub struct SplitInventory {
     pending: Vec<InventoryCoin>,
     fresh_receive: FreshIndex,
     fresh_external_range: Option<std::ops::Range<u32>>,
+    complete_address_window: Option<u32>,
     unused_external_indices: BTreeSet<u32>,
     fresh_funding_addresses: Option<FreshFundingAddresses>,
     fresh_deposit_addresses: Option<FreshDepositAddresses>,
@@ -310,6 +311,7 @@ impl SplitInventory {
     pub fn fresh_funding_addresses_excluding(
         &self,
         target_index: u32,
+        allocation_floor: u32,
     ) -> Option<FreshFundingAddresses> {
         if !self.is_fresh_external(target_index) {
             return None;
@@ -317,12 +319,18 @@ impl SplitInventory {
         let mut indices = self
             .fresh_external_range
             .clone()?
-            .filter(|index| *index != target_index);
+            .filter(|index| *index > target_index.max(allocation_floor));
         Some(FreshFundingAddresses {
             bitcoin_deposit: indices.next()?,
             btcb2_deposit: indices.next()?,
             bitcoin_return: indices.next()?,
         })
+    }
+
+    /// Complete receive/change coverage on both chains for imported Claim.
+    pub(crate) fn covers_address_window(&self, window: u32) -> bool {
+        self.complete_address_window
+            .is_some_and(|covered| covered >= window)
     }
 
     pub fn fresh_deposit_addresses(&self) -> Option<FreshDepositAddresses> {
@@ -372,6 +380,13 @@ impl SplitInventory {
             pending: Vec::new(),
             fresh_receive: fresh_receive(btcb2, bitcoin, external_ranged),
             fresh_external_range: fresh_external_range(btcb2, bitcoin, external_ranged),
+            complete_address_window: [Branch::External, Branch::Internal]
+                .iter()
+                .flat_map(|branch| [btcb2.coverage(*branch), bitcoin.coverage(*branch)])
+                .try_fold(u32::MAX, |end, coverage| {
+                    let coverage = coverage.filter(|coverage| coverage.start == 0)?;
+                    Some(end.min(coverage.end_exclusive))
+                }),
             unused_external_indices: btcb2
                 .coverage(Branch::External)
                 .into_iter()
@@ -1203,7 +1218,7 @@ mod tests {
         );
         assert_eq!(inventory.fresh_receive(), FreshIndex::Proven(6));
         assert_eq!(
-            inventory.fresh_funding_addresses_excluding(6),
+            inventory.fresh_funding_addresses_excluding(6, 0),
             Some(FreshFundingAddresses {
                 bitcoin_deposit: 7,
                 btcb2_deposit: 8,
@@ -1211,15 +1226,18 @@ mod tests {
             })
         );
         assert_eq!(
-            inventory.fresh_funding_addresses_excluding(7),
+            inventory.fresh_funding_addresses_excluding(7, 0),
             Some(FreshFundingAddresses {
-                bitcoin_deposit: 6,
-                btcb2_deposit: 8,
-                bitcoin_return: 9,
+                bitcoin_deposit: 8,
+                btcb2_deposit: 9,
+                bitcoin_return: 10,
             })
         );
-        assert_eq!(inventory.fresh_funding_addresses_excluding(5), None);
-        assert_eq!(inventory.fresh_funding_addresses_excluding(u32::MAX), None);
+        assert_eq!(inventory.fresh_funding_addresses_excluding(5, 0), None);
+        assert_eq!(
+            inventory.fresh_funding_addresses_excluding(u32::MAX, 0),
+            None
+        );
 
         assert_eq!(
             inventory.fresh_deposit_addresses(),
@@ -1612,7 +1630,7 @@ mod tests {
         .unwrap();
         assert_eq!(too_narrow.fresh_receive(), FreshIndex::Proven(8));
         assert_eq!(too_narrow.fresh_funding_addresses(), None);
-        assert_eq!(too_narrow.fresh_funding_addresses_excluding(8), None);
+        assert_eq!(too_narrow.fresh_funding_addresses_excluding(8, 0), None);
         // A coin at the candidate index contradicts "unused": refuse it.
         let inventory = SplitInventory::join(
             &report(

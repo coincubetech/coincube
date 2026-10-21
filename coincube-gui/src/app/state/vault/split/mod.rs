@@ -1335,7 +1335,12 @@ impl SplitPanel {
                     let for_directory = directory.clone();
                     let for_target = target.clone();
                     tokio::task::spawn_blocking(move || {
-                        let reserve = || {
+                        let imported_minimum = target_binding.as_ref()
+                            .map(|binding| binding.imported_address_window())
+                            .transpose()
+                            .map_err(|_| "The imported Claim scan range is invalid.".to_string())?
+                            .flatten();
+                        let reserve = |allocation_floor| {
                             match target_binding {
                                 Some(binding) => {
                                     crate::services::claim_workflow::reserve_split_funding_with_target(
@@ -1345,6 +1350,7 @@ impl SplitPanel {
                                         &context,
                                         &inventory,
                                         &binding,
+                                        allocation_floor,
                                     )
                                 }
                                 None if cfg!(test) => {
@@ -1375,11 +1381,23 @@ impl SplitPanel {
                                             &for_target,
                                             &wallet,
                                         )?;
-                                        reserve()
+                                        let floor = match imported_minimum {
+                                            Some(minimum) => {
+                                                let current = crate::services::bitcoin_import::pairing::claim_scan_state(
+                                                    &root, &for_target, &for_reservation, minimum,
+                                                )?;
+                                                if !inventory.covers_address_window(current.source.address_window) {
+                                                    return Err("The imported wallet allocation changed beyond the accepted scan. Scan the source wallet again.".into());
+                                                }
+                                                Some(current.receive_allocation_floor)
+                                            }
+                                            None => None,
+                                        };
+                                        reserve(floor)
                                     },
                                 )
                             }
-                            _ if cfg!(test) => reserve(),
+                            _ if cfg!(test) => reserve(None),
                             _ => Err("Reopen this Cube before reserving Claim deposit addresses."
                                 .to_string()),
                         }

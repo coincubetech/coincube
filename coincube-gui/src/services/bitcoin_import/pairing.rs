@@ -165,12 +165,12 @@ pub fn validate_pair(
 /// Recover a complete scan range from both the immutable paired identity and
 /// the live source database. The saved minimum prevents an older restored
 /// source snapshot from shrinking a Claim that has already been accepted.
-pub(crate) fn claim_scan_source(
+pub(crate) fn claim_scan_state(
     root: &CoincubeDirectory,
     target_cube: &str,
     source_policy: &coincube_core::foreign_split::SplitSource,
     minimum_window: u32,
-) -> Result<crate::imported_claim::ImportedClaimSource, String> {
+) -> Result<ClaimScanState, String> {
     if !(1..=10_000).contains(&minimum_window) {
         return Err("The imported Claim scan range is unavailable. Start Claim again.".into());
     }
@@ -194,25 +194,31 @@ pub(crate) fn claim_scan_source(
     {
         return Err("The imported Claim source descriptors changed.".into());
     }
-    let data = root
-        .network_directory(ChainId::Bitcoin)
-        .coincubed_data_directory(&attachment.wallet_id);
-    let config =
-        Config::from_file(Some(data.path().join(CONFIG_FILE))).map_err(|e| e.to_string())?;
-    let state = coincubed::read_imported_claim_state(&config, &data).map_err(|e| e.to_string())?;
-    let current = state
-        .receive_index
-        .checked_add(1)
-        .and_then(|receive| {
-            state
-                .change_index
-                .checked_add(1)
-                .map(|change| receive.max(change))
-        })
-        .ok_or("The imported source address range overflowed.")?
-        .max(state.discovery_target)
-        .max(state.receive_scanned)
-        .max(state.change_scanned);
+    let state = paired_allocation_state(root, &source, attachment)?;
+    let target_state = paired_allocation_state(root, target, target_wallet)?;
+    let receive_allocation_floor = state.receive_index.max(target_state.receive_index);
+    let current = [state, target_state]
+        .iter()
+        .try_fold(0_u32, |window, state| {
+            Ok::<_, String>(
+                window
+                    .max(
+                        state
+                            .receive_index
+                            .checked_add(1)
+                            .ok_or("The imported address range overflowed.")?,
+                    )
+                    .max(
+                        state
+                            .change_index
+                            .checked_add(1)
+                            .ok_or("The imported address range overflowed.")?,
+                    )
+                    .max(state.discovery_target)
+                    .max(state.receive_scanned)
+                    .max(state.change_scanned),
+            )
+        })?;
     if current > 10_000 {
         return Err("The source address window exceeds the supported Claim range.".into());
     }
@@ -220,13 +226,70 @@ pub(crate) fn claim_scan_source(
     if window > 10_000 {
         return Err("The source address window exceeds the supported Claim range.".into());
     }
-    Ok(crate::imported_claim::ImportedClaimSource {
-        cube_id: source.id,
-        name: source.name,
-        external: attachment.descriptor.receive_descriptor().to_string(),
-        internal: attachment.descriptor.change_descriptor().to_string(),
-        address_window: window,
+    Ok(ClaimScanState {
+        source: crate::imported_claim::ImportedClaimSource {
+            cube_id: source.id,
+            name: source.name,
+            external: attachment.descriptor.receive_descriptor().to_string(),
+            internal: attachment.descriptor.change_descriptor().to_string(),
+            address_window: window,
+        },
+        receive_allocation_floor,
     })
+}
+
+pub(crate) struct ClaimScanState {
+    pub source: crate::imported_claim::ImportedClaimSource,
+    pub receive_allocation_floor: u32,
+}
+
+pub(crate) fn claim_scan_source(
+    root: &CoincubeDirectory,
+    target_cube: &str,
+    source_policy: &coincube_core::foreign_split::SplitSource,
+    minimum_window: u32,
+) -> Result<crate::imported_claim::ImportedClaimSource, String> {
+    claim_scan_state(root, target_cube, source_policy, minimum_window).map(|state| state.source)
+}
+
+/// Before first pairing there is no target database. An existing target's
+/// independent allocation must fit the initial Claim scan too.
+pub(crate) fn existing_claim_window(
+    root: &CoincubeDirectory,
+    source_cube: &str,
+    source_policy: &coincube_core::foreign_split::SplitSource,
+    minimum: u32,
+) -> Result<u32, String> {
+    let directory = root.network_directory(ChainId::BitcoinBlake2b);
+    if !directory.path().join(settings::SETTINGS_FILE_NAME).exists() {
+        return Ok(minimum);
+    }
+    let saved = Settings::from_file(&directory).map_err(|error| error.to_string())?;
+    let target = target_cube_id(source_cube);
+    if !saved.cubes.iter().any(|cube| cube.id == target) {
+        return Ok(minimum);
+    }
+    claim_scan_source(root, &target, source_policy, minimum).map(|source| source.address_window)
+}
+
+fn paired_allocation_state(
+    root: &CoincubeDirectory,
+    cube: &CubeSettings,
+    wallet: &ImportedWalletAttachment,
+) -> Result<coincubed::ImportedClaimState, String> {
+    let data = root
+        .network_directory(cube.network)
+        .coincubed_data_directory(&wallet.wallet_id);
+    let config =
+        Config::from_file(Some(data.path().join(CONFIG_FILE))).map_err(|e| e.to_string())?;
+    if config.main_descriptor != WalletDescriptor::Imported(wallet.descriptor.clone())
+        || config.bitcoin_config.chain != cube.network
+        || config.import_birthday != Some(wallet.birthday)
+        || config.import_initial_lookahead != Some(wallet.initial_lookahead)
+    {
+        return Err("The imported Claim allocation identity changed.".into());
+    }
+    coincubed::read_imported_claim_state(&config, &data).map_err(|e| e.to_string())
 }
 
 /// Published initialization metadata is sufficient for a still-syncing pair:
@@ -473,6 +536,49 @@ mod tests {
         target.imported_claim_source = Some(Box::new(binding));
         (source, target)
     }
+    fn prepare_allocation_storage(root: &CoincubeDirectory, cube: &CubeSettings, receive: u32) {
+        let wallet = cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .unwrap();
+        let data = root
+            .network_directory(cube.network)
+            .coincubed_data_directory(&wallet.wallet_id);
+        let staged = DataDirectory::new(data.path().with_extension("test-staging"));
+        let mut config = Config::new(
+            coincubed::config::BitcoinConfig::new(cube.network, std::time::Duration::from_secs(10)),
+            Some(coincubed::config::BitcoinBackend::Electrum(
+                coincubed::config::ElectrumConfig {
+                    addr: "tcp://127.0.0.1:50001".into(),
+                    validate_domain: true,
+                },
+            )),
+            log::LevelFilter::Off,
+            WalletDescriptor::Imported(wallet.descriptor.clone()),
+            DataDirectory::new(data.path().to_path_buf()),
+        );
+        config.import_birthday = Some(wallet.birthday);
+        config.import_initial_lookahead = Some(wallet.initial_lookahead);
+        coincubed::create_imported_storage(
+            &config,
+            &staged,
+            wallet.birthday,
+            wallet.initial_lookahead,
+        )
+        .unwrap();
+        coincubed::restore_imported_address_state(&config, &staged, receive, 0).unwrap();
+        std::fs::rename(staged.path(), data.path()).unwrap();
+        coincubed::complete_imported_history_for_test(
+            &config,
+            &data,
+            receive + wallet.initial_lookahead,
+            wallet.initial_lookahead,
+        )
+        .unwrap();
+    }
+
     #[test]
     fn exact_pair_keeps_branches_and_external_origins_but_separates_identity() {
         let (source, target) = pair();
@@ -565,7 +671,8 @@ mod tests {
             )
             .unwrap();
         }
-        crate::imported_claim::tests::prepare_storage(&root, &source);
+        prepare_allocation_storage(&root, &source, 40);
+        prepare_allocation_storage(&root, &target, 50);
         let attachment = source
             .bitcoin_import
             .as_ref()
@@ -584,7 +691,31 @@ mod tests {
                 .validate(&root, &client)?;
             Ok::<_, String>(scan_source.address_window)
         };
-        assert_eq!(validate(444).unwrap(), 444);
+        let allocation = claim_scan_state(&root, &target.id, &source_policy, 1).unwrap();
+        assert_eq!(allocation.receive_allocation_floor, 50);
+        assert_eq!(allocation.source.address_window, 254);
+        assert_eq!(
+            existing_claim_window(&root, &source.id, &source_policy, 1).unwrap(),
+            254
+        );
+        let target_wallet = target
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .unwrap();
+        let target_data = root
+            .network_directory(target.network)
+            .coincubed_data_directory(&target_wallet.wallet_id);
+        let staged = DataDirectory::new(target_data.path().with_extension("test-staging"));
+        let target_config = Config::from_file(Some(target_data.path().join(CONFIG_FILE))).unwrap();
+        std::fs::rename(target_data.path(), staged.path()).unwrap();
+        coincubed::restore_imported_address_state(&target_config, &staged, 750, 0).unwrap();
+        std::fs::rename(staged.path(), target_data.path()).unwrap();
+        let allocation = claim_scan_state(&root, &target.id, &source_policy, 1).unwrap();
+        assert_eq!(allocation.receive_allocation_floor, 750);
+        assert_eq!(allocation.source.address_window, 755);
+        assert_eq!(validate(444).unwrap(), 755);
         assert_eq!(validate(10_000).unwrap(), 10_000);
         let data = root
             .network_directory(ChainId::Bitcoin)
@@ -592,8 +723,8 @@ mod tests {
         let config = Config::from_file(Some(data.path().join(CONFIG_FILE))).unwrap();
         coincubed::expand_imported_discovery(&config, &data, 650).unwrap();
         assert!(validate(444).is_err());
-        coincubed::complete_imported_history_for_test(&config, &data, 650, 650).unwrap();
-        assert_eq!(validate(444).unwrap(), 654);
+        coincubed::complete_imported_history_for_test(&config, &data, 690, 650).unwrap();
+        assert_eq!(validate(444).unwrap(), 755);
         assert_eq!(validate(900).unwrap(), 900); // durable minimum cannot shrink
 
         let directory = root.network_directory(ChainId::Bitcoin);

@@ -1386,7 +1386,15 @@ pub fn reserve_split_funding(
     context: &Context,
     inventory: &SplitInventory,
 ) -> Result<SplitFundingReservation, Error> {
-    reserve_split_funding_inner(directory, source, target_cube, context, inventory, None)
+    reserve_split_funding_inner(
+        directory,
+        source,
+        target_cube,
+        context,
+        inventory,
+        None,
+        None,
+    )
 }
 
 /// Production reservation binds the already authenticated target Vault
@@ -1398,6 +1406,7 @@ pub fn reserve_split_funding_with_target(
     context: &Context,
     inventory: &SplitInventory,
     target: &SplitTargetBinding,
+    imported_allocation_floor: Option<u32>,
 ) -> Result<SplitFundingReservation, Error> {
     target.validate()?;
     reserve_split_funding_inner(
@@ -1407,6 +1416,7 @@ pub fn reserve_split_funding_with_target(
         context,
         inventory,
         Some(target),
+        imported_allocation_floor,
     )
 }
 
@@ -1417,6 +1427,7 @@ fn reserve_split_funding_inner(
     context: &Context,
     inventory: &SplitInventory,
     target: Option<&SplitTargetBinding>,
+    imported_allocation_floor: Option<u32>,
 ) -> Result<SplitFundingReservation, Error> {
     if target.is_some_and(|binding| !binding.target_fresh_in(inventory)) {
         return Err(Error::InvalidPlan);
@@ -1439,8 +1450,12 @@ fn reserve_split_funding_inner(
         };
     }
     let indices = match target.filter(|target| target.imported_descriptor.is_some()) {
-        Some(target) => inventory.fresh_funding_addresses_excluding(target.receive_index),
-        None => inventory.fresh_funding_addresses(),
+        Some(target) => inventory.fresh_funding_addresses_excluding(
+            target.receive_index,
+            imported_allocation_floor.ok_or(Error::InvalidPlan)?,
+        ),
+        None if imported_allocation_floor.is_none() => inventory.fresh_funding_addresses(),
+        None => return Err(Error::InvalidPlan),
     }
     .ok_or(Error::InvalidPlan)?;
     let mut requested = SplitFundingReservation::new(source, target_cube, context, indices)?;
@@ -1685,6 +1700,109 @@ mod tests {
     }
 
     #[test]
+    fn imported_funding_above_both_allocation_watermarks_keeps_released_indices_on_retry() {
+        let (cube, _, _) = crate::imported_claim::tests::fixture();
+        let wallet = cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .unwrap();
+        let source = SplitSource::new(
+            wallet.descriptor.receive_descriptor().clone(),
+            Some(wallet.descriptor.change_descriptor().clone()),
+        )
+        .unwrap();
+        let imported =
+            coincube_core::wallet_descriptor::ImportedWalletDescriptor::from_descriptors(
+                source.external().clone(),
+                source.internal().unwrap().clone(),
+                ChainId::Bitcoin,
+            )
+            .unwrap()
+            .paired_blake2b()
+            .unwrap();
+        let id = WalletId::for_imported(&imported, ChainId::BitcoinBlake2b).unwrap();
+        let descriptor = WalletDescriptor::Imported(imported);
+        let binding = SplitTargetBinding::for_test(id, &descriptor, 6);
+        let report = |chain, byte| {
+            ScanReport::for_test(chain, 1, BlockHash::from_byte_array([byte; 32]), Vec::new())
+                .with_fork_height(Some(2))
+                .with_coverage(
+                    [Branch::External, Branch::Internal]
+                        .iter()
+                        .map(|branch| BranchCoverage {
+                            branch: *branch,
+                            start: 0,
+                            end_exclusive: 200,
+                            last_used: Some(3),
+                        })
+                        .collect(),
+                )
+        };
+        let inventory = SplitInventory::join(
+            &report(ChainId::BitcoinBlake2b, 3),
+            &report(ChainId::Bitcoin, 4),
+            1,
+            true,
+        )
+        .unwrap();
+        assert!(inventory.covers_address_window(200));
+        assert!(!inventory.covers_address_window(201));
+        let directory = std::env::temp_dir().join(format!(
+            "imported-funding-watermark-{}",
+            uuid::Uuid::new_v4()
+        ));
+        // The destination remains index6, source has allocated through40 and
+        // target through50; no chain history alone can reveal either fact.
+        assert!(matches!(
+            reserve_split_funding_with_target(
+                &directory,
+                &source,
+                "cube-a",
+                &context(),
+                &inventory,
+                &binding,
+                None,
+            ),
+            Err(Error::InvalidPlan)
+        ));
+        let saved = reserve_split_funding_with_target(
+            &directory,
+            &source,
+            "cube-a",
+            &context(),
+            &inventory,
+            &binding,
+            Some(50),
+        )
+        .unwrap();
+        assert_eq!(
+            saved.indices,
+            FreshFundingAddresses {
+                bitcoin_deposit: 51,
+                btcb2_deposit: 52,
+                bitcoin_return: 53,
+            }
+        );
+        let saved = release_split_funding(&directory, &saved).unwrap();
+        let before = serde_json::to_vec(&saved).unwrap();
+        let reopened = reserve_split_funding_with_target(
+            &directory,
+            &source,
+            "cube-a",
+            &context(),
+            &inventory,
+            &binding,
+            Some(170),
+        )
+        .unwrap();
+        assert_eq!(reopened, saved);
+        assert_eq!(serde_json::to_vec(&reopened).unwrap(), before);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn split_target_binding_is_durable_and_cannot_rotate_on_retry() {
         let directory = std::env::temp_dir().join(format!(
             "split-target-{}-{}",
@@ -1700,6 +1818,7 @@ mod tests {
             &context(),
             &inventory(3),
             &binding,
+            None,
         )
         .unwrap();
         assert_eq!(saved.target_binding.as_ref(), Some(&binding));
@@ -1729,6 +1848,7 @@ mod tests {
                 &later,
                 &inventory(3),
                 &changed,
+                None,
             ),
             Err(Error::WrongIdentity)
         ));

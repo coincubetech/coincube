@@ -929,6 +929,7 @@ async fn unsigned_paired_split_reopens_only_with_original_target_and_account() {
         &connect.context,
         &intent.inventory,
         &target,
+        None,
     )
     .unwrap();
     let addresses = step1::check_reserved_funding_addresses(

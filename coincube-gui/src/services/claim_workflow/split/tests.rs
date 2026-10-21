@@ -338,6 +338,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         &inventory,
         &wrong_target,
+        None,
     )
     .unwrap();
     assert!(matches!(
@@ -363,6 +364,7 @@ fn ancestry_split_pair_is_durable_and_unchecked_without_a_legacy_broadcast_path(
         &context(),
         &inventory,
         &target_binding,
+        None,
     )
     .unwrap();
     let mut changed_account = context();
@@ -4344,8 +4346,8 @@ fn imported_ancestry_journal_keeps_the_accepted_scan_minimum_on_reopen() {
                 .flatten();
             coin
         };
-        let bitcoin_marker = marker(2, ChainId::Bitcoin);
-        let fork_marker = marker(3, ChainId::BitcoinBlake2b);
+        let bitcoin_marker = marker(7, ChainId::Bitcoin);
+        let fork_marker = marker(8, ChainId::BitcoinBlake2b);
         let path = |marker: &SplitCoin| {
             RetainedPath::new(
                 marker.outpoint,
@@ -4366,7 +4368,7 @@ fn imported_ancestry_journal_keeps_the_accepted_scan_minimum_on_reopen() {
                 funding: &bitcoin_marker,
                 dependency: &bitcoin_path.reverify().unwrap(),
                 fork_height: FORK,
-                destination: 4,
+                destination: 9,
             },
             2,
             LockTime::from_height(TIP).unwrap(),
@@ -4422,6 +4424,7 @@ fn imported_ancestry_journal_keeps_the_accepted_scan_minimum_on_reopen() {
             &context(),
             &inventory,
             &binding,
+            Some(6),
         )
         .unwrap();
         let controller = Controller::create_ancestry_split(

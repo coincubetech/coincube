@@ -172,14 +172,23 @@ pub(crate) fn with_source_reservation_lock<T>(
     source: &SplitSource,
     reserve: impl FnOnce() -> Result<T, String>,
 ) -> Result<T, String> {
+    let _lock = source_reservation_lock(root, source)?;
+    reserve()
+}
+
+/// The same nonblocking guard also protects in-app imported receive allocation.
+/// Hold it before taking a wallet database or journal lock, never the reverse.
+pub(crate) fn source_reservation_lock(
+    root: &CoincubeDirectory,
+    source: &SplitSource,
+) -> Result<File, String> {
     let directory = root
         .network_directory(ChainId::BitcoinBlake2b)
         .path()
         .join("split-source-locks")
         .join(source.digest().to_string());
     claim_workflow::prepare_directory(&directory).map_err(|_| RESUME_EXISTING.to_string())?;
-    let _lock = source_lock(&directory.join("reservation.lock"))?;
-    reserve()
+    source_lock(&directory.join("reservation.lock"))
 }
 
 fn source_lock(path: &Path) -> Result<File, String> {

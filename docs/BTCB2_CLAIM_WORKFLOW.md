@@ -115,6 +115,11 @@ pairing and signer metadata. Restoring the source preserves the operation ID
 bound by the target, so restoring both Kits can revalidate the original pair.
 Older Kits without that optional identity remain readable; restoration never
 invents a matching pair identity or replaces a conflicting existing operation.
+An imported wallet backed up before these fields were included needs a one-time
+Recovery Kit update to carry its stable import operation and external signer
+metadata. Its old backup remains readable, but its stored fingerprint correctly
+shows drift until each backup copy is updated. Fingerprints include the full
+new payload; an old backup is never relabeled as containing the missing fields.
 Restoring the fork wallet alone permits history viewing, while Claim requires
 both source and target records to pass revalidation.
 

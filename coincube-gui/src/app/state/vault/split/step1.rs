@@ -398,6 +398,9 @@ pub struct OpenRequest {
 #[async_trait]
 pub trait SplitConnect: Send + Sync {
     fn context(&self) -> Context;
+    fn imported_claim_root(&self) -> Option<CoincubeDirectory> {
+        None
+    }
     /// The current session's two-chain reader for exact recorded witnesses.
     /// Alternative transports cannot silently skip this read.
     fn paired_observation(&self) -> Option<&HttpObservationSource> {
@@ -648,6 +651,39 @@ impl SplitDepositProgress {
     }
 }
 
+fn checked_imported_allocation(
+    root: &CoincubeDirectory,
+    source: &SplitSource,
+    target_cube: &str,
+    saved: &claim_workflow::SplitFundingReservation,
+) -> Result<crate::services::bitcoin_import::pairing::ClaimScanState, String> {
+    let minimum = saved
+        .target_binding
+        .as_ref()
+        .ok_or("The imported target binding is missing.")?
+        .imported_address_window()
+        .map_err(|_| "The imported Claim scan range is invalid.".to_string())?
+        .ok_or("The imported Claim scan range is missing.")?;
+    let state = crate::services::bitcoin_import::pairing::claim_scan_state(
+        root,
+        target_cube,
+        source,
+        minimum,
+    )?;
+    if !saved.is_released()
+        && [
+            saved.indices.bitcoin_deposit,
+            saved.indices.btcb2_deposit,
+            saved.indices.bitcoin_return,
+        ]
+        .iter()
+        .any(|index| *index <= state.receive_allocation_floor)
+    {
+        return Err("A reserved funding address was already allocated by an imported wallet. The saved plan was preserved; review it before sending funds.".into());
+    }
+    Ok(state)
+}
+
 pub async fn check_reserved_funding_addresses(
     connect: &dyn SplitConnect,
     directory: PathBuf,
@@ -670,6 +706,35 @@ pub async fn check_reserved_funding_addresses(
     .map_err(|_| "Reading the saved funding addresses was interrupted.".to_string())?
     .map_err(|_| "The saved funding addresses could not be verified.".to_string())?
     .ok_or_else(|| "No funding addresses were reserved for this wallet.".to_string())?;
+    // Lock order is source guard, then short database snapshots/journal reads.
+    // Never hold a journal lock while acquiring this guard. Keep Receive from
+    // allocating into a new plan until the durable release is complete.
+    let allocation_guard = if saved
+        .target_binding
+        .as_ref()
+        .is_some_and(|binding| binding.imported_descriptor().is_some())
+    {
+        let root = connect
+            .imported_claim_root()
+            .ok_or("The imported Claim source is not bound to this open Cube.")?;
+        let source = source.clone();
+        let target = target_cube.to_owned();
+        let saved = saved.clone();
+        Some(
+            tokio::task::spawn_blocking(move || {
+                let guard =
+                    crate::services::bitcoin_import::pairing::legacy::source_reservation_lock(
+                        &root, &source,
+                    )?;
+                let state = checked_imported_allocation(&root, &source, &target, &saved)?;
+                Ok::<_, String>((root, guard, state.source.address_window))
+            })
+            .await
+            .map_err(|_| "Checking imported address allocations was interrupted.".to_string())??,
+        )
+    } else {
+        None
+    };
     let [bitcoin_deposit, btcb2_deposit, bitcoin_return] = saved
         .addresses()
         .map_err(|_| "The saved funding addresses are invalid.".to_string())?;
@@ -702,6 +767,20 @@ pub async fn check_reserved_funding_addresses(
     .map_err(|_| "Quoting both chains' deposit fees timed out.".to_string())??;
     if !connect.session_current() || connect.context() != context {
         return Err("The Connect session changed during the address check.".into());
+    }
+    if let Some((root, _, scanned_window)) = allocation_guard.as_ref() {
+        let root = root.clone();
+        let source = source.clone();
+        let target = target_cube.to_owned();
+        let saved = saved.clone();
+        let scanned_window = *scanned_window;
+        tokio::task::spawn_blocking(move || {
+            let current = checked_imported_allocation(&root, &source, &target, &saved)?;
+            if current.source.address_window > scanned_window {
+                return Err("The imported wallet address window changed during the funding check. Try again.".to_string());
+            }
+            Ok(())
+        }).await.map_err(|_| "Rechecking imported address allocations was interrupted.".to_string())??;
     }
     if !saved.is_released() {
         tokio::task::spawn_blocking(move || {
@@ -1404,6 +1483,9 @@ fn split_funding_quote_for_inventory(
 impl SplitConnect for ProductionConnect {
     fn context(&self) -> Context {
         self.context.clone()
+    }
+    fn imported_claim_root(&self) -> Option<CoincubeDirectory> {
+        self.claim_root.clone()
     }
     fn paired_observation(&self) -> Option<&HttpObservationSource> {
         Some(&self.observation)
