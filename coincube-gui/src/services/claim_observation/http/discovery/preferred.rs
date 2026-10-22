@@ -9,7 +9,8 @@ impl HttpObservationSource {
     /// reserve them, build both transactions and run signer preflight.
     ///
     /// The outer snapshot shares one request/byte budget across both searches
-    /// and the final collection, with one wall-clock deadline for the pair.
+    /// and the final collection. Search has one 90s deadline for the pair;
+    /// final fresh collection retains its own 30s deadline.
     pub async fn discover_spend_inputs(
         &self,
         bitcoin_candidates: &[OutPoint],
@@ -42,8 +43,8 @@ impl HttpObservationSource {
         {
             return Err(invalid());
         }
-        let source = self.discovery_snapshot();
-        tokio::time::timeout(MAX_COLLECTION_TIME, async {
+        let source = self.discovery_search_snapshot();
+        let found = tokio::time::timeout(MAX_DISCOVERY_TIME, async {
             let search = |chain, candidates| {
                 let source = &source;
                 async move {
@@ -79,18 +80,25 @@ impl HttpObservationSource {
             let (Some(bitcoin), Some(fork)) = (bitcoin?, fork?) else {
                 return Ok(None);
             };
-            let bitcoin_path = bitcoin
-                .retained_path()
-                .map_err(DiscoveryError::Structural)?;
-            let fork_path = fork.retained_path().map_err(DiscoveryError::Structural)?;
-            let inputs = source
-                .collect_spend_inputs(&bitcoin_path, &fork_path, shared, policy)
-                .await
-                .map_err(DiscoveryError::Observation)?;
-            Ok(Some(inputs))
+            Ok(Some((bitcoin, fork)))
         })
         .await
-        .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))?
+        .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))??;
+        let Some((bitcoin, fork)) = found else {
+            return Ok(None);
+        };
+        // Final collection keeps the established 256-request ceiling without
+        // resetting the shared search counters or response-byte allowance.
+        source.budget.as_ref().unwrap().restrict_to_collection();
+        let bitcoin_path = bitcoin
+            .retained_path()
+            .map_err(DiscoveryError::Structural)?;
+        let fork_path = fork.retained_path().map_err(DiscoveryError::Structural)?;
+        let inputs = source
+            .collect_spend_inputs(&bitcoin_path, &fork_path, shared, policy)
+            .await
+            .map_err(DiscoveryError::Observation)?;
+        Ok(Some(inputs))
     }
 
     /// Search in caller preference order. The caller supplies owned, confirmed,
@@ -98,8 +106,8 @@ impl HttpObservationSource {
     /// conditions must be checked again during construction and preflight.
     ///
     /// None means no candidate qualified, not proof that any coin is replay-safe.
-    /// A transient error or exhausted bound aborts rather than masquerading as
-    /// an empty search.
+    /// Transient and shared-budget failures abort. A candidate-local graph
+    /// limit allows later candidates, but never masquerades as an empty search.
     pub async fn discover_preferred_ancestry(
         &self,
         candidates: &[OutPoint],
@@ -139,17 +147,30 @@ impl HttpObservationSource {
         if !session_current(&self.generation, self.expected) {
             return Err(observation(FailureKind::Cancelled));
         }
-        let snapshot = self.discovery_snapshot();
-        let result = tokio::time::timeout(MAX_COLLECTION_TIME, async {
+        let snapshot = self.discovery_search_snapshot();
+        let result = tokio::time::timeout(MAX_DISCOVERY_TIME, async {
+            let mut local_limit = None;
             for candidate in candidates {
-                if let Some(proof) = snapshot
+                match snapshot
                     .discover_ancestry_for(*candidate, policy, root_chain)
-                    .await?
+                    .await
                 {
-                    return Ok(Some(proof));
+                    Ok(Some(proof)) => return Ok(Some(proof)),
+                    Ok(None) => {}
+                    Err(
+                        error @ DiscoveryError::Structural(
+                            claim_ancestry::Error::PathLimit | claim_ancestry::Error::ByteLimit,
+                        ),
+                    ) => {
+                        local_limit.get_or_insert(error);
+                    }
+                    Err(error) => return Err(error),
                 }
             }
-            Ok(None)
+            match local_limit {
+                Some(error) => Err(error),
+                None => Ok(None),
+            }
         })
         .await
         .map_err(|_| observation(FailureKind::Deadline))?;
@@ -356,7 +377,7 @@ mod tests {
             let server = MockServer::start();
             let (mut source, _sender) = source(&server);
             source.budget = Some(Arc::new(CollectionBudget {
-                requests: AtomicUsize::new(3),
+                requests: AtomicUsize::new(2),
                 bytes: AtomicUsize::new(MAX_RESPONSE_BYTES),
             }));
             let (_, raw) = ancestry_fixture();
@@ -397,8 +418,71 @@ mod tests {
             assert!(matches!(result, Err(DiscoveryError::Observation(kind)) if kind == expected));
             reads[0].assert_hits(1);
             statuses[0].assert_hits(1);
-            reads[1].assert_hits(if transient { 0 } else { 1 });
+            reads[1].assert_hits(0);
             statuses[1].assert_hits(0);
         }
+    }
+
+    #[tokio::test]
+    async fn candidate_local_depth_limit_allows_a_later_candidate() {
+        use coincube_core::miniscript::bitcoin::{script::Builder, TxIn};
+        let server = MockServer::start();
+        let (source, _sender) = source(&server);
+        let (_, raw) = ancestry_fixture();
+        let root: Transaction = deserialize(&raw).unwrap();
+        let mut chain = vec![root.clone()];
+        for tag in 1..=claim_ancestry::MAX_PATH_TRANSACTIONS {
+            let mut tx = root.clone();
+            tx.input = vec![TxIn {
+                previous_output: OutPoint::new(chain.last().unwrap().compute_txid(), 0),
+                script_sig: Builder::new().push_int(tag as i64).into_script(),
+                ..TxIn::default()
+            }];
+            chain.push(tx);
+        }
+        let first = OutPoint::new(chain.last().unwrap().compute_txid(), 0);
+        let mut other = root.clone();
+        other.output[0].value = Amount::from_sat(6000);
+        let second = OutPoint::new(other.compute_txid(), 0);
+        for tx in chain.iter().skip(1) {
+            let txid = tx.compute_txid();
+            server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{txid}/hex"));
+                then.status(200).body(hex::encode(serialize(tx)));
+            });
+            server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{txid}"));
+                then.status(200)
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .header("x-coincube-observation", "fresh")
+                    .json_body(json!({"txid":txid,"status":{"confirmed":true,"block_height":961650,"block_hash":"88".repeat(32)}}));
+            });
+        }
+        let below_limit = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+                root.compute_txid()
+            ));
+            then.status(500);
+        });
+        let next_candidate = server.mock(|when, then| {
+            when.method(GET).path(format!(
+                "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
+                second.txid
+            ));
+            then.status(503);
+        });
+        let result = source
+            .discover_preferred_ancestry(&[first, second], policy())
+            .await;
+        assert_eq!(
+            result.err(),
+            Some(DiscoveryError::Observation(FailureKind::Http(503)))
+        );
+        below_limit.assert_hits(0);
+        next_candidate.assert_hits(1);
     }
 }
