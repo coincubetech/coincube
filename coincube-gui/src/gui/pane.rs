@@ -48,11 +48,10 @@ pub enum ViewMessage {
     /// [`crate::app::view::Message::OpenPlanBilling`]. The handler focuses an
     /// existing Home tab and routes it to Connect → Plan & Billing.
     OpenPlanBilling,
-    /// Bubbled from the Home tab on its auth-success edge. The
-    /// handler broadcasts a `ConnectAccountMessage::Init` to every
-    /// open Cube tab so those panels re-read the shared keyring
-    /// entry and swap out of their "Sign in" prompts without
-    /// waiting for the user to interact.
+    /// Bubbled from the Home tab on its auth-success edge. `GUI::update`
+    /// broadcasts a `ConnectAccountMessage::Init` to every open Cube tab, in
+    /// every pane, so those panels re-check the session and swap out of
+    /// their "Sign in" prompts without waiting for the user to interact.
     ConnectSignedIn,
 }
 
@@ -372,26 +371,12 @@ impl Pane {
             // handle by the pane grid update.
             Message::View(ViewMessage::SplitTab(_)) => {}
             // handled at the GUI level
-            Message::View(ViewMessage::ToggleTheme | ViewMessage::GlobalSettingsChanged) => {}
-            Message::View(ViewMessage::ConnectSignedIn) => {
-                // Re-init the ConnectAccountPanel on every open Cube
-                // tab so each one pulls the just-saved session out of
-                // the shared keyring. The Init handler short-circuits
-                // when already authenticated, so this is a no-op for
-                // tabs that won the race.
-                let mut tasks: Vec<Task<Message>> = Vec::new();
-                for t in &self.tabs {
-                    if matches!(&t.state, tab::State::App(_)) {
-                        let init_msg = app::Message::View(app::view::Message::ConnectAccount(
-                            app::view::ConnectAccountMessage::Init,
-                        ));
-                        tasks.push(Task::done(Message::tab(t.id, tab::Message::Run(init_msg))));
-                    }
-                }
-                if !tasks.is_empty() {
-                    return Task::batch(tasks);
-                }
-            }
+            // handled at the GUI level, which re-inits every pane's Cube tabs
+            Message::View(
+                ViewMessage::ToggleTheme
+                | ViewMessage::GlobalSettingsChanged
+                | ViewMessage::ConnectSignedIn,
+            ) => {}
             Message::View(ViewMessage::OpenBitcoinClaim(handoff)) => {
                 return self
                     .focus_home_tab_with(crate::home::Message::ReturnBitcoinClaim(handoff), cfg);
