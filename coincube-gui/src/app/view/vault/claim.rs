@@ -693,9 +693,9 @@ pub(crate) fn deposit_proof_detail(
         FundingProofStatus::Pending if checking => "Verifying replay protection…",
         FundingProofStatus::Pending => "Replay protection not verified yet.",
         FundingProofStatus::PathFound => "Post-fork ancestry found; paired verification incomplete.",
-        FundingProofStatus::NoQualifyingAncestry => "No qualifying post-fork ancestry found yet. Retry verification.",
+        FundingProofStatus::NoQualifyingAncestry => "No eligible deposit traces to a post-fork mining reward unique to this chain.",
         FundingProofStatus::Failed(DiscoveryError::Structural(Error::PathLimit | Error::ByteLimit)) =>
-            "Ancestry check reached its safety limit. Verification is incomplete; retry verification.",
+            "Search limit reached before this deposit’s ancestry could be verified.",
         FundingProofStatus::Failed(DiscoveryError::Structural(_)) =>
             "Could not verify a link to a post-fork mining reward. Retry verification.",
         FundingProofStatus::Failed(DiscoveryError::Observation(error)) => match error {
@@ -703,7 +703,8 @@ pub(crate) fn deposit_proof_detail(
             FailureKind::AncestryRootChanged { .. } | FailureKind::Changed => "The deposit or chain changed during verification. Wait for confirmations and retry verification.",
             FailureKind::Http(429) => "Indexer rate limited. Retry verification after the cooldown.",
             FailureKind::Unavailable | FailureKind::Http(_) | FailureKind::Stale | FailureKind::FreshnessUnverified => "Fresh indexer data is unavailable. Retry verification when the indexer recovers.",
-            FailureKind::Deadline | FailureKind::CollectionLimit => "The bounded ancestry check could not finish. Retry verification.",
+            FailureKind::Deadline => "Ancestry verification timed out. This deposit remains unverified.",
+            FailureKind::CollectionLimit => "Verification reached its data limit. This deposit remains unverified.",
             FailureKind::Cancelled => "The Connect session changed. Reopen this Cube under the same account and retry verification.",
             _ => "Could not verify this deposit’s replay protection. Retry verification.",
         },

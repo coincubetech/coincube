@@ -17,6 +17,20 @@ bounded, confirmed path to a canonical coinbase that differs between the two
 chains at the dependency root. A post-fork timestamp or missing transaction
 is never a proof of chain exclusivity.
 
+Automatic Claim ancestry discovery may inspect up to 512 distinct transactions,
+4,096 distinct dependency edges and 4,000,000 bytes of raw graph data per candidate.
+It retains at most 64 links and 4,000,000 bytes in any proof, with a 400,000-byte limit per
+transaction. A positively confirmed pre-fork transaction may close a search
+branch only after its raw txid, canonical height mapping and pinned authenticated
+fork height agree; a completed negative search rechecks every closed frontier,
+the tip, anchor, freshness and session. Both funding searches and candidate
+loops share one 90-second deadline, 4,096 discovery requests and 16 MiB of
+response data. Final collection remains a separate 30-second phase with at
+most 256 remaining requests on those same counters. Standalone collection
+and retained-path requalification retain their existing bounds. Repeating a
+deterministic search-limit result does not extend the graph or prove that a
+deposit has qualifying ancestry.
+
 The source is one immutable API/provider/account context. Its authenticated
 anchor must come from the typed `CoincubeClient::network_anchor` endpoint. That
 response already binds dynamic RDTS, MTP, hash and height coherently; there is no

@@ -190,7 +190,19 @@ impl HttpObservationSource {
         fresh: bool,
         body_limit: usize,
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), FailureKind> {
-        let prefix = Self::prefix(chain)?;
+        self.get_body_detailed(chain, path, fresh, body_limit)
+            .await
+            .map_err(|(error, _)| error)
+    }
+    /// Distinguish exceeding the caller's body cap from malformed content.
+    async fn get_body_detailed(
+        &self,
+        chain: ChainId,
+        path: &str,
+        fresh: bool,
+        body_limit: usize,
+    ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
+        let prefix = Self::prefix(chain).map_err(|error| (error, false))?;
         self.bounded(async {
             if crate::services::esplora_backoff::remaining(&self.base).is_some() {
                 return Err(FailureKind::Http(429));
@@ -228,7 +240,7 @@ impl HttpObservationSource {
                 .content_length()
                 .is_some_and(|n| n > body_limit as u64)
             {
-                return Err(FailureKind::Malformed);
+                return Ok(Err(()));
             }
             let mut bytes = Vec::new();
             while let Some(chunk) = response
@@ -236,17 +248,19 @@ impl HttpObservationSource {
                 .await
                 .map_err(|_| FailureKind::Unavailable)?
             {
-                if chunk.len() > body_limit.saturating_sub(bytes.len()) {
-                    return Err(FailureKind::Malformed);
-                }
                 if let Some(budget) = &self.budget {
                     budget.charge_bytes(chunk.len())?;
                 }
+                if chunk.len() > body_limit.saturating_sub(bytes.len()) {
+                    return Ok(Err(()));
+                }
                 bytes.extend_from_slice(&chunk);
             }
-            Ok((status, bytes, headers, stamp))
+            Ok(Ok((status, bytes, headers, stamp)))
         })
         .await
+        .map_err(|error| (error, false))?
+        .map_err(|()| (FailureKind::Malformed, true))
     }
     /// Fetch one bounded ancestry link using the anonymous immutable-data route.
     /// Txid authentication permits cache hits, but proves neither canonical
@@ -270,8 +284,18 @@ impl HttpObservationSource {
         txid: Txid,
         max_bytes: usize,
     ) -> Result<Vec<u8>, FailureKind> {
+        self.ancestry_transaction_search(chain, txid, max_bytes)
+            .await
+            .map_err(|(error, _)| error)
+    }
+    async fn ancestry_transaction_search(
+        &self,
+        chain: ChainId,
+        txid: Txid,
+        max_bytes: usize,
+    ) -> Result<Vec<u8>, (FailureKind, bool)> {
         let (status, bytes, _, _) = self
-            .get_body(
+            .get_body_detailed(
                 chain,
                 &format!("tx/{}/hex", txid),
                 false,
@@ -279,15 +303,15 @@ impl HttpObservationSource {
             )
             .await?;
         if status != 200 {
-            return Err(FailureKind::Http(status));
+            return Err((FailureKind::Http(status), false));
         }
         // Strict hex without whitespace keeps the wire and decoded bounds exact.
-        let raw = hex::decode(bytes).map_err(|_| FailureKind::Malformed)?;
+        let raw = hex::decode(bytes).map_err(|_| (FailureKind::Malformed, false))?;
         let transaction: coincube_core::miniscript::bitcoin::Transaction =
             coincube_core::miniscript::bitcoin::consensus::deserialize(&raw)
-                .map_err(|_| FailureKind::Malformed)?;
+                .map_err(|_| (FailureKind::Malformed, false))?;
         if transaction.compute_txid() != txid {
-            return Err(FailureKind::Malformed);
+            return Err((FailureKind::Malformed, false));
         }
         Ok(raw)
     }

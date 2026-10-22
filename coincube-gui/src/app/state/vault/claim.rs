@@ -481,8 +481,11 @@ pub(crate) fn funding_proof_refusal(
             | FailureKind::Stale
             | FailureKind::FreshnessUnverified,
         ) => "Fresh data from both chains is unavailable. Retry when both nodes and indexers are current.",
-        DiscoveryError::Observation(FailureKind::Deadline | FailureKind::CollectionLimit) => {
-            "The bounded two-chain ancestry check could not finish. Retry after the services recover."
+        DiscoveryError::Observation(FailureKind::Deadline) => {
+            "The two-chain ancestry check timed out. No funding pair was verified."
+        }
+        DiscoveryError::Observation(FailureKind::CollectionLimit) => {
+            "The two-chain ancestry check reached its data limit. No funding pair was verified."
         }
         DiscoveryError::Observation(FailureKind::Cancelled) => {
             "The Connect session changed during the ancestry check. Sign in and retry."

@@ -4,6 +4,7 @@ mod binding;
 mod collect;
 mod funding;
 mod preferred;
+mod prune;
 mod sweep;
 pub use binding::AncestryContext;
 use coincube_core::{
@@ -30,7 +31,9 @@ pub use sweep::CollectedAncestrySweep;
 // wall-clock and response-byte limits, but allow an ordinary small Vault to
 // finish its complete proof instead of truncating it after 128 reads.
 const MAX_REQUESTS: usize = 256;
+const MAX_DISCOVERY_REQUESTS: usize = 4096;
 const MAX_RESPONSE_BYTES: usize = 16 * 1024 * 1024;
+const MAX_DISCOVERY_TIME: Duration = Duration::from_secs(90);
 
 pub(super) struct CollectionBudget {
     requests: AtomicUsize,
@@ -38,10 +41,19 @@ pub(super) struct CollectionBudget {
 }
 impl CollectionBudget {
     fn new() -> Self {
+        Self::with_requests(MAX_REQUESTS)
+    }
+    fn for_discovery() -> Self {
+        Self::with_requests(MAX_DISCOVERY_REQUESTS)
+    }
+    fn with_requests(requests: usize) -> Self {
         Self {
-            requests: AtomicUsize::new(MAX_REQUESTS),
+            requests: AtomicUsize::new(requests),
             bytes: AtomicUsize::new(MAX_RESPONSE_BYTES),
         }
+    }
+    fn restrict_to_collection(&self) {
+        self.requests.fetch_min(MAX_REQUESTS, Ordering::Relaxed);
     }
     pub(super) fn charge_request(&self, reserved_bytes: usize) -> Result<(), FailureKind> {
         self.requests
@@ -136,6 +148,15 @@ impl HttpObservationSource {
             test_ancestry_history: self.test_ancestry_history,
         }
     }
+    /// Wider search allowances apply only to a new discovery operation.
+    /// Nested snapshots continue sharing the original finite counters.
+    fn discovery_search_snapshot(&self) -> Self {
+        let mut snapshot = self.discovery_snapshot();
+        if self.budget.is_none() {
+            snapshot.budget = Some(Arc::new(CollectionBudget::for_discovery()));
+        }
+        snapshot
+    }
     async fn qualify_dependency(
         &self,
         dependency: &claim_ancestry::CoinbaseDependency,
@@ -229,7 +250,7 @@ impl HttpObservationSource {
         })
     }
     /// Discover one qualifying mainnet dependency with shared graph, response,
-    /// request and 30s time limits. None means no qualifying candidate was found,
+    /// request and 90s search limits. None means no qualifying candidate was found,
     /// never proof of replay safety. Persisted links require re-verification;
     /// ownership, maturity, spend policy and final fresh preflight remain separate.
     pub async fn discover_ancestry(
@@ -262,17 +283,33 @@ impl HttpObservationSource {
             return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
         }
         let mut search = Search::new(selected).map_err(DiscoveryError::Structural)?;
-        let snapshot = self.discovery_snapshot();
+        let snapshot = self.discovery_search_snapshot();
         let observation = DiscoveryError::Observation;
-        let result = tokio::time::timeout(MAX_COLLECTION_TIME, async {
+        let result = tokio::time::timeout(MAX_DISCOVERY_TIME, async {
+            let mut pruning =
+                prune::PruneContext::new(&snapshot, root_chain).map_err(observation)?;
             loop {
                 match search.step().map_err(DiscoveryError::Structural)? {
                     Step::Fetch { txid, max_bytes } => {
                         let raw = snapshot
-                            .ancestry_transaction_limited(root_chain, txid, max_bytes)
+                            .ancestry_transaction_search(root_chain, txid, max_bytes)
+                            .await
+                            .map_err(|(error, exceeded_graph_bytes)| {
+                                if exceeded_graph_bytes
+                                    && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES
+                                {
+                                    DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
+                                } else {
+                                    observation(error)
+                                }
+                            })?;
+                        let pre_fork = pruning
+                            .inspect(&snapshot, txid, policy)
                             .await
                             .map_err(observation)?;
-                        search.provide(raw).map_err(DiscoveryError::Structural)?;
+                        search
+                            .provide_with_pruning(raw, pre_fork)
+                            .map_err(DiscoveryError::Structural)?;
                     }
                     Step::Candidate(candidate) => {
                         match snapshot
@@ -296,7 +333,13 @@ impl HttpObservationSource {
                             }
                         }
                     }
-                    Step::Complete => return Ok(None),
+                    Step::Complete => {
+                        pruning
+                            .finish(&snapshot, policy)
+                            .await
+                            .map_err(observation)?;
+                        return Ok(None);
+                    }
                 }
             }
         })
@@ -313,13 +356,257 @@ impl HttpObservationSource {
 mod tests {
     use super::super::tests::{ancestry_fixture, source as make_source};
     use super::*;
+    use coincube_core::miniscript::bitcoin::{
+        absolute,
+        consensus::{deserialize, serialize},
+        script::Builder,
+        transaction, Amount, ScriptBuf, Transaction, TxIn, TxOut,
+    };
     use httpmock::prelude::*;
+    use serde_json::json;
 
     fn policy() -> Policy {
         Policy {
             max_observation_age_seconds: 60,
             expiry_margin_seconds: 600,
         }
+    }
+
+    #[test]
+    fn final_phase_clamps_without_resetting_shared_requests_or_bytes() {
+        let budget = CollectionBudget::for_discovery();
+        for _ in 0..(MAX_DISCOVERY_REQUESTS - 7) {
+            budget.charge_request(0).unwrap();
+        }
+        budget.charge_bytes(123).unwrap();
+        budget.restrict_to_collection();
+        assert_eq!(budget.requests.load(Ordering::Relaxed), 7);
+        assert_eq!(
+            budget.bytes.load(Ordering::Relaxed),
+            MAX_RESPONSE_BYTES - 123
+        );
+        for _ in 0..7 {
+            budget.charge_request(0).unwrap();
+        }
+        assert_eq!(budget.charge_request(0), Err(FailureKind::CollectionLimit));
+        let budget = CollectionBudget::for_discovery();
+        budget.restrict_to_collection();
+        assert_eq!(budget.requests.load(Ordering::Relaxed), MAX_REQUESTS);
+    }
+
+    fn graph_transaction(parents: &[OutPoint], tag: u8) -> Transaction {
+        Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: parents
+                .iter()
+                .map(|parent| TxIn {
+                    previous_output: *parent,
+                    script_sig: ScriptBuf::from_bytes(vec![tag]),
+                    ..TxIn::default()
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        }
+    }
+
+    #[tokio::test]
+    async fn canonical_pre_fork_frontier_closes_a_synthetic_graph_on_each_chain() {
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let server = MockServer::start();
+            let (source, _sender) = make_source(&server);
+            let prefix = HttpObservationSource::prefix(chain).unwrap();
+            let tip_hash = "aa".repeat(32);
+            let frontier_hash = "bb".repeat(32);
+            let missing = graph_transaction(&[OutPoint::null()], 250);
+            let out = |tx: &Transaction| OutPoint::new(tx.compute_txid(), 0);
+            let leaves: Vec<_> = (0..5)
+                .map(|tag| graph_transaction(&[out(&missing)], tag))
+                .collect();
+            let mut graph = leaves.clone();
+            let mut previous = out(&leaves[0]);
+            for tag in 10..26 {
+                let tx = graph_transaction(&[previous, out(&leaves[(tag as usize) % 5])], tag);
+                previous = out(&tx);
+                graph.push(tx);
+            }
+            let selected = graph_transaction(&[previous, out(&leaves[4])], 30);
+            graph.push(selected.clone());
+            assert_eq!(graph.len(), 22);
+            server.mock(|when, then| {
+                when.method(GET)
+                    .path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
+                    .header("authorization", "Bearer synthetic-observation-token");
+                then.status(200).json_body(json!({"success":true,"data":{
+                    "network":"bitcoin-blake2b","state":"available","anchor":{
+                        "tip_hash":tip_hash,"tip_height":961700,
+                        "tip_median_time_past":10000,"observed_at":source.now(),
+                        "observation":{"tip_height":961700,"fork":{"height":961640,"active":true},
+                            "rdts":{"state":"unsupported"}}
+                    }
+                }}));
+            });
+            let fresh = |path: String, body: String| {
+                server.mock(|when, then| {
+                    when.method(GET).path(path);
+                    then.status(200)
+                        .header("x-cache", "BYPASS")
+                        .header("cache-control", "no-store")
+                        .header("x-coincube-observation", "fresh")
+                        .body(body);
+                })
+            };
+            let base = format!("/api/v1/esplora/{prefix}");
+            fresh(format!("{base}/blocks/tip/hash"), tip_hash.clone());
+            fresh(
+                format!("{base}/block/{tip_hash}/status"),
+                json!({"in_best_chain":true,"height":961700}).to_string(),
+            );
+            fresh(format!("{base}/block-height/961700"), tip_hash.clone());
+            fresh(format!("{base}/block-height/961600"), frontier_hash.clone());
+            for (index, tx) in graph.iter().enumerate() {
+                let txid = tx.compute_txid();
+                server.mock(|when, then| {
+                    when.method(GET).path(format!("{base}/tx/{txid}/hex"));
+                    then.status(200).body(hex::encode(serialize(tx)));
+                });
+                let pre_fork = index < leaves.len();
+                fresh(
+                    format!("{base}/tx/{txid}"),
+                    json!({"txid":txid,"status":{"confirmed":true,
+                        "block_height":if pre_fork {961600} else {961650},
+                        "block_hash":if pre_fork {&frontier_hash} else {&tip_hash}}})
+                    .to_string(),
+                );
+            }
+            let below_frontier = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("{base}/tx/{}/hex", missing.compute_txid()));
+                then.status(500);
+            });
+            let result = match chain {
+                ChainId::Bitcoin => source.discover_ancestry(out(&selected), policy()).await,
+                ChainId::BitcoinBlake2b => {
+                    source
+                        .discover_fork_ancestry(out(&selected), policy())
+                        .await
+                }
+                _ => unreachable!(),
+            };
+            assert!(matches!(result, Ok(None)), "{:?}", result);
+            below_frontier.assert_hits(0);
+        }
+    }
+
+    #[tokio::test]
+    async fn pre_fork_sibling_does_not_hide_a_qualifying_post_fork_root() {
+        let server = MockServer::start();
+        let (source, _sender) = make_source(&server);
+        let (_, raw) = ancestry_fixture();
+        let mut bitcoin: Transaction = deserialize(&raw).unwrap();
+        bitcoin.input[0].script_sig = Builder::new().push_int(961640).push_int(1).into_script();
+        let mut fork = bitcoin.clone();
+        fork.output[0].value = Amount::from_sat(4000);
+        let out = |tx: &Transaction| OutPoint::new(tx.compute_txid(), 0);
+        let missing = graph_transaction(&[OutPoint::null()], 250);
+        let pre_fork = graph_transaction(&[out(&missing)], 1);
+        let selected = graph_transaction(&[out(&pre_fork), out(&fork)], 2);
+        let bitcoin_tip = "11".repeat(32);
+        let fork_tip = "22".repeat(32);
+        let bitcoin_block = "33".repeat(32);
+        let fork_block = "44".repeat(32);
+        let frontier_block = "55".repeat(32);
+        let fresh = |path: String, body: String| {
+            server.mock(|when, then| {
+                when.method(GET).path(path);
+                then.status(200)
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .header("x-coincube-observation", "fresh")
+                    .body(body);
+            })
+        };
+        for (chain, tip, block, coinbase) in [
+            (ChainId::Bitcoin, &bitcoin_tip, &bitcoin_block, &bitcoin),
+            (ChainId::BitcoinBlake2b, &fork_tip, &fork_block, &fork),
+        ] {
+            let base = format!(
+                "/api/v1/esplora/{}",
+                HttpObservationSource::prefix(chain).unwrap()
+            );
+            fresh(format!("{base}/blocks/tip/hash"), tip.clone());
+            fresh(
+                format!("{base}/block/{tip}/status"),
+                json!({"in_best_chain":true,"height":961840}).to_string(),
+            );
+            fresh(format!("{base}/block-height/961840"), tip.clone());
+            fresh(format!("{base}/block-height/961640"), block.clone());
+            fresh(
+                format!("{base}/block-height/227931"),
+                "000000000000024b89b42a942fe0d9fea3bb44ab7bd1b19115dd6a759c0808b8".to_owned(),
+            );
+            fresh(
+                format!("{base}/block/{block}/txid/0"),
+                coinbase.compute_txid().to_string(),
+            );
+            server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("{base}/tx/{}/hex", coinbase.compute_txid()));
+                then.status(200).body(hex::encode(serialize(coinbase)));
+            });
+            fresh(
+                format!("{base}/tx/{}", coinbase.compute_txid()),
+                json!({"txid":coinbase.compute_txid(),"status":{"confirmed":true,"block_height":961640,"block_hash":block}}).to_string(),
+            );
+        }
+        let fork_base = "/api/v1/esplora/bitcoin-blake2b/mainnet";
+        fresh(
+            format!("{fork_base}/block-height/961600"),
+            frontier_block.clone(),
+        );
+        for (tx, height, block) in [
+            (&selected, 961660, &fork_tip),
+            (&pre_fork, 961600, &frontier_block),
+        ] {
+            server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("{fork_base}/tx/{}/hex", tx.compute_txid()));
+                then.status(200).body(hex::encode(serialize(tx)));
+            });
+            fresh(
+                format!("{fork_base}/tx/{}", tx.compute_txid()),
+                json!({"txid":tx.compute_txid(),"status":{"confirmed":true,"block_height":height,"block_hash":block}}).to_string(),
+            );
+        }
+        server.mock(|when, then| {
+            when.method(GET)
+                .path("/api/v1/connect/networks/bitcoin-blake2b/anchor")
+                .header("authorization", "Bearer synthetic-observation-token");
+            then.status(200).json_body(json!({"success":true,"data":{
+                "network":"bitcoin-blake2b","state":"available","anchor":{
+                    "tip_hash":fork_tip,"tip_height":961840,"tip_median_time_past":10000,
+                    "observed_at":source.now(),
+                    "observation":{"tip_height":961840,"fork":{"height":961640,"active":true},
+                        "rdts":{"state":"unsupported"}}
+                }
+            }}));
+        });
+        let below_frontier = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("{fork_base}/tx/{}/hex", missing.compute_txid()));
+            then.status(500);
+        });
+        let result = source
+            .discover_fork_ancestry(out(&selected), policy())
+            .await;
+        assert!(matches!(result, Ok(Some(_))), "{:?}", result);
+        let found = result.unwrap().unwrap();
+        assert_eq!(found.links().len(), 2);
+        assert_eq!(found.pair().root_chain(), ChainId::BitcoinBlake2b);
+        below_frontier.assert_hits(0);
     }
 
     #[tokio::test]
@@ -458,6 +745,32 @@ mod tests {
         ));
         mock.assert_hits(0);
     }
+
+    #[tokio::test]
+    async fn streamed_oversize_body_charges_shared_bytes_before_local_graph_limit() {
+        let server = MockServer::start();
+        let (mut source, _sender) = make_source(&server);
+        let (txid, raw) = ancestry_fixture();
+        let body = hex::encode(&raw);
+        let response = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{txid}/hex"));
+            then.status(200)
+                .header("transfer-encoding", "chunked")
+                .body(body.clone());
+        });
+        source.budget = Some(Arc::new(CollectionBudget {
+            requests: AtomicUsize::new(2),
+            bytes: AtomicUsize::new(body.len() - 1),
+        }));
+        assert_eq!(
+            source
+                .ancestry_transaction_search(ChainId::Bitcoin, txid, raw.len() - 1)
+                .await,
+            Err((FailureKind::CollectionLimit, false))
+        );
+        response.assert_hits(1);
+    }
     #[tokio::test]
     async fn failed_root_observation_never_becomes_an_empty_search_or_skipped_branch() {
         use coincube_core::miniscript::bitcoin::{
@@ -467,10 +780,9 @@ mod tests {
         };
         use serde_json::json;
         for (status, confirmed, expected) in [
-            (503, false, Some(FailureKind::Http(503))),
-            (404, false, Some(FailureKind::Changed)),
-            (200, false, Some(FailureKind::Changed)),
-            (200, true, None),
+            (503, false, FailureKind::Http(503)),
+            (404, false, FailureKind::Changed),
+            (200, false, FailureKind::Changed),
         ] {
             let server = MockServer::start();
             let (source, _sender) = make_source(&server);
@@ -499,6 +811,17 @@ mod tests {
                     then.status(200).body(hex::encode(serialize(tx)));
                 });
             }
+            server.mock(|when, then| {
+                when.method(GET).path(format!(
+                    "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                    selected.compute_txid()
+                ));
+                then.status(200)
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .header("x-coincube-observation", "fresh")
+                    .json_body(json!({"txid":selected.compute_txid(),"status":{"confirmed":true,"block_height":961650,"block_hash":"88".repeat(32)}}));
+            });
             let later_read = server.mock(|when, then| {
                 when.method(GET).path(format!(
                     "/api/v1/esplora/bitcoin/mainnet/tx/{}/hex",
@@ -538,15 +861,12 @@ mod tests {
                     },
                 )
                 .await;
-            if let Some(expected) = expected {
-                assert!(
-                    matches!(result,Err(DiscoveryError::Observation(error)) if error == expected)
-                );
-                later_read.assert_hits(0);
-            } else {
-                assert!(matches!(result, Ok(None)));
-                later_read.assert_hits(1);
-            }
+            assert!(
+                matches!(result,Err(DiscoveryError::Observation(error)) if error == expected),
+                "{:?}",
+                result
+            );
+            later_read.assert_hits(0);
         }
     }
 }

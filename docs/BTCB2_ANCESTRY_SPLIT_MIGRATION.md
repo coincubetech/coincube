@@ -16,7 +16,8 @@ The journal has a Windows backend that pins directory components, requires
 private owner-only NTFS files, and replaces intents with write-through
 semantics; Windows crash and access-control tests remain in platform CI.
 Deployed same-database indexer recovery, a realistic authenticated Connect
-scan within the 30-second and 256-request bounds, visual and accessibility
+scan under its separate 90-second ancestry-search and 30-second final-collection
+deadlines (with finite shared data and request bounds), visual and accessibility
 review, physical BitBox and Ledger PSBT approval, and independent review are
 still required before enabling signing. The implementation notes below record
 incremental work; statements about a next step describe the state at that

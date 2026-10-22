@@ -3,6 +3,12 @@
 use super::*;
 use std::collections::BTreeMap;
 
+/// Discovery may inspect unrelated branches before finding a short proof.
+/// This bounds that work independently of the retained proof's 64 links.
+pub const MAX_GRAPH_TRANSACTIONS: usize = 512;
+/// Keep cycle-check work bounded even when the wider graph is dense.
+pub const MAX_GRAPH_EDGES: usize = 4096;
+
 #[derive(Debug, Clone)]
 pub struct OwnedLink {
     pub transaction: Vec<u8>,
@@ -15,7 +21,8 @@ pub struct Candidate {
 }
 #[derive(Debug)]
 pub enum Step {
-    /// The transport must enforce this remaining byte allowance while reading.
+    /// Transport must enforce this remaining allowance while reading; the
+    /// search checks it again when the requested bytes are provided.
     Fetch { txid: Txid, max_bytes: usize },
     /// Reverify retained links after persistence. Qualify the root separately.
     /// Advancing permanently skips this root: stop on transient qualification
@@ -35,6 +42,8 @@ struct Node {
     transaction: Transaction,
     outpoint: OutPoint,
     predecessor: Option<Predecessor>,
+    depth: usize,
+    pre_fork: bool,
     next_input: usize,
 }
 #[derive(Clone, Copy)]
@@ -56,9 +65,11 @@ pub struct Search {
     order: Vec<Txid>,
     cursor: usize,
     edges: BTreeMap<Txid, BTreeSet<Txid>>,
+    edge_count: usize,
     pending: Option<Pending>,
     ready: Option<Txid>,
     bytes: usize,
+    overdepth: bool,
     error: Option<Error>,
 }
 impl Search {
@@ -73,9 +84,11 @@ impl Search {
             order: Vec::new(),
             cursor: 0,
             edges: BTreeMap::new(),
+            edge_count: 0,
             pending: None,
             ready: None,
             bytes: 0,
+            overdepth: false,
             error: None,
         })
     }
@@ -104,11 +117,13 @@ impl Search {
         if let Some(txid) = self.ready.take() {
             let node = &self.nodes[&txid];
             Self::validate_output(node, node.outpoint)?;
-            if node.transaction.is_coinbase() {
-                return self.candidate(txid).map(Step::Candidate);
-            }
-            if node.transaction.input.is_empty() {
-                return Err(Error::InvalidInput);
+            if !node.pre_fork {
+                if node.transaction.is_coinbase() {
+                    return self.candidate(txid).map(Step::Candidate);
+                }
+                if node.transaction.input.is_empty() {
+                    return Err(Error::InvalidInput);
+                }
             }
         }
         if self.nodes.is_empty() {
@@ -122,6 +137,7 @@ impl Search {
             }
             let input = node.next_input;
             let child = node.transaction.input[input].previous_output;
+            let depth = node.depth;
             node.next_input += 1;
             if child.is_null() {
                 return Err(Error::InvalidInput);
@@ -131,20 +147,29 @@ impl Search {
                 self.record_edge(txid, child.txid)?;
                 continue;
             }
+            // A branch too deep for a retained proof cannot preempt a short
+            // sibling that the breadth-first walk has not visited yet.
+            if depth >= MAX_PATH_TRANSACTIONS {
+                self.overdepth = true;
+                continue;
+            }
             let step = self.request(child, Some(Predecessor { txid, input }))?;
             self.record_edge(txid, child.txid)?;
             return Ok(step);
         }
-        Ok(Step::Complete)
+        if self.overdepth {
+            Err(Error::PathLimit)
+        } else {
+            Ok(Step::Complete)
+        }
     }
-    /// Reserve one outstanding fetch only after checking the unchanged shared
-    /// node/byte bounds. The node cap also bounds any reconstructed path depth.
+    /// Reserve one outstanding fetch within the separate graph and byte bounds.
     fn request(
         &mut self,
         outpoint: OutPoint,
         predecessor: Option<Predecessor>,
     ) -> Result<Step, Error> {
-        if self.nodes.len() >= MAX_PATH_TRANSACTIONS {
+        if self.nodes.len() >= MAX_GRAPH_TRANSACTIONS {
             return Err(Error::PathLimit);
         }
         let max_bytes = MAX_PATH_BYTES
@@ -183,6 +208,9 @@ impl Search {
         {
             return Ok(());
         }
+        if self.edge_count >= MAX_GRAPH_EDGES {
+            return Err(Error::PathLimit);
+        }
         let mut pending = BTreeSet::from([child]);
         let mut visited = BTreeSet::new();
         while let Some(txid) = pending.pop_first() {
@@ -196,6 +224,7 @@ impl Search {
             }
         }
         self.edges.entry(parent).or_default().insert(child);
+        self.edge_count += 1;
         Ok(())
     }
     /// Reconstruct the immutable first-discovery path and pass its exact raw
@@ -233,10 +262,16 @@ impl Search {
     /// Supply exactly the requested txid's bytes. Wrong identity, trailing data,
     /// excess bytes, and unsolicited responses permanently fail this search.
     pub fn provide(&mut self, raw: Vec<u8>) -> Result<(), Error> {
+        self.provide_with_pruning(raw, false)
+    }
+    /// A caller may skip a node's inputs only after positively authenticating
+    /// that this transaction is canonical before the fork. This is a discovery
+    /// hint, never a retained proof or a negative chain observation.
+    pub fn provide_with_pruning(&mut self, raw: Vec<u8>, pre_fork: bool) -> Result<(), Error> {
         if let Some(error) = self.error {
             return Err(error);
         }
-        let result = self.provide_inner(raw);
+        let result = self.provide_inner(raw, pre_fork);
         if let Err(error) = result {
             self.error = Some(error);
         }
@@ -245,7 +280,7 @@ impl Search {
     /// Retain one transaction matching the requested identity and its immutable
     /// first predecessor;
     /// defer structural output validation and candidate emission to `step`.
-    fn provide_inner(&mut self, raw: Vec<u8>) -> Result<(), Error> {
+    fn provide_inner(&mut self, raw: Vec<u8>, pre_fork: bool) -> Result<(), Error> {
         let expected = self.pending.ok_or(Error::WrongTransaction)?;
         if raw.len() > MAX_TRANSACTION_BYTES
             || raw.len() > MAX_PATH_BYTES.saturating_sub(self.bytes)
@@ -257,6 +292,10 @@ impl Search {
             return Err(Error::WrongTransaction);
         }
         self.bytes += raw.len();
+        let depth = expected
+            .predecessor
+            .map_or(1, |predecessor| self.nodes[&predecessor.txid].depth + 1);
+        let next_input = if pre_fork { transaction.input.len() } else { 0 };
         self.nodes.insert(
             expected.outpoint.txid,
             Node {
@@ -264,7 +303,9 @@ impl Search {
                 transaction,
                 outpoint: expected.outpoint,
                 predecessor: expected.predecessor,
-                next_input: 0,
+                depth,
+                pre_fork,
+                next_input,
             },
         );
         self.order.push(expected.outpoint.txid);
@@ -688,6 +729,137 @@ mod tests {
                 assert_eq!(result.unwrap_err(), Error::ByteLimit);
             }
             assert_eq!(search.bytes, MAX_PATH_BYTES);
+        }
+    }
+    #[test]
+    fn wide_pre_fork_frontier_preserves_a_short_late_candidate() {
+        let missing = transaction(&[OutPoint::null()], 250);
+        let leaves: Vec<_> = (0..129)
+            .map(|tag| transaction(&[out(&missing)], tag as u8))
+            .collect();
+        let mut path = vec![transaction(&[OutPoint::null()], 200)];
+        for tag in 201..209 {
+            path.push(transaction(&[out(path.last().unwrap())], tag));
+        }
+        let mut inputs: Vec<_> = leaves.iter().map(out).collect();
+        inputs.push(out(path.last().unwrap()));
+        let selected = transaction(&inputs, 210);
+        let mut txs = leaves.clone();
+        txs.extend(path);
+        txs.push(selected.clone());
+        let graph = graph(&txs);
+        let pruned: BTreeSet<_> = leaves.iter().map(Transaction::compute_txid).collect();
+        let mut search = Search::new(out(&selected)).unwrap();
+        let mut requested = Vec::new();
+        let candidate = loop {
+            match search.step().unwrap() {
+                Step::Fetch { txid, max_bytes } => {
+                    requested.push(txid);
+                    assert!(graph[&txid].len() <= max_bytes);
+                    search
+                        .provide_with_pruning(graph[&txid].clone(), pruned.contains(&txid))
+                        .unwrap();
+                }
+                Step::Candidate(candidate) => break candidate,
+                Step::Complete => panic!("the post-fork path must be found"),
+            }
+        };
+        assert!(requested.len() > MAX_PATH_TRANSACTIONS);
+        assert_eq!(candidate.links.len(), 10);
+        assert_eq!(candidate.dependency.root(), out(&txs[129]));
+    }
+
+    #[test]
+    fn all_branches_close_at_a_pre_fork_frontier_without_fetching_below_it() {
+        let missing = transaction(&[OutPoint::null()], 250);
+        let leaves: Vec<_> = (0..5)
+            .map(|tag| transaction(&[out(&missing)], tag))
+            .collect();
+        let mut graph_nodes = leaves.clone();
+        let mut previous = out(&leaves[0]);
+        for tag in 10..26 {
+            let next = transaction(&[previous, out(&leaves[(tag as usize) % 5])], tag);
+            previous = out(&next);
+            graph_nodes.push(next);
+        }
+        let selected = transaction(&[previous, out(&leaves[4])], 30);
+        graph_nodes.push(selected.clone());
+        assert_eq!(graph_nodes.len(), 22);
+        let graph = graph(&graph_nodes);
+        let pruned: BTreeSet<_> = leaves.iter().map(Transaction::compute_txid).collect();
+        let mut search = Search::new(out(&selected)).unwrap();
+        let mut requests = 0;
+        loop {
+            match search.step().unwrap() {
+                Step::Fetch { txid, .. } => {
+                    requests += 1;
+                    search
+                        .provide_with_pruning(graph[&txid].clone(), pruned.contains(&txid))
+                        .unwrap();
+                }
+                Step::Candidate(_) => panic!("a pre-fork branch must not qualify"),
+                Step::Complete => break,
+            }
+        }
+        assert_eq!(requests, graph_nodes.len());
+    }
+
+    #[test]
+    fn dense_graph_stops_at_the_distinct_edge_limit() {
+        let mut txs = vec![transaction(&[OutPoint::null()], 1)];
+        for tag in 2..103 {
+            let parents: Vec<_> = txs.iter().map(out).collect();
+            txs.push(transaction(&parents, tag));
+        }
+        let mut search = Search::new(out(txs.last().unwrap())).unwrap();
+        let result = candidates(&mut search, &graph(&txs));
+        assert_eq!(result.unwrap_err(), Error::PathLimit);
+        assert_eq!(search.edge_count, MAX_GRAPH_EDGES);
+        assert!(search.nodes.len() <= MAX_GRAPH_TRANSACTIONS);
+    }
+
+    #[test]
+    fn visited_graph_cap_accepts_512_nodes_and_rejects_a_513th() {
+        let missing = transaction(&[OutPoint::null()], 250);
+        for leaves_count in [MAX_GRAPH_TRANSACTIONS - 1, MAX_GRAPH_TRANSACTIONS] {
+            let leaves: Vec<_> = (0..leaves_count)
+                .map(|index| {
+                    let mut tx = transaction(&[out(&missing)], (index % 251) as u8);
+                    tx.output[0].value = Amount::from_sat(index as u64 + 1);
+                    tx
+                })
+                .collect();
+            let selected = transaction(&leaves.iter().map(out).collect::<Vec<_>>(), 252);
+            let mut txs = leaves.clone();
+            txs.push(selected.clone());
+            let graph = graph(&txs);
+            let mut search = Search::new(out(&selected)).unwrap();
+            let mut requests = 0;
+            let result = loop {
+                match search.step() {
+                    Ok(Step::Fetch { txid, .. }) => {
+                        requests += 1;
+                        search
+                            .provide_with_pruning(
+                                graph[&txid].clone(),
+                                txid != selected.compute_txid(),
+                            )
+                            .unwrap();
+                    }
+                    Ok(Step::Candidate(_)) => panic!("all leaves are pre-fork"),
+                    Ok(Step::Complete) => break Ok(()),
+                    Err(error) => break Err(error),
+                }
+            };
+            assert_eq!(requests, MAX_GRAPH_TRANSACTIONS);
+            assert_eq!(
+                result,
+                if leaves_count == MAX_GRAPH_TRANSACTIONS - 1 {
+                    Ok(())
+                } else {
+                    Err(Error::PathLimit)
+                }
+            );
         }
     }
 }

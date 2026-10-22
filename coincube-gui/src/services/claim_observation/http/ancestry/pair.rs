@@ -37,6 +37,11 @@ impl HttpObservationSource {
                 .map_err(|_| FailureKind::Malformed)?,
         })
     }
+    pub(in crate::services::claim_observation::http) fn ancestry_first_fork_height(
+        &self,
+    ) -> Result<u32, FailureKind> {
+        Ok(self.ancestry_history()?.first_fork_height)
+    }
 }
 
 /// Matching current mainnet histories with distinct same-height coinbase roots.

@@ -6235,13 +6235,16 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                     .any(|label| label.contains("Fresh indexer data is unavailable")));
             }
             if scenario == "proof-bounded" {
-                assert!(labels.0.iter().any(|label| label.contains("safety limit")));
+                assert!(labels
+                    .0
+                    .iter()
+                    .any(|label| label.contains("Search limit reached")));
             }
             if scenario == "proof-none" {
                 assert!(labels
                     .0
                     .iter()
-                    .any(|label| label.contains("No qualifying post-fork ancestry")));
+                    .any(|label| label.contains("post-fork mining reward unique to this chain")));
             }
         } else if scenario == "error" {
             assert!(labels
