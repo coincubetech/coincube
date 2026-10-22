@@ -239,6 +239,14 @@ pub enum SelectKeySourceMessage {
     BackToGrid,
 }
 
+/// The Hardware Device card's tip.
+const HARDWARE_DEVICE_TIP: &str = "Use a plugged-in hardware signer. \
+     Supported: Ledger Nano S/S+/X, Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY.";
+
+/// The Keychain Keys card's tip on the Bitcoin Blake2b picker, where the
+/// card is disabled.
+const BLAKE2B_KEYCHAIN_TIP: &str = "Keychain keys are not available for Bitcoin Blake2b yet.";
+
 /// The Hardware Device card's tip on the Bitcoin Blake2b picker. A device
 /// signs the legacy way, so a spend that only devices sign is replayable
 /// onto Bitcoin; the Cube Key on the same path can sign it protected.
@@ -1638,24 +1646,56 @@ impl SelectKeySource {
     // rest fire their existing selection flows directly and end up at
     // `details_view` for alias entry.
 
-    /// The key-source cards of the Bitcoin Blake2b picker, in display
-    /// order: Cube Key, Hardware Device, Border Wallet, Import xpub, Paste
-    /// xpub. Keychain keys and provider tokens are not offered there.
-    fn blake2b_grid_cards(&self) -> Vec<GridCard> {
+    /// The key-source cards, in display order, three per row:
+    ///   Row 1: Hardware Device · Keychain Keys · Cube Key
+    ///   Row 2: Border Wallet · Import xpub File · Paste xpub
+    /// Bitcoin Blake2b shows the same grid; only the Hardware Device tip
+    /// differs, and the Keychain Keys card is disabled there because
+    /// Keychain keys are not offered on that chain.
+    fn grid_cards(&self) -> Vec<GridCard> {
+        let blake2b = self.chain.is_blake2b();
+        let keychain_enabled = !blake2b && self.keychain_available();
+        let keychain_tip = if blake2b {
+            Some(BLAKE2B_KEYCHAIN_TIP)
+        } else if !keychain_enabled {
+            Some("Sign in to Connect to use Keychain keys.")
+        } else {
+            None
+        };
+        // "Cube Key" replaces the old Developer-mode "Generate hot key"
+        // button. Disabled when the master signer is already placed in
+        // the vault (matches the old gate).
         let master_fg = self.master_signer.lock().expect("poisoned").fingerprint();
+        let cube_key_enabled = !self.keys.contains_key(&master_fg);
+        let cube_key_tip = if cube_key_enabled {
+            "A key generated on this device, stored either encrypted with your \
+             Cube PIN or derived from a Passkey."
+        } else {
+            "Your Cube Key is already placed in this vault."
+        };
         vec![
-            GridCard {
-                icon: icon::cube_icon,
-                title: "Cube Key",
-                tip: None,
-                on_press: (!self.keys.contains_key(&master_fg))
-                    .then_some(SelectKeySourceMessage::SelectGenerateMasterKey),
-            },
             GridCard {
                 icon: icon::usb_icon,
                 title: "Hardware Device",
-                tip: Some(BLAKE2B_HARDWARE_DEVICE_TIP),
+                tip: Some(if blake2b {
+                    BLAKE2B_HARDWARE_DEVICE_TIP
+                } else {
+                    HARDWARE_DEVICE_TIP
+                }),
                 on_press: Some(SelectKeySourceMessage::ShowHardwareListen),
+            },
+            GridCard {
+                icon: icon::key_icon,
+                title: "Keychain Keys",
+                tip: keychain_tip,
+                on_press: keychain_enabled.then_some(SelectKeySourceMessage::ShowKeychainKeys),
+            },
+            GridCard {
+                icon: icon::cube_icon,
+                title: "Cube Key",
+                tip: Some(cube_key_tip),
+                on_press: cube_key_enabled
+                    .then_some(SelectKeySourceMessage::SelectGenerateMasterKey),
             },
             GridCard {
                 icon: icon::grid_icon,
@@ -1664,13 +1704,13 @@ impl SelectKeySource {
                 on_press: Some(SelectKeySourceMessage::SelectBorderWalletSafetyNet),
             },
             GridCard {
-                icon: icon::key_icon,
-                title: "Import xpub",
+                icon: icon::import_icon,
+                title: "Import xpub File",
                 tip: None,
                 on_press: Some(SelectKeySourceMessage::SelectLoadXpub),
             },
             GridCard {
-                icon: icon::key_icon,
+                icon: icon::clipboard_icon,
                 title: "Paste xpub",
                 tip: None,
                 on_press: Some(SelectKeySourceMessage::SelectEnterXpub),
@@ -1685,28 +1725,17 @@ impl SelectKeySource {
         // parameter because the view dispatcher already resolves it.
         _hws: Vec<DetectedHw>,
     ) -> Element<Message> {
-        let only_safety_net = self.actual_path.token_kind.contains(&KeyKind::SafetyNet)
+        // Provider tokens are not offered on Bitcoin Blake2b, so neither
+        // the safety-net-only screen nor the advanced options apply there.
+        let tokens_offered = !self.chain.is_blake2b();
+        let only_safety_net = tokens_offered
+            && self.actual_path.token_kind.contains(&KeyKind::SafetyNet)
             && self.actual_path.token_kind.len() == 1;
 
         let header = modal::header(
             Some("Select key source".to_string()),
             Some(|| Message::Close),
         );
-
-        if self.chain.is_blake2b() {
-            let content = self
-                .blake2b_grid_cards()
-                .into_iter()
-                .fold(Column::new().spacing(10).push(header), |col, card| {
-                    col.push(self.view_card((card.icon)(), card.title, card.tip, card.on_press))
-                })
-                .push((!self.keys.is_empty()).then(|| self.view_keys()))
-                .width(modal::MODAL_WIDTH);
-            return Container::new(content)
-                .padding(15)
-                .style(theme::card::modal)
-                .into();
-        }
 
         // If the path is "safety-net-only" there's nothing to pick
         // *but* a safety-net token — surface just that widget and
@@ -1726,78 +1755,24 @@ impl SelectKeySource {
 
         let already_used = (!self.keys.is_empty()).then(|| self.view_keys());
 
-        // Row 1: Hardware Device · Keychain Keys · Cube Key
-        let row1 = Row::new()
-            .spacing(modal::V_SPACING)
-            .push(self.view_card(
-                icon::usb_icon(),
-                "Hardware Device",
-                Some(
-                    "Use a plugged-in hardware signer. Supported: Ledger Nano S/S+/X, \
-                     Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY.",
-                ),
-                Some(SelectKeySourceMessage::ShowHardwareListen),
-            ))
-            .push({
-                let enabled = self.keychain_available();
-                let on_press = enabled.then_some(SelectKeySourceMessage::ShowKeychainKeys);
-                let tip: Option<&str> = if enabled {
-                    None
-                } else {
-                    Some("Sign in to Connect to use Keychain keys.")
-                };
-                self.view_card(icon::key_icon(), "Keychain Keys", tip, on_press)
-            })
-            .push({
-                // "Cube Key" replaces the old Developer-mode "Generate
-                // hot key" button. Disabled when the master signer is
-                // already placed in the vault (matches the old gate).
-                let master_fg = self.master_signer.lock().expect("poisoned").fingerprint();
-                let enabled = !self.keys.contains_key(&master_fg);
-                let on_press = enabled.then_some(SelectKeySourceMessage::SelectGenerateMasterKey);
-                let tip = if enabled {
-                    Some(
-                        "A key generated on this device, stored either encrypted with your \
-                         Cube PIN or derived from a Passkey.",
-                    )
-                } else {
-                    Some("Your Cube Key is already placed in this vault.")
-                };
-                self.view_card(icon::cube_icon(), "Cube Key", tip, on_press)
-            });
+        let mut cards = self.grid_cards().into_iter().peekable();
+        let mut column = Column::new().spacing(10).push(header).push(already_used);
+        while cards.peek().is_some() {
+            let row =
+                cards
+                    .by_ref()
+                    .take(3)
+                    .fold(Row::new().spacing(modal::V_SPACING), |row, card| {
+                        row.push(self.view_card((card.icon)(), card.title, card.tip, card.on_press))
+                    });
+            column = column.push(row);
+        }
 
-        // Row 2: Border Wallet · Import xpub · Paste xpub
-        let row2 = Row::new()
-            .spacing(modal::V_SPACING)
-            .push(self.view_card(
-                // Placeholder icon — replace with a grid-pattern SVG in
-                // a follow-up.
-                icon::grid_icon(),
-                "Border Wallet",
-                Some(BORDER_WALLET_TIP),
-                Some(SelectKeySourceMessage::SelectBorderWalletSafetyNet),
-            ))
-            .push(self.view_card(
-                icon::import_icon(),
-                "Import xpub File",
-                None,
-                Some(SelectKeySourceMessage::SelectLoadXpub),
-            ))
-            .push(self.view_card(
-                icon::clipboard_icon(),
-                "Paste xpub",
-                None,
-                Some(SelectKeySourceMessage::SelectEnterXpub),
-            ));
+        let advanced = tokens_offered
+            .then(|| self.view_advanced_options())
+            .flatten();
 
-        let advanced = self.view_advanced_options();
-
-        let column = Column::new()
-            .spacing(10)
-            .push(header)
-            .push(already_used)
-            .push(row1)
-            .push(row2)
+        let column = column
             .push(advanced)
             .align_x(Horizontal::Center)
             .width(modal::MODAL_WIDTH);
@@ -3117,47 +3092,76 @@ mod tests {
         }
     }
 
-    /// HW-1: the Bitcoin Blake2b grid offers exactly Cube Key, Hardware
-    /// Device, Border Wallet, Import xpub and Paste xpub, in that order. The
-    /// Hardware Device card says its spends can be replayed and points to
-    /// the Cube Key; the Border Wallet card keeps its Bitcoin tip.
+    /// The key-source grid every chain shows, in display order.
+    const GRID_TITLES: [&str; 6] = [
+        "Hardware Device",
+        "Keychain Keys",
+        "Cube Key",
+        "Border Wallet",
+        "Import xpub File",
+        "Paste xpub",
+    ];
+
+    /// The Bitcoin grid shows the six key-source cards; Keychain Keys is
+    /// disabled until the user is signed in to Connect.
+    #[test]
+    fn grid_offers_every_key_source() {
+        let picker = empty_picker();
+        let cards = picker.grid_cards();
+        assert_eq!(
+            cards.iter().map(|card| card.title).collect::<Vec<_>>(),
+            GRID_TITLES
+        );
+        assert_eq!(cards[0].tip, Some(HARDWARE_DEVICE_TIP));
+        assert!(cards[1].on_press.is_none());
+        assert_eq!(
+            cards[1].tip,
+            Some("Sign in to Connect to use Keychain keys.")
+        );
+        let _ = picker.view_grid(Vec::new());
+    }
+
+    /// HW-1: the Bitcoin Blake2b grid matches the Bitcoin one — same cards,
+    /// same order — with Keychain Keys disabled. The Hardware Device card
+    /// says its spends can be replayed and points to the Cube Key; the
+    /// Border Wallet card keeps its Bitcoin tip.
     #[test]
     fn fork_grid_offers_cube_key_hardware_and_xpubs() {
         for chain in FORK_CHAINS {
-            let picker = fork_picker(chain);
-            let cards = picker.blake2b_grid_cards();
+            let mut picker = fork_picker(chain);
+            // Signed in or not, Keychain keys stay off on the fork chain.
+            picker.cube_id = Some("cube".to_string());
+            picker.coincube_client = Some(crate::services::coincube::CoincubeClient::new());
+            assert!(picker.keychain_available());
+            let cards = picker.grid_cards();
             assert_eq!(
                 cards.iter().map(|card| card.title).collect::<Vec<_>>(),
-                [
-                    "Cube Key",
-                    "Hardware Device",
-                    "Border Wallet",
-                    "Import xpub",
-                    "Paste xpub"
-                ]
+                GRID_TITLES
             );
             assert!(matches!(
                 cards[0].on_press,
+                Some(SelectKeySourceMessage::ShowHardwareListen)
+            ));
+            assert!(cards[1].on_press.is_none());
+            assert_eq!(cards[1].tip, Some(BLAKE2B_KEYCHAIN_TIP));
+            assert!(matches!(
+                cards[2].on_press,
                 Some(SelectKeySourceMessage::SelectGenerateMasterKey)
             ));
             assert!(matches!(
-                cards[1].on_press,
-                Some(SelectKeySourceMessage::ShowHardwareListen)
-            ));
-            assert!(matches!(
-                cards[2].on_press,
+                cards[3].on_press,
                 Some(SelectKeySourceMessage::SelectBorderWalletSafetyNet)
             ));
-            assert_eq!(cards[2].tip, Some(BORDER_WALLET_TIP));
+            assert_eq!(cards[3].tip, Some(BORDER_WALLET_TIP));
             assert!(matches!(
-                cards[3].on_press,
+                cards[4].on_press,
                 Some(SelectKeySourceMessage::SelectLoadXpub)
             ));
             assert!(matches!(
-                cards[4].on_press,
+                cards[5].on_press,
                 Some(SelectKeySourceMessage::SelectEnterXpub)
             ));
-            assert_eq!(cards[1].tip, Some(BLAKE2B_HARDWARE_DEVICE_TIP));
+            assert_eq!(cards[0].tip, Some(BLAKE2B_HARDWARE_DEVICE_TIP));
             assert!(BLAKE2B_HARDWARE_DEVICE_TIP
                 .contains("can be replayed onto Bitcoin unless the coins were split first"));
             assert!(BLAKE2B_HARDWARE_DEVICE_TIP.contains("Cube Key on the same path"));
