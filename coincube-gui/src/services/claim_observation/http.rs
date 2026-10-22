@@ -21,6 +21,9 @@ pub use discovery::{
 };
 
 const BODY_LIMIT: usize = 256 * 1024;
+// Esplora /tx includes every input and prevout, so its JSON can be much larger
+// than the authenticated raw transaction. Keep this route separately bounded.
+const TRANSACTION_METADATA_LIMIT: usize = 2 * 1024 * 1024;
 const TRANSACTION_HEX_LIMIT: usize = 2 * coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -493,7 +496,21 @@ impl ObservationSource for HttpObservationSource {
         txid: Txid,
     ) -> Result<FreshRead<TransactionObservation>, FailureKind> {
         // /tx includes txid; /status alone cannot bind a body to the requested tx.
-        let (status, bytes, headers, stamp) = self.get(chain, &format!("tx/{}", txid)).await?;
+        let (status, bytes, headers, stamp) = self
+            .get_body_detailed(
+                chain,
+                &format!("tx/{}", txid),
+                true,
+                TRANSACTION_METADATA_LIMIT,
+            )
+            .await
+            .map_err(|(error, exceeded_limit)| {
+                if exceeded_limit {
+                    FailureKind::CollectionLimit
+                } else {
+                    error
+                }
+            })?;
         let value = if status == 404 {
             TransactionObservation::Absent
         } else {
@@ -803,6 +820,99 @@ mod tests {
         }
     }
     #[tokio::test]
+    async fn large_valid_transaction_metadata_reader_accepts_both_chains() {
+        use coincube_core::miniscript::bitcoin::{
+            absolute, consensus::serialize, transaction, Amount, ScriptBuf, Transaction, TxIn,
+            TxOut,
+        };
+
+        let transaction = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: (1..=1_000)
+                .map(|n| TxIn {
+                    previous_output: OutPoint::new(
+                        Txid::from_str(&format!("{n:064x}")).unwrap(),
+                        0,
+                    ),
+                    ..TxIn::default()
+                })
+                .collect(),
+            output: vec![TxOut {
+                value: Amount::from_sat(1_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let raw = serialize(&transaction);
+        assert!(raw.len() < coincube_core::claim_ancestry::MAX_TRANSACTION_BYTES);
+        let txid = transaction.compute_txid();
+        let block_hash = BlockHash::from_str(&"22".repeat(32)).unwrap();
+        let inputs: Vec<_> = transaction
+            .input
+            .iter()
+            .map(|input| {
+                json!({
+                    "txid": input.previous_output.txid,
+                    "vout": input.previous_output.vout,
+                    "prevout": {
+                        "scriptpubkey": "0014".to_owned() + &"33".repeat(20),
+                        "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 ".to_owned() + &"33".repeat(20),
+                        "scriptpubkey_type": "v0_p2wpkh",
+                        "value": 2_000
+                    },
+                    "scriptsig": "",
+                    "scriptsig_asm": "",
+                    "witness": [],
+                    "is_coinbase": false,
+                    "sequence": input.sequence.to_consensus_u32()
+                })
+            })
+            .collect();
+        let body = json!({
+            "txid": txid,
+            "status": {"confirmed": true, "block_height": 961_650, "block_hash": block_hash},
+            "vin": inputs,
+            "vout": [{"scriptpubkey": "", "value": 1_000}]
+        })
+        .to_string();
+        assert!(body.len() > BODY_LIMIT);
+        assert!(body.len() < TRANSACTION_METADATA_LIMIT);
+
+        for chain in [ChainId::Bitcoin, ChainId::BitcoinBlake2b] {
+            let server = MockServer::start();
+            let (source, _sender) = source(&server);
+            let prefix = HttpObservationSource::prefix(chain).unwrap();
+            let raw_mock = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/{prefix}/tx/{txid}/hex"));
+                then.status(200).body(hex::encode(&raw));
+            });
+            let status_mock = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/{prefix}/tx/{txid}"))
+                    .header("x-coincube-observation", "fresh");
+                then.status(200)
+                    .header("x-coincube-observation", "fresh")
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .body(&body);
+            });
+            assert_eq!(source.ancestry_transaction(chain, txid).await.unwrap(), raw);
+            assert_eq!(
+                source.transaction(chain, txid).await.unwrap().value,
+                TransactionObservation::Confirmed {
+                    txid,
+                    block: BlockRef {
+                        height: 961_650,
+                        hash: block_hash
+                    }
+                }
+            );
+            raw_mock.assert_hits(1);
+            status_mock.assert_hits(1);
+        }
+    }
+    #[tokio::test]
     async fn ancestry_cancellation_drops_inflight_read() {
         let server = MockServer::start();
         let (source, sender) = source(&server);
@@ -899,8 +1009,8 @@ mod tests {
             (
                 200,
                 true,
-                "x".repeat(BODY_LIMIT + 1),
-                Some(FailureKind::Malformed),
+                "x".repeat(TRANSACTION_METADATA_LIMIT + 1),
+                Some(FailureKind::CollectionLimit),
             ),
         ] {
             let server = MockServer::start();

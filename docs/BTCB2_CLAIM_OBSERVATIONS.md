@@ -104,12 +104,17 @@ client with no JWT, cookies or device headers, no redirects and a five-second
 request deadline. The origin must not contain userinfo, query, fragment or a
 path prefix. No alternate provider or chain fallback exists.
 
-Every anonymous response requires all three fresh acknowledgement markers.
-Bodies are streamed with a 256 KiB cap (oversized legitimate transactions remain
-unavailable). Request-start wall timestamps are retained conservatively. `/tx`
-responses must contain the requested txid and complete, consistent confirmation
-fields; `/tx/.../status` alone cannot establish that body binding. Only an explicit
-fresh 404 becomes absence. Other HTTP codes remain typed failures.
+Fresh observation responses require all three acknowledgement markers.
+Fresh `/tx/{txid}` JSON metadata has a separate 2 MiB response cap because its
+input and prevout details can be much larger than the raw transaction. Other
+fresh reads retain the 256 KiB cap; raw transaction hex retains its 400,000-byte
+decoded cap. The shared 16 MiB collection budget also charges the larger read.
+An oversized `/tx` response is a collection-limit refusal, while malformed JSON
+remains a malformed-response refusal. Request-start wall timestamps are retained
+conservatively. `/tx` responses must contain the requested txid and complete,
+consistent confirmation fields; `/tx/.../status` alone cannot establish that body
+binding. Only an explicit fresh 404 becomes absence. Other HTTP codes remain
+typed failures.
 
 The shared authenticated anchor reader now disables redirects, uses a ten-second
 HTTP timeout, and streams at most 64 KiB. Existing typed state/error parsing is

@@ -394,6 +394,60 @@ mod tests {
         assert_eq!(budget.requests.load(Ordering::Relaxed), MAX_REQUESTS);
     }
 
+    #[tokio::test]
+    async fn larger_transaction_metadata_charges_the_shared_discovery_budget() {
+        let server = MockServer::start();
+        let (source, _sender) = make_source(&server);
+        let source = source.discovery_search_snapshot();
+        let txid = Txid::from_str(&"11".repeat(32)).unwrap();
+        let body = json!({
+            "txid": txid,
+            "status": {"confirmed": false},
+            "extra": "x".repeat(super::BODY_LIMIT)
+        })
+        .to_string();
+        assert!(body.len() > super::BODY_LIMIT);
+        let mock = server.mock(|when, then| {
+            when.method(GET)
+                .path(format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{txid}"));
+            then.status(200)
+                .header("x-coincube-observation", "fresh")
+                .header("x-cache", "BYPASS")
+                .header("cache-control", "no-store")
+                .body(&body);
+        });
+        let budget = source.budget.as_ref().unwrap();
+        let starting_requests = budget.requests.load(Ordering::Relaxed);
+        let starting_bytes = budget.bytes.load(Ordering::Relaxed);
+        assert_eq!(
+            source
+                .transaction(ChainId::BitcoinBlake2b, txid)
+                .await
+                .unwrap()
+                .value,
+            TransactionObservation::Unconfirmed { txid }
+        );
+        assert_eq!(
+            budget.requests.load(Ordering::Relaxed),
+            starting_requests - 1
+        );
+        assert_eq!(
+            budget.bytes.load(Ordering::Relaxed),
+            starting_bytes - body.len()
+        );
+        let nested = source.discovery_snapshot();
+        assert!(Arc::ptr_eq(nested.budget.as_ref().unwrap(), budget));
+        budget.bytes.store(body.len() - 1, Ordering::Relaxed);
+        assert_eq!(
+            nested
+                .transaction(ChainId::BitcoinBlake2b, txid)
+                .await
+                .unwrap_err(),
+            FailureKind::CollectionLimit
+        );
+        mock.assert_hits(2);
+    }
+
     fn graph_transaction(parents: &[OutPoint], tag: u8) -> Transaction {
         Transaction {
             version: transaction::Version::TWO,
@@ -502,7 +556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn pre_fork_sibling_does_not_hide_a_qualifying_post_fork_root() {
+    async fn large_transaction_metadata_pre_fork_sibling_does_not_hide_post_fork_root() {
         let server = MockServer::start();
         let (source, _sender) = make_source(&server);
         let (_, raw) = ancestry_fixture();
@@ -512,7 +566,34 @@ mod tests {
         fork.output[0].value = Amount::from_sat(4000);
         let out = |tx: &Transaction| OutPoint::new(tx.compute_txid(), 0);
         let missing = graph_transaction(&[OutPoint::null()], 250);
-        let pre_fork = graph_transaction(&[out(&missing)], 1);
+        let mut pre_fork_parents = vec![out(&missing)];
+        pre_fork_parents.extend(
+            (1..1_000).map(|n| OutPoint::new(Txid::from_str(&format!("{n:064x}")).unwrap(), 0)),
+        );
+        let pre_fork = graph_transaction(&pre_fork_parents, 1);
+        assert!(serialize(&pre_fork).len() < claim_ancestry::MAX_TRANSACTION_BYTES);
+        let large_pre_fork_status = json!({
+            "txid": pre_fork.compute_txid(),
+            "status": {"confirmed": true, "block_height": 961600, "block_hash": "55".repeat(32)},
+            "vin": pre_fork.input.iter().map(|input| json!({
+                "txid": input.previous_output.txid,
+                "vout": input.previous_output.vout,
+                "prevout": {
+                    "scriptpubkey": "0014".to_owned() + &"66".repeat(20),
+                    "scriptpubkey_asm": "OP_0 OP_PUSHBYTES_20 ".to_owned() + &"66".repeat(20),
+                    "scriptpubkey_type": "v0_p2wpkh",
+                    "value": 2_000
+                },
+                "scriptsig": "01",
+                "scriptsig_asm": "OP_PUSHBYTES_1 01",
+                "witness": [],
+                "is_coinbase": false,
+                "sequence": input.sequence.to_consensus_u32()
+            })).collect::<Vec<_>>()
+        })
+        .to_string();
+        assert!(large_pre_fork_status.len() > super::BODY_LIMIT);
+        assert!(large_pre_fork_status.len() < super::TRANSACTION_METADATA_LIMIT);
         let selected = graph_transaction(&[out(&pre_fork), out(&fork)], 2);
         let bitcoin_tip = "11".repeat(32);
         let fork_tip = "22".repeat(32);
@@ -578,7 +659,11 @@ mod tests {
             });
             fresh(
                 format!("{fork_base}/tx/{}", tx.compute_txid()),
-                json!({"txid":tx.compute_txid(),"status":{"confirmed":true,"block_height":height,"block_hash":block}}).to_string(),
+                if tx.compute_txid() == pre_fork.compute_txid() {
+                    large_pre_fork_status.clone()
+                } else {
+                    json!({"txid":tx.compute_txid(),"status":{"confirmed":true,"block_height":height,"block_hash":block}}).to_string()
+                },
             );
         }
         server.mock(|when, then| {
