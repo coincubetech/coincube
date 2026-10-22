@@ -60,6 +60,15 @@ fn refreshes_claim_pair(message: &AppMessage) -> bool {
     )
 }
 
+/// Exact provider/account context to revalidate on the next local PIN attempt.
+/// Holding this candidate grants neither seed access nor daemon authority.
+#[derive(Clone)]
+struct ForkUnlockCandidate {
+    root: CoincubeDirectory,
+    client: crate::services::coincube::CoincubeClient,
+    user_id: u32,
+}
+
 pub struct GUI {
     panes: pane_grid::State<pane::Pane>,
     focus: Option<pane_grid::Pane>,
@@ -228,6 +237,54 @@ impl GUI {
                 Message::Pane(pane_id, pane::Message::tab(tab_id, *message))
             }
             message => message,
+        };
+        // Every hosted fork PIN starts with a completed, scoped account
+        // candidate. A cold Home can borrow one unambiguous verified sibling;
+        // an account still being checked cannot bypass its gate that way.
+        let opening_pin = match &message {
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => match inner.as_ref() {
+                tab::Message::Launch(home::Message::Run(root, _, chain, _))
+                    if chain.is_blake2b() =>
+                {
+                    self.panes
+                        .get(*pane_id)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
+                        .and_then(|tab| match &tab.state {
+                            tab::State::Home(home) => {
+                                let candidate = if home.connect_account.is_authenticated() {
+                                    self.verified_unlock_origin(*pane_id, *tab_id)
+                                } else if home.connect_account.authenticated_client().is_none() {
+                                    self.unique_unlock_candidate(
+                                        root,
+                                        &home.connect_account.client.base_url,
+                                    )
+                                } else {
+                                    // A retained token while this Home's account
+                                    // gate is checking or closed is not admission.
+                                    None
+                                };
+                                candidate.map(|candidate| (*pane_id, *tab_id, candidate))
+                            }
+                            _ => None,
+                        })
+                }
+                _ => None,
+            },
+            _ => None,
+        };
+        // Shared-client restore reaches readiness without SetSession. Capture
+        // its exact current origin before Pane converts this to an originless intent.
+        let ready_unlock = match &message {
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::Launch(home::Message::ConnectSignedInBubble)
+                        | tab::Message::ConnectSignedIn
+                ) =>
+            {
+                self.verified_unlock_origin(*pane_id, *tab_id)
+            }
+            _ => None,
         };
         // Reuse a sibling session when opening Home or a Bitcoin Cube. Separate
         // keyring refreshes race token rotation and can leave older Cubes with
@@ -415,9 +472,115 @@ impl GUI {
         // Dispatch may return early (notably for in-App account messages).
         // Keep those returns inside the helper so invalidation tasks always run.
         auth_tasks.push(self.update_message(message));
+        if let Some(candidate) = ready_unlock {
+            for (_, pane) in self.panes.iter_mut() {
+                for tab in &mut pane.tabs {
+                    if let tab::State::PinEntry(pin) = &mut tab.state {
+                        pin.adopt_connect_candidate(
+                            &candidate.root,
+                            candidate.client.clone(),
+                            candidate.user_id,
+                        );
+                    }
+                }
+            }
+        }
+
+        if let Some((pane_id, tab_id, candidate)) = opening_pin {
+            if let Some(tab::Tab {
+                state: tab::State::PinEntry(pin),
+                ..
+            }) = self
+                .panes
+                .get_mut(pane_id)
+                .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
+            {
+                pin.adopt_connect_candidate(&candidate.root, candidate.client, candidate.user_id);
+            }
+        }
+
         self.refresh_claim_deposit_display();
         self.refresh_sidebar_session_status();
         Task::batch(auth_tasks)
+    }
+
+    fn verified_unlock_origin(
+        &self,
+        pane_id: pane_grid::Pane,
+        tab_id: usize,
+    ) -> Option<ForkUnlockCandidate> {
+        let tab = self
+            .panes
+            .get(pane_id)?
+            .tabs
+            .iter()
+            .find(|tab| tab.id == tab_id)?;
+        match &tab.state {
+            tab::State::Home(home) if home.connect_account.is_authenticated() => {
+                Some(ForkUnlockCandidate {
+                    root: home.datadir_path.clone(),
+                    user_id: home.connect_account.user.as_ref()?.id,
+                    client: home.connect_account.authenticated_client()?,
+                })
+            }
+            tab::State::App(app) => {
+                app.shareable_connect_identity()
+                    .map(|(user_id, client)| ForkUnlockCandidate {
+                        root: app.datadir().clone(),
+                        user_id,
+                        client,
+                    })
+            }
+            _ => None,
+        }
+    }
+
+    /// A cold Home may borrow only one unambiguous completed identity.
+    /// Conflicting account or token snapshots require a new account check.
+    fn unique_unlock_candidate(
+        &self,
+        root: &CoincubeDirectory,
+        provider: &str,
+    ) -> Option<ForkUnlockCandidate> {
+        let mut selected: Option<ForkUnlockCandidate> = None;
+        for (_, pane) in self.panes.iter() {
+            for tab in &pane.tabs {
+                let identity = match &tab.state {
+                    tab::State::Home(home) if home.connect_account.is_authenticated() => {
+                        home.connect_account.user.as_ref().and_then(|user| {
+                            home.connect_account
+                                .authenticated_client()
+                                .map(|client| (home.datadir_path.clone(), user.id, client))
+                        })
+                    }
+                    tab::State::App(app) => app
+                        .shareable_connect_identity()
+                        .map(|(user_id, client)| (app.datadir().clone(), user_id, client)),
+                    _ => None,
+                };
+                let Some((source_root, user_id, client)) = identity else {
+                    continue;
+                };
+                if !crate::chain::same_path(root.path(), source_root.path())
+                    || provider.trim_end_matches('/') != client.base_url.trim_end_matches('/')
+                    || client.token().is_none_or(|token| token.trim().is_empty())
+                {
+                    continue;
+                }
+                if let Some(previous) = &selected {
+                    if previous.user_id != user_id || previous.client.token() != client.token() {
+                        return None;
+                    }
+                } else {
+                    selected = Some(ForkUnlockCandidate {
+                        root: source_root,
+                        client,
+                        user_id,
+                    });
+                }
+            }
+        }
+        selected
     }
 
     // The footer describes signing in to the app, not the individual Cube's
@@ -1318,6 +1481,624 @@ mod fork_auth_dispatch_tests {
             "opening Home should use its sibling's session instead of refreshing it"
         );
         let _ = std::fs::remove_dir_all(root_path);
+    }
+
+    #[test]
+    fn accepted_home_login_reaches_an_already_open_fork_pin() {
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let root_path = std::env::temp_dir()
+                    .join(format!("pin-session-handoff-{}", uuid::Uuid::new_v4()));
+                let root = CoincubeDirectory::new(root_path.clone());
+                std::fs::create_dir_all(&root_path).unwrap();
+                let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut client =
+                    crate::services::coincube::CoincubeClient::for_test("http://127.0.0.1:1");
+                client.set_token("old-session");
+                home.connect_account.client = client.clone();
+                let pin = crate::pin_entry::PinEntry::new(
+                    crate::app::settings::CubeSettings::new(
+                        "Pending fork".into(),
+                        ChainId::BitcoinBlake2b,
+                    ),
+                    root_path.clone(),
+                    crate::pin_entry::PinEntrySuccess::LoadApp {
+                        datadir: root.clone(),
+                        config: crate::app::Config::new(false),
+                        network: bitcoin::Network::Bitcoin,
+                        internal_bitcoind: None,
+                        backup: None,
+                        wallet_settings: None,
+                        connect_client: Some(client),
+                    },
+                    None,
+                );
+                let mut pane = pane::Pane::new_with_tab(tab::State::Home(home));
+                pane.tabs.push(tab::Tab::new(2, tab::State::PinEntry(pin)));
+                let (panes, pane_id) = pane_grid::State::new(pane);
+                let mut gui = GUI {
+                    panes,
+                    focus: Some(pane_id),
+                    config: Config::new(root, None),
+                    window_id: None,
+                    window_init: None,
+                    window_config: None,
+                    global_cache: GlobalCache::default(),
+                    theme_mode: Default::default(),
+                };
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Launch(home::Message::View(
+                            home::ViewMessage::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::SetSession(
+                                    LoginResponse {
+                                        requires_2fa: false,
+                                        token: "new-session".into(),
+                                        refresh_token: "new-refresh".into(),
+                                        user: User {
+                                            id: 42,
+                                            email: "fixture@example.invalid".into(),
+                                            email_verified: Some(true),
+                                        },
+                                    },
+                                    0,
+                                ),
+                            ),
+                        )),
+                    ),
+                )));
+                let account = |message| {
+                    Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Launch(home::Message::View(
+                                home::ViewMessage::ConnectAccount(message),
+                            )),
+                        ),
+                    )
+                };
+                let ready = || {
+                    Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Launch(home::Message::ConnectSignedInBubble),
+                        ),
+                    )
+                };
+                // A token response is not admission: the account gate has not run.
+                drop(gui.update(ready()));
+                let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert!(
+                    connect_client.is_none(),
+                    "login token alone grants no PIN candidate"
+                );
+                drop(gui.update(account(
+                    crate::app::view::ConnectAccountMessage::SessionLoaded {
+                        user: User {
+                            id: 42,
+                            email: "fixture@example.invalid".into(),
+                            email_verified: Some(true),
+                        },
+                        plan: None,
+                        epoch: 0,
+                    },
+                )));
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    unreachable!()
+                };
+                let generation = home.connect_account.session_generation();
+                drop(gui.update(ready()));
+                let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert!(
+                    connect_client.is_none(),
+                    "checking account grants no PIN candidate"
+                );
+                for outcome in [
+                    crate::services::coincube::DuressCheckOutcome::Unreachable,
+                    crate::services::coincube::DuressCheckOutcome::Ok(
+                        crate::services::coincube::DuressState {
+                            active: true,
+                            unlock_at: None,
+                            enrolled: false,
+                            this_device_registered: false,
+                        },
+                    ),
+                ] {
+                    drop(gui.update(account(
+                        crate::app::view::ConnectAccountMessage::DuressStateChecked(
+                            outcome, generation, 2,
+                        ),
+                    )));
+                    drop(gui.update(ready()));
+                    let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                    else {
+                        unreachable!()
+                    };
+                    let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                        &pin.on_success;
+                    assert!(
+                        connect_client.is_none(),
+                        "closed account gate grants no PIN candidate"
+                    );
+                }
+                drop(gui.update(account(
+                    crate::app::view::ConnectAccountMessage::DuressStateChecked(
+                        crate::services::coincube::DuressCheckOutcome::Ok(
+                            crate::services::coincube::DuressState {
+                                active: false,
+                                unlock_at: None,
+                                enrolled: false,
+                                this_device_registered: false,
+                            },
+                        ),
+                        generation,
+                        0,
+                    ),
+                )));
+                drop(gui.update(ready()));
+                let pending = gui
+                    .panes
+                    .get(pane_id)
+                    .unwrap()
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == 2)
+                    .unwrap();
+                let tab::State::PinEntry(pin) = &pending.state else {
+                    panic!("unlock must remain at PIN")
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert_eq!(
+                    connect_client.as_ref().and_then(|client| client.token()),
+                    Some("new-session"),
+                    "a completed Home login must not strand the pending fork PIN signed out"
+                );
+                assert!(
+                    pin.take_fork_signer().is_none(),
+                    "session propagation must not unlock the seed"
+                );
+                let source = gui
+                    .panes
+                    .get_mut(pane_id)
+                    .unwrap()
+                    .tabs
+                    .iter_mut()
+                    .find(|tab| tab.id == 1)
+                    .unwrap();
+                let tab::State::Home(home) = &mut source.state else {
+                    unreachable!()
+                };
+                home.connect_account.invalidate_auth();
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Launch(home::Message::View(
+                            home::ViewMessage::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::SetSession(
+                                    LoginResponse {
+                                        requires_2fa: false,
+                                        token: "stale-session".into(),
+                                        refresh_token: "stale-refresh".into(),
+                                        user: User {
+                                            id: 99,
+                                            email: "stale@example.invalid".into(),
+                                            email_verified: Some(true),
+                                        },
+                                    },
+                                    0,
+                                ),
+                            ),
+                        )),
+                    ),
+                )));
+                let pending = &gui.panes.get(pane_id).unwrap().tabs[1];
+                let tab::State::PinEntry(pin) = &pending.state else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert_eq!(
+                    connect_client.as_ref().and_then(|client| client.token()),
+                    Some("new-session"),
+                    "stale login must not replace the candidate"
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Launch(home::Message::View(
+                            home::ViewMessage::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::LogOut,
+                            ),
+                        )),
+                    ),
+                )));
+                let pending = &gui.panes.get(pane_id).unwrap().tabs[1];
+                let tab::State::PinEntry(pin) = &pending.state else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert!(
+                    connect_client.is_none(),
+                    "logout must withdraw the candidate"
+                );
+                assert!(pin.take_fork_signer().is_none());
+                drop(gui);
+                std::fs::remove_dir_all(root_path).unwrap();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn home_open_only_adopts_completed_scoped_identity() {
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let server = httpmock::MockServer::start();
+                let user = server.mock(|when, then| {
+                    when.method(httpmock::Method::GET).path("/api/v1/user")
+                        .header("authorization", "Bearer direct-session");
+                    then.status(200).json_body(serde_json::json!({
+                        "id":8,"email":"other@example.invalid","email_verified":true
+                    }));
+                });
+                let feature = server.mock(|when, then| {
+                    when.method(httpmock::Method::GET).path("/api/v1/connect/features");
+                    then.status(200).json_body(serde_json::json!({"data":{"plans":[],"bitcoin_blake2b_enabled":true}}));
+                });
+                let provider_url = server.base_url();
+                for case in [
+                    "direct", "checking", "active", "same",
+                    "wrong-root",
+                    "wrong-provider",
+                    "account-conflict",
+                    "token-conflict",
+                ] {
+                    let path = std::env::temp_dir()
+                        .join(format!("cold-home-pin-{}", uuid::Uuid::new_v4()));
+                    let root = CoincubeDirectory::new(path.clone());
+                    std::fs::create_dir_all(&path).unwrap();
+                    crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(
+                        &crate::app::settings::global::GlobalSettings::path(&root),
+                        true,
+                    )
+                    .unwrap();
+                    let provider = provider_url.as_str();
+                    let ready =
+                        |source_root: CoincubeDirectory, provider: &str, id: u32, token: &str| {
+                            let (mut home, task) = home::Home::new_for_chain(source_root, None);
+                            drop(task);
+                            home.connect_account.client =
+                                crate::services::coincube::CoincubeClient::for_test(provider);
+                            home.connect_account.client.set_token(token);
+                            home.connect_account.user = Some(User {
+                                id,
+                                email: "fixture@example.invalid".into(),
+                                email_verified: Some(true),
+                            });
+                            home.connect_account.step =
+                                crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+                            home
+                        };
+                    let source_root = if case == "wrong-root" {
+                        CoincubeDirectory::new(path.join("other"))
+                    } else {
+                        root.clone()
+                    };
+                    let source_provider = if case == "wrong-provider" {
+                        "http://127.0.0.1:2"
+                    } else {
+                        provider
+                    };
+                    let first = ready(source_root, source_provider, 7, "current-session");
+                    let (mut cold, task) =
+                        home::Home::new_for_chain(root.clone(), Some(ChainId::BitcoinBlake2b));
+                    drop(task);
+                    cold.connect_account.client =
+                        crate::services::coincube::CoincubeClient::for_test(provider);
+                    drop(cold.update(home::Message::GlobalFeatureLoaded(0, true)));
+                    if matches!(case, "direct" | "checking" | "active") {
+                        cold.connect_account.client.set_token("direct-session");
+                        cold.connect_account.user = Some(User {
+                            id:7,email:"fixture@example.invalid".into(),email_verified:Some(true),
+                        });
+                        cold.connect_account.step = match case {
+                            "direct" => crate::app::state::connect::account::ConnectFlowStep::Dashboard,
+                            "checking" => crate::app::state::connect::account::ConnectFlowStep::CheckingDuress {
+                                status: crate::app::state::connect::account::DuressGateStatus::Checking,
+                            },
+                            _ => crate::app::state::connect::account::ConnectFlowStep::DuressRecovery {
+                                unlock_at:None,passphrase:String::new(),submitting:false,cleared:false,
+                            },
+                        };
+                        assert!(cold.connect_account.authenticated_client().is_some(),
+                            "raw client presence is not completed account admission");
+                    }
+
+                    let mut pane = pane::Pane::new_with_tab(tab::State::Home(first));
+                    pane.tabs.push(tab::Tab::new(2, tab::State::Home(cold)));
+                    if case.ends_with("conflict") {
+                        pane.tabs.push(tab::Tab::new(
+                            3,
+                            tab::State::Home(ready(
+                                root.clone(),
+                                provider,
+                                if case == "account-conflict" { 8 } else { 7 },
+                                "other-session",
+                            )),
+                        ));
+                    }
+                    let (panes, pane_id) = pane_grid::State::new(pane);
+                    let mut gui = GUI {
+                        panes,
+                        focus: Some(pane_id),
+                        config: Config::new(root.clone(), None),
+                        window_id: None,
+                        window_init: None,
+                        window_config: None,
+                        global_cache: GlobalCache::default(),
+                        theme_mode: Default::default(),
+                    };
+                    let mut cube = crate::app::settings::CubeSettings::new(
+                        "Cold fork".into(),
+                        ChainId::BitcoinBlake2b,
+                    );
+                    cube.created_at = 0;
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            2,
+                            tab::Message::Launch(home::Message::Run(
+                                root,
+                                crate::app::Config::new(false),
+                                ChainId::BitcoinBlake2b,
+                                cube,
+                            )),
+                        ),
+                    )));
+                    let pending = &mut gui.panes.get_mut(pane_id).unwrap().tabs[1];
+                    let tab::State::PinEntry(pin) = &mut pending.state else {
+                        panic!("{} must reach PIN", case)
+                    };
+                    let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                        &pin.on_success;
+                    assert_eq!(
+                        connect_client.as_ref().and_then(|client| client.token()),
+                        if case == "direct" {
+                            Some("direct-session")
+                        } else if case == "same" {
+                            Some("current-session")
+                        } else {
+                            None
+                        },
+                        "{}",
+                        case
+                    );
+                    assert!(pin.take_fork_signer().is_none());
+                    if case == "direct" {
+                        // Exercise the actual Home -> PIN candidate. A changed
+                        // server identity must be refused before feature/decrypt work.
+                        assert_eq!(user.hits(), 0);
+                        for (index, digit) in "1234".chars().enumerate() {
+                            drop(pin.update(crate::pin_entry::Message::PinInput(
+                                crate::pin_input::Message::DigitChanged(index,digit.to_string()))));
+                        }
+                        let task = pin.update(crate::pin_entry::Message::Submit);
+                        let messages = runtime.block_on(async {
+                            use iced::futures::StreamExt;
+                            let mut messages = Vec::new();
+                            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                                while let Some(action) = stream.next().await {
+                                    if let iced_runtime::Action::Output(message) = action {
+                                        messages.push(message);
+                                    }
+                                }
+                            }
+                            messages
+                        });
+                        for message in messages { drop(pin.update(message)); }
+                        user.assert_hits(1);
+                        feature.assert_hits(0);
+                        assert!(pin.take_fork_signer().is_none());
+                    }
+                    drop(gui);
+                    std::fs::remove_dir_all(path).unwrap();
+                }
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn shared_home_restore_ready_reaches_pending_pin_without_set_session() {
+        let result = std::thread::Builder::new()
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir()
+                    .join(format!("restored-home-pin-{}", uuid::Uuid::new_v4()));
+                let root = CoincubeDirectory::new(path.clone());
+                std::fs::create_dir_all(&path).unwrap();
+                let provider = "http://127.0.0.1:1";
+                let mut client = crate::services::coincube::CoincubeClient::for_test(provider);
+                client.set_token("restored-session");
+                let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                drop(home.adopt_connect_client(client));
+                let generation = home.connect_account.session_generation();
+                let epoch = home.connect_account.auth_epoch();
+                let mut pin = crate::pin_entry::PinEntry::new(
+                    crate::app::settings::CubeSettings::new(
+                        "Pending fork".into(),
+                        ChainId::BitcoinBlake2b,
+                    ),
+                    path.clone(),
+                    crate::pin_entry::PinEntrySuccess::LoadApp {
+                        datadir: root.clone(),
+                        config: crate::app::Config::new(false),
+                        network: bitcoin::Network::Bitcoin,
+                        internal_bitcoind: None,
+                        backup: None,
+                        wallet_settings: None,
+                        connect_client: None,
+                    },
+                    None,
+                );
+                pin.set_connect_provider(provider);
+                let mut pane = pane::Pane::new_with_tab(tab::State::Home(home));
+                pane.tabs.push(tab::Tab::new(2, tab::State::PinEntry(pin)));
+                let (panes, pane_id) = pane_grid::State::new(pane);
+                let mut gui = GUI {
+                    panes,
+                    focus: Some(pane_id),
+                    config: Config::new(root, None),
+                    window_id: None,
+                    window_init: None,
+                    window_config: None,
+                    global_cache: GlobalCache::default(),
+                    theme_mode: Default::default(),
+                };
+                let account = |message| {
+                    Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Launch(home::Message::View(
+                                home::ViewMessage::ConnectAccount(message),
+                            )),
+                        ),
+                    )
+                };
+                // Run the real restore completion: AdmittedUserLoaded dispatches
+                // SessionLoaded synchronously, which waits for the duress check.
+                // Drop its network tasks; this fixture supplies only their typed outcomes.
+                drop(gui.update(account(
+                    crate::app::view::ConnectAccountMessage::AdmittedUserLoaded {
+                        user: Ok(User {
+                            id: 7,
+                            email: "fixture@example.invalid".into(),
+                            email_verified: Some(true),
+                        }),
+                        generation,
+                        epoch,
+                    },
+                )));
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    unreachable!()
+                };
+                assert!(!home.connect_account.is_authenticated());
+                let generation = home.connect_account.session_generation();
+                let ready = || {
+                    Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Launch(home::Message::ConnectSignedInBubble),
+                        ),
+                    )
+                };
+                drop(gui.update(ready()));
+                let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert!(
+                    connect_client.is_none(),
+                    "checking origin grants no candidate"
+                );
+                drop(gui.update(account(
+                    crate::app::view::ConnectAccountMessage::DuressStateChecked(
+                        crate::services::coincube::DuressCheckOutcome::Ok(
+                            crate::services::coincube::DuressState {
+                                active: false,
+                                unlock_at: None,
+                                enrolled: false,
+                                this_device_registered: false,
+                            },
+                        ),
+                        generation,
+                        0,
+                    ),
+                )));
+                let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[0].state else {
+                    unreachable!()
+                };
+                assert!(home.connect_account.is_authenticated());
+                // The exact-origin bubble emitted on that ready edge repairs the PIN.
+                drop(gui.update(ready()));
+                let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert_eq!(
+                    connect_client.as_ref().and_then(|client| client.token()),
+                    Some("restored-session")
+                );
+                assert!(pin.take_fork_signer().is_none());
+                drop(gui.update(account(crate::app::view::ConnectAccountMessage::LogOut)));
+                drop(gui.update(ready()));
+                let tab::State::PinEntry(pin) = &gui.panes.get(pane_id).unwrap().tabs[1].state
+                else {
+                    unreachable!()
+                };
+                let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
+                    &pin.on_success;
+                assert!(
+                    connect_client.is_none(),
+                    "stale queued readiness cannot revive logout"
+                );
+                drop(gui);
+                std::fs::remove_dir_all(path).unwrap();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]

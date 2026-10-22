@@ -5516,6 +5516,20 @@ impl App {
         }
     }
 
+    /// Only a completed, unheld account session can seed a cold PIN candidate.
+    /// The pending PIN still rechecks the expected user before decrypting.
+    pub(crate) fn shareable_connect_identity(
+        &self,
+    ) -> Option<(u32, crate::services::coincube::CoincubeClient)> {
+        if !self.panels.connect.account.is_authenticated() {
+            return None;
+        }
+        Some((
+            self.panels.connect.account.user.as_ref()?.id,
+            self.shareable_connect_client()?,
+        ))
+    }
+
     /// An ordinary Bitcoin Cube can reuse a verified sibling session at startup.
     /// Fork daemons keep their admitted credentials, and an explicit auth hold
     /// must not be lifted by discovering an old sibling client.

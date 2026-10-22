@@ -13,6 +13,14 @@ messages or the legacy shared signer cache. The slot derives the Cube encryption
 key directly. No Liquid or Spark SDK is constructed. Passkey and remote legacy
 wallet routes remain unavailable for the fork.
 
+A pending fork PIN screen receives a candidate from the exact current completed
+Connect login after its account safety gates, scoped to its data root and API
+provider. The next PIN submission rechecks that account's identity and feature availability before decrypting; it
+does not automatically resume an old PIN or reuse its signer. Logout, replacement
+and stale generations withdraw prior work. Hosted Connect chain data retains its
+account requirement; the separately admitted managed local-node path does not
+require a Connect account.
+
 The Loader requires the current authenticated Connect client and a local Vault.
 It reads only that ChainId's wallet directory, rejects config/ChainId/datadir
 mismatch, and starts the authenticated embedded daemon. It never attaches to an
