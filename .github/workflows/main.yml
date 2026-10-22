@@ -47,6 +47,23 @@ jobs:
           sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config protobuf-compiler libdbus-1-dev libwebkit2gtk-4.1-dev
           cargo clippy --all-targets -- -D warnings
 
+  mcp_tests:
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          components: clippy
+      - run: cargo test -p coincube-mcp --features adapter --locked
+      - run: cargo clippy -p coincube-mcp --features adapter --all-targets --locked -- -D warnings
+
   # coincube-spark-bridge is excluded from the root workspace (see the root
   # Cargo.toml), so the bare `cargo test` in unit_tests does not reach it and
   # its 15 tests had never run in CI. Its Cargo.lock is its own, hence the
@@ -236,6 +253,12 @@ jobs:
           python3 contrib/test_keyring_supervision.py
           python3 contrib/test_keyring_supervision.py --live-kill
           dbus-run-session -- python3 contrib/with_test_keyring.py -- cargo test --color always -- --nocapture
+      - name: Real wallet through installed STDIO companion
+        if: matrix.toolchain == 'pinned' && runner.os != 'Windows'
+        shell: bash
+        run: |
+          cargo build -p coincube-mcp --features adapter --locked
+          TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
       - name: Preserve Secret Service fixture diagnostics
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

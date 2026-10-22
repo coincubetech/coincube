@@ -53,6 +53,7 @@ use zeroize::Zeroizing;
 use crate::app::settings::CubeSettings;
 
 struct Session {
+    generation: u64,
     /// The Cube this PIN belongs to. Checked on read so a stale session from a
     /// previously-open Cube can never hand its PIN to a different one.
     cube_id: String,
@@ -124,6 +125,7 @@ fn open_inner(cube_id: String, pin: Option<Zeroizing<String>>) {
         .filter(|s| s.cube_id == cube_id)
         .and_then(|s| s.signer);
     *guard = Some(Session {
+        generation: next_generation(),
         cube_id,
         pin,
         signer,
@@ -145,6 +147,7 @@ pub fn store_unlocked_signer(cube_id: &str, fingerprint: Fingerprint, signer: Ma
         // holding just the signer. `open` will fill in the PIN and preserve it.
         _ => {
             *guard = Some(Session {
+                generation: next_generation(),
                 cube_id: cube_id.to_string(),
                 // No PIN yet, and possibly never — a passkey Cube stores its
                 // signer here and never calls `open`. `None`, not `""`.
@@ -302,6 +305,21 @@ pub fn seed_file_password(cube: &CubeSettings) -> Option<Zeroizing<String>> {
 /// runs before the restored Cube's id is minted. `None` for a passkey Cube.
 pub fn current_pin() -> Option<Zeroizing<String>> {
     lock_session().as_ref().and_then(|s| s.pin.clone())
+}
+
+fn next_generation() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Non-secret lifetime identity for scoped read grants. Never returns PIN/key data.
+/// Closing or reopening even the same Cube invalidates the previous identity.
+pub fn generation_for(cube_id: &str) -> Option<u64> {
+    lock_session()
+        .as_ref()
+        .filter(|s| s.cube_id == cube_id)
+        .map(|s| s.generation)
 }
 
 /// Id of the currently open Cube, if any.
