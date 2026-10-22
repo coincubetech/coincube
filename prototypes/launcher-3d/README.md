@@ -28,12 +28,20 @@ For repeatable native reviews, F4 loads 12 Cubes, F5 loads 20, F6 resizes the La
 - Fixture load: empty, 1, 4, 12 or 20 Cubes. Loading a preset discards previous in-memory fixture edits. The lab models the Estate limit of 7 Cubes per network (21 across these 3 fixture networks). Creation shows the chosen network’s count and disables when it reaches 7; this is synthetic behavior, not production entitlement enforcement. The main design target is 10–20 total Cubes.
 - All networks initially includes Bitcoin mainnet, Bitcoin Blake2b mainnet and Testnet4. Live chains includes both mainnets. Filters only change catalog visibility. Counts show hidden entries and Clear filters restores the full catalog.
 - Create on explicitly chooses the synthetic network. Create Cube adds an in-memory fixture; it creates no file or key. If the chosen chain was hidden, the catalog returns to All networks so the new Cube is visible.
-- Click a Cube or its name/catalog entry to select it. Arrow keys move selection; Enter opens the selected preview. The right-hand catalog is available at high counts where labels on every object would overlap.
+- Click a Cube or its name/catalog entry to select it. With the catalog focused (or before focusing a control), arrow keys move selection and Enter opens the selected preview. The right-hand catalog is available at high counts where labels on every object would overlap.
 - Open preview explains the next real-world unlock step. It performs no authentication, wallet loading, account access or transaction.
 - Float enables gentle motion. Reduce motion disables float and selection interpolation; benchmarking can still redraw a static scene.
 - Light theme changes only the Lab. Benchmark requests continuous redraw while the Lab is focused. Unfocused animation/benchmark pauses. Default idle rendering requests no continuous animation.
 
 Protection states and No Vault are readable text. Colors distinguish synthetic networks and support selection, but are not the only source of identity/status. No official Blake2b logo or unverified security claim is invented. The labels/catalog use ordinary Iced widgets; this does not establish native assistive-technology conformance.
+
+## Keyboard operation
+
+Tab and Shift-Tab move focus in visual reading order: theme, filter, Clear filters, creation network, enabled Create Cube, fixture buttons, motion/benchmark toggles, catalog or empty-state action, available Open preview, and Print metrics. Focus wraps in both directions; disabled creation and absent actions are skipped. A separate light/dark outline identifies keyboard focus without changing the selection treatment.
+
+Enter or Space activates buttons and toggles. On either network picker, Enter/Space opens the existing-style Iced menu; Up/Down moves the pending option, Home/End jumps to the first/last option, Enter/Space commits, and Escape cancels. Tab closes a pending menu without committing and advances focus. Picker keys do not change Cube selection or open a preview. Command/Control/Alt combinations are left to their owners. Global Lab shortcuts ignore events already captured by widgets.
+
+The catalog is one Tab stop; arrows navigate its Cubes and Enter/Space opens the selected preview. This avoids tabbing through up to twenty entries to reach Open or metrics. The previously identified automatic selected-row reveal and dense scene-label refinements are deferred to the design handoff, along with catalog density. Keyboard operation does not establish VoiceOver or native accessibility-tree conformance.
 
 ## Rendering
 
@@ -59,4 +67,4 @@ Tests cover cross-network filter semantics, bounded metrics, synthetic identity 
 
 ## Scope and provenance
 
-Origin: Robert's local Codex UX review conversation, 2026-10-21. Exact requested branch: `3d`. Base: `113e2ca2251d7cfb8c1d0dbba9374a79993c8f59`. Workspace instructions: `/Users/macstudio/git/coincubetech/AGENTS.md`; repo instructions: `CLAUDE.md`. Shared Agent Ops policy read at `b4e4fa3c3ecedad93f40d08f71baca7cea707a25`. No Buzz originating-thread link was supplied. Concept C remains the chosen direction inside open Cubes; this experiment reviews the separate Launcher's appearance and performance before integration.
+Origin: Robert's local Codex UX review conversation, 2026-10-21. Exact requested task branch: `3d`. On 2026-10-22 Robert requested a larger UI/UX integration branch, `design-refresh`, created from current `master` at `a75a7d19106c916b9dff890364470bd70ee77751`; PR #742 now targets that branch. Selected identity/catalog density await Claude Design artifacts. Original task base: `113e2ca2251d7cfb8c1d0dbba9374a79993c8f59`. Workspace instructions: `/Users/macstudio/git/coincubetech/AGENTS.md`; repo instructions: `CLAUDE.md`. Shared Agent Ops policy read at `b4e4fa3c3ecedad93f40d08f71baca7cea707a25`. No Buzz originating-thread link was supplied. Concept C remains the chosen direction inside open Cubes; this experiment reviews the separate Launcher's appearance and performance before integration.

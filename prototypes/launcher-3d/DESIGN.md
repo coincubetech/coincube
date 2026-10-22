@@ -165,13 +165,13 @@ The Cube silhouette is authored geometry: each face is subdivided at `[-1, -0.96
 
 ### Action and experiment controls
 
-Create Cube and Open preview share the primary style: orange fill, dark ink and native primary-control radius. Hovered and Pressed share the lighter orange; Disabled uses the muted disabled fill. Creation disables at (7) synthetic Cubes on the chosen network; its count appears beside the network selector. Three fixture networks permit (21) total. Default padding and other inherited behavior come from Iced's button implementation, not a prototype-defined control-height system. No custom focus ring is authored.
+Create Cube and Open preview share the primary style: orange fill, dark ink and native primary-control radius. Hovered and Pressed share the lighter orange; Disabled uses the muted disabled fill. Creation disables at (7) synthetic Cubes on the chosen network; its count appears beside the network selector. Three fixture networks permit (21) total. Default padding and other inherited behavior come from Iced's button implementation, not a prototype-defined control-height system. A keyboard adapter adds a two-logical-pixel theme-contrasting outline with a three-pixel gap, outside existing control bounds; selection remains orange.
 
 Empty/1/4/12/20 use Iced secondary buttons. Clear filters and Print metrics use Iced text buttons. The two pick lists and four checkboxes use built-in theme styling; custom CSS-like states must not be inferred. Fixture buttons replace the in-memory catalog, rather than acting as persistent navigation tabs.
 
 ### Cube selection and preview
 
-Geometry clicking, name-label clicking and catalog clicking select the same Cube. Catalog entries contain name, explicit network and backup/Vault status. Each uses the shared selectable-label style with rest, hovered/pressed and selected variants; selected styling takes precedence over hover. Global arrow keys step through visible Cubes with wraparound; Enter produces the selected preview notice. There is no authored focus treatment on these custom label styles, and global key handling is not proof of robust per-widget keyboard focus behavior.
+Geometry clicking, name-label clicking and catalog clicking select the same Cube. Catalog entries contain name, explicit network and backup/Vault status. Each uses the shared selectable-label style with rest, hovered/pressed and selected variants; selected styling takes precedence over hover. The catalog is one Tab stop with a visible group focus outline. Its arrow keys step through visible Cubes with wraparound; Enter/Space produces the selected preview notice. Before a control is focused, scene arrows/Enter remain shortcuts. A focused control owns its keys, and captured events do not reach global shortcuts. Selected-row reveal and dense object labels remain deferred design work.
 
 Selection is not unlock. The details row shows the Cube/network, protection text, Vault presence and Locked fixture label, alongside Open preview. Preview only updates explanatory text. There is no authentication sheet, wallet loading or balances component in this lab.
 
@@ -185,7 +185,7 @@ Notices remain inline beneath selection details. Metrics use a compact text row 
 
 ### Capability boundary
 
-The shader scene has no native accessibility node model of its own. Regular text/catalog controls and global key shortcuts provide alternate interaction paths but do not establish VoiceOver or other assistive-technology conformance; focus order, semantic exposure and text scaling remain unverified. No dedicated compact, 2.5D or GPU-unavailable fallback is implemented. The verification record retains a historical100-Cube stress sample from before the Estate-limit clarification; current design targets10–20 total Cubes; cross-device GPU/power acceptance remains unmeasured. Those gaps remain defects or unverified acceptance, not reusable design invariants.
+The shader scene has no native accessibility node model of its own. The complete Tab path, control activation and picker keys provide keyboard operation, verified in the native Lab; they do not establish VoiceOver or other assistive-technology conformance. Semantic exposure and text scaling remain unverified. No dedicated compact, 2.5D or GPU-unavailable fallback is implemented. The verification record retains a historical100-Cube stress sample from before the Estate-limit clarification; current design targets10–20 total Cubes; cross-device GPU/power acceptance remains unmeasured. Those gaps remain defects or unverified acceptance, not reusable design invariants.
 
 ## Do's and Don'ts
 

@@ -1,3 +1,4 @@
+mod keyboard;
 mod metrics;
 mod model;
 mod scene;
@@ -10,12 +11,13 @@ use std::{
 use iced::{
     border, event,
     widget::{
-        button, checkbox, column, container, pick_list, pin, responsive, row, scrollable, shader,
-        stack, text, Column, Space,
+        button, checkbox, column, container, pin, responsive, row, scrollable, shader, stack, text,
+        Column, Space,
     },
     window, Alignment, Background, Border, Color, Element, Fill, Font, Length, Size, Subscription,
     Task, Theme,
 };
+use keyboard::{Control, Kind};
 use metrics::{Metrics, SharedMetrics};
 use model::{Catalog, Filter, Network, Protection, MAX_PER_NETWORK};
 
@@ -55,6 +57,9 @@ pub enum Message {
     Step(i32),
     Reduced(bool),
     Resize(Size),
+    ControlFocus(Control),
+    Traverse(bool),
+    SceneShortcut(iced::keyboard::key::Named),
 }
 
 struct App {
@@ -67,6 +72,7 @@ struct App {
     benchmark: bool,
     light: bool,
     focused: bool,
+    keyboard_focus: Option<Control>,
     started: Instant,
     selected_at: Instant,
     metrics: SharedMetrics,
@@ -88,6 +94,7 @@ impl App {
             benchmark: false,
             light: false,
             focused: true,
+            keyboard_focus: None,
             started: Instant::now(),
             selected_at: Instant::now(),
             metrics: Arc::new(Mutex::new(Metrics::default())),
@@ -99,6 +106,32 @@ impl App {
 
     fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::ControlFocus(control) => self.keyboard_focus = Some(control),
+            Message::Traverse(backwards) => {
+                let controls = self.controls();
+                let current = self
+                    .keyboard_focus
+                    .and_then(|c| controls.iter().position(|x| *x == c));
+                let next = match current {
+                    Some(i) if backwards => (i + controls.len() - 1) % controls.len(),
+                    Some(i) => (i + 1) % controls.len(),
+                    None if backwards => controls.len() - 1,
+                    None => 0,
+                };
+                self.keyboard_focus = Some(controls[next]);
+            }
+            Message::SceneShortcut(key) => {
+                // A focused control owns its keys; only the unfocused scene uses these shortcuts.
+                if self.keyboard_focus.is_none() {
+                    use iced::keyboard::key::Named;
+                    return self.update(match key {
+                        Named::ArrowLeft | Named::ArrowUp => Message::Step(-1),
+                        Named::ArrowRight | Named::ArrowDown => Message::Step(1),
+                        Named::Enter => Message::Open,
+                        _ => return Task::none(),
+                    });
+                }
+            }
             Message::Resize(size) => {
                 self.reset_metrics();
                 return window::latest().and_then(move |id| window::resize(id, size));
@@ -120,6 +153,7 @@ impl App {
                 }
             }
             Message::Select(id) => {
+                self.keyboard_focus = Some(Control::Catalog);
                 self.selected = Some(id);
                 self.selected_at = Instant::now();
                 self.notice="Selection only. Open preview demonstrates the next step without unlocking anything.".into();
@@ -192,7 +226,65 @@ impl App {
                 }
             }
         }
+        if self
+            .keyboard_focus
+            .is_some_and(|control| !self.controls().contains(&control))
+        {
+            self.keyboard_focus = Some(if self.catalog.visible(self.filter).is_empty() {
+                Control::EmptyAction
+            } else {
+                Control::Catalog
+            });
+        }
         Task::none()
+    }
+
+    fn controls(&self) -> Vec<Control> {
+        let mut controls = vec![
+            Control::Theme,
+            Control::Filter,
+            Control::Clear,
+            Control::CreationNetwork,
+        ];
+        if self.catalog.can_create(self.creation_network) {
+            controls.push(Control::Create);
+        }
+        controls.extend([0, 1, 4, 12, 20].map(Control::Fixture));
+        controls.extend([Control::Float, Control::Benchmark, Control::Reduced]);
+        controls.push(if self.catalog.visible(self.filter).is_empty() {
+            Control::EmptyAction
+        } else {
+            Control::Catalog
+        });
+        if self.selected.is_some() {
+            controls.push(Control::Open);
+        }
+        controls.push(Control::PrintMetrics);
+        controls
+    }
+
+    fn control<'a>(
+        &self,
+        target: Control,
+        kind: Kind,
+        content: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        keyboard::control(
+            target,
+            self.keyboard_focus.filter(|_| self.focused),
+            self.light,
+            kind,
+            content,
+        )
+    }
+
+    fn action<'a>(
+        &self,
+        target: Control,
+        action: Message,
+        content: impl Into<Element<'a, Message>>,
+    ) -> Element<'a, Message> {
+        self.control(target, Kind::Action(action), content)
     }
 
     fn reset_metrics(&mut self) {
@@ -212,28 +304,7 @@ impl App {
     }
 
     fn subscription(&self) -> Subscription<Message> {
-        let focus = event::listen_with(|event, _, _| match event {
-            iced::Event::Window(window::Event::Focused) => Some(Message::Focus(true)),
-            iced::Event::Window(window::Event::Unfocused) => Some(Message::Focus(false)),
-            iced::Event::Keyboard(iced::keyboard::Event::KeyPressed {
-                key: iced::keyboard::Key::Named(key),
-                ..
-            }) => match key {
-                iced::keyboard::key::Named::ArrowRight | iced::keyboard::key::Named::ArrowDown => {
-                    Some(Message::Step(1))
-                }
-                iced::keyboard::key::Named::ArrowLeft | iced::keyboard::key::Named::ArrowUp => {
-                    Some(Message::Step(-1))
-                }
-                iced::keyboard::key::Named::Enter => Some(Message::Open),
-                iced::keyboard::key::Named::F4 => Some(Message::Reset(12)),
-                iced::keyboard::key::Named::F5 => Some(Message::Reset(20)),
-                iced::keyboard::key::Named::F6 => Some(Message::Resize(Size::new(1024., 700.))),
-                iced::keyboard::key::Named::F7 => Some(Message::Resize(Size::new(1440., 900.))),
-                _ => None,
-            },
-            _ => None,
-        });
+        let focus = event::listen_with(|event, status, _| keyboard::global_message(event, status));
         if self.sampling_active() {
             Subscription::batch([
                 focus,
@@ -270,21 +341,35 @@ impl App {
             text("3D Launcher Lab · Synthetic data only")
                 .size(14)
                 .color(muted),
-            checkbox(self.light)
-                .label("Light theme")
-                .on_toggle(Message::Light)
+            self.action(
+                Control::Theme,
+                Message::Light(!self.light),
+                checkbox(self.light)
+                    .label("Light theme")
+                    .on_toggle(Message::Light)
+            )
         ]
         .spacing(24)
         .align_y(Alignment::Center);
         let toolbar = row![
-            pick_list(Filter::ALL, Some(self.filter), Message::Filter)
-                .placeholder("Network filter"),
+            keyboard::choice(
+                Control::Filter,
+                self.keyboard_focus.filter(|_| self.focused),
+                self.light,
+                &Filter::ALL,
+                self.filter,
+                Message::Filter
+            ),
             text(format!("{} shown · {hidden} hidden", visible.len()))
                 .size(14)
                 .color(muted),
-            button("Clear filters")
-                .on_press(Message::Clear)
-                .style(button::text),
+            self.action(
+                Control::Clear,
+                Message::Clear,
+                button("Clear filters")
+                    .on_press(Message::Clear)
+                    .style(button::text)
+            ),
             Space::new().width(Fill),
             text(format!(
                 "{}/{} on",
@@ -293,48 +378,77 @@ impl App {
             ))
             .size(14)
             .color(muted),
-            pick_list(
-                Network::ALL,
-                Some(self.creation_network),
+            keyboard::choice(
+                Control::CreationNetwork,
+                self.keyboard_focus.filter(|_| self.focused),
+                self.light,
+                &Network::ALL,
+                self.creation_network,
                 Message::CreationNetwork
             ),
-            button("+ Create Cube")
-                .on_press_maybe(
-                    self.catalog
-                        .can_create(self.creation_network)
-                        .then_some(Message::Create)
-                )
-                .style(primary)
+            self.create_button()
         ]
         .spacing(12)
         .align_y(Alignment::Center);
         let load = row![
             text("Fixture load").size(14).color(muted),
-            button("Empty")
-                .on_press(Message::Reset(0))
-                .style(button::secondary),
-            button("1")
-                .on_press(Message::Reset(1))
-                .style(button::secondary),
-            button("4")
-                .on_press(Message::Reset(4))
-                .style(button::secondary),
-            button("12")
-                .on_press(Message::Reset(12))
-                .style(button::secondary),
-            button("20")
-                .on_press(Message::Reset(20))
-                .style(button::secondary),
+            self.action(
+                Control::Fixture(0),
+                Message::Reset(0),
+                button("Empty")
+                    .on_press(Message::Reset(0))
+                    .style(button::secondary)
+            ),
+            self.action(
+                Control::Fixture(1),
+                Message::Reset(1),
+                button("1")
+                    .on_press(Message::Reset(1))
+                    .style(button::secondary)
+            ),
+            self.action(
+                Control::Fixture(4),
+                Message::Reset(4),
+                button("4")
+                    .on_press(Message::Reset(4))
+                    .style(button::secondary)
+            ),
+            self.action(
+                Control::Fixture(12),
+                Message::Reset(12),
+                button("12")
+                    .on_press(Message::Reset(12))
+                    .style(button::secondary)
+            ),
+            self.action(
+                Control::Fixture(20),
+                Message::Reset(20),
+                button("20")
+                    .on_press(Message::Reset(20))
+                    .style(button::secondary)
+            ),
             Space::new().width(Fill),
-            checkbox(self.float)
-                .label("Float")
-                .on_toggle(Message::Float),
-            checkbox(self.benchmark)
-                .label("Benchmark")
-                .on_toggle(Message::Benchmark),
-            checkbox(self.reduced)
-                .label("Reduce motion")
-                .on_toggle(Message::Reduced)
+            self.action(
+                Control::Float,
+                Message::Float(!self.float),
+                checkbox(self.float)
+                    .label("Float")
+                    .on_toggle(Message::Float)
+            ),
+            self.action(
+                Control::Benchmark,
+                Message::Benchmark(!self.benchmark),
+                checkbox(self.benchmark)
+                    .label("Benchmark")
+                    .on_toggle(Message::Benchmark)
+            ),
+            self.action(
+                Control::Reduced,
+                Message::Reduced(!self.reduced),
+                checkbox(self.reduced)
+                    .label("Reduce motion")
+                    .on_toggle(Message::Reduced)
+            )
         ]
         .spacing(10)
         .align_y(Alignment::Center);
@@ -355,6 +469,7 @@ impl App {
         };
         let selected = self.selected;
         let light = self.light;
+        let keyboard_focus = self.keyboard_focus.filter(|_| self.focused);
         let has_catalog = !self.catalog.cubes.is_empty();
         let stage: Element<'_, Message> = responsive(move |size| {
             let mut layers: Vec<Element<'_, Message>> =
@@ -380,7 +495,17 @@ impl App {
                         column![
                             text(title).size(26),
                             text(subtitle).size(16).color(muted),
-                            action.style(primary)
+                            keyboard::control(
+                                Control::EmptyAction,
+                                keyboard_focus,
+                                light,
+                                Kind::Action(if has_catalog {
+                                    Message::Clear
+                                } else {
+                                    Message::Create
+                                }),
+                                action.style(primary)
+                            )
                         ]
                         .spacing(16)
                         .align_x(Alignment::Center),
@@ -423,7 +548,7 @@ impl App {
         .width(Fill)
         .height(Fill)
         .into();
-        let catalog = self.catalog_view(muted);
+        let catalog = self.control(Control::Catalog, Kind::Catalog, self.catalog_view(muted));
         let workspace = row![
             container(stage)
                 .width(Fill)
@@ -477,9 +602,13 @@ impl App {
                 .spacing(6),
                 Space::new().width(Fill),
                 text("Locked · fixture").size(14).color(muted),
-                button("Open preview")
-                    .on_press(Message::Open)
-                    .style(primary)
+                self.action(
+                    Control::Open,
+                    Message::Open,
+                    button("Open preview")
+                        .on_press(Message::Open)
+                        .style(primary)
+                )
             ]
             .spacing(18)
             .align_y(Alignment::Center)
@@ -496,13 +625,29 @@ impl App {
         let performance = row![
             text(self.metrics_text.clone()).size(13).color(muted),
             Space::new().width(Fill),
-            button("Print metrics")
-                .on_press(Message::PrintMetrics)
-                .style(button::text)
+            self.action(
+                Control::PrintMetrics,
+                Message::PrintMetrics,
+                button("Print metrics")
+                    .on_press(Message::PrintMetrics)
+                    .style(button::text)
+            )
         ]
         .spacing(12)
         .align_y(Alignment::Center);
         container(column![header,toolbar,load,workspace,details,text(&self.notice).size(13).color(muted),performance,text("Metrics: redraw cadence and CPU scene preparation/encoding only; GPU execution, presentation latency and power are not measured. Animation/benchmark pause when unfocused.").size(12).color(muted)].spacing(18)).padding(24).width(Fill).height(Fill).into()
+    }
+
+    fn create_button(&self) -> Element<'_, Message> {
+        let enabled = self.catalog.can_create(self.creation_network);
+        let button = button("+ Create Cube")
+            .on_press_maybe(enabled.then_some(Message::Create))
+            .style(primary);
+        if enabled {
+            self.action(Control::Create, Message::Create, button)
+        } else {
+            button.into()
+        }
     }
 
     fn catalog_view(&self, muted: Color) -> Element<'_, Message> {
@@ -613,6 +758,51 @@ fn label_style(light: bool, selected: bool, status: button::Status) -> button::S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tab_order_wraps_reverses_and_skips_disabled_creation() {
+        let mut app = App::new();
+        let order = app.controls();
+        assert!(order.contains(&Control::Create));
+        assert!(order.contains(&Control::Catalog));
+        assert!(!order.contains(&Control::Open));
+        for expected in order.iter().chain(order.iter()).copied() {
+            let _ = app.update(Message::Traverse(false));
+            assert_eq!(app.keyboard_focus, Some(expected));
+        }
+        let _ = app.update(Message::Traverse(true));
+        assert_eq!(app.keyboard_focus, Some(order[order.len() - 2]));
+        let _ = app.update(Message::Reset(20));
+        assert!(!app.controls().contains(&Control::Create));
+        let _ = app.update(Message::Reset(0));
+        assert!(app.controls().contains(&Control::EmptyAction));
+        assert!(!app.controls().contains(&Control::Catalog));
+        let _ = app.update(Message::ControlFocus(Control::Create));
+        let _ = app.update(Message::Create);
+        assert!(app.controls().contains(&Control::Open));
+        assert!(app.controls().contains(&Control::Catalog));
+    }
+
+    #[test]
+    fn focused_controls_do_not_trigger_global_cube_shortcuts() {
+        let mut app = App::new();
+        let _ = app.update(Message::Step(1));
+        let selected = app.selected;
+        let notice = app.notice.clone();
+        let _ = app.update(Message::ControlFocus(Control::CreationNetwork));
+        let _ = app.update(Message::SceneShortcut(
+            iced::keyboard::key::Named::ArrowDown,
+        ));
+        let _ = app.update(Message::SceneShortcut(iced::keyboard::key::Named::Enter));
+        assert_eq!(app.selected, selected);
+        assert_eq!(app.notice, notice);
+        // The catalog's own key handler is still allowed to navigate and open.
+        let _ = app.update(Message::ControlFocus(Control::Catalog));
+        let _ = app.update(Message::Step(1));
+        assert_ne!(app.selected, selected);
+        let _ = app.update(Message::Open);
+        assert!(app.notice.starts_with("Preview:"));
+    }
 
     #[test]
     fn stopping_or_pausing_sampling_clears_the_collecting_status() {
