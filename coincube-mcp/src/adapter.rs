@@ -8,11 +8,15 @@ use rmcp::{
 use serde_json::Value;
 use std::path::PathBuf;
 
+/// Official-SDK STDIO handler forwarding only the four closed desktop reads.
 #[derive(Clone)]
 pub struct Adapter {
+    /// Authenticated local endpoint supplied by trusted host configuration.
     pub socket: PathBuf,
+    /// Private desktop-issued bearer credential; never a model tool argument.
     pub credential: String,
 }
+/// Attach typed schemas and read-only metadata; desktop grants still enforce access.
 fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
     name: &'static str,
     description: &'static str,
@@ -28,6 +32,7 @@ fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
                 .open_world(false),
         )
 }
+/// Advertise the closed four-tool surface without exposing wallet data or secrets.
 pub fn tools() -> Vec<Tool> {
     vec![
         tool::<Empty, WalletList>(
@@ -48,10 +53,14 @@ pub fn tools() -> Vec<Tool> {
         ),
     ]
 }
+/// Decode typed arguments while withholding raw serialization error details.
 fn parse<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ErrorData> {
     serde_json::from_value(v).map_err(|_| ErrorData::invalid_params("invalid_input", None))
 }
 impl Adapter {
+    /// Validate and dispatch a known tool through the desktop authorization gate.
+    /// Protocol errors reject unknown/invalid calls; wallet errors are sanitized
+    /// structured tool errors rather than raw daemon exceptions.
     pub async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, ErrorData> {
         let request = match name {
             "tenshu_list_wallets" => crate::Request::List(parse(arguments)?),
@@ -88,10 +97,12 @@ impl Adapter {
     }
 }
 impl ServerHandler for Adapter {
+    /// Negotiate the SDK lifecycle while advertising only tool capabilities.
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::new("tenshu-mcp", env!("CARGO_PKG_VERSION")))
     }
+    /// Return public discovery metadata without granting wallet-read authority.
     async fn list_tools(
         &self,
         _: Option<PaginatedRequestParams>,
@@ -102,6 +113,7 @@ impl ServerHandler for Adapter {
             ..Default::default()
         })
     }
+    /// Route an SDK call through the same validated, closed tool dispatcher.
     async fn call_tool(
         &self,
         request: CallToolRequestParams,

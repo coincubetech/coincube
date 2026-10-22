@@ -11,6 +11,9 @@ use crate::{
 };
 use miniscript::bitcoin::{self, bip32::ChildNumber, hashes::Hash, secp256k1::Secp256k1};
 use std::time::Duration;
+/// Create a disposable SQLite Vault with one synthetic confirmed 55,000 sat output.
+/// Chain polling uses DummyBitcoind; no external node, funds or credentials are used.
+/// The caller must stop and drop the returned daemon before removing its directory.
 pub fn wallet(
     root: &std::path::Path,
     descriptor: coincube_core::descriptors::CoincubeDescriptor,

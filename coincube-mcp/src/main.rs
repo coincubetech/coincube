@@ -1,4 +1,6 @@
+//! STDIO entry point for the separately packaged, read-only Tenshu MCP companion.
 use rmcp::{ServiceExt, service::RoleServer, transport::async_rw::AsyncRwTransport};
+/// Run the STDIO server with sanitized diagnostics restricted to standard error.
 #[tokio::main]
 async fn main() {
     if run().await.is_err() {
@@ -8,6 +10,7 @@ async fn main() {
         std::process::exit(1);
     }
 }
+/// Validate private environment configuration and serve bounded JSON-RPC lines.
 async fn run() -> Result<(), ()> {
     if !cfg!(any(unix, windows)) {
         return Err(());
