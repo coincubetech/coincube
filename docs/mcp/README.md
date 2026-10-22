@@ -1,9 +1,9 @@
 # Tenshu local AI access (MCP)
 
 This first slice supports **Bitcoin Vaults using Tenshu's embedded daemon on
-macOS and Linux**. It reads the existing wallet engine. It does not support
-Liquid, Spark, imported non-Vault policies, Bitcoin Blake2b, external daemons,
-or Windows IPC yet. MCP starts disabled and every new unlocked Cube session
+macOS, Linux and Windows**. It reads the existing wallet engine. It does not support
+Liquid, Spark, imported non-Vault policies, Bitcoin Blake2b or external daemons
+yet. MCP starts disabled and every new unlocked Cube session
 requires explicit approval. No Connect API or Keychain changes are needed.
 
 ## Feature testing on `mcp`
@@ -91,6 +91,14 @@ The GUI produces this shape, with actual paths and a fresh credential:
 }
 ```
 
+On Windows the copied command ends in `tenshu-mcp.exe`; the MSI installs it beside
+`coincube.exe`. `TENSHU_MCP_SOCKET` is a local pipe name such as
+`\\.\pipe\tenshu-mcp-PID-RANDOM`, not a TCP address. Keep the generated name unchanged:
+the adapter validates its format and checks the pipe server's OS process ID
+before sending the credential. The pipe DACL permits only the current Windows
+logon session and rejects remote clients. The bearer grant is still required.
+The client grants identification-only SQOS, not impersonation rights.
+
 Use the copied values, not these placeholders. On Linux/development builds the
 command is the absolute installed/build path to `tenshu-mcp`. There are no tool
 arguments for paths, credentials, shell commands or daemon RPC methods.
@@ -165,7 +173,7 @@ memory/configuration; this feature does not sandbox arbitrary same-user malware.
 
 `coincube-mcp/tests/security.rs` covers the SDK and actual STDIO process, typed
 inputs, permissions, per-client isolation, expiration, revocation during reads,
-shutdown, disconnection, socket permissions, bounded frames and sanitized errors.
+shutdown, disconnection, Unix socket permissions, Windows logon-session ACLs and peer identity, bounded frames and sanitized errors.
 `app::local_mcp::tests` exercises trusted settings and the actual embedded daemon
 against a disposable SQLite wallet containing public-only synthetic transactions;
 the blockchain backend is a test double. It is not a funded regtest/full client UI
@@ -174,7 +182,7 @@ acceptance run.
 An additional acceptance test launches the actual STDIO executable using the
 private configuration issued by desktop Settings, reads all four tools from that
 SQLite wallet, and verifies scope denial, locking, revocation and clean EOF. It
-runs explicitly in the pinned Unix CI jobs after building the companion binary:
+runs explicitly in the pinned platform CI jobs after building the companion binary:
 
 ```sh
 cargo build -p coincube-mcp --features adapter --locked
@@ -187,9 +195,9 @@ cargo clippy -p coincube-mcp --features adapter --all-targets -- -D warnings
 cargo fmt --all -- --check
 ```
 
-Before production release, complete macOS/Linux packaged-client acceptance with
+Before production release, complete packaged-client acceptance on each platform with
 Maple and Claude, verify signed packaging, and obtain independent security review.
-Phase 2 should first add tested Windows named-pipe security and richer client
+Windows named-pipe security is included in this extension. Next add richer client
 credential management. Any later unsigned transaction proposal needs a separate
 capability, scoped operation ID and trusted desktop review. Signing remains with
 existing user/Keychain mechanisms; it cannot be an extension of this read dispatch.

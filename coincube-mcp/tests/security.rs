@@ -1,4 +1,4 @@
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 use coincube_mcp::{ipc::*, *};
 use std::{
     sync::{
@@ -7,7 +7,9 @@ use std::{
     },
     time::Duration,
 };
-use tokio::{io::AsyncWriteExt, net::UnixStream};
+use tokio::io::AsyncWriteExt;
+#[cfg(unix)]
+use tokio::net::UnixStream;
 
 #[derive(Default)]
 struct Fixture {
@@ -198,6 +200,7 @@ async fn shutdown_removes_endpoint_and_cancels_inflight_read() {
     .await
     .unwrap();
     drop(server);
+    #[cfg(unix)]
     assert!(!socket.exists());
     assert!(
         tokio::time::timeout(Duration::from_secs(2), task)
@@ -212,6 +215,7 @@ async fn shutdown_removes_endpoint_and_cancels_inflight_read() {
             .is_err()
     );
 }
+#[cfg(unix)]
 #[tokio::test]
 async fn socket_permissions_disconnect_and_oversized_input() {
     use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -288,6 +292,35 @@ async fn invalid_inputs_never_reach_wallet() {
         assert!(serde_json::from_str::<Request>(&request).is_err());
     }
     assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
+}
+
+#[cfg(windows)]
+#[tokio::test]
+async fn named_pipe_disconnect_and_oversized_input_never_reach_wallet() {
+    use tokio::net::windows::named_pipe::ClientOptions;
+    let reader = Arc::new(Fixture::default());
+    let server = start(reader.clone(), [true; 3]);
+    let mut stream = ClientOptions::new().open(&server.socket).unwrap();
+    stream
+        .write_all(&vec![b'x'; REQUEST_LIMIT + 1])
+        .await
+        .unwrap();
+    assert!(
+        tokio::time::timeout(DEADLINE, line(stream, RESPONSE_LIMIT))
+            .await
+            .unwrap()
+            .is_err()
+    );
+    assert_eq!(reader.reads.load(Ordering::SeqCst), 0);
+    assert!(
+        call(
+            &server.socket,
+            server.grant.credential(),
+            summary("fixture-wallet")
+        )
+        .await
+        .is_ok()
+    );
 }
 #[tokio::test]
 async fn unavailable_errors_are_fixed_codes() {
@@ -416,13 +449,24 @@ mod protocol {
 #[cfg(feature = "adapter")]
 #[tokio::test]
 async fn actual_stdio_binary_only_emits_protocol_and_exits_on_eof() {
+    stdio_companion(std::ffi::OsStr::new(env!("CARGO_BIN_EXE_tenshu-mcp"))).await;
+}
+#[cfg(feature = "adapter")]
+#[tokio::test]
+#[ignore = "requires extracted installed companion via TENSHU_MCP_TEST_ADAPTER"]
+async fn extracted_adapter_stdio() {
+    let binary = std::env::var_os("TENSHU_MCP_TEST_ADAPTER").expect("provide installed companion");
+    stdio_companion(&binary).await;
+}
+#[cfg(feature = "adapter")]
+async fn stdio_companion(binary: &std::ffi::OsStr) {
     use std::process::Stdio;
     use tokio::{
         io::{AsyncBufReadExt, BufReader},
         process::Command,
     };
     let server = start(Arc::new(Fixture::default()), [true; 3]);
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tenshu-mcp"))
+    let mut child = Command::new(binary)
         .env("TENSHU_MCP_SOCKET", &server.socket)
         .env("TENSHU_MCP_CREDENTIAL", server.grant.credential())
         .stdin(Stdio::piped())

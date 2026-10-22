@@ -12,7 +12,7 @@ async fn main() {
 }
 /// Validate private environment configuration and serve bounded JSON-RPC lines.
 async fn run() -> Result<(), ()> {
-    if !cfg!(unix) {
+    if !cfg!(any(unix, windows)) {
         return Err(());
     }
     let socket = std::env::var_os("TENSHU_MCP_SOCKET").ok_or(())?.into();

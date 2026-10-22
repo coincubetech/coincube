@@ -208,6 +208,9 @@ jobs:
         if: matrix.platform == 'windows'
         run: |
           cargo build --package coincube-gui --profile minimal --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo build --package coincube-mcp --features adapter --profile minimal --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           # The bridge is excluded from the root workspace, so the line above
           # cannot build it — this is the second half of `make build`.
           cargo build --manifest-path coincube-spark-bridge/Cargo.toml --profile minimal --locked
@@ -240,7 +243,16 @@ jobs:
             Write-Host "bridge installs to $($bridge.DirectoryName) but the gui installs to $($gui.DirectoryName) — they must be siblings"
             exit 1
           }
-          Write-Host "both binaries install to $($gui.DirectoryName)"
+          $mcp = Get-ChildItem -Path $dest -Recurse -Filter tenshu-mcp.exe | Select-Object -First 1
+          if (-not $mcp -or $mcp.DirectoryName -ne $gui.DirectoryName) {
+            Write-Host "tenshu-mcp.exe must install beside coincube.exe"; exit 1
+          }
+          # Run the actual extracted companion against the tested named-pipe fixture.
+          $env:TENSHU_MCP_TEST_ADAPTER = $mcp.FullName
+          cargo test -p coincube-mcp --features adapter --locked extracted_adapter_stdio -- --ignored
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:TENSHU_MCP_TEST_ADAPTER
+          Write-Host "all companion binaries install to $($gui.DirectoryName)"
 
           # It execs and speaks the protocol. No API key, no mnemonic, no
           # network: stdin EOF ends the run on its own.

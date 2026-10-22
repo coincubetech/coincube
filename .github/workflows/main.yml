@@ -52,7 +52,7 @@ jobs:
     timeout-minutes: 20
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v5
         with:
@@ -198,6 +198,14 @@ jobs:
         # concurrency costs little and, with the in-code retries, removes the
         # remaining Windows flakiness.
         run: |
+          # Exercise Windows MCP early, including the separately built STDIO
+          # companion, before the longer full workspace suite.
+          cargo build -p coincube-mcp --features adapter --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:TENSHU_MCP_TEST_ADAPTER = Join-Path $PWD 'target/debug/tenshu-mcp.exe'
+          cargo test -p coincube-gui --lib app::local_mcp::tests --no-default-features --locked -- --include-ignored --test-threads=2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Remove-Item Env:TENSHU_MCP_TEST_ADAPTER
           cargo test --no-default-features -- --test-threads=2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python contrib/check_windows_binary.py target/debug/coincube.exe
@@ -258,7 +266,8 @@ jobs:
         shell: bash
         run: |
           cargo build -p coincube-mcp --features adapter --locked
-          TENSHU_MCP_TEST_ADAPTER="$PWD/target/debug/tenshu-mcp" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+          adapter="$PWD/target/debug/tenshu-mcp"
+          TENSHU_MCP_TEST_ADAPTER="$adapter" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
       - name: Preserve Secret Service fixture diagnostics
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

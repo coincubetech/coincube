@@ -72,9 +72,9 @@ impl Adapter {
         if !request.valid() {
             return Err(ErrorData::invalid_params("invalid_input", None));
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let result = crate::ipc::call(&self.socket, &self.credential, request).await;
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         let result: Result<Response, Error> = {
             let _ = request;
             Err(Error::Unavailable)
