@@ -1308,7 +1308,11 @@ impl Tab {
                         connect_client: l.connect_account.authenticated_client(),
                     };
 
-                    self.state = unlock_state(cube, datadir_root, on_success, duress_account_id);
+                    let mut state = unlock_state(cube, datadir_root, on_success, duress_account_id);
+                    if let State::PinEntry(pin) = &mut state {
+                        pin.set_connect_provider(&l.connect_account.client.base_url);
+                    }
+                    self.state = state;
                     Task::none()
                 }
                 home::Message::View(home::ViewMessage::ToggleTheme) => {

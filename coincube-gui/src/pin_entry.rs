@@ -28,6 +28,8 @@ pub struct PinEntry {
     loading: bool,
     fork_generation: u64,
     fork_task: Option<iced::task::Handle>,
+    connect_provider: String,
+    connect_expected_user: Option<u32>,
     // Store what to do after successful PIN entry
     pub on_success: PinEntrySuccess,
     /// This device's enrolled Connect duress account id, captured at
@@ -120,6 +122,11 @@ impl PinEntry {
         on_success: PinEntrySuccess,
         duress_account_id: Option<String>,
     ) -> Self {
+        let PinEntrySuccess::LoadApp { connect_client, .. } = &on_success;
+        let connect_provider = connect_client
+            .as_ref()
+            .map(|client| client.base_url.clone())
+            .unwrap_or_else(crate::services::coincube_api_base_url);
         let loading_quote = quote_display::random_quote("loading");
         let loading_image_handle = quote_display::image_handle_for_context("loading");
         Self {
@@ -131,6 +138,8 @@ impl PinEntry {
             loading: false,
             fork_generation: next_fork_generation(),
             fork_task: None,
+            connect_provider,
+            connect_expected_user: None,
             on_success,
             duress_account_id,
             loading_quote,
@@ -160,6 +169,42 @@ impl PinEntry {
             )
     }
 
+    /// Capture the opening Home's provider even while its account check is pending.
+    pub(crate) fn set_connect_provider(&mut self, provider: &str) {
+        self.connect_provider = provider.to_owned();
+    }
+
+    /// A candidate is not admission: cancel any old unlock and require a new
+    /// PIN submission to verify this exact account and the fork feature again.
+    pub(crate) fn adopt_connect_candidate(
+        &mut self,
+        root: &crate::dir::CoincubeDirectory,
+        client: crate::services::coincube::CoincubeClient,
+        expected_user: u32,
+    ) -> bool {
+        if !self.requires_connect()
+            || !crate::chain::same_path(&self.datadir_root, root.path())
+            || self.connect_provider.trim_end_matches('/') != client.base_url.trim_end_matches('/')
+            || client.token().is_none_or(|token| token.trim().is_empty())
+        {
+            return false;
+        }
+        let PinEntrySuccess::LoadApp { connect_client, .. } = &self.on_success;
+        if self.connect_expected_user == Some(expected_user)
+            && connect_client
+                .as_ref()
+                .is_some_and(|current| current.token() == client.token())
+        {
+            return true;
+        }
+        self.fail_open(String::new());
+        let PinEntrySuccess::LoadApp { connect_client, .. } = &mut self.on_success;
+        *connect_client = Some(client);
+        self.connect_expected_user = Some(expected_user);
+        self.error = None;
+        true
+    }
+
     pub fn take_fork_signer(&self) -> Option<std::sync::Arc<coincube_core::signer::MasterSigner>> {
         self.fork_signer.lock().ok()?.take()
     }
@@ -173,6 +218,7 @@ impl PinEntry {
         // A blocking decrypt can still finish after cancellation. Detach its
         // slot so it cannot repopulate this screen's current handoff.
         self.fork_signer = Default::default();
+        self.connect_expected_user = None;
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -235,6 +281,7 @@ impl PinEntry {
                 let PinEntrySuccess::LoadApp { connect_client, .. } = &self.on_success;
                 let connect_client = connect_client.clone();
                 let requires_connect = self.requires_connect();
+                let expected_user = self.connect_expected_user;
                 let generation = self.fork_generation;
                 let is_fork = cube.network.is_blake2b();
                 let task = Task::perform(
@@ -251,6 +298,15 @@ impl PinEntry {
                                 "Sign in to Connect before unlocking this Bitcoin Blake2b Cube"
                                     .to_string()
                             })?;
+                            if let Some(expected_user) = expected_user {
+                                let user = client.get_user().await.map_err(|_| "Connect session could not be verified. Return Home and retry the account check.".to_string())?;
+                                if user.id != expected_user {
+                                    return Err(
+                                        "Connect account changed. Return Home and sign in again."
+                                            .to_string(),
+                                    );
+                                }
+                            }
                             crate::chain::require_connect_feature(
                                 cube.network,
                                 client,
@@ -552,6 +608,175 @@ mod fork_handoff_tests {
         }
         feature.assert_async().await;
         std::fs::remove_dir_all(path).unwrap();
+    }
+
+    async fn candidate_outputs(task: Task<Message>) -> Vec<Message> {
+        use iced::futures::StreamExt;
+        match iced_runtime::task::into_stream(task) {
+            Some(stream) => {
+                stream
+                    .filter_map(|action| async move {
+                        match action {
+                            iced_runtime::Action::Output(message) => Some(message),
+                            _ => None,
+                        }
+                    })
+                    .collect()
+                    .await
+            }
+            None => Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn scoped_connect_candidate_checks_account_and_feature_before_decrypting() {
+        use httpmock::prelude::*;
+        for case in ["native", "imported", "wrong-user", "feature-off", "revoked"] {
+            let server = MockServer::start_async().await;
+            let user = server.mock_async(|when, then| {
+                when.method(GET).path("/api/v1/user").header("authorization", "Bearer fresh-session");
+                then.status(200).delay(std::time::Duration::from_millis(50)).json_body(serde_json::json!({
+                    "id": if case == "wrong-user" { 8 } else { 7 }, "email":"fixture@example.invalid", "email_verified":true,
+                }));
+            }).await;
+            let feature = server.mock_async(|when, then| {
+                when.method(GET).path("/api/v1/connect/features").header("authorization", "Bearer fresh-session");
+                then.status(200).json_body(serde_json::json!({"data":{"plans":[],"bitcoin_blake2b_enabled":case != "feature-off"}}));
+            }).await;
+            let chain = crate::chain::ChainId::BitcoinBlake2b;
+            let path =
+                std::env::temp_dir().join(format!("scoped-fork-pin-{}", uuid::Uuid::new_v4()));
+            let root = crate::dir::CoincubeDirectory::new(path.clone());
+            std::fs::create_dir_all(&path).unwrap();
+            let signer =
+                coincube_core::signer::MasterSigner::generate(chain.bitcoin_network()).unwrap();
+            let secp = coincube_core::miniscript::bitcoin::secp256k1::Secp256k1::new();
+            let mut cube = CubeSettings::new("Pending fork".into(), chain);
+            if case == "imported" {
+                let (source, _, _) = crate::imported_claim::tests::fixture();
+                let import = source.bitcoin_import.unwrap();
+                let source_wallet = import.active_attachment().unwrap().clone();
+                let wallet = crate::app::settings::ImportedWalletAttachment::new(
+                    source_wallet.descriptor.paired_blake2b().unwrap(),
+                    chain,
+                    source_wallet.birthday,
+                    source_wallet.initial_lookahead,
+                )
+                .unwrap();
+                cube.id = crate::services::bitcoin_import::pairing::target_cube_id(&source.id);
+                cube.bitcoin_import = Some(Box::new(crate::app::settings::BitcoinImport {
+                    operation_id: uuid::Uuid::new_v4(),
+                    stage: crate::app::settings::BitcoinImportStage::Ready { wallet },
+                    last_error: None,
+                }));
+                cube.imported_claim_source = Some(Box::new(
+                    crate::app::settings::bitcoin_import::ImportedClaimPair {
+                        source_cube_id: source.id,
+                        source_operation_id: import.operation_id,
+                        source_wallet,
+                    },
+                ));
+            }
+            cube.master_signer_fingerprint = Some(signer.fingerprint(&secp));
+            signer
+                .store_encrypted_for_chain(&path, chain, &secp, None, "1234", &cube.id, None)
+                .unwrap();
+            let pref = crate::app::settings::global::GlobalSettings::path(&root);
+            crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(&pref, true)
+                .unwrap();
+            let mut client = crate::services::coincube::CoincubeClient::for_test(server.base_url());
+            client.set_token("fresh-session");
+            let mut pin = PinEntry::new(
+                cube,
+                path.clone(),
+                PinEntrySuccess::LoadApp {
+                    datadir: root.clone(),
+                    config: crate::app::Config::new(false),
+                    network: chain.bitcoin_network(),
+                    internal_bitcoind: None,
+                    backup: None,
+                    wallet_settings: None,
+                    connect_client: None,
+                },
+                None,
+            );
+            pin.set_connect_provider(&server.base_url());
+            let generation = pin.fork_generation;
+            assert!(!pin.adopt_connect_candidate(
+                &crate::dir::CoincubeDirectory::new(path.join("other-root")),
+                client.clone(),
+                7
+            ));
+            let mut other_provider = client.clone();
+            other_provider.base_url = "http://127.0.0.1:1".into();
+            assert!(!pin.adopt_connect_candidate(&root, other_provider, 7));
+            assert_eq!(pin.fork_generation, generation);
+            assert_eq!(user.hits_async().await, 0);
+            assert!(pin.adopt_connect_candidate(&root, client, 7));
+            for (index, digit) in "1234".chars().enumerate() {
+                drop(
+                    pin.update(Message::PinInput(pin_input::Message::DigitChanged(
+                        index,
+                        digit.to_string(),
+                    ))),
+                );
+            }
+            let generation = pin.fork_generation;
+            let task = pin.update(Message::Submit);
+            let mut messages = if case == "revoked" {
+                let worker = tokio::spawn(candidate_outputs(task));
+                tokio::time::timeout(std::time::Duration::from_secs(3), async {
+                    while user.hits_async().await == 0 {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+                .unwrap();
+                let PinEntrySuccess::LoadApp { connect_client, .. } = &pin.on_success;
+                let duplicate = connect_client.clone().unwrap();
+                assert!(pin.adopt_connect_candidate(&root, duplicate, 7));
+                assert_eq!(
+                    pin.fork_generation, generation,
+                    "duplicate readiness must not abort verification"
+                );
+                assert!(pin.loading);
+                pin.fail_open("Connect session changed".into());
+                let PinEntrySuccess::LoadApp { connect_client, .. } = &mut pin.on_success;
+                *connect_client = None;
+                let _ = pin.update(Message::ForkClassified(generation, Ok(Verdict::Unlock)));
+                worker.await.unwrap()
+            } else {
+                candidate_outputs(task).await
+            };
+            for message in messages.drain(..) {
+                drop(pin.update(message));
+            }
+            if case == "native" || case == "imported" {
+                assert!(pin.error.is_none(), "{}: {:?}", case, pin.error);
+                assert!(
+                    pin.take_fork_signer().is_some(),
+                    "{} must unlock the chain-bound seed",
+                    case
+                );
+                feature.assert_hits_async(1).await;
+            } else {
+                assert!(
+                    pin.take_fork_signer().is_none(),
+                    "{} must not decrypt or retain a signer",
+                    case
+                );
+                assert!(pin.error.is_some());
+                feature
+                    .assert_hits_async(usize::from(case == "feature-off"))
+                    .await;
+                assert!(
+                    !matches!(pin.error.as_deref(), Some("Incorrect PIN")),
+                    "service failures are not wrong PINs"
+                );
+            }
+            user.assert_hits_async(1).await;
+            std::fs::remove_dir_all(path).unwrap();
+        }
     }
 
     #[test]
