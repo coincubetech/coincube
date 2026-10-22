@@ -529,6 +529,27 @@ mod fork_handoff_tests {
             .take_fork_signer()
             .expect("signed-out local PIN opens the fork signer");
         assert_eq!(unlocked.fingerprint(&secp), signer.fingerprint(&secp));
+        // Continue the real successful local PIN through the tab's production
+        // handoff. Do not poll the returned startup task: admission is under
+        // test, and no managed node or wallet daemon should run here.
+        *pin.fork_signer.lock().unwrap() = Some(unlocked);
+        {
+            let _session = crate::app::session::test_guard();
+            let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::PinEntry(pin));
+            let task = tab.update(crate::gui::tab::Message::PinEntry(Message::PinVerified));
+            assert!(
+                task.units() > 0,
+                "local handoff must schedule its dedicated startup"
+            );
+            let crate::gui::tab::State::Loader(loader) = &tab.state else {
+                panic!("successful local PIN must reach its loader");
+            };
+            assert_eq!(loader.cube_settings.network, chain);
+            assert!(!loader.requires_connect());
+            drop(task);
+            drop(tab);
+            crate::app::session::close();
+        }
         feature.assert_async().await;
         std::fs::remove_dir_all(path).unwrap();
     }

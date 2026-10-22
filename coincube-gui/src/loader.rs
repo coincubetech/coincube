@@ -756,6 +756,11 @@ impl Loader {
         match message {
             Message::View(ViewMessage::Retry) => {
                 if self.cube_settings.network.is_blake2b() {
+                    // Reopening must establish a fresh session after revocation.
+                    // Keep the specific refusal instead of rebuilding without auth.
+                    if self.fork_session_revoked {
+                        return Task::none();
+                    }
                     if let Some(deadline) = self.fork_retry_not_before {
                         let remaining =
                             deadline.saturating_duration_since(std::time::Instant::now());
@@ -3029,6 +3034,126 @@ mod bootstrap_backend_selection_tests {
             &signer,
             bitcoin::Network::Bitcoin,
         ))
+    }
+
+    #[test]
+    fn retry_preserves_a_revoked_fork_session_and_its_reopen_guidance() {
+        let root = temp_root("revoked-retry");
+        let (mut loader, startup) = Loader::new_for_chain(
+            root.clone(),
+            GUIConfig::new(false),
+            wallet(),
+            cube(ChainId::BitcoinBlake2b),
+            authenticated_client(),
+            encryption_key(),
+        );
+        assert!(matches!(loader.step, Step::Connecting));
+        assert!(startup.units() > 0);
+        drop(startup); // Admission only: never poll a daemon or network worker.
+        loader.invalidate_fork_session();
+        assert!(loader.fork_session_revoked);
+        assert!(loader.connect_client.is_none());
+        assert!(loader.cube_encryption_key.is_none());
+        let original = match &loader.step {
+            Step::Error(error) => error.to_string(),
+            _ => panic!("invalidation must refuse the session"),
+        };
+        assert!(original.contains("reopen this Cube"));
+        for deadline in [
+            Some(std::time::Instant::now() + Duration::from_secs(30)),
+            None, // The real cooldown has elapsed; never wait in the test.
+        ] {
+            loader.fork_retry_not_before = deadline;
+            for _ in 0..2 {
+                let task = loader.update(Message::View(ViewMessage::Retry));
+                assert_eq!(task.units(), 0);
+                assert!(loader.fork_session_revoked);
+                assert!(loader.connect_client.is_none());
+                assert!(loader.cube_encryption_key.is_none());
+                assert!(matches!(&loader.step, Step::Error(error)
+                    if error.to_string() == original));
+            }
+        }
+        // Late worker delivery must still see the revocation latch after Retry.
+        let task = loader.update(Message::Started(Err(Error::Unexpected(
+            "late startup".into(),
+        ))));
+        assert_eq!(task.units(), 0);
+        assert!(matches!(&loader.step, Step::Error(error)
+            if error.to_string() == original));
+        // Capability revocation may install a more specific refusal afterwards.
+        let disabled =
+            "Bitcoin Blake2b is disabled. Check Global Settings before reopening this Cube.";
+        loader.fail(Error::Unexpected(disabled.into()));
+        let task = loader.update(Message::View(ViewMessage::Retry));
+        assert_eq!(task.units(), 0);
+        assert!(loader.fork_session_revoked);
+        assert!(matches!(&loader.step, Step::Error(error)
+            if error.to_string() == format!("Unexpected error: {disabled}")));
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn nonrevoked_connect_and_local_fork_retries_keep_their_admission() {
+        for local in [false, true] {
+            let root = temp_root("healthy-retry");
+            let chain = ChainId::BitcoinBlake2b;
+            let key = encryption_key();
+            let (loader, startup) = if local {
+                let (_, wallet) = crate::chain::managed_local_fixture(&root, chain);
+                Loader::new_local_fork(
+                    root.clone(),
+                    GUIConfig::new(false),
+                    wallet,
+                    cube(chain),
+                    key.clone(),
+                )
+            } else {
+                Loader::new_for_chain(
+                    root.clone(),
+                    GUIConfig::new(false),
+                    wallet(),
+                    cube(chain),
+                    authenticated_client(),
+                    key.clone(),
+                )
+            };
+            drop(startup);
+            let mut tab = crate::gui::tab::Tab::new(1, crate::gui::tab::State::Loader(loader));
+            if local {
+                // Local admission is independent of sibling Connect auth changes.
+                for change in [
+                    crate::gui::tab::AuthChange::LogOut,
+                    crate::gui::tab::AuthChange::SignIn {
+                        user_id: 7,
+                        token: zeroize::Zeroizing::new("new-synthetic-token".into()),
+                    },
+                ] {
+                    assert_eq!(tab.invalidate_fork_session(change, false).units(), 0);
+                }
+            }
+            let crate::gui::tab::State::Loader(loader) = &mut tab.state else {
+                panic!("auth-independent local loader must stay open");
+            };
+            assert!(!loader.fork_session_revoked);
+            loader.fork_retry_not_before = None;
+            let task = loader.update(Message::View(ViewMessage::Retry));
+            assert!(
+                task.units() > 0,
+                "healthy local={} must retry startup",
+                local
+            );
+            assert!(matches!(loader.step, Step::Connecting));
+            assert!(!loader.fork_session_revoked);
+            assert_eq!(loader.connect_client.is_some(), !local);
+            assert!(Arc::ptr_eq(
+                loader.cube_encryption_key.as_ref().unwrap(),
+                &key
+            ));
+            drop(task);
+            drop(tab);
+            std::fs::remove_dir_all(root.path()).unwrap();
+        }
     }
 
     /// A managed-node handle with no node behind it, to stand in for one the
