@@ -12,16 +12,26 @@ use std::sync::Arc;
 #[cfg(unix)]
 use std::time::Duration;
 
+/// Actions emitted only by the trusted desktop AI access settings.
 #[derive(Debug, Clone)]
 pub enum Message {
+    /// Enable or disable MCP for the current unlocked session.
     Enable(bool),
+    /// Select whether the current Vault may be shared.
     Wallet(bool),
+    /// Edit balance, history or policy access by capability index.
     Capability(usize, bool),
+    /// Set the local display label; it is not a client authentication identity.
     ClientName(String),
+    /// Mint a fresh, expiring grant after validating the current selection.
     Approve,
+    /// Invalidate the current grant immediately.
     Revoke,
+    /// Copy the companion command and temporary credential for a trusted client.
     CopyConfig,
 }
+/// Session-local approval state. Dropping it shuts down its private IPC server.
+/// The default grants no access and no credential is persisted.
 #[derive(Default)]
 pub struct Settings {
     enabled: bool,
@@ -34,6 +44,7 @@ pub struct Settings {
     server: Option<wire::ipc::Server>,
 }
 impl Settings {
+    /// Stop the server and clear its approved display label synchronously.
     pub fn revoke(&mut self) {
         #[cfg(unix)]
         {
@@ -41,6 +52,9 @@ impl Settings {
         }
         self.approved_name.clear();
     }
+    /// Apply a trusted UI action, returning private client JSON only for CopyConfig.
+    /// Selection edits revoke old credentials; approval requires an unlocked Vault
+    /// on the embedded backend and captures its current session generation.
     pub fn update(
         &mut self,
         message: Message,
@@ -128,6 +142,7 @@ impl Settings {
         }
         None
     }
+    /// Render consent controls and warn that the configured AI provider may receive data.
     pub fn view(&self, supported: bool) -> Element<'_, view::Message> {
         let message = |m| view::Message::LocalMcp(m);
         let mut content = column![
@@ -211,6 +226,7 @@ impl Settings {
 }
 
 #[cfg(unix)]
+/// Read projection retaining a descriptor and daemon, never a wallet signer.
 #[derive(Clone)]
 struct VaultReader {
     read_slots: Arc<tokio::sync::Semaphore>,
@@ -221,6 +237,7 @@ struct VaultReader {
 }
 #[cfg(unix)]
 impl wire::Reader for VaultReader {
+    /// Bound blocking database work to two workers independently of IPC deadlines.
     fn read(
         &self,
         request: wire::Request,
@@ -249,6 +266,7 @@ impl wire::Reader for VaultReader {
 }
 #[cfg(unix)]
 impl VaultReader {
+    /// Validate the opaque wallet scope and daemon identity before projecting public data.
     async fn read_wallet(&self, request: wire::Request) -> Result<wire::Response, wire::Error> {
         // Defense in depth: the IPC gate enforces the same opaque identity.
         if request.scope().is_some_and(|(id, _)| id != self.wallet_id) {
@@ -381,6 +399,7 @@ mod tests {
     };
     use std::str::FromStr;
 
+    /// Create a disposable real SQLite wallet and matching GUI wallet wrapper.
     fn fixture() -> (
         std::path::PathBuf,
         Arc<Wallet>,
@@ -406,6 +425,7 @@ mod tests {
             Arc::new(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(config, handle));
         (root, Arc::new(Wallet::new(descriptor)), daemon)
     }
+    /// Build a typed request using an opaque grant-scoped wallet identifier.
     fn input(id: &str) -> wire::WalletInput {
         wire::WalletInput {
             wallet_id: id.into(),
@@ -417,6 +437,7 @@ mod tests {
     // wallet-service boundaries, using the configuration issued by Settings.
     #[test]
     #[ignore = "build tenshu-mcp and set TENSHU_MCP_TEST_ADAPTER; run explicitly in CI"]
+    /// Exercise an actual companion process against SQLite and verify revocation.
     fn stdio_client_reads_real_wallet_and_observes_revocation() {
         use serde_json::{json, Value};
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -444,6 +465,7 @@ mod tests {
                 .stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn().unwrap();
             let mut stdin = child.stdin.take().unwrap();
             let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
+            /// Read the matching JSON-RPC result, skipping unrelated notifications.
             async fn response(
                 stdin: &mut tokio::process::ChildStdin,
                 stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
@@ -501,6 +523,7 @@ mod tests {
     }
 
     #[test]
+    /// Verify consent, all read projections and server teardown with a real database.
     fn real_sqlite_wallet_reads_require_ui_grant_and_revoke_on_settings_drop() {
         let _session_guard = super::super::session::test_guard();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -635,6 +658,7 @@ mod tests {
     }
 
     #[test]
+    /// Ensure disabling access or narrowing capabilities invalidates existing client JSON.
     fn disable_and_capability_edit_invalidate_old_configuration() {
         let _session_guard = super::super::session::test_guard();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
@@ -695,6 +719,7 @@ mod tests {
     }
 
     #[test]
+    /// Distinguish ordinary account refresh from a backend transition that must revoke.
     fn app_preserves_grant_on_connect_refresh_but_revokes_on_backend_switch() {
         use super::super::{message::Message as AppMessage, App};
         let _session_guard = super::super::session::test_guard();
