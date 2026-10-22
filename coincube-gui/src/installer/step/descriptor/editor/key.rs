@@ -490,13 +490,21 @@ impl SelectKeySource {
         if self.actual_path.keys.iter().any(|key_fg| key_fg == &fg) {
             return Some("Key already used in this path".to_string());
         }
-        // "One Keychain key per owner per Vault" is a Keychain-only rule, so
-        // only Keychain keys are barred from a second spending path. Every
-        // other source may legitimately be reused across paths — the
-        // expanding-multisig inheritance template is built on exactly that,
-        // mirroring the primary keys into the 2-of-6 recovery path.
+        // Keychain keys ("one Keychain key per owner per Vault") and the Cube
+        // Key are barred from a second spending path. Every other source may
+        // legitimately be reused across paths. The expanding-multisig
+        // template's mirroring is unaffected: it edits a primary key at both
+        // of its slots at once, so neither counts as "elsewhere".
         if matches!(source, KeySource::KeychainKey { .. }) && self.key_placed_elsewhere(fg) {
             return Some("This Keychain key is already used elsewhere in this Vault.".to_string());
+        }
+        // The Cube Key lives on this device behind the Cube's PIN or Passkey,
+        // so as both a primary and an inheritance key it would let whoever
+        // unlocks the Cube spend the inheritance path too, leaving the heir
+        // no key of their own. The Cube Key card is already disabled once
+        // the key is placed; this closes the same gap on its row here.
+        if matches!(source, KeySource::MasterSigner) && self.key_placed_elsewhere(fg) {
+            return Some("This Cube Key is already used elsewhere in this Vault.".to_string());
         }
         None
     }
@@ -708,6 +716,16 @@ impl SelectKeySource {
         )
     }
     fn on_select_key(&mut self, fingerprint: Fingerprint) -> Task<Message> {
+        // Backstop for the "already used sources" rows, which are disabled
+        // for the same reason.
+        if let Some(reason) = self
+            .keys
+            .get(&fingerprint)
+            .and_then(|(_, key)| self.key_unavailable_reason(fingerprint, &key.source))
+        {
+            self.error = Some(reason);
+            return Task::none();
+        }
         self.focus = Focus::Key(fingerprint);
         self.selected_key = SelectedKey::Existing(fingerprint);
         self.on_next()
@@ -3366,16 +3384,14 @@ mod tests {
 
     #[test]
     fn a_non_keychain_key_may_be_reused_in_another_path() {
-        // Reuse across spending paths is a supported descriptor shape — the
-        // expanding-multisig inheritance template mirrors the primary keys
-        // into its recovery path — so only Keychain keys are barred from it.
+        // Reuse across spending paths is a supported descriptor shape, so
+        // only Keychain keys and the Cube Key are barred from it.
         let fg = Fingerprint::from_str("8a550171").unwrap();
         // Placed at (1, 0); we're editing (0, 0), a slot in another path.
         let picker = picker_with_placed_key(vec![(0, 0)], vec![(1, 0)], fg);
         assert!(picker.key_placed_elsewhere(fg));
         for source in [
             KeySource::Manual,
-            KeySource::MasterSigner,
             KeySource::BorderWallet {
                 grid_seed_source: crate::app::settings::GridSeedSource::Independent,
             },
@@ -3395,6 +3411,43 @@ mod tests {
         assert_eq!(
             picker.key_unavailable_reason(fg, &source),
             Some("This Keychain key is already used elsewhere in this Vault.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_cube_key_placed_in_another_path_is_blocked() {
+        // The primary key is the Cube Key; we're editing the inheritance key.
+        let fg = Fingerprint::from_str("8a550171").unwrap();
+        let picker = picker_with_placed_key(vec![(1, 0)], vec![(0, 0)], fg);
+        assert_eq!(
+            picker.key_unavailable_reason(fg, &KeySource::MasterSigner),
+            Some("This Cube Key is already used elsewhere in this Vault.".to_string())
+        );
+    }
+
+    #[test]
+    fn a_cube_key_at_the_edited_slot_stays_selectable() {
+        // Re-picking the Cube Key for the slot it already holds is no reuse.
+        let fg = Fingerprint::from_str("8a550171").unwrap();
+        let picker = picker_with_placed_key(vec![(0, 0)], vec![(0, 0)], fg);
+        assert_eq!(
+            picker.key_unavailable_reason(fg, &KeySource::MasterSigner),
+            None
+        );
+    }
+
+    #[test]
+    fn selecting_a_cube_key_placed_in_another_path_is_refused() {
+        // Backstop behind the disabled "already used sources" row.
+        let fg = Fingerprint::from_str("8a550171").unwrap();
+        let mut picker = picker_with_placed_key(vec![(1, 0)], vec![(0, 0)], fg);
+        picker.keys.get_mut(&fg).unwrap().1.source = KeySource::MasterSigner;
+        let _ = picker.on_select_key(fg);
+        assert!(matches!(picker.selected_key, SelectedKey::None));
+        assert_eq!(picker.step, Step::Grid);
+        assert_eq!(
+            picker.error.as_deref(),
+            Some("This Cube Key is already used elsewhere in this Vault.")
         );
     }
 
