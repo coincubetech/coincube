@@ -23,6 +23,8 @@ The crate pins Iced/iced_wgpu 0.14.0 and glam 0.25.0, with its own committed Car
 
 ## Review controls
 
+For repeatable native reviews, F4 loads 12 Cubes, F5 loads 20, F6 resizes the Lab to 1024×700 logical pixels, and F7 restores 1440×900. These are Lab-only shortcuts; fixture shortcuts discard prior synthetic edits. Resizing resets timing samples. On keyboards using media keys by default, hold Fn with the function key.
+
 - Fixture load: empty, 1, 4, 12 or 20 Cubes. Loading a preset discards previous in-memory fixture edits. The lab models the Estate limit of 7 Cubes per network (21 across these 3 fixture networks). Creation shows the chosen network’s count and disables when it reaches 7; this is synthetic behavior, not production entitlement enforcement. The main design target is 10–20 total Cubes.
 - All networks initially includes Bitcoin mainnet, Bitcoin Blake2b mainnet and Testnet4. Live chains includes both mainnets. Filters only change catalog visibility. Counts show hidden entries and Clear filters restores the full catalog.
 - Create on explicitly chooses the synthetic network. Create Cube adds an in-memory fixture; it creates no file or key. If the chosen chain was hidden, the catalog returns to All networks so the new Cube is visible.

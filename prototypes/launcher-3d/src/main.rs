@@ -14,7 +14,7 @@ use iced::{
         stack, text, Column, Space,
     },
     window, Alignment, Background, Border, Color, Element, Fill, Font, Length, Size, Subscription,
-    Theme,
+    Task, Theme,
 };
 use metrics::{Metrics, SharedMetrics};
 use model::{Catalog, Filter, Network, Protection, MAX_PER_NETWORK};
@@ -54,6 +54,7 @@ pub enum Message {
     PrintMetrics,
     Step(i32),
     Reduced(bool),
+    Resize(Size),
 }
 
 struct App {
@@ -96,8 +97,12 @@ impl App {
         }
     }
 
-    fn update(&mut self, message: Message) {
+    fn update(&mut self, message: Message) -> Task<Message> {
         match message {
+            Message::Resize(size) => {
+                self.reset_metrics();
+                return window::latest().and_then(move |id| window::resize(id, size));
+            }
             Message::Reduced(value) => {
                 self.reduced = value;
                 self.reset_metrics();
@@ -130,7 +135,7 @@ impl App {
             Message::Create => {
                 if self.catalog.can_create(self.creation_network) {
                     let Some(id) = self.catalog.create(self.creation_network) else {
-                        return;
+                        return Task::none();
                     };
                     self.selected = Some(id);
                     self.selected_at = Instant::now();
@@ -187,6 +192,7 @@ impl App {
                 }
             }
         }
+        Task::none()
     }
 
     fn reset_metrics(&mut self) {
@@ -211,6 +217,10 @@ impl App {
                     Some(Message::Step(-1))
                 }
                 iced::keyboard::key::Named::Enter => Some(Message::Open),
+                iced::keyboard::key::Named::F4 => Some(Message::Reset(12)),
+                iced::keyboard::key::Named::F5 => Some(Message::Reset(20)),
+                iced::keyboard::key::Named::F6 => Some(Message::Resize(Size::new(1024., 700.))),
+                iced::keyboard::key::Named::F7 => Some(Message::Resize(Size::new(1440., 900.))),
                 _ => None,
             },
             _ => None,
@@ -598,7 +608,7 @@ mod tests {
     #[test]
     fn clearing_a_filter_discards_timings_from_the_previous_scene_load() {
         let mut app = App::new();
-        app.update(Message::Filter(Filter::Bitcoin));
+        let _ = app.update(Message::Filter(Filter::Bitcoin));
         let before = app.catalog.visible(app.filter).len();
         let at = Instant::now();
         {
@@ -610,7 +620,7 @@ mod tests {
         }
         assert!(app.metrics.lock().unwrap().summary().starts_with("50.0"));
 
-        app.update(Message::Clear);
+        let _ = app.update(Message::Clear);
 
         assert!(app.catalog.visible(app.filter).len() > before);
         assert_eq!(app.metrics.lock().unwrap().renders, 0);
