@@ -238,9 +238,9 @@ impl GUI {
             }
             message => message,
         };
-        // A cold opening Home can otherwise snapshot None even while another
-        // tab owns the one current verified session. Conflicting identities are
-        // deliberately not resolved by picking a sibling.
+        // Every hosted fork PIN starts with a completed, scoped account
+        // candidate. A cold Home can borrow one unambiguous verified sibling;
+        // an account still being checked cannot bypass its gate that way.
         let opening_pin = match &message {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => match inner.as_ref() {
                 tab::Message::Launch(home::Message::Run(root, _, chain, _))
@@ -250,14 +250,20 @@ impl GUI {
                         .get(*pane_id)
                         .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
                         .and_then(|tab| match &tab.state {
-                            tab::State::Home(home)
-                                if home.connect_account.authenticated_client().is_none() =>
-                            {
-                                self.unique_unlock_candidate(
-                                    root,
-                                    &home.connect_account.client.base_url,
-                                )
-                                .map(|candidate| (*pane_id, *tab_id, candidate))
+                            tab::State::Home(home) => {
+                                let candidate = if home.connect_account.is_authenticated() {
+                                    self.verified_unlock_origin(*pane_id, *tab_id)
+                                } else if home.connect_account.authenticated_client().is_none() {
+                                    self.unique_unlock_candidate(
+                                        root,
+                                        &home.connect_account.client.base_url,
+                                    )
+                                } else {
+                                    // A retained token while this Home's account
+                                    // gate is checking or closed is not admission.
+                                    None
+                                };
+                                candidate.map(|candidate| (*pane_id, *tab_id, candidate))
                             }
                             _ => None,
                         })
@@ -1752,7 +1758,7 @@ mod fork_auth_dispatch_tests {
     }
 
     #[test]
-    fn cold_home_open_only_adopts_one_scoped_current_identity() {
+    fn home_open_only_adopts_completed_scoped_identity() {
         let result = std::thread::Builder::new()
             .stack_size(8 * 1024 * 1024)
             .spawn(|| {
@@ -1761,8 +1767,21 @@ mod fork_auth_dispatch_tests {
                     .build()
                     .unwrap();
                 let _enter = runtime.enter();
+                let server = httpmock::MockServer::start();
+                let user = server.mock(|when, then| {
+                    when.method(httpmock::Method::GET).path("/api/v1/user")
+                        .header("authorization", "Bearer direct-session");
+                    then.status(200).json_body(serde_json::json!({
+                        "id":8,"email":"other@example.invalid","email_verified":true
+                    }));
+                });
+                let feature = server.mock(|when, then| {
+                    when.method(httpmock::Method::GET).path("/api/v1/connect/features");
+                    then.status(200).json_body(serde_json::json!({"data":{"plans":[],"bitcoin_blake2b_enabled":true}}));
+                });
+                let provider_url = server.base_url();
                 for case in [
-                    "same",
+                    "direct", "checking", "active", "same",
                     "wrong-root",
                     "wrong-provider",
                     "account-conflict",
@@ -1777,7 +1796,7 @@ mod fork_auth_dispatch_tests {
                         true,
                     )
                     .unwrap();
-                    let provider = "http://127.0.0.1:1";
+                    let provider = provider_url.as_str();
                     let ready =
                         |source_root: CoincubeDirectory, provider: &str, id: u32, token: &str| {
                             let (mut home, task) = home::Home::new_for_chain(source_root, None);
@@ -1811,6 +1830,24 @@ mod fork_auth_dispatch_tests {
                     cold.connect_account.client =
                         crate::services::coincube::CoincubeClient::for_test(provider);
                     drop(cold.update(home::Message::GlobalFeatureLoaded(0, true)));
+                    if matches!(case, "direct" | "checking" | "active") {
+                        cold.connect_account.client.set_token("direct-session");
+                        cold.connect_account.user = Some(User {
+                            id:7,email:"fixture@example.invalid".into(),email_verified:Some(true),
+                        });
+                        cold.connect_account.step = match case {
+                            "direct" => crate::app::state::connect::account::ConnectFlowStep::Dashboard,
+                            "checking" => crate::app::state::connect::account::ConnectFlowStep::CheckingDuress {
+                                status: crate::app::state::connect::account::DuressGateStatus::Checking,
+                            },
+                            _ => crate::app::state::connect::account::ConnectFlowStep::DuressRecovery {
+                                unlock_at:None,passphrase:String::new(),submitting:false,cleared:false,
+                            },
+                        };
+                        assert!(cold.connect_account.authenticated_client().is_some(),
+                            "raw client presence is not completed account admission");
+                    }
+
                     let mut pane = pane::Pane::new_with_tab(tab::State::Home(first));
                     pane.tabs.push(tab::Tab::new(2, tab::State::Home(cold)));
                     if case.ends_with("conflict") {
@@ -1852,15 +1889,17 @@ mod fork_auth_dispatch_tests {
                             )),
                         ),
                     )));
-                    let pending = &gui.panes.get(pane_id).unwrap().tabs[1];
-                    let tab::State::PinEntry(pin) = &pending.state else {
+                    let pending = &mut gui.panes.get_mut(pane_id).unwrap().tabs[1];
+                    let tab::State::PinEntry(pin) = &mut pending.state else {
                         panic!("{} must reach PIN", case)
                     };
                     let crate::pin_entry::PinEntrySuccess::LoadApp { connect_client, .. } =
                         &pin.on_success;
                     assert_eq!(
                         connect_client.as_ref().and_then(|client| client.token()),
-                        if case == "same" {
+                        if case == "direct" {
+                            Some("direct-session")
+                        } else if case == "same" {
                             Some("current-session")
                         } else {
                             None
@@ -1869,6 +1908,32 @@ mod fork_auth_dispatch_tests {
                         case
                     );
                     assert!(pin.take_fork_signer().is_none());
+                    if case == "direct" {
+                        // Exercise the actual Home -> PIN candidate. A changed
+                        // server identity must be refused before feature/decrypt work.
+                        assert_eq!(user.hits(), 0);
+                        for (index, digit) in "1234".chars().enumerate() {
+                            drop(pin.update(crate::pin_entry::Message::PinInput(
+                                crate::pin_input::Message::DigitChanged(index,digit.to_string()))));
+                        }
+                        let task = pin.update(crate::pin_entry::Message::Submit);
+                        let messages = runtime.block_on(async {
+                            use iced::futures::StreamExt;
+                            let mut messages = Vec::new();
+                            if let Some(mut stream) = iced_runtime::task::into_stream(task) {
+                                while let Some(action) = stream.next().await {
+                                    if let iced_runtime::Action::Output(message) = action {
+                                        messages.push(message);
+                                    }
+                                }
+                            }
+                            messages
+                        });
+                        for message in messages { drop(pin.update(message)); }
+                        user.assert_hits(1);
+                        feature.assert_hits(0);
+                        assert!(pin.take_fork_signer().is_none());
+                    }
                     drop(gui);
                     std::fs::remove_dir_all(path).unwrap();
                 }

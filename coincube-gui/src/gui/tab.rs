@@ -1311,6 +1311,14 @@ impl Tab {
                     let mut state = unlock_state(cube, datadir_root, on_success, duress_account_id);
                     if let State::PinEntry(pin) = &mut state {
                         pin.set_connect_provider(&l.connect_account.client.base_url);
+                        if pin.requires_connect() {
+                            // The GUI supplies a scoped completed-account candidate;
+                            // a raw Home token may still be behind its safety gate.
+                            let crate::pin_entry::PinEntrySuccess::LoadApp {
+                                connect_client, ..
+                            } = &mut pin.on_success;
+                            *connect_client = None;
+                        }
                     }
                     self.state = state;
                     Task::none()
