@@ -691,7 +691,19 @@ fn scan_error_copy(error: ScanError) -> String {
         ScanError::RateLimited(delay) => format!("The indexer is rate limited. Try again after its cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
         ScanError::Descriptor => "Enter a supported public mainnet descriptor. Private keys, hardened public derivation and ambiguous multipath descriptors are refused.".to_string(),
         ScanError::RangeLimit | ScanError::AddressLimit => "The wallet history did not reach a safe gap inside this bounded scan. No zero-balance conclusion was made.".to_string(),
-        ScanError::Freshness | ScanError::Changed => "The chain changed or fresh evidence could not be proved. Scan again before continuing.".to_string(),
+        ScanError::Freshness => "Fresh indexer data could not be proved. Scan again before continuing.".to_string(),
+        ScanError::Changed(reason) => {
+            use crate::services::foreign_scan::ChangedReason;
+            let detail = match reason {
+                ChangedReason::TipNoLongerBest => "The scanned block is no longer part of the current chain.",
+                ChangedReason::TipMoved => "The latest block changed during the scan.",
+                ChangedReason::AnchorMismatch => "The indexer and network status reported different latest blocks.",
+                ChangedReason::AnchorChanged => "The network's fork status changed during the scan.",
+                ChangedReason::AddressState => "Deposit data or history changed between reads.",
+                ChangedReason::HeightBehindUtxo => "The indexer reported a confirmed deposit above its latest block.",
+            };
+            format!("{detail} Scan again before continuing.")
+        },
         ScanError::Cancelled => "The scan was cancelled.".to_string(),
         ScanError::Deadline => "The bounded scan timed out before proving a complete result.".to_string(),
         ScanError::Http(401) => "Sign in to Connect before scanning a Bitcoin wallet.".to_string(),
@@ -1986,7 +1998,7 @@ mod tests {
 
         for error in [
             ScanError::Freshness,
-            ScanError::Changed,
+            ScanError::Changed(crate::services::foreign_scan::ChangedReason::TipMoved),
             ScanError::Unavailable,
             ScanError::Http(503),
             ScanError::Prevout,

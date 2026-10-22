@@ -137,7 +137,7 @@ impl Source for HttpSource {
         )
         .map_err(|_| ScanError::Malformed)?;
         if !status.in_best_chain {
-            return Err(ScanError::Changed);
+            return Err(ScanError::Changed(ChangedReason::TipNoLongerBest));
         }
         status.height.ok_or(ScanError::Malformed)
     }

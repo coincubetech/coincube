@@ -17,7 +17,11 @@ use coincube_core::{
 };
 use iced::futures::future::join_all;
 use serde::Deserialize;
-use std::{collections::BTreeSet, str::FromStr, time::Duration};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str::FromStr,
+    time::Duration,
+};
 use tokio::sync::watch;
 
 pub const MAX_ADDRESSES: u32 = 200;
@@ -47,11 +51,23 @@ pub enum ScanError {
     RateLimited(Duration),
     Malformed,
     Freshness,
-    Changed,
+    Changed(ChangedReason),
     RangeLimit,
     AddressLimit,
     BodyLimit,
     Prevout,
+}
+
+/// A non-sensitive cause for a changed scan. No address, transaction or wallet
+/// identity is retained in the error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChangedReason {
+    TipNoLongerBest,
+    TipMoved,
+    AnchorMismatch,
+    AnchorChanged,
+    AddressState,
+    HeightBehindUtxo,
 }
 
 /// Read-only, single-address deposit visibility. It is deliberately not a
@@ -108,7 +124,7 @@ fn summarize_address_funds(utxos: &[Utxo], height: Option<u32>) -> Result<Addres
                 height
                     .ok_or(ScanError::Malformed)?
                     .checked_sub(block_height)
-                    .ok_or(ScanError::Changed)?,
+                    .ok_or(ScanError::Changed(ChangedReason::HeightBehindUtxo))?,
             ) + 1;
             funds.largest_confirmed_sats = funds.largest_confirmed_sats.max(coin.value);
             funds.min_confirmations = if funds.min_confirmations == 0 {
@@ -554,6 +570,28 @@ struct Status {
     block_hash: Option<BlockHash>,
 }
 
+/// Esplora's UTXO list has no order contract. Compare complete records by
+/// outpoint, refusing duplicate records in either observation.
+fn same_utxos(before: &[Utxo], after: &[Utxo]) -> Result<bool, ScanError> {
+    fn by_outpoint(utxos: &[Utxo]) -> Result<BTreeMap<OutPoint, &Utxo>, ScanError> {
+        if utxos.len() > MAX_UTXOS {
+            return Err(ScanError::BodyLimit);
+        }
+        let mut by_outpoint = BTreeMap::new();
+        for coin in utxos {
+            let outpoint = OutPoint {
+                txid: coin.txid,
+                vout: coin.vout,
+            };
+            if outpoint.is_null() || by_outpoint.insert(outpoint, coin).is_some() {
+                return Err(ScanError::Malformed);
+            }
+        }
+        Ok(by_outpoint)
+    }
+    Ok(by_outpoint(before)? == by_outpoint(after)?)
+}
+
 #[async_trait]
 trait Source: Send + Sync {
     async fn tip(&self, chain: ChainId) -> Result<BlockHash, ScanError>;
@@ -676,7 +714,7 @@ async fn collect_mode(
     if plan.chain == ChainId::BitcoinBlake2b {
         let (anchor, fork) = source.anchor().await?;
         if anchor != before {
-            return Err(ScanError::Changed);
+            return Err(ScanError::Changed(ChangedReason::AnchorMismatch));
         }
         fork_height = fork;
     }
@@ -816,8 +854,9 @@ async fn collect_mode(
                         block_hash: coin.status.block_hash,
                     });
                 }
-                if stats != stats_again || utxos != utxos_again {
-                    return Err(ScanError::Changed);
+                let utxos_same = same_utxos(&utxos, &utxos_again)?;
+                if stats != stats_again || !utxos_same {
+                    return Err(ScanError::Changed(ChangedReason::AddressState));
                 }
                 report.addresses += 1;
                 if stats.used() {
@@ -859,11 +898,17 @@ async fn collect_mode(
             return Err(ScanError::RangeLimit);
         }
     }
-    if before != source.tip(plan.chain).await?
-        || (plan.chain == ChainId::BitcoinBlake2b
-            && source.anchor().await? != (before, fork_height))
-    {
-        return Err(ScanError::Changed);
+    if before != source.tip(plan.chain).await? {
+        return Err(ScanError::Changed(ChangedReason::TipMoved));
+    }
+    if plan.chain == ChainId::BitcoinBlake2b {
+        let (anchor, closing_fork_height) = source.anchor().await?;
+        if anchor != before {
+            return Err(ScanError::Changed(ChangedReason::AnchorMismatch));
+        }
+        if closing_fork_height != fork_height {
+            return Err(ScanError::Changed(ChangedReason::AnchorChanged));
+        }
     }
     Ok(report)
 }

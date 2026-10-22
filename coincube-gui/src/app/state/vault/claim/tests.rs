@@ -48,6 +48,33 @@ fn incomplete_inventory_identifies_the_failing_chain() {
 }
 
 #[test]
+fn changed_inventory_copy_identifies_the_failed_observation() {
+    use crate::services::{
+        claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
+    };
+    for (reason, detail) in [
+        (ChangedReason::TipNoLongerBest, "current chain"),
+        (ChangedReason::TipMoved, "latest block changed"),
+        (ChangedReason::AnchorMismatch, "different latest blocks"),
+        (ChangedReason::AnchorChanged, "fork status changed"),
+        (
+            ChangedReason::AddressState,
+            "deposit data or history changed",
+        ),
+        (ChangedReason::HeightBehindUtxo, "confirmed deposit above"),
+    ] {
+        let error = ClaimInventoryError::Scan(InventoryError::Scan(
+            ChainId::BitcoinBlake2b,
+            ScanError::Changed(reason),
+        ));
+        let message = inventory_scan_refusal(error, ScanRetry::Automatic);
+        assert!(message.contains("BTCB2"));
+        assert!(message.contains(detail), "{}", message);
+        assert!(message.contains("retry automatically"));
+    }
+}
+
+#[test]
 fn rate_limit_copy_only_promises_the_retry_that_will_happen() {
     use crate::services::{
         claim_inventory::ClaimInventoryError, foreign_split_inventory::InventoryError,
