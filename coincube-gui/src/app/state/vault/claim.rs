@@ -88,7 +88,7 @@ use crate::{
         },
         coincube::CoincubeClient,
         feeestimation::fee_estimation::FeeEstimator,
-        foreign_scan::{self, AddressFunds, ScanError},
+        foreign_scan::{self, AddressFunds, ChangedReason, ScanError},
     },
 };
 
@@ -519,7 +519,19 @@ fn inventory_scan_refusal(
                     ScanRetry::Manual => format!("The indexer is rate limited. Try opening the split again after the cooldown (about {} minutes).", delay.as_secs().div_ceil(60)),
                 },
                 ScanError::Deadline => "the indexer did not finish the Vault scan in time",
-                ScanError::Changed => "the chain or an address changed during the scan",
+                ScanError::Changed(reason) => match reason {
+                    ChangedReason::TipNoLongerBest =>
+                        "the scanned block is no longer part of the current chain",
+                    ChangedReason::TipMoved => "the latest block changed during the scan",
+                    ChangedReason::AnchorMismatch =>
+                        "the indexer and network status reported different latest blocks",
+                    ChangedReason::AnchorChanged =>
+                        "the network's fork status changed during the scan",
+                    ChangedReason::AddressState =>
+                        "deposit data or history changed between reads",
+                    ChangedReason::HeightBehindUtxo =>
+                        "the indexer reported a confirmed deposit above its latest block",
+                },
                 ScanError::Http(429 | 502 | 503 | 504) | ScanError::Unavailable =>
                     "the indexer is temporarily unavailable",
                 ScanError::AddressLimit | ScanError::RangeLimit =>

@@ -69,7 +69,12 @@ struct Fake {
     used_first: bool,
     spent_addresses: BTreeSet<String>,
     changed: bool,
+    anchor_tip_differs: bool,
+    anchor_changes_fork_height: bool,
+    reorder_second_utxo_read: bool,
     tips: AtomicUsize,
+    anchor_reads: AtomicUsize,
+    utxo_reads: AtomicUsize,
     coins: Mutex<Vec<Utxo>>,
     previous: Option<Transaction>,
 }
@@ -79,7 +84,12 @@ impl Fake {
             used_first: false,
             spent_addresses: BTreeSet::new(),
             changed: false,
+            anchor_tip_differs: false,
+            anchor_changes_fork_height: false,
+            reorder_second_utxo_read: false,
             tips: AtomicUsize::new(0),
+            anchor_reads: AtomicUsize::new(0),
+            utxo_reads: AtomicUsize::new(0),
             coins: Mutex::new(vec![]),
             previous: None,
         }
@@ -97,7 +107,15 @@ impl Source for Fake {
         Ok(u32::from(tip.to_byte_array()[0]) + 800_000)
     }
     async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
-        Ok((BlockHash::from_byte_array([1; 32]), Some(100)))
+        let read = self.anchor_reads.fetch_add(1, Ordering::SeqCst);
+        Ok((
+            BlockHash::from_byte_array([if self.anchor_tip_differs { 2 } else { 1 }; 32]),
+            Some(if self.anchor_changes_fork_height && read > 0 {
+                101
+            } else {
+                100
+            }),
+        ))
     }
     async fn stats(&self, _: ChainId, address: &str) -> Result<Stats, ScanError> {
         let first = bitcoin::Address::from_script(
@@ -121,11 +139,94 @@ impl Source for Fake {
         })
     }
     async fn utxos(&self, _: ChainId, _: &str) -> Result<Vec<Utxo>, ScanError> {
-        Ok(self.coins.lock().unwrap().clone())
+        let mut coins = self.coins.lock().unwrap().clone();
+        if self.reorder_second_utxo_read && self.utxo_reads.fetch_add(1, Ordering::SeqCst) == 1 {
+            coins.reverse();
+        }
+        Ok(coins)
     }
     async fn transaction(&self, _: ChainId, _: Txid) -> Result<Transaction, ScanError> {
         self.previous.clone().ok_or(ScanError::Unavailable)
     }
+}
+
+#[tokio::test]
+async fn reordered_utxos_with_identical_records_do_not_change_scan() {
+    let mut p = plan(1);
+    p.branches[0].descriptor =
+        ScanDescriptor::parse(Branch::External, &ranged().replace("/*", "/0")).unwrap();
+    p.gap = 1;
+    let script = p.branches[0].descriptor.script(0).unwrap();
+    let previous = Transaction {
+        version: bitcoin::transaction::Version::TWO,
+        lock_time: bitcoin::absolute::LockTime::ZERO,
+        input: vec![],
+        output: vec![
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(1000),
+                script_pubkey: script.clone(),
+            },
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(2000),
+                script_pubkey: script,
+            },
+        ],
+    };
+    let txid = previous.compute_txid();
+    let mut source = Fake::empty();
+    source.previous = Some(previous);
+    source.reorder_second_utxo_read = true;
+    *source.coins.lock().unwrap() = (0..2)
+        .map(|vout| Utxo {
+            txid,
+            vout,
+            value: 1000 + 1000 * u64::from(vout),
+            status: Status {
+                confirmed: true,
+                block_height: Some(100),
+                block_hash: Some(BlockHash::from_byte_array([5; 32])),
+            },
+        })
+        .collect();
+    for chain in [ChainId::BitcoinBlake2b, ChainId::Bitcoin] {
+        p.chain = chain;
+        source.utxo_reads.store(0, Ordering::SeqCst);
+        let report = collect(&source, &p, 7).await.unwrap();
+        assert_eq!(report.coins().len(), 2);
+        assert_eq!(report.coins()[0].outpoint.vout, 0);
+        assert_eq!(report.coins()[1].outpoint.vout, 1);
+    }
+}
+
+#[test]
+fn utxo_comparison_rejects_changed_records_and_duplicates() {
+    let coin = Utxo {
+        txid: Txid::from_byte_array([1; 32]),
+        vout: 0,
+        value: 1000,
+        status: Status {
+            confirmed: true,
+            block_height: Some(100),
+            block_hash: Some(BlockHash::from_byte_array([2; 32])),
+        },
+    };
+    let mut other = coin.clone();
+    other.value += 1;
+    assert_eq!(same_utxos(std::slice::from_ref(&coin), &[other]), Ok(false));
+    let mut other = coin.clone();
+    other.status.block_height = Some(101);
+    assert_eq!(same_utxos(std::slice::from_ref(&coin), &[other]), Ok(false));
+    let mut other = coin.clone();
+    other.vout = 1;
+    assert_eq!(same_utxos(std::slice::from_ref(&coin), &[other]), Ok(false));
+    assert_eq!(
+        same_utxos(&[coin.clone(), coin.clone()], std::slice::from_ref(&coin)),
+        Err(ScanError::Malformed)
+    );
+    assert_eq!(
+        same_utxos(std::slice::from_ref(&coin), &[coin.clone(), coin.clone()]),
+        Err(ScanError::Malformed)
+    );
 }
 #[tokio::test]
 async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
@@ -156,7 +257,19 @@ async fn spent_history_is_not_an_unused_address_and_limits_are_incomplete() {
     source.changed = true;
     assert!(matches!(
         collect(&source, &plan(4), 7).await,
-        Err(ScanError::Changed)
+        Err(ScanError::Changed(ChangedReason::TipMoved))
+    ));
+    let mut source = Fake::empty();
+    source.anchor_tip_differs = true;
+    assert!(matches!(
+        collect(&source, &plan(4), 7).await,
+        Err(ScanError::Changed(ChangedReason::AnchorMismatch))
+    ));
+    let mut source = Fake::empty();
+    source.anchor_changes_fork_height = true;
+    assert!(matches!(
+        collect(&source, &plan(4), 7).await,
+        Err(ScanError::Changed(ChangedReason::AnchorChanged))
     ));
 }
 
@@ -1045,7 +1158,7 @@ async fn split_tip_height_is_bound_to_the_scanned_tip() {
     for (body, expected) in [
         (
             r#"{"in_best_chain":false,"height":5,"next_best":null}"#,
-            Err(ScanError::Changed),
+            Err(ScanError::Changed(ChangedReason::TipNoLongerBest)),
         ),
         (r#"{"in_best_chain":true}"#, Err(ScanError::Malformed)),
         (r#"{"in_best_chain":true,"height":7}"#, Ok(7)),

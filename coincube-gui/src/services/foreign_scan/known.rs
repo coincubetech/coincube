@@ -119,7 +119,7 @@ async fn collect_known(
     // `anchor` also reports the observed fork height (Split); only the
     // anchored tip hash matters for this known-output check.
     if source.anchor().await?.0 != tip {
-        return Err(ScanError::Changed);
+        return Err(ScanError::Changed(ChangedReason::AnchorMismatch));
     }
     let mut addresses: BTreeMap<String, Vec<&KnownOutput>> = BTreeMap::new();
     for coin in outputs {
@@ -167,12 +167,15 @@ async fn collect_known(
     // Recheck all addresses after raw transactions have been fetched, so a
     // spend during a later address lookup also invalidates earlier evidence.
     for (address, before) in snapshots {
-        if before != source.utxos(chain, &address).await? {
-            return Err(ScanError::Changed);
+        if !same_utxos(&before, &source.utxos(chain, &address).await?)? {
+            return Err(ScanError::Changed(ChangedReason::AddressState));
         }
     }
-    if tip != source.tip(chain).await? || tip != source.anchor().await?.0 {
-        return Err(ScanError::Changed);
+    if tip != source.tip(chain).await? {
+        return Err(ScanError::Changed(ChangedReason::TipMoved));
+    }
+    if tip != source.anchor().await?.0 {
+        return Err(ScanError::Changed(ChangedReason::AnchorMismatch));
     }
     Ok(found)
 }
@@ -261,6 +264,82 @@ mod tests {
             Ok(self.tx.clone())
         }
     }
+
+    struct ReorderedCoins {
+        tx: Transaction,
+        coins: Vec<Utxo>,
+        reads: AtomicUsize,
+    }
+    #[async_trait]
+    impl Source for ReorderedCoins {
+        async fn tip(&self, _: ChainId) -> Result<BlockHash, ScanError> {
+            Ok(BlockHash::from_byte_array([1; 32]))
+        }
+        async fn tip_height(&self, _: ChainId, _: BlockHash) -> Result<u32, ScanError> {
+            unreachable!()
+        }
+        async fn anchor(&self) -> Result<(BlockHash, Option<u64>), ScanError> {
+            Ok((BlockHash::from_byte_array([1; 32]), None))
+        }
+        async fn stats(&self, _: ChainId, _: &str) -> Result<Stats, ScanError> {
+            unreachable!()
+        }
+        async fn utxos(&self, _: ChainId, _: &str) -> Result<Vec<Utxo>, ScanError> {
+            let mut coins = self.coins.clone();
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 1 {
+                coins.reverse();
+            }
+            Ok(coins)
+        }
+        async fn transaction(&self, _: ChainId, _: Txid) -> Result<Transaction, ScanError> {
+            Ok(self.tx.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn known_unspent_accepts_reordered_identical_outputs() {
+        let mut tx = Fixture::new().tx;
+        tx.output.push(bitcoin::TxOut {
+            value: bitcoin::Amount::from_sat(2000),
+            script_pubkey: tx.output[0].script_pubkey.clone(),
+        });
+        let txid = tx.compute_txid();
+        let block_hash = BlockHash::from_byte_array([2; 32]);
+        let coins: Vec<_> = tx
+            .output
+            .iter()
+            .enumerate()
+            .map(|(vout, output)| Utxo {
+                txid,
+                vout: vout as u32,
+                value: output.value.to_sat(),
+                status: Status {
+                    confirmed: true,
+                    block_height: Some(900_000),
+                    block_hash: Some(block_hash),
+                },
+            })
+            .collect();
+        let known: Vec<_> = tx
+            .output
+            .iter()
+            .enumerate()
+            .map(|(vout, output)| KnownOutput {
+                outpoint: OutPoint {
+                    txid,
+                    vout: vout as u32,
+                },
+                output: output.clone(),
+                bitcoin_height: 900_000,
+            })
+            .collect();
+        let source = ReorderedCoins {
+            tx,
+            coins,
+            reads: AtomicUsize::new(0),
+        };
+        assert_eq!(collect_known(&source, &known).await, Ok(known));
+    }
     #[tokio::test]
     async fn positive_requires_exact_prevout_and_stable_unspent_observation() {
         let mut source = Fixture::new();
@@ -281,7 +360,7 @@ mod tests {
         source.calls.store(0, Ordering::SeqCst);
         assert_eq!(
             collect_known(&source, std::slice::from_ref(&known)).await,
-            Err(ScanError::Changed)
+            Err(ScanError::Changed(ChangedReason::AddressState))
         );
         source.unavailable = true;
         assert_eq!(
