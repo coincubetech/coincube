@@ -1,4 +1,4 @@
-//! Bounded, deterministic depth-first candidate discovery. A candidate is only
+//! Bounded, deterministic breadth-first candidate discovery. A candidate is only
 //! a structural dependency, not evidence that its root is Bitcoin-exclusive.
 use super::*;
 use std::collections::BTreeMap;
@@ -25,28 +25,44 @@ pub enum Step {
     /// This is never proof of replay safety or permission to spend.
     Complete,
 }
+#[derive(Clone, Copy)]
+struct Predecessor {
+    txid: Txid,
+    input: usize,
+}
 struct Node {
     raw: Vec<u8>,
     transaction: Transaction,
-}
-struct Frame {
     outpoint: OutPoint,
+    predecessor: Option<Predecessor>,
     next_input: usize,
 }
+#[derive(Clone, Copy)]
+struct Pending {
+    outpoint: OutPoint,
+    predecessor: Option<Predecessor>,
+    max_bytes: usize,
+}
 /// Requests each distinct transaction at most once and shares count/byte limits
-/// across all explored branches, including rejected candidates. Inputs are
-/// visited in transaction order. Any structural or budget error is terminal.
-/// The caller supplies transport cancellation and a whole-search deadline.
+/// across all explored branches, including rejected candidates. Fetched nodes
+/// expand in discovery order, with inputs visited lazily in transaction order.
+/// This prevents one deep input from starving a short sibling path without
+/// allocating a frontier proportional to a transaction's input count.
+/// Any structural or budget error is terminal. The caller supplies transport
+/// cancellation and a whole-search deadline; root qualification stays separate.
 pub struct Search {
     selected: OutPoint,
     nodes: BTreeMap<Txid, Node>,
-    stack: Vec<Frame>,
-    exhausted: BTreeSet<Txid>,
-    pending: Option<Txid>,
+    order: Vec<Txid>,
+    cursor: usize,
+    edges: BTreeMap<Txid, BTreeSet<Txid>>,
+    pending: Option<Pending>,
+    ready: Option<Txid>,
     bytes: usize,
     error: Option<Error>,
 }
 impl Search {
+    /// Start a bounded structural search without fetching or qualifying a root.
     pub fn new(selected: OutPoint) -> Result<Self, Error> {
         if selected.is_null() {
             return Err(Error::InvalidSelection);
@@ -54,16 +70,18 @@ impl Search {
         Ok(Self {
             selected,
             nodes: BTreeMap::new(),
-            stack: vec![Frame {
-                outpoint: selected,
-                next_input: 0,
-            }],
-            exhausted: BTreeSet::new(),
+            order: Vec::new(),
+            cursor: 0,
+            edges: BTreeMap::new(),
             pending: None,
+            ready: None,
             bytes: 0,
             error: None,
         })
     }
+    /// Advance to one fetch, structural candidate or complete traversal.
+    /// Repeated calls while a fetch is pending repeat the same request. Calling
+    /// again after a candidate rejects that root and resumes its parent cursor.
     pub fn step(&mut self) -> Result<Step, Error> {
         if let Some(error) = self.error {
             return Err(error);
@@ -74,101 +92,143 @@ impl Search {
         }
         result
     }
+    /// Lazily expand fetched nodes in FIFO order and validate every referenced
+    /// output, including references whose transaction was already fetched.
     fn step_inner(&mut self) -> Result<Step, Error> {
-        loop {
-            let Some(frame) = self.stack.last_mut() else {
-                return Ok(Step::Complete);
-            };
-            let txid = frame.outpoint.txid;
-            let Some(node) = self.nodes.get(&txid) else {
-                if self.nodes.len() >= MAX_PATH_TRANSACTIONS {
-                    return Err(Error::PathLimit);
-                }
-                let remaining = MAX_PATH_BYTES
-                    .saturating_sub(self.bytes)
-                    .min(MAX_TRANSACTION_BYTES);
-                if remaining == 0 {
-                    return Err(Error::ByteLimit);
-                }
-                self.pending = Some(txid);
-                return Ok(Step::Fetch {
-                    txid,
-                    max_bytes: remaining,
-                });
-            };
-            if node
-                .transaction
-                .output
-                .get(frame.outpoint.vout as usize)
-                .is_none()
-            {
-                return Err(Error::InvalidOutput);
-            }
+        if let Some(pending) = self.pending {
+            return Ok(Step::Fetch {
+                txid: pending.outpoint.txid,
+                max_bytes: pending.max_bytes,
+            });
+        }
+        if let Some(txid) = self.ready.take() {
+            let node = &self.nodes[&txid];
+            Self::validate_output(node, node.outpoint)?;
             if node.transaction.is_coinbase() {
-                let links: Vec<_> = self
-                    .stack
-                    .iter()
-                    .enumerate()
-                    .map(|(index, frame)| OwnedLink {
-                        transaction: self.nodes[&frame.outpoint.txid].raw.clone(),
-                        parent_input: if index + 1 == self.stack.len() {
-                            None
-                        } else {
-                            Some(frame.next_input - 1)
-                        },
-                    })
-                    .collect();
-                let borrowed: Vec<_> = links
-                    .iter()
-                    .map(|link| Link {
-                        transaction: &link.transaction,
-                        parent_input: link.parent_input,
-                    })
-                    .collect();
-                let dependency = verify(self.selected, &borrowed)?;
-                self.exhausted.insert(txid);
-                self.stack.pop();
-                return Ok(Step::Candidate(Candidate { links, dependency }));
+                return self.candidate(txid).map(Step::Candidate);
             }
             if node.transaction.input.is_empty() {
                 return Err(Error::InvalidInput);
             }
-            if frame.next_input == node.transaction.input.len() {
-                self.exhausted.insert(txid);
-                self.stack.pop();
+        }
+        if self.nodes.is_empty() {
+            return self.request(self.selected, None);
+        }
+        while let Some(txid) = self.order.get(self.cursor).copied() {
+            let node = self.nodes.get_mut(&txid).ok_or(Error::IncompletePath)?;
+            if node.transaction.is_coinbase() || node.next_input == node.transaction.input.len() {
+                self.cursor += 1;
                 continue;
             }
-            let child = node.transaction.input[frame.next_input].previous_output;
-            frame.next_input += 1;
+            let input = node.next_input;
+            let child = node.transaction.input[input].previous_output;
+            node.next_input += 1;
             if child.is_null() {
                 return Err(Error::InvalidInput);
             }
-            if self
-                .stack
-                .iter()
-                .any(|frame| frame.outpoint.txid == child.txid)
-            {
-                return Err(Error::RepeatedTransaction);
-            }
-            if self.exhausted.contains(&child.txid) {
-                if self.nodes[&child.txid]
-                    .transaction
-                    .output
-                    .get(child.vout as usize)
-                    .is_none()
-                {
-                    return Err(Error::InvalidOutput);
-                }
+            if let Some(existing) = self.nodes.get(&child.txid) {
+                Self::validate_output(existing, child)?;
+                self.record_edge(txid, child.txid)?;
                 continue;
             }
-            if self.stack.len() >= MAX_PATH_TRANSACTIONS {
+            let step = self.request(child, Some(Predecessor { txid, input }))?;
+            self.record_edge(txid, child.txid)?;
+            return Ok(step);
+        }
+        Ok(Step::Complete)
+    }
+    /// Reserve one outstanding fetch only after checking the unchanged shared
+    /// node/byte bounds. The node cap also bounds any reconstructed path depth.
+    fn request(
+        &mut self,
+        outpoint: OutPoint,
+        predecessor: Option<Predecessor>,
+    ) -> Result<Step, Error> {
+        if self.nodes.len() >= MAX_PATH_TRANSACTIONS {
+            return Err(Error::PathLimit);
+        }
+        let max_bytes = MAX_PATH_BYTES
+            .saturating_sub(self.bytes)
+            .min(MAX_TRANSACTION_BYTES);
+        if max_bytes == 0 {
+            return Err(Error::ByteLimit);
+        }
+        self.pending = Some(Pending {
+            outpoint,
+            predecessor,
+            max_bytes,
+        });
+        Ok(Step::Fetch {
+            txid: outpoint.txid,
+            max_bytes,
+        })
+    }
+    /// Reused transaction identity does not establish that another referenced
+    /// output index exists; check every edge's outpoint independently.
+    fn validate_output(node: &Node, outpoint: OutPoint) -> Result<(), Error> {
+        node.transaction
+            .output
+            .get(outpoint.vout as usize)
+            .map(|_| ())
+            .ok_or(Error::InvalidOutput)
+    }
+    /// Reject cycles across all explored branches, not just the first-parent
+    /// tree. Deduplicated edges keep reachability metadata bounded by the node
+    /// cap, even when a transaction contains many repeated input references.
+    fn record_edge(&mut self, parent: Txid, child: Txid) -> Result<(), Error> {
+        if self
+            .edges
+            .get(&parent)
+            .is_some_and(|children| children.contains(&child))
+        {
+            return Ok(());
+        }
+        let mut pending = BTreeSet::from([child]);
+        let mut visited = BTreeSet::new();
+        while let Some(txid) = pending.pop_first() {
+            if txid == parent {
+                return Err(Error::RepeatedTransaction);
+            }
+            if visited.insert(txid) {
+                if let Some(children) = self.edges.get(&txid) {
+                    pending.extend(children.iter().filter(|id| !visited.contains(*id)).copied());
+                }
+            }
+        }
+        self.edges.entry(parent).or_default().insert(child);
+        Ok(())
+    }
+    /// Reconstruct the immutable first-discovery path and pass its exact raw
+    /// links through the existing structural verifier before exposing a root.
+    fn candidate(&self, root: Txid) -> Result<Candidate, Error> {
+        let mut links = Vec::new();
+        let mut txid = root;
+        let mut parent_input = None;
+        loop {
+            if links.len() >= MAX_PATH_TRANSACTIONS {
                 return Err(Error::PathLimit);
             }
-            self.stack.push(Frame {
-                outpoint: child,
-                next_input: 0,
+            let node = self.nodes.get(&txid).ok_or(Error::IncompletePath)?;
+            links.push(OwnedLink {
+                transaction: node.raw.clone(),
+                parent_input,
             });
+            let Some(predecessor) = node.predecessor else {
+                break;
+            };
+            txid = predecessor.txid;
+            parent_input = Some(predecessor.input);
         }
+        links.reverse();
+        let borrowed: Vec<_> = links
+            .iter()
+            .map(|link| Link {
+                transaction: &link.transaction,
+                parent_input: link.parent_input,
+            })
+            .collect();
+        let dependency = verify(self.selected, &borrowed)?;
+        Ok(Candidate { links, dependency })
     }
     /// Supply exactly the requested txid's bytes. Wrong identity, trailing data,
     /// excess bytes, and unsolicited responses permanently fail this search.
@@ -182,6 +242,9 @@ impl Search {
         }
         result
     }
+    /// Retain one transaction matching the requested identity and its immutable
+    /// first predecessor;
+    /// defer structural output validation and candidate emission to `step`.
     fn provide_inner(&mut self, raw: Vec<u8>) -> Result<(), Error> {
         let expected = self.pending.ok_or(Error::WrongTransaction)?;
         if raw.len() > MAX_TRANSACTION_BYTES
@@ -190,11 +253,22 @@ impl Search {
             return Err(Error::ByteLimit);
         }
         let transaction: Transaction = deserialize(&raw).map_err(|_| Error::InvalidTransaction)?;
-        if transaction.compute_txid() != expected {
+        if transaction.compute_txid() != expected.outpoint.txid {
             return Err(Error::WrongTransaction);
         }
         self.bytes += raw.len();
-        self.nodes.insert(expected, Node { raw, transaction });
+        self.nodes.insert(
+            expected.outpoint.txid,
+            Node {
+                raw,
+                transaction,
+                outpoint: expected.outpoint,
+                predecessor: expected.predecessor,
+                next_input: 0,
+            },
+        );
+        self.order.push(expected.outpoint.txid);
+        self.ready = Some(expected.outpoint.txid);
         self.pending = None;
         Ok(())
     }
@@ -274,8 +348,8 @@ mod tests {
             vec![
                 selected.compute_txid(),
                 first.compute_txid(),
-                a.compute_txid(),
                 second.compute_txid(),
+                a.compute_txid(),
                 b.compute_txid()
             ]
         );
@@ -323,6 +397,190 @@ mod tests {
         assert!(matches!(search.step(), Err(Error::InvalidOutput)));
     }
     #[test]
+    fn repeated_pending_fetch_is_stable_and_candidate_advances_once() {
+        let root = transaction(&[OutPoint::null()], 1);
+        let selected = transaction(&[out(&root)], 2);
+        let mut search = Search::new(out(&selected)).unwrap();
+        for tx in [&selected, &root] {
+            let before = search.nodes.len();
+            let allowance = MAX_PATH_BYTES
+                .saturating_sub(search.bytes)
+                .min(MAX_TRANSACTION_BYTES);
+            for _ in 0..3 {
+                assert!(
+                    matches!(search.step().unwrap(), Step::Fetch { txid, max_bytes }
+                    if txid == tx.compute_txid() && max_bytes == allowance)
+                );
+                assert_eq!(search.nodes.len(), before);
+                assert_eq!(search.order.len(), before);
+            }
+            search.provide(serialize(tx)).unwrap();
+        }
+        let Step::Candidate(candidate) = search.step().unwrap() else {
+            panic!("one root expected");
+        };
+        assert_eq!(candidate.links[0].parent_input, Some(0));
+        assert_eq!(candidate.dependency.root(), out(&root));
+        assert!(matches!(search.step().unwrap(), Step::Complete));
+        assert!(matches!(search.step().unwrap(), Step::Complete));
+    }
+
+    #[test]
+    fn reused_unexpanded_parent_still_validates_each_output() {
+        let root = transaction(&[OutPoint::null()], 1);
+        let parent = transaction(&[out(&root)], 2);
+        let invalid = OutPoint::new(parent.compute_txid(), 1);
+        let selected = transaction(&[out(&parent), invalid], 3);
+        let mut search = Search::new(out(&selected)).unwrap();
+        for tx in [&selected, &parent] {
+            assert!(
+                matches!(search.step().unwrap(), Step::Fetch { txid, .. } if txid == tx.compute_txid())
+            );
+            search.provide(serialize(tx)).unwrap();
+        }
+        assert!(matches!(search.step(), Err(Error::InvalidOutput)));
+        assert_eq!(search.nodes.len(), 2);
+        assert!(matches!(search.step(), Err(Error::InvalidOutput)));
+    }
+
+    #[test]
+    fn first_predecessor_survives_reused_outputs_and_retained_roundtrip() {
+        let root = transaction(&[OutPoint::null()], 1);
+        let mut parent = transaction(&[out(&root)], 2);
+        parent.output.push(parent.output[0].clone());
+        let selected = transaction(&[OutPoint::new(parent.compute_txid(), 1), out(&parent)], 3);
+        let graph = graph(&[root.clone(), parent.clone(), selected.clone()]);
+        let mut search = Search::new(out(&selected)).unwrap();
+        let (found, requests) = candidates(&mut search, &graph).unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                selected.compute_txid(),
+                parent.compute_txid(),
+                root.compute_txid()
+            ]
+        );
+        assert_eq!(found.len(), 1);
+        assert_eq!(
+            found[0]
+                .links
+                .iter()
+                .map(|link| link.parent_input)
+                .collect::<Vec<_>>(),
+            vec![Some(0), Some(0), None]
+        );
+        assert_eq!(search.nodes[&parent.compute_txid()].outpoint.vout, 1);
+        let retained = retained::RetainedPath::new(out(&selected), found[0].links.clone()).unwrap();
+        let restored = retained::RetainedPath::decode(out(&selected), &retained.encode()).unwrap();
+        assert_eq!(restored.reverify().unwrap().root(), out(&root));
+        assert_eq!(restored.reverify().unwrap().selected(), out(&selected));
+    }
+
+    #[test]
+    fn rejected_short_root_continues_to_an_earlier_deeper_branch() {
+        let deep_root = transaction(&[OutPoint::null()], 1);
+        let deep = transaction(&[out(&deep_root)], 2);
+        let short = transaction(&[OutPoint::null()], 3);
+        let selected = transaction(&[out(&deep), out(&short)], 4);
+        let mut search = Search::new(out(&selected)).unwrap();
+        let (found, requests) = candidates(
+            &mut search,
+            &graph(&[
+                deep_root.clone(),
+                deep.clone(),
+                short.clone(),
+                selected.clone(),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            requests,
+            vec![
+                selected.compute_txid(),
+                deep.compute_txid(),
+                short.compute_txid(),
+                deep_root.compute_txid()
+            ]
+        );
+        assert_eq!(found.len(), 2);
+        assert_eq!(found[0].dependency.root(), out(&short));
+        assert_eq!(found[1].dependency.root(), out(&deep_root));
+        assert_eq!(found[0].links[0].parent_input, Some(1));
+        assert_eq!(found[1].links[0].parent_input, Some(0));
+        assert_eq!(found[1].links[1].parent_input, Some(0));
+    }
+
+    #[test]
+    fn high_fanin_is_expanded_lazily_and_unused_bad_edges_do_not_preempt_a_root() {
+        let root = transaction(&[OutPoint::null()], 1);
+        let parents: Vec<_> = (0..8000)
+            .map(|vout| OutPoint::new(root.compute_txid(), vout))
+            .collect();
+        let selected = transaction(&parents, 2);
+        assert!(serialize(&selected).len() < MAX_TRANSACTION_BYTES);
+        let mut search = Search::new(out(&selected)).unwrap();
+        assert!(matches!(search.step().unwrap(), Step::Fetch { .. }));
+        search.provide(serialize(&selected)).unwrap();
+        assert!(
+            matches!(search.step().unwrap(), Step::Fetch { txid, .. } if txid == root.compute_txid())
+        );
+        assert_eq!(search.nodes.len(), 1);
+        assert_eq!(search.order.len(), 1);
+        assert_eq!(search.edges.values().map(BTreeSet::len).sum::<usize>(), 1);
+        assert_eq!(search.nodes[&selected.compute_txid()].next_input, 1);
+        search.provide(serialize(&root)).unwrap();
+        assert!(matches!(search.step().unwrap(), Step::Candidate(_)));
+        assert_eq!(search.nodes.len(), 2);
+        // Continuing after that root is rejected still checks the next vout.
+        assert!(matches!(search.step(), Err(Error::InvalidOutput)));
+    }
+
+    #[test]
+    fn explored_edges_reject_cross_branch_and_self_cycles_without_rejecting_diamonds() {
+        // Real transaction identity is enforced separately by provide. Synthetic
+        // graph IDs isolate the reachability check without requiring hash cycles.
+        let ids: Vec<_> = (1..=4)
+            .map(|tag| transaction(&[OutPoint::null()], tag).compute_txid())
+            .collect();
+        let mut search = Search::new(OutPoint::new(ids[0], 0)).unwrap();
+        for (parent, child) in [(0, 1), (0, 2), (1, 3), (2, 3), (1, 2)] {
+            search.record_edge(ids[parent], ids[child]).unwrap();
+        }
+        search.record_edge(ids[1], ids[2]).unwrap();
+        let before = search.edges.clone();
+        assert_eq!(
+            search.record_edge(ids[2], ids[1]),
+            Err(Error::RepeatedTransaction)
+        );
+        assert_eq!(
+            search.record_edge(ids[3], ids[0]),
+            Err(Error::RepeatedTransaction)
+        );
+        assert_eq!(
+            search.record_edge(ids[3], ids[3]),
+            Err(Error::RepeatedTransaction)
+        );
+        assert_eq!(search.edges, before);
+    }
+
+    #[test]
+    fn mixed_null_input_and_trailing_bytes_fail_permanently() {
+        let root = transaction(&[OutPoint::null()], 1);
+        let selected = transaction(&[OutPoint::null(), out(&root)], 2);
+        let mut search = Search::new(out(&selected)).unwrap();
+        assert!(matches!(search.step().unwrap(), Step::Fetch { .. }));
+        search.provide(serialize(&selected)).unwrap();
+        assert!(matches!(search.step(), Err(Error::InvalidInput)));
+        assert_eq!(search.provide(serialize(&root)), Err(Error::InvalidInput));
+        let mut search = Search::new(out(&root)).unwrap();
+        assert!(matches!(search.step().unwrap(), Step::Fetch { .. }));
+        let mut trailing = serialize(&root);
+        trailing.push(0);
+        assert_eq!(search.provide(trailing), Err(Error::InvalidTransaction));
+        assert!(matches!(search.step(), Err(Error::InvalidTransaction)));
+    }
+
+    #[test]
     fn malformed_unrequested_and_wrong_identity_are_terminal() {
         let root = transaction(&[OutPoint::null()], 1);
         for (request, bytes, expected) in [
@@ -365,6 +623,40 @@ mod tests {
         }
         txs
     }
+    #[test]
+    fn finds_short_root_without_exhausting_an_earlier_deep_input() {
+        let deep = chain(MAX_PATH_TRANSACTIONS, None);
+        let short = transaction(&[OutPoint::null()], 200);
+        for short_input in [0, 1] {
+            let mut parents = [out(deep.last().unwrap()), out(&short)];
+            if short_input == 0 {
+                parents.swap(0, 1);
+            }
+            let selected = transaction(&parents, 201);
+            let mut transactions = deep.clone();
+            transactions.extend([short.clone(), selected.clone()]);
+            let graph = graph(&transactions);
+            let mut search = Search::new(out(&selected)).unwrap();
+            let mut requests = Vec::new();
+            let candidate = loop {
+                match search.step().unwrap() {
+                    Step::Fetch { txid, .. } => {
+                        requests.push(txid);
+                        search.provide(graph[&txid].clone()).unwrap();
+                    }
+                    Step::Candidate(candidate) => break candidate,
+                    Step::Complete => panic!("the short structural path must be found"),
+                }
+            };
+            assert_eq!(candidate.dependency.root(), out(&short));
+            assert_eq!(candidate.links.len(), 2);
+            assert_eq!(candidate.links[0].parent_input, Some(short_input));
+            assert_eq!(candidate.links[1].parent_input, None);
+            assert_eq!(requests.len(), short_input + 2);
+            assert!(search.nodes.len() <= 3);
+        }
+    }
+
     #[test]
     fn count_limit_is_shared_and_checked_before_an_extra_fetch() {
         for count in [MAX_PATH_TRANSACTIONS, MAX_PATH_TRANSACTIONS + 1] {
