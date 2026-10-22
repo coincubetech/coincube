@@ -143,7 +143,7 @@ On-floor name/network buttons appear only at counts up to eight. When scene widt
 
 **The Catalog Continuity Rule.** The regular catalog remains available when object labels are reduced or absent at higher counts.
 
-Compact acceptance is incomplete. [VERIFICATION.md](VERIFICATION.md) records an earlier compact label-overlap finding and a source fix whose final compact recapture is pending. Toolbar wrapping, text scaling, longer names/localization and smaller windows have no established passing behavior. The fixed catalog and minimum window are observed constraints, not permission to propagate overflow into future surfaces.
+Compact fixture fit now passes at 1024×700 logical content size for the tested 4/12/20 English fixtures; see [VERIFICATION.md](VERIFICATION.md). Dense selected-object identity, catalog scrolling and complete keyboard focus still require refinement before integration. Toolbar wrapping, text scaling, longer names/localization and smaller windows remain unverified. The fixed catalog and minimum window are current constraints, not responsive-layout rules.
 
 ## Elevation & Depth
 

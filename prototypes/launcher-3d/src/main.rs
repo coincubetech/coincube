@@ -199,7 +199,16 @@ impl App {
         if let Ok(mut metrics) = self.metrics.lock() {
             *metrics = Metrics::default();
         }
-        self.metrics_text = "Collecting fresh samples…".into();
+        self.metrics_text = if self.sampling_active() {
+            "Collecting fresh samples…"
+        } else {
+            "Start benchmark to sample redraw cadence"
+        }
+        .into();
+    }
+
+    fn sampling_active(&self) -> bool {
+        self.focused && (self.benchmark || (self.float && !self.reduced))
     }
 
     fn subscription(&self) -> Subscription<Message> {
@@ -225,7 +234,7 @@ impl App {
             },
             _ => None,
         });
-        if self.focused && (self.benchmark || (self.float && !self.reduced)) {
+        if self.sampling_active() {
             Subscription::batch([
                 focus,
                 iced::time::every(Duration::from_millis(500)).map(|_| Message::Tick),
@@ -604,6 +613,27 @@ fn label_style(light: bool, selected: bool, status: button::Status) -> button::S
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stopping_or_pausing_sampling_clears_the_collecting_status() {
+        let mut app = App::new();
+        let collecting = "Collecting fresh samples…";
+        let idle = "Start benchmark to sample redraw cadence";
+        let _ = app.update(Message::Benchmark(true));
+        assert_eq!(app.metrics_text, collecting);
+        let _ = app.update(Message::Benchmark(false));
+        assert_eq!(app.metrics_text, idle);
+        let _ = app.update(Message::Float(true));
+        assert_eq!(app.metrics_text, collecting);
+        let _ = app.update(Message::Reduced(true));
+        assert_eq!(app.metrics_text, idle);
+        let _ = app.update(Message::Benchmark(true));
+        assert_eq!(app.metrics_text, collecting);
+        let _ = app.update(Message::Focus(false));
+        assert_eq!(app.metrics_text, idle);
+        let _ = app.update(Message::Focus(true));
+        assert_eq!(app.metrics_text, collecting);
+    }
 
     #[test]
     fn clearing_a_filter_discards_timings_from_the_previous_scene_load() {
