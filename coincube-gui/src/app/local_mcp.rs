@@ -468,7 +468,7 @@ mod tests {
                 .stderr(std::process::Stdio::piped()).kill_on_drop(true).spawn().unwrap();
             let mut stdin = child.stdin.take().unwrap();
             let mut stdout = BufReader::new(child.stdout.take().unwrap()).lines();
-            /// Read the matching JSON-RPC result, skipping unrelated notifications.
+            /// Send a request and require the next JSON-RPC response to match its ID.
             async fn response(
                 stdin: &mut tokio::process::ChildStdin,
                 stdout: &mut tokio::io::Lines<BufReader<tokio::process::ChildStdout>>,
