@@ -2,8 +2,21 @@ use std::fs;
 use std::path::PathBuf;
 use uuid::Uuid;
 
+#[cfg(not(test))]
 fn device_fingerprint_path() -> Option<PathBuf> {
     dirs::config_dir().map(|base| base.join("coincube").join("device_fingerprint"))
+}
+
+/// Every test that builds a `CoincubeClient` reaches this through
+/// `device_headers()`. It must not read or create the developer's real
+/// fingerprint (on macOS, the live Coincube datadir's `device_fingerprint`).
+#[cfg(test)]
+fn device_fingerprint_path() -> Option<PathBuf> {
+    Some(
+        std::env::temp_dir()
+            .join(format!("coincube-test-device-{}", std::process::id()))
+            .join("device_fingerprint"),
+    )
 }
 
 pub fn get_or_create_device_fingerprint() -> String {
@@ -55,4 +68,21 @@ pub fn device_headers() -> reqwest::header::HeaderMap {
         reqwest::header::HeaderValue::from_static("desktop"),
     );
     headers
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn fingerprint_path_is_never_the_os_config_dir_in_tests() {
+        let path = super::device_fingerprint_path().unwrap();
+        assert!(path.starts_with(std::env::temp_dir()), "{:?}", path);
+        if let Some(config) = dirs::config_dir() {
+            assert!(!path.starts_with(config), "{:?}", path);
+        }
+
+        // Other tests may race to create the file, so check where it landed,
+        // not which test's value won.
+        assert!(!super::get_or_create_device_fingerprint().is_empty());
+        assert!(path.is_file(), "{:?}", path);
+    }
 }
