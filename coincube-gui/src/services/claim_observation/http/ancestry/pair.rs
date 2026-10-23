@@ -584,10 +584,8 @@ mod tests {
                             claim_ancestry::Error::InvalidOutput,
                         ));
                         let bitcoin_good = case == "valid";
-                        if !bitcoin_good {
-                            fresh_mock(&server, &format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}", fork.compute_txid()),
-                                json!({"txid":fork.compute_txid(), "status":{"confirmed":true,"block_height":root_height,"block_hash":fork_block}}).to_string());
-                        }
+                        let fork_candidate_status = fresh_mock(&server, &format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{}", fork.compute_txid()),
+                            json!({"txid":fork.compute_txid(), "status":{"confirmed":true,"block_height":root_height,"block_hash":fork_block}}).to_string());
                         let bitcoin_candidate = OutPoint::new(
                             bitcoin.compute_txid(),
                             if bitcoin_good { 0 } else { u32::MAX },
@@ -618,6 +616,7 @@ mod tests {
                                 [invalid, FundingProofStatus::PathFound]
                             }
                         );
+                        fork_candidate_status.delete_async().await;
                     }
                     if matches!(case, "valid" | "rdts-absent") {
                         // The funding collector requires a fresh current UTXO
@@ -1029,6 +1028,23 @@ mod tests {
                         }
                         fresh_mock(&server,&format!("/api/v1/esplora/bitcoin/mainnet/tx/{}",old_id),
                             json!({"txid":old_id,"status":{"confirmed":true,"block_height":17,"block_hash":"88".repeat(32)}}).to_string());
+                        fresh_mock(
+                            &server,
+                            "/api/v1/esplora/bitcoin/mainnet/block-height/17",
+                            "88".repeat(32),
+                        );
+                        fresh_mock(
+                            &server,
+                            &format!(
+                                "/api/v1/esplora/bitcoin/mainnet/tx/{}",
+                                selected.compute_txid()
+                            ),
+                            json!({"txid":selected.compute_txid(), "status":{
+                                "confirmed":true,"block_height":root_height,
+                                "block_hash":bitcoin_block
+                            }})
+                            .to_string(),
+                        );
                         let selected = OutPoint::new(selected.compute_txid(), 0);
                         let discovered = source
                             .discover_ancestry(selected, policy)
