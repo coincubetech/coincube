@@ -1,0 +1,750 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "Cube-Compact.dc.html": {
+      "h": 768,
+      "is_interactive": true,
+      "title": "Concept C · Compact window (1024×768)",
+      "w": 1024,
+      "x": 1520,
+      "y": 2680
+    },
+    "Cube-Workspace.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Concept C · Open Cube + Settings (1440×900)",
+      "w": 1440,
+      "x": 0,
+      "y": 2680
+    },
+    "Journey.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Journey · Launcher → unlock → Cube → All Cubes",
+      "w": 1440,
+      "x": 1520,
+      "y": 1240
+    },
+    "Launcher-3D.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Launcher 1 · Fixed-camera 3D floor",
+      "w": 1440,
+      "x": 0,
+      "y": 0
+    },
+    "Launcher-Catalog.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Launcher 3 · Compact catalog",
+      "w": 1440,
+      "x": 3040,
+      "y": 0
+    },
+    "Launcher-Iso.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "Launcher 2 · 2.5D isometric",
+      "w": 1440,
+      "x": 1520,
+      "y": 0
+    },
+    "Launcher-States.dc.html": {
+      "h": 1100,
+      "title": "Launcher · State sheet",
+      "w": 1440,
+      "x": 0,
+      "y": 1240
+    },
+    "V2-Cube-Compact.dc.html": {
+      "h": 768,
+      "is_interactive": true,
+      "title": "V2 · Compact window (1024×768)",
+      "w": 1024,
+      "x": 1520,
+      "y": 5260
+    },
+    "V2-Cube-Overview.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "V2 · Open Cube: icon sidebar, Overview, per-Vault Tools",
+      "w": 1440,
+      "x": 0,
+      "y": 5260
+    },
+    "V2-Launcher-3D.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "V2 · Launcher 3D floor (faces carry meaning, big cubes)",
+      "w": 1440,
+      "x": 0,
+      "y": 4020
+    },
+    "V2-Launcher-Faces.dc.html": {
+      "h": 760,
+      "title": "V2 · Cube face encoding specimens",
+      "w": 1440,
+      "x": 1520,
+      "y": 4020
+    },
+    "V3-Cube-Overview.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "V3 · Overview without cards (ledger / split; Receive variants)",
+      "w": 1440,
+      "x": 2960,
+      "y": 5260
+    },
+    "V3-Launcher-Spin.dc.html": {
+      "h": 900,
+      "is_interactive": true,
+      "title": "V3 · Launcher spin-to-face (details face → PIN/passkey face)",
+      "w": 1440,
+      "x": 3040,
+      "y": 4020
+    },
+    "V3-Launcher-Connect.dc.html": {
+      "x": 4560,
+      "y": 4020,
+      "w": 1440,
+      "h": 900,
+      "title": "V3 · Connect at the Launcher level",
+      "is_interactive": true
+    },
+    "V3-Launcher-AppPrefs.dc.html": {
+      "x": 6080,
+      "y": 4020,
+      "w": 1440,
+      "h": 900,
+      "title": "V3 · App preferences (this device: System/Light/Dark, Launcher style, balances, developer, diagnostics, about)",
+      "is_interactive": true
+    },
+    "V3-Cube-Transfer.dc.html": {
+      "x": 0,
+      "y": 6500,
+      "w": 1440,
+      "h": 900,
+      "title": "V4 · Single open Cube + transfer to another Cube (unlock in flow) + split entry",
+      "is_interactive": true
+    },
+    "V3-Wallet-Send.dc.html": {
+      "x": 1520,
+      "y": 6500,
+      "w": 1440,
+      "h": 900,
+      "title": "V4 · Send (Spark / Liquid / Vault: compose → Prepare → review → sign → sent)",
+      "is_interactive": true
+    },
+    "V3-Wallet-Receive.dc.html": {
+      "x": 3040,
+      "y": 6500,
+      "w": 1440,
+      "h": 900,
+      "title": "V4 · Receive (method first: invoice, Lightning address, Spark address, deposit, swap, USDt, Vault address)",
+      "is_interactive": true
+    },
+    "V3-Activity.dc.html": {
+      "x": 4560,
+      "y": 6500,
+      "w": 1440,
+      "h": 900,
+      "title": "V4 · Activity (all wallets, filters, detail panel with PSBT and signers)",
+      "is_interactive": true
+    },
+    "V3-Vault-Advanced.dc.html": {
+      "x": 6080,
+      "y": 6500,
+      "w": 1440,
+      "h": 900,
+      "title": "V4 · Vault › Tools (coin control, PSBTs, recovery path, split coins)",
+      "is_interactive": true
+    },
+    "V3-Vault-Split.dc.html": {
+      "x": 7600,
+      "y": 6500,
+      "w": 1440,
+      "h": 900,
+      "title": "V4 · Split coins (existing flow in the V2 shell)",
+      "is_interactive": true
+    },
+    "P-Settings.dc.html": {
+      "x": 3040,
+      "y": 1240,
+      "w": 1440,
+      "h": 900,
+      "title": "Settings (sidebar foot)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Launcher.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "1 · Launcher (Open → PIN → checks → Continue)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Connect.dc.html": {
+      "x": 1520,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect (from the Launcher account entry)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-AppPrefs.dc.html": {
+      "x": 3040,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "App preferences (from the Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Overview.dc.html": {
+      "x": 0,
+      "y": 1240,
+      "w": 1440,
+      "h": 900,
+      "title": "2 · Overview hub (wallet pages, Send/Receive, Transfer, Tools)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Activity.dc.html": {
+      "x": 1520,
+      "y": 1240,
+      "w": 1440,
+      "h": 900,
+      "title": "Activity (sidebar)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Send.dc.html": {
+      "x": 0,
+      "y": 2480,
+      "w": 1440,
+      "h": 900,
+      "title": "Send (from any Send pill)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Receive.dc.html": {
+      "x": 1520,
+      "y": 2480,
+      "w": 1440,
+      "h": 900,
+      "title": "Receive (V6: Bitcoin / Stablecoin selectors)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Transfer.dc.html": {
+      "x": 3040,
+      "y": 2480,
+      "w": 1440,
+      "h": 900,
+      "title": "Transfer / Blake2b copy (from the Transfer pill)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Advanced.dc.html": {
+      "x": 0,
+      "y": 3720,
+      "w": 1440,
+      "h": 900,
+      "title": "Vault › Tools (from the Vault page)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Split.dc.html": {
+      "x": 1520,
+      "y": 3720,
+      "w": 1440,
+      "h": 900,
+      "title": "Split coins (from Tools)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "V6-Connect-SignIn.dc.html": {
+      "x": 0,
+      "y": 7740,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · Connect sign-in / sign-up (email → token; promo on sign-up form)",
+      "is_interactive": true
+    },
+    "V6-Cube-Create.dc.html": {
+      "x": 1520,
+      "y": 7740,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Create Cube (network, unlock, backup gate, Vault builder, node)",
+      "is_interactive": true
+    },
+    "V6-Cube-Restore.dc.html": {
+      "x": 3040,
+      "y": 7740,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Import or restore (descriptor, Recovery Kit, phone, heir, phrase)",
+      "is_interactive": true
+    },
+    "V6-Cube-Opening.dc.html": {
+      "x": 4560,
+      "y": 7740,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · Opening Cube (quotes, stages, errors)",
+      "is_interactive": true
+    },
+    "V6-Cube-Unlock.dc.html": {
+      "x": 6080,
+      "y": 7740,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · PIN entry and passkey unlock (standalone)",
+      "is_interactive": true
+    },
+    "V6-Cube-Delete.dc.html": {
+      "x": 7600,
+      "y": 7740,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · Delete Cube / remote Cube modals",
+      "is_interactive": true
+    },
+    "V6-Wallet-Receive.dc.html": {
+      "x": 0,
+      "y": 9180,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · Receive (Bitcoin / Stablecoin selectors, Send-like layout)",
+      "is_interactive": true
+    },
+    "V6-BorderWallet.dc.html": {
+      "x": 1520,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Border Wallet enrolment and reconstruction",
+      "is_interactive": true
+    },
+    "V6-Market-BuySell.dc.html": {
+      "x": 3040,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Marketplace Buy/Sell (Mavapay, Meld)",
+      "is_interactive": true
+    },
+    "V6-Market-P2P.dc.html": {
+      "x": 4560,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Marketplace P2P (Mostro: book, create, trades, chat, settings)",
+      "is_interactive": true
+    },
+    "V6-Duress.dc.html": {
+      "x": 6080,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Duress (status, enrol, contacts, active screen)",
+      "is_interactive": true
+    },
+    "V6-Members.dc.html": {
+      "x": 7600,
+      "y": 9180,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · Cube members (gated)",
+      "is_interactive": true
+    },
+    "V6-Liquid.dc.html": {
+      "x": 9120,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Liquid (overview, swap, transactions, settings)",
+      "is_interactive": true
+    },
+    "V6-Signing.dc.html": {
+      "x": 10640,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Signing (hardware, Keychain, pairing, labels, export, Branta)",
+      "is_interactive": true
+    },
+    "V6-Claim.dc.html": {
+      "x": 12160,
+      "y": 9180,
+      "w": 1440,
+      "h": 900,
+      "title": "V6 · Claim BTCB2",
+      "is_interactive": true
+    },
+    "P-SignIn.dc.html": {
+      "x": 4560,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect sign-in / sign-up",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Create.dc.html": {
+      "x": 0,
+      "y": 4960,
+      "w": 1440,
+      "h": 1100,
+      "title": "Create Cube (from the Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Restore.dc.html": {
+      "x": 1520,
+      "y": 4960,
+      "w": 1440,
+      "h": 1100,
+      "title": "Import or restore (from the Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Opening.dc.html": {
+      "x": 3040,
+      "y": 4960,
+      "w": 1440,
+      "h": 900,
+      "title": "Opening Cube (after checks / create / restore)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Unlock.dc.html": {
+      "x": 4560,
+      "y": 4960,
+      "w": 1440,
+      "h": 900,
+      "title": "PIN / passkey unlock (standalone)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Delete.dc.html": {
+      "x": 6080,
+      "y": 4960,
+      "w": 1440,
+      "h": 900,
+      "title": "Delete Cube",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-BuySell.dc.html": {
+      "x": 0,
+      "y": 6400,
+      "w": 1440,
+      "h": 1100,
+      "title": "Marketplace · Buy/Sell",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-P2P.dc.html": {
+      "x": 1520,
+      "y": 6400,
+      "w": 1440,
+      "h": 1100,
+      "title": "Marketplace · P2P",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Liquid.dc.html": {
+      "x": 3040,
+      "y": 6400,
+      "w": 1440,
+      "h": 1100,
+      "title": "Liquid wallet",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Duress.dc.html": {
+      "x": 4560,
+      "y": 6400,
+      "w": 1440,
+      "h": 1100,
+      "title": "Duress (from Connect)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Members.dc.html": {
+      "x": 6080,
+      "y": 6400,
+      "w": 1440,
+      "h": 900,
+      "title": "Members (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Signing.dc.html": {
+      "x": 0,
+      "y": 7840,
+      "w": 1440,
+      "h": 1100,
+      "title": "Signing, pairing, labels, export",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Claim.dc.html": {
+      "x": 1520,
+      "y": 7840,
+      "w": 1440,
+      "h": 900,
+      "title": "Claim BTCB2 (from Tools)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-BorderWallet.dc.html": {
+      "x": 3040,
+      "y": 7840,
+      "w": 1440,
+      "h": 1100,
+      "title": "Border Wallet",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "V6-Gaps-Installer.dc.html": {
+      "x": 13680,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Gap screens: installer (descriptor backup/registration, Blake2b-only mode, split scan, hardware detection, Connect step, import extras, legacy login)",
+      "is_interactive": true
+    },
+    "V6-Gaps-Wallets.dc.html": {
+      "x": 15200,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Gap screens: wallets (SideShift send, Spark bridge, deposits, Vault overview states, RBF, node extras, feerate)",
+      "is_interactive": true
+    },
+    "V6-Gaps-Account.dc.html": {
+      "x": 16720,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Gap screens: account (Recovery Kit mode, alerts scope, Avatar)",
+      "is_interactive": true
+    },
+    "P-GapsInstaller.dc.html": {
+      "x": 4560,
+      "y": 7840,
+      "w": 1440,
+      "h": 1100,
+      "title": "Installer gap screens (from Create)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-GapsWallets.dc.html": {
+      "x": 6080,
+      "y": 7840,
+      "w": 1440,
+      "h": 1100,
+      "title": "Wallet gap screens (from Tools / Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-GapsAccount.dc.html": {
+      "x": 7600,
+      "y": 7840,
+      "w": 1440,
+      "h": 1100,
+      "title": "Account gap screens (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "V6-Gaps-Details.dc.html": {
+      "x": 18240,
+      "y": 9180,
+      "w": 1440,
+      "h": 1100,
+      "title": "V6 · Gap screens: details (split entry, Stable Balance/USDt banners, plan banners, checkout, Add to Cubes, Spark guard, batch label, share wallet)",
+      "is_interactive": true
+    },
+    "P-GapsDetails.dc.html": {
+      "x": 9120,
+      "y": 7840,
+      "w": 1440,
+      "h": 1100,
+      "title": "Detail gap screens (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Locking.dc.html": {
+      "x": 0,
+      "y": 10480,
+      "w": 1440,
+      "h": 900,
+      "title": "Locking Cube (hand-off → Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "V3-Locking.dc.html": {
+      "x": 1520,
+      "y": 10480,
+      "w": 1440,
+      "h": 900,
+      "title": "V3 · Locking Cube (hand-off → Launcher)",
+      "is_interactive": true
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-10-21T22:46:41Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "focused",
+    "file": "P-Launcher.dc.html"
+  },
+  "notes": {
+    "t1": {
+      "kind": "title1",
+      "maxW": 4480,
+      "text": "Launcher explorations · same fixtures, same levers (count 0/1/4/20, filters, theme, reduced motion, focus)",
+      "w": 240,
+      "x": 0,
+      "y": -300
+    },
+    "t2": {
+      "kind": "title1",
+      "maxW": 2960,
+      "text": "States and the Launcher → unlock → Cube → All Cubes journey",
+      "w": 240,
+      "x": 0,
+      "y": 940
+    },
+    "t3": {
+      "kind": "title1",
+      "maxW": 2960,
+      "text": "Concept C inside an open Cube · one readable sidebar, scoped Settings, explicit Expert",
+      "w": 240,
+      "x": 0,
+      "y": 2380
+    },
+    "t4": {
+      "kind": "title1",
+      "maxW": 7520,
+      "text": "V2 pass (2026-10-21 decisions): faces carry Cube type, bigger cubes, distinct icon sidebar, Expert → per-Vault Tools, Overview modeled on current Tenshu",
+      "w": 240,
+      "x": 0,
+      "y": 3720
+    },
+    "t5": {
+      "kind": "title1",
+      "maxW": 10560,
+      "text": "V4 flows (2026-10-22): one open Cube, cross-Cube transfer, Send, Receive, Activity with detail",
+      "w": 240,
+      "x": 0,
+      "y": 6200
+    },
+    "p1": {
+      "kind": "title1",
+      "maxW": 6000,
+      "text": "One testable prototype · press Play on the Launcher and walk the whole app; every link stays inside this page",
+      "w": 240,
+      "x": 0,
+      "y": -300,
+      "page": "proto"
+    },
+    "t6": {
+      "kind": "title1",
+      "maxW": 19680,
+      "text": "V6 coverage (2026-10-23): sign-in/up, Create, Import/restore, Opening with quotes, Receive restructured, PIN/passkey, delete, Border Wallet, Marketplace, Duress, Members, Liquid, Signing, Claim",
+      "w": 240,
+      "x": 0,
+      "y": 7440
+    }
+  },
+  "order": [
+    "Launcher-3D.dc.html",
+    "Launcher-Iso.dc.html",
+    "Launcher-Catalog.dc.html",
+    "Launcher-States.dc.html",
+    "Journey.dc.html",
+    "Cube-Workspace.dc.html",
+    "Cube-Compact.dc.html",
+    "V2-Launcher-3D.dc.html",
+    "V2-Launcher-Faces.dc.html",
+    "V2-Cube-Overview.dc.html",
+    "V2-Cube-Compact.dc.html",
+    "V3-Cube-Overview.dc.html",
+    "V3-Launcher-Spin.dc.html",
+    "V3-Launcher-Connect.dc.html",
+    "V3-Launcher-AppPrefs.dc.html",
+    "V3-Cube-Transfer.dc.html",
+    "V3-Wallet-Send.dc.html",
+    "V3-Wallet-Receive.dc.html",
+    "V3-Activity.dc.html",
+    "P-Launcher.dc.html",
+    "P-Connect.dc.html",
+    "P-AppPrefs.dc.html",
+    "P-Overview.dc.html",
+    "P-Activity.dc.html",
+    "P-Settings.dc.html",
+    "P-Send.dc.html",
+    "P-Receive.dc.html",
+    "P-Transfer.dc.html",
+    "P-Advanced.dc.html",
+    "P-Split.dc.html",
+    "V3-Vault-Advanced.dc.html",
+    "V3-Vault-Split.dc.html",
+    "V6-Connect-SignIn.dc.html",
+    "V6-Cube-Create.dc.html",
+    "V6-Cube-Restore.dc.html",
+    "V6-Cube-Opening.dc.html",
+    "V6-Cube-Unlock.dc.html",
+    "V6-Cube-Delete.dc.html",
+    "V6-Wallet-Receive.dc.html",
+    "V6-BorderWallet.dc.html",
+    "V6-Market-BuySell.dc.html",
+    "V6-Market-P2P.dc.html",
+    "V6-Duress.dc.html",
+    "V6-Members.dc.html",
+    "V6-Liquid.dc.html",
+    "V6-Signing.dc.html",
+    "V6-Claim.dc.html",
+    "P-SignIn.dc.html",
+    "P-Create.dc.html",
+    "P-Restore.dc.html",
+    "P-Opening.dc.html",
+    "P-Unlock.dc.html",
+    "P-Delete.dc.html",
+    "P-BuySell.dc.html",
+    "P-P2P.dc.html",
+    "P-Liquid.dc.html",
+    "P-Duress.dc.html",
+    "P-Members.dc.html",
+    "P-Signing.dc.html",
+    "P-Claim.dc.html",
+    "P-BorderWallet.dc.html",
+    "V6-Gaps-Installer.dc.html",
+    "V6-Gaps-Wallets.dc.html",
+    "V6-Gaps-Account.dc.html",
+    "P-GapsInstaller.dc.html",
+    "P-GapsWallets.dc.html",
+    "P-GapsAccount.dc.html",
+    "V6-Gaps-Details.dc.html",
+    "P-GapsDetails.dc.html",
+    "P-Locking.dc.html",
+    "V3-Locking.dc.html"
+  ],
+  "pages": [
+    {
+      "id": "proto",
+      "name": "Prototype (clickable)"
+    }
+  ],
+  "title": "Tenshu Launcher & Concept C"
+}

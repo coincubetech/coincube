@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Marketplace Buy/Sell</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--b2b:#5fb3c9}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#2c6d7e}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{border-color:var(--muted)}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd,.tenshu fieldset{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu fieldset{border:0;padding:0;min-width:0}
+.tenshu a{color:var(--acc-ink)}
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+/* top bar (single-Cube model) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tring{display:inline-grid;place-items:center;width:20px;height:20px;border:1.5px dashed var(--muted);border-radius:50%}
+.tring>img{width:14px;height:14px;opacity:.6;display:block}
+.ttag{font-size:11.5px;font-weight:600;padding:1px 7px;border:1px solid var(--muted);border-radius:9px;color:var(--ink)}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.tenshu .lkb{display:inline-flex;align-items:center;height:28px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu .lkb:hover{background:var(--hover)}
+.tenshu .lkb.go{background:var(--accent);border-color:var(--accent);color:#1a1208;font-weight:600}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none;color:var(--ink)}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.ni.sub{padding-left:38px;min-height:34px}
+.ni.par{margin-top:10px}
+.ni:disabled{cursor:not-allowed;background:transparent;color:var(--muted)}
+.ni .ds{display:block;font-size:12px;color:var(--muted);font-weight:400;margin-top:2px}
+.attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;text-decoration:none}
+.tenshu a.attn{color:var(--ink)}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto;display:flex;flex-direction:column}
+.pg{flex:1;display:grid;grid-template-columns:minmax(0,680px) 240px;column-gap:40px;justify-content:center;align-content:start;padding:28px 40px 24px}
+.hd{grid-column:1 / -1;margin-bottom:20px}
+.ph{font-size:24px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.stepper{grid-column:1 / -1;display:flex;gap:4px;margin-bottom:20px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.stepper li{display:flex;align-items:center;gap:8px;flex:1;min-width:0;font-size:13px;color:var(--muted);white-space:nowrap}
+.stepper .n{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.stepper li.cur{color:var(--ink);font-weight:600}
+.stepper li.cur .n{background:var(--accent);border-color:var(--accent);color:#1a1208}
+.stepper li.done .n{color:var(--good);border-color:var(--good)}
+/* the one bounded form region */
+.form{border:1px solid var(--line);border-radius:16px;background:var(--panel);min-width:0}
+.fh{display:flex;align-items:center;gap:12px;padding:16px 24px;min-height:64px}
+.fh h2{font-size:17px;font-weight:600;flex:1}
+.fh .pw{font-size:12px;color:var(--muted)}
+.fs{padding:20px 24px;border-top:1px solid var(--line)}
+.fs h3{font-size:14px;font-weight:600;margin-bottom:12px}
+.ffoot{display:flex;align-items:center;gap:12px;padding:16px 24px;border-top:1px solid var(--line)}
+.ffoot .hint{flex:1;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.fld{display:flex;flex-direction:column;gap:6px}
+.fld+.fld{margin-top:16px}
+.fld label,.fld .lt{font-weight:600;font-size:13px}
+.inp{width:100%;height:44px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:15px;outline:none}
+.inp::placeholder{color:var(--muted)}
+.inp:focus{border-color:var(--focus);box-shadow:0 0 0 1px var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.inp.mono{font-size:13px}
+select.inp{appearance:auto}
+.pair{display:grid;grid-template-columns:1fr 40px 1fr;align-items:end;gap:8px}
+.pair .sw{height:44px;display:grid;place-items:center;color:var(--muted)}
+.sub{font-size:13px;color:var(--muted);margin-top:6px}
+.err{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--bad);font-weight:500;margin-top:8px}
+.pill{height:40px;padding:0 22px;border-radius:20px;font-weight:600;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.pill.fill{background:var(--accent);border:1px solid var(--accent);color:#1a1208}
+.pill.out{background:transparent;border:1px solid var(--acc-ink);color:var(--acc-ink)}
+.pill:disabled{opacity:.45;cursor:not-allowed}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:13px;white-space:nowrap;color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn:disabled{cursor:not-allowed;color:var(--muted)}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px;font-size:13px}
+.back{display:inline-flex;align-items:center;gap:4px;border:0;background:none;padding:2px 0;color:var(--acc-ink);font-size:13px;font-weight:500;cursor:pointer;border-radius:4px;margin-bottom:12px}
+.pb{height:28px;padding:0 10px;border:1px dashed var(--line);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
+.pb:hover{background:var(--hover)}
+.spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--acc-ink);border-radius:50%;animation:sp .8s linear infinite;flex:none;display:inline-block}
+@keyframes sp{to{transform:rotate(360deg)}}
+.busy{display:flex;align-items:center;gap:12px;padding:40px 24px;border-top:1px solid var(--line)}
+.busy b{display:block;font-weight:600}
+/* mode choice */
+.modes{display:grid;gap:10px}
+.mode{display:flex;align-items:center;gap:14px;min-height:72px;padding:0 20px;border:1px solid var(--line);border-radius:12px;background:var(--bg);cursor:pointer;text-align:left;font-size:15px;font-weight:500}
+.mode:hover{background:var(--hover)}
+.mode[aria-pressed="true"]{border-color:var(--acc-ink);background:var(--selected);font-weight:600}
+.mode .ic{width:22px;height:22px;color:var(--acc-ink)}
+.two{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+/* rows */
+.dl>div{display:grid;grid-template-columns:170px minmax(0,1fr) auto;column-gap:16px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);font-size:13px}
+.dl>div:first-child{border-top:1px solid var(--line)}
+.dl dt{color:var(--muted)}.dl dd{overflow-wrap:anywhere}
+.stp{padding:16px 0;border-bottom:1px solid var(--line)}
+.stp:first-of-type{border-top:1px solid var(--line)}
+.stp .sh{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--muted);margin-bottom:8px}
+.crit{display:flex;gap:10px;align-items:flex-start;margin-top:10px;font-size:13px}
+.crit b{display:block;color:var(--warn);font-weight:600}
+.notes li{display:flex;gap:8px;padding:4px 0;font-size:13px;color:var(--muted)}
+.notes li::before{content:"";width:4px;height:4px;border-radius:50%;background:var(--muted);margin-top:8px;flex:none}
+.opt{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;column-gap:12px;min-height:48px;padding:6px 12px;border-radius:8px;cursor:pointer}
+.opt:hover{background:var(--hover)}
+.opt.on{background:var(--selected)}
+.opt input{margin:0;width:16px;height:16px;accent-color:var(--accent)}
+.opt .nm{font-weight:500}.opt .ds{display:block;font-size:12px;color:var(--muted)}
+.opt .rt{font-size:13px;text-align:right;color:var(--muted)}
+.qte{display:grid;grid-template-columns:20px minmax(0,1fr) 120px 120px;align-items:center;column-gap:12px;min-height:52px;padding:6px 12px;border-radius:8px;cursor:pointer;font-size:13px}
+.qte:hover{background:var(--hover)}.qte.on{background:var(--selected)}
+.qte input{margin:0;width:16px;height:16px;accent-color:var(--accent)}
+.qhead{display:grid;grid-template-columns:20px minmax(0,1fr) 120px 120px;column-gap:12px;padding:0 12px 6px;font-size:12px;color:var(--muted)}
+.route{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.blk{padding:12px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg)}
+.blk .k{font-size:12px;font-weight:600;letter-spacing:.04em;color:var(--muted)}
+.blk .v{font-size:18px;font-weight:600;margin-top:4px}
+.qr{display:grid;grid-template-columns:150px minmax(0,1fr);gap:20px;align-items:start}
+.qr svg{display:block;border:1px solid var(--line);border-radius:8px;background:#fff}
+.cpy{display:flex;gap:8px;margin-top:8px}.cpy .inp{flex:1;min-width:0}
+.web{height:340px;border:1px dashed var(--line);border-radius:12px;background:var(--bg);display:grid;place-items:center;text-align:center}
+.web .wl{font-weight:600}.web .wc{font-size:13px;color:var(--muted);margin-top:4px}
+.done{display:flex;align-items:center;gap:10px}
+.done .ic{width:28px;height:28px;color:var(--good)}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-weight:500;color:var(--muted);padding:8px 10px;border-bottom:1px solid var(--line);font-size:12px}
+.tbl td{padding:10px;border-bottom:1px solid var(--line)}
+.tbl td.num{text-align:right}.tbl th.num{text-align:right}
+.sbadge{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.gate{padding:48px 24px;text-align:left}
+.gate h2{font-size:18px;font-weight:600;margin-top:12px}
+.gate p{font-size:13px;color:var(--muted);margin-top:6px;max-width:52ch}
+.hidnote{grid-column:1 / -1;margin-top:8px;padding:20px 24px;border:1px dashed var(--line);border-radius:12px}
+.hidnote b{display:block;font-weight:600}
+.hidnote p{font-size:13px;color:var(--muted);margin-top:4px}
+/* aside */
+.aside{padding-top:4px;font-size:13px}
+.aside .row{display:flex;justify-content:space-between;gap:12px;padding:10px 0;border-bottom:1px solid var(--line)}
+.aside .row:first-of-type{border-top:1px solid var(--line)}
+.aside .k{color:var(--muted)}
+.aside .bv{font-weight:600}
+.pfoot{padding:12px 40px 16px;text-align:center}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <a class="chip" href="P-Connect.dc.html" title="{{ chip.acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <sc-if value="{{ chip.in }}" hint-placeholder-val="{{ true }}"><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></sc-if>
+        <sc-if value="{{ chip.out }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span></sc-if>
+      </a>
+      <div class="chip" title="{{ chip.connTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
+        <sc-if value="{{ chip.in }}" hint-placeholder-val="{{ true }}"><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
+        <sc-if value="{{ chip.out }}" hint-placeholder-val="{{ false }}"><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Not checked</span></sc-if>
+      </div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock {{ cube.name }} and open the Launcher?</p><a class="lkb go" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="lkb" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}">
+          <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+          <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+          <a class="ni" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+        </sc-if>
+        <sc-if value="{{ cube.test }}" hint-placeholder-val="{{ false }}">
+          <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Lab</span></a>
+        </sc-if>
+        <sc-if value="{{ nav.market }}" hint-placeholder-val="{{ true }}">
+          <a class="ni par" href="P-P2P.dc.html" aria-expanded="true"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 7.25 4 3h10l1 4.25"/><path d="M3 7.25c0 1.1.9 1.9 2 1.9s2-.8 2-1.9c0 1.1.9 1.9 2 1.9s2-.8 2-1.9c0 1.1.9 1.9 2 1.9s2-.8 2-1.9"/><path d="M4 9.1v6.4h10V9.1"/><path d="M7.5 15.5V12h3v3.5"/></svg><span>Marketplace</span></a>
+          <a class="ni sub" href="P-P2P.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span>P2P</span></a>
+          <sc-if value="{{ nav.bsOn }}" hint-placeholder-val="{{ true }}">
+            <a class="ni sub on" aria-current="page" href="P-BuySell.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7 5.5v7M7 5.5h2.6a1.6 1.6 0 0 1 0 3.2H7m0 0h3a1.7 1.7 0 0 1 0 3.3H7M8.5 4.25v1.25M8.5 12.5v1.25"/></svg><span>Buy/Sell</span></a>
+          </sc-if>
+          <sc-if value="{{ nav.bsOff }}" hint-placeholder-val="{{ false }}">
+            <button type="button" class="ni sub" disabled title="Buy/Sell isn't available on Testnet4."><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7 5.5v7M7 5.5h2.6a1.6 1.6 0 0 1 0 3.2H7m0 0h3a1.7 1.7 0 0 1 0 3.3H7"/></svg><span><span>Buy/Sell</span><span class="ds">Buy/Sell isn't available on Testnet4.</span></span></button>
+          </sc-if>
+        </sc-if>
+      </div>
+      <a class="attn" href="P-Overview.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <div class="hd">
+          <h1 class="ph">Buy/Sell</h1>
+          <p class="idl"><sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>{{ cube.name }} · {{ cube.net }}</p>
+        </div>
+
+        <!-- server gate: the route is hidden; this note stands in for the absent page -->
+        <sc-if value="{{ v.hiddenNote }}" hint-placeholder-val="{{ false }}">
+          <div class="hidnote" role="note">
+            <b>{{ hid.title }}</b>
+            <p>{{ hid.text }}</p>
+            <p>A stale route shows: “The Marketplace isn't available right now.”</p>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ v.stepper }}" hint-placeholder-val="{{ true }}">
+          <ol class="stepper" aria-label="Buy/Sell steps">
+            <sc-for list="{{ steps }}" as="s" hint-placeholder-count="6">
+              <li class="{{ s.cls }}" aria-current="{{ s.cur }}"><span class="n"><sc-if value="{{ s.isDone }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.25 3 3 6-6.5"/></svg></sc-if><sc-if value="{{ s.notDone }}" hint-placeholder-val="{{ true }}">{{ s.num }}</sc-if></span><span>{{ s.label }}</span><span class="srl">{{ s.sr }}</span></li>
+            </sc-for>
+          </ol>
+        </sc-if>
+
+        <sc-if value="{{ v.col }}" hint-placeholder-val="{{ true }}">
+        <div>
+          <sc-if value="{{ v.back }}" hint-placeholder-val="{{ false }}"><button type="button" class="back" onClick="{{ back.go }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>{{ back.label }}</button></sc-if>
+          <section class="form" aria-labelledby="bs-h">
+
+            <!-- NETWORK GATE (Bitcoin only) -->
+            <sc-if value="{{ v.netGate }}" hint-placeholder-val="{{ false }}">
+              <div class="gate">
+                <span class="tring"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+                <h2 id="bs-h">Buy/Sell isn't available on Testnet4.</h2>
+                <p>Open a Bitcoin mainnet Cube to buy or sell.</p>
+                <div style="margin-top:20px"><a class="pill out" href="P-Launcher.dc.html">All Cubes</a></div>
+              </div>
+            </sc-if>
+
+            <!-- COUNTRY UNSUPPORTED (Meld) -->
+            <sc-if value="{{ v.unsupported }}" hint-placeholder-val="{{ false }}">
+              <div class="gate">
+                <svg class="ic bad" style="width:28px;height:28px" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M2.5 9h13M9 2.5c1.8 1.9 2.6 4 2.6 6.5S10.8 13.6 9 15.5M9 2.5C7.2 4.4 6.4 6.5 6.4 9s.8 4.6 2.6 6.5"/></svg>
+                <h2 id="bs-h">Your country: {{ ctry.name }} currently isn't supported for BuySell</h2>
+                <div style="margin-top:20px;display:flex;gap:10px"><button type="button" class="pill out" onClick="{{ toLocation }}">Start Over</button></div>
+              </div>
+            </sc-if>
+
+            <!-- LOADING (shared) -->
+            <sc-if value="{{ v.loading }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">{{ head.title }}</h2><span class="pw">{{ head.pw }}</span></div>
+              <div class="busy" role="status" aria-live="polite"><span class="spin" aria-hidden="true"></span><div><b>{{ loadText }}</b><sc-if value="{{ v.loadWait }}" hint-placeholder-val="{{ false }}"><span class="cap">Please wait...</span></sc-if></div></div>
+            </sc-if>
+
+            <!-- LOCATION -->
+            <sc-if value="{{ is.location }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Location</h2></div>
+              <div class="fs">
+                <div class="fld"><label for="bs-country">Select Country: </label>
+                  <select class="inp" id="bs-country" onChange="{{ pickCountry }}">
+                    <sc-for list="{{ countries }}" as="c" hint-placeholder-count="6"><option value="{{ c.code }}" selected="{{ c.sel }}">{{ c.name }}</option></sc-for>
+                  </select>
+                </div>
+                <p class="sub">{{ ctry.route }}</p>
+              </div>
+              <div class="ffoot"><span class="hint"></span><button type="button" class="pill fill" onClick="{{ next }}">Continue</button></div>
+            </sc-if>
+
+            <!-- SIGN IN (Buy/Sell's own) -->
+            <sc-if value="{{ is.login }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Sign in to your account</h2></div>
+              <div class="fs">
+                <div class="fld"><label for="bs-email">Email</label><input class="inp" id="bs-email" type="email" autocomplete="email" value="{{ email }}" onInput="{{ onEmail }}"></div>
+              </div>
+              <div class="ffoot"><span class="hint"><button type="button" class="lbtn" onClick="{{ toRegister }}">Don't have an account? Sign up</button></span><button type="button" class="pill fill" onClick="{{ sendOtp }}">Continue</button></div>
+            </sc-if>
+            <sc-if value="{{ is.register }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Create an Account</h2></div>
+              <div class="fs">
+                <p class="sub" style="margin:0 0 16px">Create a COINCUBE account to access Buy/Sell and other features</p>
+                <div class="fld"><label for="bs-remail">Email Address</label><input class="inp" id="bs-remail" type="email" autocomplete="email" value="{{ email }}" onInput="{{ onEmail }}"></div>
+                <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p></sc-if>
+              </div>
+              <div class="ffoot"><span class="hint"></span><button type="button" class="pill fill" onClick="{{ sendOtp }}">Continue</button></div>
+            </sc-if>
+
+            <!-- OTP -->
+            <sc-if value="{{ is.otp }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Enter the OTP sent to your email</h2></div>
+              <div class="fs">
+                <p class="sub" style="margin:0 0 16px">{{ email }}</p>
+                <div class="fld"><label for="bs-otp">OTP code</label><input class="inp mono" id="bs-otp" inputmode="numeric" autocomplete="one-time-code" placeholder="Enter OTP code" value="{{ otp }}" onInput="{{ onOtp }}" style="font-size:18px;letter-spacing:.2em;max-width:260px"></div>
+              </div>
+              <div class="ffoot"><span class="hint">
+                <sc-if value="{{ otpCd.wait }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" disabled>Resend in {{ otpCd.n }}s</button></sc-if>
+                <sc-if value="{{ otpCd.ready }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" onClick="{{ resend }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="4" width="13" height="10" rx="1.5"/><path d="m3 5 6 5 6-5"/></svg>Resend OTP</button></sc-if>
+              </span><button type="button" class="pill fill" disabled="{{ otpOff }}" onClick="{{ verify }}">Verify OTP</button></div>
+            </sc-if>
+
+            <!-- MODE SELECT -->
+            <sc-if value="{{ is.mode }}" hint-placeholder-val="{{ true }}">
+              <div class="fh"><h2 id="bs-h">Buy or sell</h2></div>
+              <div class="fs">
+                <div class="modes" role="group" aria-labelledby="bs-h">
+                  <button type="button" class="mode" aria-pressed="{{ modeP.buy }}" onClick="{{ pickBuy }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7 5.5v7M7 5.5h2.6a1.6 1.6 0 0 1 0 3.2H7m0 0h3a1.7 1.7 0 0 1 0 3.3H7"/></svg>Buy Bitcoin using Fiat Currencies</button>
+                  <button type="button" class="mode" aria-pressed="{{ modeP.sell }}" onClick="{{ pickSell }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M11.2 6.6c-.3-.8-1.2-1.3-2.2-1.3-1.3 0-2.2.7-2.2 1.7 0 2.3 4.6 1.3 4.6 3.9 0 1-1 1.8-2.4 1.8-1.1 0-2-.5-2.3-1.4M9 4v1.3M9 12.7V14"/></svg>Sell Bitcoin to a Fiat Currency</button>
+                </div>
+              </div>
+              <sc-if value="{{ modeP.none }}" hint-placeholder-val="{{ true }}">
+                <div class="ffoot">
+                  <button type="button" class="btn" disabled="{{ histOff }}" onClick="{{ toHistory }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 9a6 6 0 1 0 1.8-4.3M3 3.5v2.25h2.25"/><path d="M9 6v3l2 1.25"/></svg>View Order History</button>
+                  <button type="button" class="btn" onClick="{{ logOut }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M7 15.5H4a1.5 1.5 0 0 1-1.5-1.5V4A1.5 1.5 0 0 1 4 2.5h3M12 12.5 15.5 9 12 5.5M15.5 9H7"/></svg>Log Out</button>
+                  <span class="hint"></span>
+                </div>
+              </sc-if>
+              <sc-if value="{{ modeP.some }}" hint-placeholder-val="{{ false }}">
+                <div class="ffoot"><span class="hint"></span><button type="button" class="pill fill" onClick="{{ startSession }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M2.5 9h13M9 2.5c1.8 1.9 2.6 4 2.6 6.5S10.8 13.6 9 15.5M9 2.5C7.2 4.4 6.4 6.5 6.4 9s.8 4.6 2.6 6.5"/></svg>Continue</button></div>
+              </sc-if>
+            </sc-if>
+
+            <!-- MAVAPAY · BUY amount -->
+            <sc-if value="{{ is.mBuyAmt }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Buy Bitcoin using Fiat Money</h2><span class="pw">Powered by Mavapay</span></div>
+              <div class="fs">
+                <div class="pair">
+                  <div class="fld"><label for="bs-fiat">{{ ctry.cur }} ({{ ctry.code }})</label><input class="inp" id="bs-fiat" inputmode="decimal" placeholder="[AMOUNT]" value=""></div>
+                  <span class="sw" aria-hidden="true"><svg class="ic" viewBox="0 0 18 18"><path d="M3 6.5h12M12 3.5l3 3-3 3M15 11.5H3M6 8.5l-3 3 3 3"/></svg></span>
+                  <div class="fld"><label for="bs-sats">Satoshis (BTCSAT)</label><input class="inp" id="bs-sats" inputmode="numeric" value="{{ amt }}" onInput="{{ onAmt }}"></div>
+                </div>
+                <p class="sub">Arrives in Liquid · Travel through a Lightning invoice.</p>
+                <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p></sc-if>
+              </div>
+              <div class="ffoot"><span class="hint" role="status">{{ busyText }}</span><button type="button" class="pill fill" disabled="{{ busyOff }}" onClick="{{ genInvoice }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="4.5" width="13" height="9" rx="1.5"/><path d="M2.5 7.5h13"/></svg>Generate Invoice</button></div>
+            </sc-if>
+
+            <!-- MAVAPAY · SELL bank details + amount -->
+            <sc-if value="{{ is.mSellAmt }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Sell Bitcoin to Fiat Money</h2><span class="pw">Powered by Mavapay</span></div>
+              <div class="fs">
+                <h3>{{ bank.title }}</h3>
+                <sc-if value="{{ bank.ng }}" hint-placeholder-val="{{ true }}">
+                  <div class="fld"><label for="bs-acct">Enter Recipient Bank Account Number</label><input class="inp mono" id="bs-acct" inputmode="numeric" value="{{ acctNum }}" aria-invalid="{{ bank.numBad }}" aria-describedby="bs-acct-e" onInput="{{ onAcct }}">
+                    <sc-if value="{{ bank.showNumErr }}" hint-placeholder-val="{{ false }}"><p class="err" id="bs-acct-e" role="alert">Bank Account Number MUST be a number</p></sc-if></div>
+                  <div class="fld"><label for="bs-bank">Select Recipient Bank</label>
+                    <select class="inp" id="bs-bank" onChange="{{ onBank }}"><option value="">Select a recipient bank</option><sc-for list="{{ banks }}" as="b" hint-placeholder-count="3"><option value="{{ b.v }}" selected="{{ b.sel }}">{{ b.v }}</option></sc-for></select></div>
+                </sc-if>
+                <sc-if value="{{ bank.za }}" hint-placeholder-val="{{ false }}">
+                  <div class="fld"><label for="bs-zan">Enter the Recipient's Name</label><input class="inp" id="bs-zan" value="{{ zaName }}" onInput="{{ onZaName }}"></div>
+                  <div class="fld"><label for="bs-acct2">Enter Recipient Bank Account Number</label><input class="inp mono" id="bs-acct2" inputmode="numeric" value="{{ acctNum }}" aria-invalid="{{ bank.numBad }}" onInput="{{ onAcct }}">
+                    <sc-if value="{{ bank.showNumErr }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert">Bank Account Number MUST be a number</p></sc-if></div>
+                  <div class="fld"><label for="bs-bank2">Select Recipient Bank</label>
+                    <select class="inp" id="bs-bank2" onChange="{{ onBank }}"><option value="">Select the recipient's bank</option><sc-for list="{{ banks }}" as="b" hint-placeholder-count="3"><option value="{{ b.v }}" selected="{{ b.sel }}">{{ b.v }}</option></sc-for></select></div>
+                </sc-if>
+                <sc-if value="{{ bank.ke }}" hint-placeholder-val="{{ false }}">
+                  <div class="fld"><label for="bs-ken">Enter Recipient Account Name</label><input class="inp" id="bs-ken" value="{{ keName }}" onInput="{{ onKeName }}"></div>
+                  <div class="fld"><label for="bs-kep">Enter Recipient Phone Number</label><input class="inp mono" id="bs-kep" inputmode="tel" value="{{ kePhone }}" onInput="{{ onKePhone }}"></div>
+                </sc-if>
+                <sc-if value="{{ bank.canVerify }}" hint-placeholder-val="{{ true }}">
+                  <div style="margin-top:16px"><button type="button" class="btn" disabled="{{ bank.verifyOff }}" onClick="{{ verifyBank }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Verify Details</button></div>
+                </sc-if>
+                <sc-if value="{{ bank.confirm }}" hint-placeholder-val="{{ false }}">
+                  <div class="crit" role="status"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><div><span class="muted">Is this the recipient's registered name?</span><br><b style="color:var(--ink)">A. N. Recipient (synthetic)</b></div></div>
+                </sc-if>
+                <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p></sc-if>
+              </div>
+              <div class="fs">
+                <div class="fld"><label for="bs-ssats">Input Transfer Amount (in Satoshis)</label>
+                  <div style="display:flex;align-items:center;gap:12px"><input class="inp mono" id="bs-ssats" inputmode="numeric" value="{{ amt }}" onInput="{{ onAmt }}" style="max-width:220px;font-size:15px"><span class="muted">≈ {{ ctry.sym }} [AMOUNT]</span></div></div>
+              </div>
+              <div class="ffoot"><span class="hint" role="status">{{ sellHint }}</span><button type="button" class="pill fill" disabled="{{ quoteOff }}" onClick="{{ getQuote }}">{{ quoteLabel }}</button></div>
+            </sc-if>
+
+            <!-- MAVAPAY · CHECKOUT buy: payment instructions -->
+            <sc-if value="{{ is.mBuyPay }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><div class="done" style="flex:1"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="bs-h">Order Created Successfully</h2></div><span class="pw">Powered by Mavapay</span></div>
+              <div class="fs">
+                <div class="route"><div class="blk"><p class="k">You Send</p><p class="v">{{ ctry.sym }} [AMOUNT]</p></div><div class="blk"><p class="k">You Receive</p><p class="v">{{ amtFmt }} sats</p></div></div>
+                <dl class="dl" style="margin-top:12px"><div><dt>Order Ref</dt><dd class="mono">ORD-SYNTH-0001</dd><span></span></div><div><dt>Quote Ref</dt><dd class="mono">QTE-SYNTH-0001</dd><span></span></div></dl>
+              </div>
+              <div class="fs">
+                <h3>Payment Instructions</h3>
+                <div class="stp"><p class="sh">STEP 1: TRANSFER FUNDS TO OUR ACCOUNT</p>
+                  <dl class="dl"><div><dt>Bank Name</dt><dd>[BANK NAME]</dd><span></span></div><div><dt>Account Number</dt><dd class="mono">[ACCOUNT NUMBER]</dd><button type="button" class="lbtn" onClick="{{ copyAcct }}">{{ copyA }}</button></div><div><dt>Account Name</dt><dd>[ACCOUNT NAME]</dd><span></span></div><div><dt>Amount to Send</dt><dd>{{ ctry.sym }} [AMOUNT]</dd><span></span></div></dl></div>
+                <div class="stp"><p class="sh">STEP 2: INCLUDE THIS REFERENCE IN YOUR TRANSFER</p>
+                  <div class="cpy"><input class="inp mono" readonly value="REF-SYNTH-0001" aria-label="Payment reference"><button type="button" class="btn" style="height:44px" onClick="{{ copyRef }}">{{ copyR }}</button></div>
+                  <div class="crit"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><div><b>Critical: Include this reference number</b><span class="muted">This helps us match your payment to your order. Without this reference, your order may be delayed.</span></div></div></div>
+                <div class="stp"><p class="sh">STEP 3: WAIT FOR CONFIRMATION</p>
+                  <p style="display:flex;align-items:center;gap:10px" role="status"><span class="spin" aria-hidden="true"></span>Waiting for payment confirmation...</p></div>
+              </div>
+              <div class="fs">
+                <h3>Important Notes</h3>
+                <ul class="notes"><li>Your order will begin execution once we confirm receipt of funds</li><li>Execution time will depend on market liquidity</li><li>You will receive real-time updates on trade execution progress</li><li>Final Bitcoin price may vary based on actual execution prices</li><li>Our commission (1-2%) will be deducted from the final Bitcoin amount</li></ul>
+              </div>
+              <div class="ffoot"><button type="button" class="pb" onClick="{{ simulate }}">Simulate Pay-In (Developer Option)</button><span class="hint"></span><button type="button" class="btn" onClick="{{ startOver }}">Start Over</button></div>
+            </sc-if>
+
+            <!-- MAVAPAY · CHECKOUT sell: deposit invoice -->
+            <sc-if value="{{ is.mSellPay }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><div class="done" style="flex:1"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="bs-h">Order Created Successfully</h2></div><span class="pw">Powered by Mavapay</span></div>
+              <div class="fs">
+                <div class="route"><div class="blk"><p class="k">You Send</p><p class="v">{{ amtFmt }} sats</p></div><div class="blk"><p class="k">You Receive</p><p class="v">{{ ctry.sym }} [AMOUNT]</p></div></div>
+                <dl class="dl" style="margin-top:12px"><div><dt>Order Ref</dt><dd class="mono">ORD-SYNTH-0002</dd><span></span></div><div><dt>Quote Ref</dt><dd class="mono">QTE-SYNTH-0002</dd><span></span></div></dl>
+              </div>
+              <div class="fs">
+                <h3>Deposit into the following address to proceed</h3>
+                <div class="qr">
+                  <svg width="150" height="150" viewBox="0 0 29 29" role="img" aria-label="Synthetic QR code"><rect width="29" height="29" fill="#fff"/><g fill="#161716"><path d="M2 2h7v7H2zM20 2h7v7h-7zM2 20h7v7H2z"/><path d="M3 3h5v5H3zM21 3h5v5h-5zM3 21h5v5H3z" fill="#fff"/><path d="M4 4h3v3H4zM22 4h3v3h-3zM4 22h3v3H4zM11 2h2v2h-2zM14 4h2v3h-2zM11 8h3v2h-3zM17 9h2v2h-2zM2 11h3v2H2zM7 12h3v2H7zM12 12h5v2h-5zM20 11h2v3h-2zM24 12h3v2h-3zM11 16h2v4h-2zM15 17h3v2h-3zM21 16h2v2h-2zM24 18h3v3h-3zM12 22h2v2h-2zM16 21h3v3h-3zM20 24h3v3h-3zM25 23h2v2h-2zM11 25h3v2h-3z"/></g></svg>
+                  <div><label class="cap" for="bs-inv">Lightning invoice</label><div class="cpy"><input class="inp mono" id="bs-inv" readonly value="lnbc…synthetic…7xk"><button type="button" class="btn" style="height:44px" onClick="{{ copyInv }}">{{ copyI }}</button></div></div>
+                </div>
+              </div>
+              <div class="ffoot">
+                <sc-if value="{{ v.liqOk }}" hint-placeholder-val="{{ true }}"><button type="button" class="pill fill" onClick="{{ simulate }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg>Fulfil Order from Liquid Wallet</button></sc-if>
+                <sc-if value="{{ v.liqLow }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" disabled>Liquid Balance insufficient. Manually fulfill invoice</button></sc-if>
+                <span class="hint"></span><button type="button" class="pb" onClick="{{ simulate }}">Simulate Pay-In (Developer Option)</button>
+              </div>
+            </sc-if>
+
+            <!-- MAVAPAY · COMPLETE -->
+            <sc-if value="{{ is.mDone }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><div class="done" style="flex:1"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="bs-h">{{ doneTitle }}</h2></div></div>
+              <div class="fs">
+                <p class="muted" style="font-size:13px;margin-bottom:12px">Your Bitcoin has been successfully sent to your wallet.</p>
+                <dl class="dl"><div><dt>Order Id</dt><dd class="mono">ORD-SYNTH-0001</dd><span></span></div><div><dt>Amount Paid</dt><dd>{{ paid }}</dd><span></span></div><div><dt>Bitcoin Received</dt><dd>{{ recv }}</dd><span></span></div><div><dt>Order Status</dt><dd><span class="sbadge ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Complete</span></dd><span></span></div><div><dt>Payment Method</dt><dd>Bank transfer</dd><span></span></div><div><dt>Order Date</dt><dd>[DATE]</dd><span></span></div></dl>
+              </div>
+              <div class="ffoot"><button type="button" class="btn" onClick="{{ toHistory }}">Order History</button><span class="hint"></span><button type="button" class="pill fill" onClick="{{ startOver }}">Start New Transaction</button></div>
+            </sc-if>
+
+            <!-- MAVAPAY · ORDER HISTORY -->
+            <sc-if value="{{ is.history }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Order History</h2><span class="pw">Powered by Mavapay</span></div>
+              <div class="fs" style="padding-top:8px">
+                <table class="tbl">
+                  <thead><tr><th scope="col">Order ID</th><th scope="col" class="num">Amount</th><th scope="col">Payment Method</th><th scope="col">Date</th><th scope="col">Status</th><th scope="col"><span class="srl">Action</span></th></tr></thead>
+                  <tbody>
+                    <sc-for list="{{ hist }}" as="h" hint-placeholder-count="4">
+                      <tr><td class="mono">{{ h.id }}</td><td class="num">{{ h.amt }}</td><td>{{ h.pm }}</td><td>{{ h.date }}</td><td><span class="sbadge {{ h.cls }}">{{ h.st }}</span></td><td><button type="button" class="lbtn" aria-label="{{ h.aria }}" onClick="{{ h.view }}">View</button></td></tr>
+                    </sc-for>
+                  </tbody>
+                </table>
+              </div>
+            </sc-if>
+
+            <!-- MAVAPAY · ORDER DETAIL -->
+            <sc-if value="{{ is.detail }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Order Details</h2><span class="sbadge {{ det.cls }}">{{ det.st }}</span></div>
+              <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}">
+                <div class="fs"><p class="err" role="alert" style="margin:0"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p><div style="margin-top:12px"><button type="button" class="btn" onClick="{{ retry }}">Retry</button></div></div>
+              </sc-if>
+              <sc-if value="{{ v.noErr }}" hint-placeholder-val="{{ true }}">
+                <div class="fs"><h3>Transaction Summary</h3>
+                  <dl class="dl"><div><dt>Transaction ID</dt><dd class="mono">TX-SYNTH-0003</dd><span></span></div><div><dt>Order ID</dt><dd class="mono">{{ det.id }}</dd><span></span></div><div><dt>Amount</dt><dd>{{ det.amt }}</dd><span></span></div><div><dt>Fees</dt><dd>[FEE]</dd><span></span></div><div><dt>Payment Method</dt><dd>Bank transfer</dd><span></span></div><div><dt>Date</dt><dd>[DATE]</dd><span></span></div></dl></div>
+                <div class="fs"><h3>Quote Details</h3>
+                  <dl class="dl"><div><dt>Amount Paid</dt><dd>{{ ctry.sym }} [AMOUNT]</dd><span></span></div><div><dt>Amount Received</dt><dd>{{ det.amt }}</dd><span></span></div><div><dt>Source Fee</dt><dd>[FEE]</dd><span></span></div><div><dt>Target Fee</dt><dd>[FEE]</dd><span></span></div><div><dt>Fee (USD)</dt><dd>[FEE]</dd><span></span></div><div><dt>Bitcoin Address</dt><dd class="mono">lq1q…synthetic…m2r</dd><span></span></div></dl></div>
+              </sc-if>
+            </sc-if>
+
+            <!-- MELD · REGION -->
+            <sc-if value="{{ is.region }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Select Your Region</h2></div>
+              <div class="fs">
+                <div class="fld"><label class="srl" for="bs-rsearch">Search regions</label><input class="inp" id="bs-rsearch" type="search" placeholder="Search regions..." value="{{ search }}" onInput="{{ onSearch }}"></div>
+                <fieldset style="margin-top:12px"><legend class="srl">Region</legend>
+                  <sc-for list="{{ regions }}" as="r" hint-placeholder-count="5">
+                    <label class="opt {{ r.cls }}" for="{{ r.id }}"><input type="radio" name="bs-region" id="{{ r.id }}" checked="{{ r.on }}" onChange="{{ r.pick }}"><span class="nm">{{ r.name }}</span><span></span></label>
+                  </sc-for>
+                  <sc-if value="{{ v.noRegion }}" hint-placeholder-val="{{ false }}"><p class="sub" style="padding:12px">No regions match your search</p></sc-if>
+                </fieldset>
+              </div>
+              <div class="ffoot"><span class="hint"></span><button type="button" class="pill fill" disabled="{{ regionOff }}" onClick="{{ next }}">Continue</button></div>
+            </sc-if>
+
+            <!-- MELD · AMOUNT -->
+            <sc-if value="{{ is.mAmt }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">{{ meld.title }}</h2></div>
+              <div class="fs">
+                <div class="fld"><label for="bs-mamt">Input {{ meld.unit }} amount</label>
+                  <div style="display:flex;gap:8px;align-items:center"><input class="inp" id="bs-mamt" inputmode="decimal" value="{{ meld.amt }}" aria-invalid="{{ meld.bad }}" aria-describedby="bs-mamt-e" onInput="{{ onMeldAmt }}" style="max-width:260px"><sc-if value="{{ meld.sell }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" style="height:44px" onClick="{{ setMax }}">MAX</button></sc-if></div></div>
+                <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}"><p class="err" id="bs-mamt-e" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p></sc-if>
+              </div>
+              <div class="ffoot"><span class="hint" role="status"></span><button type="button" class="pill fill" disabled="{{ meld.off }}" onClick="{{ meldSubmit }}">{{ meld.cta }}</button></div>
+            </sc-if>
+
+            <!-- MELD · DEPOSIT ADDRESS (buy) -->
+            <sc-if value="{{ is.address }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Select a Deposit Address</h2></div>
+              <div class="fs">
+                <fieldset><legend class="srl">Address source</legend>
+                  <label class="opt {{ addr.pickCls }}" for="bs-ap"><input type="radio" name="bs-addr" id="bs-ap" checked="{{ addr.pick }}" onChange="{{ addrPick }}"><span><span class="nm">Pick an existing address</span><span class="ds">Vault · Family savings</span></span><span></span></label>
+                  <label class="opt {{ addr.genCls }}" for="bs-ag"><input type="radio" name="bs-addr" id="bs-ag" checked="{{ addr.gen }}" onChange="{{ addrGen }}"><span class="nm">Generate New Address</span><span></span></label>
+                </fieldset>
+                <sc-if value="{{ addr.pick }}" hint-placeholder-val="{{ true }}">
+                  <fieldset style="margin:8px 0 0 32px"><legend class="srl">Existing addresses</legend>
+                    <sc-for list="{{ addrs }}" as="a" hint-placeholder-count="3">
+                      <label class="opt {{ a.cls }}" for="{{ a.id }}"><input type="radio" name="bs-addr-list" id="{{ a.id }}" checked="{{ a.on }}" onChange="{{ a.pick }}"><span><span class="mono">{{ a.addr }}</span><span class="ds">{{ a.label }}</span></span><span></span></label>
+                    </sc-for>
+                    <button type="button" class="lbtn" style="margin:6px 12px" onClick="{{ loadMore }}">Load more</button>
+                  </fieldset>
+                </sc-if>
+                <div style="margin-top:16px"><p class="cap">{{ addr.cap }}</p><p class="mono" style="margin-top:4px">{{ addr.value }}</p></div>
+              </div>
+              <div class="ffoot"><button type="button" class="btn" onClick="{{ back.go }}">Go Back</button><span class="hint"></span><button type="button" class="pill fill" onClick="{{ next }}">Proceed</button></div>
+            </sc-if>
+
+            <!-- MELD · QUOTES -->
+            <sc-if value="{{ is.quotes }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">Select a preferred provider</h2></div>
+              <div class="fs">
+                <div class="route"><div class="blk"><p class="k">YOU SEND</p><p class="v">{{ meld.send }}</p></div><div class="blk"><p class="k">YOU RECEIVE</p><p class="v">{{ meld.recv }}</p></div></div>
+              </div>
+              <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}">
+                <div class="fs"><p class="err" role="alert" style="margin:0"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p><div style="margin-top:12px"><button type="button" class="btn" onClick="{{ retry }}">Retry</button></div></div>
+              </sc-if>
+              <sc-if value="{{ v.noErr }}" hint-placeholder-val="{{ true }}">
+                <div class="fs" style="padding-top:12px">
+                  <div class="qhead" aria-hidden="true"><span></span><span>Provider</span><span>Total Fee</span><span>Exchange Rate</span></div>
+                  <fieldset><legend class="srl">Provider</legend>
+                    <sc-for list="{{ quotes }}" as="q" hint-placeholder-count="3">
+                      <label class="qte {{ q.cls }}" for="{{ q.id }}"><input type="radio" name="bs-quote" id="{{ q.id }}" checked="{{ q.on }}" onChange="{{ q.pick }}"><span class="nm" style="font-weight:500">{{ q.name }}</span><span>[FEE]</span><span>[RATE]</span></label>
+                    </sc-for>
+                  </fieldset>
+                </div>
+              </sc-if>
+              <div class="ffoot"><button type="button" class="btn" onClick="{{ back.go }}">Navigate Back</button><span class="hint" role="status">{{ busyText }}</span><button type="button" class="pill fill" disabled="{{ startOff }}" onClick="{{ startWeb }}">Start Session</button></div>
+            </sc-if>
+
+            <!-- MELD · WEBVIEW HANDOFF -->
+            <sc-if value="{{ is.web }}" hint-placeholder-val="{{ false }}">
+              <div class="fh"><h2 id="bs-h">{{ quoteName }}</h2><span class="pw">Meld</span></div>
+              <sc-if value="{{ v.err }}" hint-placeholder-val="{{ false }}">
+                <div class="fs"><p class="err" role="alert" style="margin:0"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.5v.01"/></svg>{{ errText }}</p><div style="margin-top:12px"><button type="button" class="btn" onClick="{{ retry }}">Retry</button></div></div>
+              </sc-if>
+              <sc-if value="{{ v.noErr }}" hint-placeholder-val="{{ true }}">
+                <div class="fs">
+                  <div class="web" role="img" aria-label="Embedded provider checkout page"><div><svg class="ic muted" style="width:28px;height:28px" aria-hidden="true" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="12" rx="1.5"/><path d="M2 6.5h14M4.5 4.75h.01M6.5 4.75h.01"/></svg><p class="wl">{{ quoteName }} checkout</p><p class="wc">Provider page · embedded webview</p></div></div>
+                </div>
+                <div class="fs">
+                  <sc-if value="{{ meld.buyWeb }}" hint-placeholder-val="{{ true }}">
+                    <label class="cap" for="bs-raddr">Your Recipient Address (Copy+Paste)</label>
+                    <div class="cpy"><input class="inp mono" id="bs-raddr" readonly value="{{ addr.value }}"><button type="button" class="btn" style="height:44px" onClick="{{ copyAddr }}">{{ copyD }}</button></div>
+                    <p class="sub">Keyboard shortcuts are problematic in the webview for macOS. Right-click the input field to paste.</p>
+                  </sc-if>
+                  <sc-if value="{{ meld.sell }}" hint-placeholder-val="{{ false }}"><p>Complete Sale flow: </p></sc-if>
+                </div>
+              </sc-if>
+              <div class="ffoot"><span class="hint"></span><button type="button" class="btn" onClick="{{ startOver }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Start Over</button></div>
+            </sc-if>
+
+          </section>
+        </div>
+        </sc-if>
+
+        <sc-if value="{{ v.aside }}" hint-placeholder-val="{{ true }}">
+          <aside class="aside" aria-label="Session">
+            <div class="row"><span class="k">Country</span><span>{{ ctry.name }}</span></div>
+            <div class="row"><span class="k">Provider</span><span>{{ ctry.prov }}</span></div>
+            <div class="row"><span class="k">Wallet</span><span>{{ ctry.wallet }}</span></div>
+            <div class="row"><span class="k">Balance</span><span class="bv">{{ bal }}</span></div>
+          </aside>
+        </sc-if>
+      </div>
+      <p class="cap pfoot">Prototype · synthetic accounts, references, invoices and addresses · amounts, fees and rates are placeholders · provider page drawn, not embedded</p>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["location","signin","otp","mode","region","amount","address","quotes","checkout","complete","history","detail"],"default":"mode","section":"Review"},"provider":{"editor":"enum","options":["mavapay","meld"],"default":"mavapay","section":"Review"},"state":{"editor":"enum","options":["ready","loading","error","unsupported","networkGate"],"default":"ready","section":"Review"},"gate":{"editor":"enum","options":["on","marketplaceOff","buySellOff"],"default":"on","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};}
+  renderVals(){
+    const P=this.props,self=this;
+    const prov=P.provider==='meld'?'meld':'mavapay',pst=P.state||'ready',gate=P.gate||'on',hb=!!P.hideBalances;
+    const key=[prov,P.step||'mode',pst,gate,hb].join('|');
+    const D='••••••';
+    const fresh={k:key,step:P.step||'mode',side:this.state.side||'buy',picked:false,acct:'login',signedOut:false,email:'alex@example.test',otp:'',cd:28,
+      country:prov==='mavapay'?'NG':'US',region:'r1',search:'',amt:'50000',meldAmt:'250',acctNum:'0123456789',bank:'',zaName:'',keName:'',kePhone:'+254700000000',
+      verified:false,addrMode:'pick',addrIdx:0,more:false,quote:'q1',copied:'',hide:hb,lockAsk:false,busy:'',st:pst,hId:'ORD-SYNTH-0001'};
+    const S=this.state.k===key?this.state:fresh;
+    const set=o=>self.setState(Object.assign({},S,o));
+    const later=(o,ms)=>setTimeout(()=>{if(self.state.k===key)self.setState(Object.assign({},self.state,o));},ms);
+    const fmt=n=>(parseInt(String(n).replace(/[^0-9]/g,''),10)||0).toLocaleString('en-US');
+
+    const C={NG:['Nigeria','Nigerian Naira','NGN','₦'],ZA:['South Africa','South African Rand','ZAR','R'],KE:['Kenya','Kenyan Shilling','KES','KSh'],US:['United States','US Dollar','USD','$'],PT:['Portugal','Euro','EUR','€']};
+    const mav=['NG','ZA','KE'].indexOf(S.country)>=0;
+    const side=S.side,buy=side==='buy';
+    const flow=mav?['location','signin','mode','amount','checkout','complete']:(buy?['location','signin','mode','region','amount','address','quotes','checkout']:['location','signin','mode','region','amount','quotes','checkout']);
+    const snap=x=>{
+      if(x==='otp')return x;
+      if(mav){if(x==='region'||x==='address')return 'amount';if(x==='quotes')return 'checkout';if(x==='history'||x==='detail')return x;}
+      else{if(x==='complete')return 'checkout';if(x==='history'||x==='detail')return 'mode';if(x==='address'&&!buy)return 'quotes';}
+      return flow.indexOf(x)>=0?x:'mode';};
+    const s=snap(S.step);
+    const sk=s==='otp'?'signin':s;
+    const go=x=>set({step:x,busy:'',copied:'',st:S.st==='error'||S.st==='loading'?'ready':S.st});
+    const nextOf=x=>{if(x==='signin')return 'otp';if(x==='otp')return 'mode';const i=flow.indexOf(x);return flow[Math.min(i+1,flow.length-1)];};
+    const prevOf=x=>{if(x==='otp')return 'signin';const i=flow.indexOf(x);return flow[Math.max(i-1,0)];};
+
+    const netGate=pst==='networkGate';
+    const hidAll=gate==='marketplaceOff',hidBS=gate==='buySellOff',hiddenRoute=hidAll||hidBS;
+    const unsupported=S.st==='unsupported'&&!hiddenRoute&&!netGate;
+    const flowOn=!hiddenRoute&&!netGate&&!unsupported;
+
+    const LOAD={location:'Detecting your location...',signin:'Signing In',otp:'Verifying',region:'Checking for regional support and transactional limits...',amount:mav?'Getting recent conversion rates, please wait':'',address:'Loading addresses',checkout:mav?'':'Loading Webview...',history:'Loading transaction history...',detail:'Loading order details...'};
+    const loading=flowOn&&S.st==='loading'&&!!LOAD[s];
+    const ERR={signin:S.acct==='register'?"Couldn't process signup request":'',amount:mav?(buy?'Unable to create quote':'Unable to verify Bank Details'):(buy?'Minimum Transaction of USD is [MIN]':'Input Amount of [AMOUNT] BTC is greater than your BTC balance of [BALANCE]'),quotes:"Couldn't get a quote",checkout:mav?'':"Couldn't open the payment page",detail:'Failed to load order details'};
+    const errText=flowOn&&!loading&&S.st==='error'?(ERR[s]||''):'';
+    const err=!!errText;
+    const show=x=>flowOn&&!loading&&x;
+    const is={
+      location:show(s==='location'),login:show(s==='signin'&&S.acct==='login'),register:show(s==='signin'&&S.acct==='register'),otp:show(s==='otp'),mode:show(s==='mode'),
+      mBuyAmt:show(mav&&s==='amount'&&buy),mSellAmt:show(mav&&s==='amount'&&!buy),mBuyPay:show(mav&&s==='checkout'&&buy),mSellPay:show(mav&&s==='checkout'&&!buy),mDone:show(mav&&s==='complete'),
+      history:show(s==='history'),detail:show(s==='detail'),
+      region:show(!mav&&s==='region'),mAmt:show(!mav&&s==='amount'),address:show(!mav&&s==='address'),quotes:show(!mav&&s==='quotes'),web:show(!mav&&s==='checkout')};
+
+    // stepper
+    const LBL={location:'Location',signin:'Sign in',mode:'Buy or sell',amount:mav?(buy?'Amount':'Details'):'Amount',checkout:mav?(buy?'Pay':'Deposit'):'Checkout',complete:'Complete',region:'Region',address:'Address',quotes:'Quotes'};
+    const ci=flow.indexOf(sk);
+    const steps=flow.map((x,i)=>({label:LBL[x],num:i+1,cls:i<ci?'done':i===ci?'cur':'',cur:i===ci?'step':'false',isDone:i<ci,notDone:i>=ci,sr:i<ci?'(done)':i===ci?'(current)':''}));
+    const stepper=flowOn&&s!=='history'&&s!=='detail';
+
+    // country / provider
+    const cc=C[S.country];
+    const ctry={name:cc[0],cur:cc[1],code:cc[2],sym:cc[3],prov:mav?'Mavapay':'Meld',wallet:mav?'Liquid · Travel':'Vault · Family savings',
+      route:mav?'Served by Mavapay in '+cc[0]+'.':'Served by Meld in '+cc[0]+'.'};
+    const countries=Object.keys(C).map(k=>({code:k,name:C[k][0],sel:k===S.country}));
+    const bal=(S.hide)?D:(mav?'25,307 sats':'250,000 sats');
+
+    // mavapay sell bank details
+    const numBad=/[^0-9]/.test(S.acctNum);
+    const BANKS={NG:['Synthetic Bank A','Synthetic Bank B','Synthetic Bank C'],ZA:['Synthetic Bank D','Synthetic Bank E'],KE:[]};
+    const banks=(BANKS[S.country]||[]).map(b=>({v:b,sel:b===S.bank}));
+    const bankOk=S.country==='KE'?(!!S.keName.trim()&&!!S.kePhone.trim()):S.country==='ZA'?(!!S.zaName.trim()&&!numBad&&!!S.acctNum&&!!S.bank):(!numBad&&!!S.acctNum&&!!S.bank);
+    const bank={title:S.country==='NG'?'Setup Bank Details (Nigeria)':S.country==='ZA'?'Setup Bank Details (South Africa)':'Setup Mobile Money Details (Kenya-MPESA)',
+      ng:S.country==='NG',za:S.country==='ZA',ke:S.country==='KE',numBad:numBad?'true':'false',showNumErr:numBad,
+      canVerify:S.country==='NG'&&!S.verified,verifyOff:numBad||!S.acctNum||!S.bank||S.busy==='verify',confirm:S.country==='NG'&&S.verified};
+    const sellReady=S.country==='NG'?(bankOk&&S.verified):bankOk;
+    const sellHint=S.busy==='quote'?'':S.country==='NG'&&!S.bank?'Select a recipient bank':S.country==='NG'&&!S.verified?'Verify your bank account details to continue':S.country==='ZA'&&!S.zaName.trim()?"Set the recipient's legal name":S.country==='ZA'&&!S.bank?"Select the recipient's bank":S.country==='KE'&&!S.keName.trim()?"Set the recipient's legal name":S.country==='KE'&&!S.kePhone.trim()?"Set the recipient's phone number":'';
+
+    // meld
+    const RG=[['r1','California'],['r2','New York'],['r3','Texas'],['r4','Florida'],['r5','Washington']];
+    const q=S.search.trim().toLowerCase();
+    const regions=RG.filter(r=>!q||r[1].toLowerCase().indexOf(q)>=0).map(r=>({id:'bs-'+r[0],name:r[1],on:S.region===r[0],cls:S.region===r[0]?'on':'',pick:()=>set({region:r[0]})}));
+    const ADDR=[['bc1q…synthetic…8hn','Meld deposit · synthetic'],['bc1q…synthetic…3qd','Unlabelled'],['bc1q…synthetic…7ue','Coffee fund · synthetic'],['bc1q…synthetic…k2m','Unlabelled']];
+    const addrs=ADDR.slice(0,S.more?4:3).map((a,i)=>({id:'bs-a'+i,addr:a[0],label:a[1],on:S.addrIdx===i,cls:S.addrIdx===i?'on':'',pick:()=>set({addrIdx:i})}));
+    const addrVal=S.addrMode==='gen'?'bc1q…synthetic…9wp':ADDR[S.addrIdx][0];
+    const addr={pick:S.addrMode==='pick',gen:S.addrMode==='gen',pickCls:S.addrMode==='pick'?'on':'',genCls:S.addrMode==='gen'?'on':'',cap:S.addrMode==='gen'?'GENERATED ADDRESS: ':'YOUR SELECTED ADDRESS: ',value:addrVal};
+    const QS=[['q1','Provider A · synthetic'],['q2','Provider B · synthetic'],['q3','Provider C · synthetic']];
+    const quotes=QS.map(x=>({id:'bs-'+x[0],name:x[1],on:S.quote===x[0],cls:S.quote===x[0]?'on':'',pick:()=>set({quote:x[0]})}));
+    const quoteName=(QS.filter(x=>x[0]===S.quote)[0]||QS[0])[1];
+    const meld={title:buy?'Buy Bitcoin using Fiat Currencies':'Sell Bitcoin to a Fiat Currency',unit:buy?'USD':'BTC',amt:S.meldAmt,sell:!buy,buyWeb:buy,
+      bad:err?'true':'false',off:!S.meldAmt.trim()||S.busy==='meld',cta:buy?'Select/Generate an Address for Deposit':(S.busy==='meld'?'Getting Quotes...':'Get Quotes'),
+      send:buy?'$ [AMOUNT]':'[AMOUNT] BTC',recv:buy?'[AMOUNT] BTC':'$ [AMOUNT]'};
+
+    // history
+    const HS=[['ORD-SYNTH-0001','Complete','ok'],['ORD-SYNTH-0002','Processing','unk'],['ORD-SYNTH-0003','Expired','unk'],['ORD-SYNTH-0004','Failed','bad']];
+    const hist=HS.map((h,i)=>({id:h[0],amt:S.hide?D:fmt([50000,20000,75000,10000][i])+' sats',pm:'Bank transfer',date:'[DATE]',st:h[1],cls:h[2],aria:'View '+h[0],view:()=>set({step:'detail',hId:h[0],hSt:h[1],hCls:h[2]})}));
+    const det={id:S.hId,st:S.hSt||'Complete',cls:S.hCls||'ok',amt:S.hide?D:'50,000 sats'};
+
+    // busy labels
+    let busyText='';
+    if(S.busy==='inv')busyText='[1] Getting Invoice...';
+    else if(S.busy==='quote'&&buy)busyText='[2] Getting Quote...';
+    else if(S.busy==='web')busyText='Loading Webview...';
+
+    const chipOut=S.signedOut||s==='signin'||s==='otp';
+    const back={label:s==='detail'?'Back to History':'Back',go:()=>go(s==='detail'?'history':s==='history'?'mode':prevOf(s))};
+    const hasBack=flowOn&&!loading&&['amount','region','address','quotes','history','detail'].indexOf(s)>=0;
+
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      hideP:S.hide?'true':'false',shown:!S.hide,hidden:S.hide,toggleHide:()=>set({hide:!S.hide}),
+      lockAsk:!!S.lockAsk,lockIdle:!S.lockAsk,askLock:()=>set({lockAsk:true}),cancelLock:()=>set({lockAsk:false}),
+      cube:{name:netGate?'Lab':'Everyday',net:netGate?'Testnet4':'Bitcoin mainnet',main:!netGate,test:netGate},
+      chip:{in:!chipOut,out:chipOut,acctTitle:chipOut?'Connect account · Signed out':'alex@example.test · Signed in',connTitle:'Cube service · '+(chipOut?'Not checked':'Connected')},
+      nav:{market:!hidAll,bsOn:!hidBS&&!netGate,bsOff:!hidBS&&netGate},
+      hid:{title:hidAll?'Marketplace hidden':'Buy/Sell hidden',text:hidAll?'Server flag off (fails closed). The sidebar omits Marketplace and both entries.':'Buy/Sell server flag off. Marketplace shows P2P only.'},
+      v:{hiddenNote:hiddenRoute,stepper:stepper,col:!hiddenRoute,aside:!hiddenRoute&&!netGate,netGate:netGate&&!hiddenRoute,unsupported:unsupported,loading:loading,loadWait:loading&&s==='location',
+        err:err,noErr:!err,back:hasBack,liqOk:parseInt(String(S.amt).replace(/[^0-9]/g,''),10)<=25307,liqLow:parseInt(String(S.amt).replace(/[^0-9]/g,''),10)>25307,noRegion:regions.length===0},
+      is:is,steps:steps,back:back,
+      head:{title:LBL[sk]||'Order History',pw:mav&&(s==='amount'||s==='history')?'Powered by Mavapay':''},loadText:LOAD[s]||'',
+      errText:errText,retry:()=>set({st:'ready'}),
+      ctry:ctry,countries:countries,bal:bal,
+      pickCountry:e=>set({country:e.target.value,bank:'',verified:false}),
+      next:()=>go(nextOf(s)),toLocation:()=>set({st:'ready',step:'location'}),toMode:()=>go('mode'),
+      email:S.email,onEmail:e=>set({email:e.target.value}),toRegister:()=>set({acct:'register'}),
+      sendOtp:()=>{set({busy:'otp'});later({busy:'',step:'otp',cd:28},600);},
+      otp:S.otp,onOtp:e=>set({otp:e.target.value.replace(/[^0-9]/g,'').slice(0,6)}),otpOff:S.otp.length<6,
+      otpCd:{wait:S.cd>0,ready:S.cd<=0,n:S.cd},resend:()=>set({cd:28}),
+      verify:()=>set({step:'mode',signedOut:false,picked:false}),
+      modeP:{buy:S.picked&&buy?'true':'false',sell:S.picked&&!buy?'true':'false',none:!S.picked,some:S.picked},
+      pickBuy:()=>set({side:'buy',picked:true}),pickSell:()=>set({side:'sell',picked:true}),
+      histOff:!mav,toHistory:()=>{if(mav)go('history');},
+      logOut:()=>set({step:'signin',acct:'login',signedOut:true}),
+      startSession:()=>go(mav?'amount':'region'),
+      amt:S.amt,amtFmt:fmt(S.amt),onAmt:e=>set({amt:e.target.value}),
+      busyText:busyText,busyOff:!!S.busy,
+      genInvoice:()=>{set({busy:'inv'});later({busy:'quote'},700);setTimeout(()=>{if(self.state.k===key&&self.state.busy==='quote')self.setState(Object.assign({},self.state,{busy:'',step:'checkout'}));},1400);},
+      bank:bank,banks:banks,acctNum:S.acctNum,onAcct:e=>set({acctNum:e.target.value,verified:false}),onBank:e=>set({bank:e.target.value,verified:false}),
+      zaName:S.zaName,onZaName:e=>set({zaName:e.target.value}),keName:S.keName,onKeName:e=>set({keName:e.target.value}),kePhone:S.kePhone,onKePhone:e=>set({kePhone:e.target.value}),
+      verifyBank:()=>{set({busy:'verify'});later({busy:'',verified:true},700);},
+      sellHint:sellHint,quoteOff:!sellReady||S.busy==='quote',quoteLabel:S.busy==='quote'?'Fetching Quote..':'Get Quote',
+      getQuote:()=>{set({busy:'quote'});later({busy:'',step:'checkout'},900);},
+      copyA:S.copied==='a'?'Copied':'Copy',copyAcct:()=>set({copied:'a'}),copyR:S.copied==='r'?'Copied':'Copy',copyRef:()=>set({copied:'r'}),
+      copyI:S.copied==='i'?'Copied':'Copy',copyInv:()=>set({copied:'i'}),copyD:S.copied==='d'?'Copied':'Copy',copyAddr:()=>set({copied:'d'}),
+      simulate:()=>go('complete'),startOver:()=>set({step:'mode',picked:false,busy:'',copied:'',verified:false}),
+      doneTitle:buy?'Purchase Complete':'Withdrawal Complete',paid:buy?ctry.sym+' [AMOUNT]':fmt(S.amt)+' sats',recv:buy?fmt(S.amt)+' sats':ctry.sym+' [AMOUNT]',
+      hist:hist,det:det,
+      search:S.search,onSearch:e=>set({search:e.target.value}),regions:regions,regionOff:!regions.some(r=>r.on),
+      meld:meld,onMeldAmt:e=>set({meldAmt:e.target.value}),setMax:()=>set({meldAmt:'0.0025'}),
+      meldSubmit:()=>{if(buy){go('address');return;}set({busy:'meld'});later({busy:'',step:'quotes'},800);},
+      addr:addr,addrs:addrs,addrPick:()=>set({addrMode:'pick'}),addrGen:()=>set({addrMode:'gen'}),loadMore:()=>set({more:true}),
+      quotes:quotes,quoteName:quoteName,startOff:err||S.busy==='web',
+      startWeb:()=>{set({busy:'web'});later({busy:'',step:'checkout'},900);}
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,847 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Detail gaps</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu fieldset{border:0;margin:0;padding:0;min-width:0}
+.tenshu a{color:var(--acc-ink)}
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 1.2s linear infinite}
+/* in-Cube top bar (V2 shell, state-word chips) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap;color:var(--ink)}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap;background:none}
+.chip.on{background:var(--selected);border-color:var(--accent)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+/* launcher top bar */
+.ltop{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.sfoot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto;display:flex;flex-direction:column}
+.pg{flex:1;width:100%;max-width:920px;padding:24px 48px 32px}
+.crumbs{display:flex;align-items:center;gap:12px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.route{margin-left:auto;font-size:12px;color:var(--muted)}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.pfoot{padding:0 0 14px;text-align:center}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-top:18px}
+.tab{padding:10px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px;text-decoration:none}
+.tenshu a.tab{color:var(--muted)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.tenshu a.tab.on{color:var(--ink)}
+.sec{margin-top:28px}
+.sec>h2{font-size:18px;font-weight:600}
+.sec .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:64ch}
+/* controls */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn[disabled]{cursor:not-allowed;opacity:.55}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:600;cursor:pointer;border-radius:4px;font-size:13px}
+.inp{height:40px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.inp:disabled{opacity:.6}
+.err{display:flex;align-items:flex-start;gap:6px;font-size:13px;color:var(--bad);font-weight:500}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:32px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:16px;max-width:520px}
+.fld label,.fld .lb{font-weight:600;font-size:13px}
+.acts{display:flex;align-items:center;gap:10px;margin-top:20px;flex-wrap:wrap}
+.acts .sp{flex:1}
+.dl{margin-top:16px;border-top:1px solid var(--line)}
+.dl>div{display:grid;grid-template-columns:200px minmax(0,1fr);column-gap:16px;padding:11px 0;border-bottom:1px solid var(--line)}
+.dl dt{color:var(--muted)}
+.dl dd{overflow-wrap:anywhere}
+.note{display:flex;align-items:flex-start;gap:8px;margin-top:14px;font-size:13px;color:var(--muted);max-width:68ch}
+.note .ic{margin-top:1px}
+.banner{display:flex;align-items:flex-start;gap:10px;margin-top:18px;padding:12px 14px;border:1px solid var(--line);border-radius:10px}
+.banner.w{border-color:var(--warn)}
+.banner.b{border-color:var(--bad)}
+.banner .ic{margin-top:1px}
+.banner .tx{flex:1;font-size:14px}
+.banner .tx span{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+.stepper{display:flex;gap:4px;margin-top:20px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.stepper li{display:flex;align-items:center;gap:8px;flex:1;min-width:0;font-size:13px;color:var(--muted)}
+.stepper .n{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.stepper li.cur{color:var(--ink);font-weight:600}
+.stepper li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.stepper li.done .n{color:var(--good);border-color:var(--good)}
+.form{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:22px 24px}
+.form h2{font-size:18px;font-weight:600}
+.form .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:62ch}
+.opt{display:grid;grid-template-columns:20px minmax(0,1fr) auto;align-items:center;column-gap:12px;min-height:52px;padding:8px 12px;border-radius:8px;cursor:pointer}
+.opt:hover{background:var(--hover)}
+.opt.on{background:var(--selected)}
+.opt input{margin:0;width:16px;height:16px;accent-color:var(--accent)}
+.opt .nm{font-weight:500}
+.opt .sub{display:block;font-size:13px;color:var(--muted)}
+.pill{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border-radius:12px;border:1px solid currentColor;font-size:12px;font-weight:600}
+/* balance + rows */
+.bal{margin-top:20px}
+.bal .k{font-size:13px;color:var(--muted)}
+.bal .big{font-size:34px;font-weight:600;line-height:1.2;margin-top:2px}
+.bal .big .u{font-size:16px;color:var(--muted);font-weight:500}
+.bal .stl{display:flex;align-items:flex-start;gap:6px;margin-top:6px;font-size:13px;max-width:70ch}
+.bal .stl .ic{margin-top:1px}
+.meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin-top:8px;max-width:420px}
+.meter i{display:block;height:100%;background:var(--accent)}
+.rows{margin-top:10px;border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:28px minmax(0,1fr) auto;column-gap:12px;align-items:center;min-height:56px;padding:6px 4px;border-bottom:1px solid var(--line)}
+.row .dir{width:28px;height:28px;border-radius:50%;display:grid;place-items:center;border:1px solid var(--line);color:var(--muted)}
+.row .nm{font-weight:500}.row .sub{font-size:13px;color:var(--muted)}
+.row .v{text-align:right;font-weight:600}.row .v .f{display:block;font-size:13px;color:var(--muted);font-weight:400}
+.row .act{display:flex;align-items:center;gap:8px;justify-content:flex-end;font-size:13px}
+.timeline li{display:flex;align-items:center;gap:10px;min-height:40px;border-bottom:1px solid var(--line);font-size:14px}
+.timeline li:first-child{border-top:1px solid var(--line)}
+.timeline li.cur{font-weight:600}
+.timeline li.todo{color:var(--muted)}
+.empty{padding:28px 0;text-align:center;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.empty b{display:block;font-weight:600;font-size:16px}
+.empty p{margin:6px auto 0;max-width:52ch;color:var(--muted);font-size:14px}
+.empty .ic{width:28px;height:28px;color:var(--muted);margin-bottom:8px}
+/* settings panels */
+.panel{margin-top:22px;padding-top:18px;border-top:1px solid var(--line)}
+.panel h3{font-size:16px;font-weight:600;display:flex;align-items:center;gap:8px}
+.panel .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:68ch}
+.tg{display:flex;align-items:center;gap:12px;min-height:44px;border-bottom:1px solid var(--line);font-size:14px}
+.tg:first-of-type{border-top:1px solid var(--line);margin-top:10px}
+.tg .lb{flex:1}
+.sw{width:40px;height:22px;border-radius:11px;border:1px solid var(--line);background:var(--bg);position:relative;cursor:pointer;padding:0;flex:none}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted)}
+.sw[aria-pressed="true"]{background:var(--accent);border-color:var(--accent)}
+.sw[aria-pressed="true"]::after{left:20px;background:var(--on-accent)}
+.date3{display:flex;gap:8px;align-items:flex-end}
+.date3 .fld{margin-top:0}
+.date3 .inp{width:96px}
+.disc{display:flex;align-items:center;gap:6px;margin-top:18px;border:0;background:none;padding:2px 0;color:var(--ink);cursor:pointer;font-weight:500}
+/* modal */
+.scrim{position:fixed;inset:0}
+.overlay{position:absolute;inset:0;background:rgba(0,0,0,.45);display:flex;justify-content:center;align-items:flex-start;padding-top:96px;z-index:5}
+.tenshu.light .overlay{background:rgba(32,32,32,.25)}
+.dlg{width:600px;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px}
+.dlg h2{font-size:18px;font-weight:600}
+/* launcher rows */
+.stage{flex:1;min-height:0;overflow:auto;padding:28px 0}
+.lwrap{max-width:880px;margin:0 auto}
+.lrow{display:grid;grid-template-columns:24px minmax(0,1fr) auto;column-gap:14px;align-items:center;min-height:60px;padding:8px 6px;border-bottom:1px solid var(--line)}
+.lrow img{width:20px;height:20px;border-radius:50%}
+.lrow .nm{font-weight:500}
+.lrow .sub{font-size:13px;color:var(--muted)}
+.lrow .ia{display:flex;align-items:center;gap:6px;position:relative}
+.ibtn{width:34px;height:34px;display:grid;place-items:center;border:1px solid var(--line);border-radius:8px;background:none;cursor:pointer;color:var(--ink);text-decoration:none}
+.tenshu a.ibtn{color:var(--ink)}
+.ibtn:hover{background:var(--hover)}
+.ibtn.acc{border-color:var(--accent);color:var(--acc-ink)}
+.tenshu a.ibtn.acc{color:var(--acc-ink)}
+.tip{position:absolute;right:0;top:40px;z-index:3;white-space:nowrap;padding:6px 10px;border-radius:6px;background:var(--ink);color:var(--bg);font-size:12px}
+.lh{font-size:15px;font-weight:600;margin-top:28px;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;color:var(--ink);margin-left:6px}
+.tb.b2b{border-color:#D4A62A}.tb.test{border-style:dashed}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+/* ---- V6-Gaps-Details additions ---- */
+.lbottom{flex:none;display:flex;align-items:center;gap:10px;padding:14px 24px;border-top:1px solid var(--line);background:var(--rail)}
+.lbottom .grow{flex:1}
+.cwrap{display:grid;grid-template-columns:220px minmax(0,1fr);max-width:1080px;margin:0 auto;border:1px solid var(--line);border-radius:12px;background:var(--panel);overflow:hidden;min-height:820px}
+.cnav{border-right:1px solid var(--line);padding:16px 10px;background:var(--rail);display:flex;flex-direction:column;gap:2px}
+.cnav .gh{padding:4px 10px 8px}
+.cbody{padding:24px 32px 28px;min-width:0}
+.cbody .ph{margin-top:6px}
+.bact{display:flex;flex-direction:column;align-items:flex-end;gap:6px;flex:none}
+.xbtn{width:30px;height:30px;display:grid;place-items:center;border:0;border-radius:6px;background:transparent;color:var(--muted);cursor:pointer;flex:none}
+.xbtn:hover{background:var(--hover);color:var(--ink)}
+.cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:20px}
+.wcard{border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:16px 18px;display:flex;flex-direction:column;gap:4px}
+.wcard .wk{display:flex;align-items:center;gap:8px;font-weight:600}
+.wcard .wv{font-size:22px;font-weight:600;margin-top:6px}
+.wcard .wv .u{font-size:14px;color:var(--muted);font-weight:500}
+.wcard .pend{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.wcard .acts{margin-top:12px}
+.qrbox{display:grid;grid-template-columns:168px minmax(0,1fr);gap:24px;margin-top:18px;align-items:start}
+.qr{width:168px;height:168px;border:1px solid var(--line);border-radius:8px;background:#fff;padding:10px}
+.qr svg{width:100%;height:100%;display:block}
+.cprow{display:grid;grid-template-columns:90px minmax(0,1fr) auto;column-gap:12px;align-items:center;min-height:44px;border-bottom:1px solid var(--line)}
+.cprow:first-child{border-top:1px solid var(--line)}
+.cprow .k{color:var(--muted);font-size:13px}
+.cprow .mono{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.amt{color:var(--acc-ink);font-weight:600;margin-top:4px}
+.stl{display:flex;align-items:center;gap:6px;font-size:14px;margin-top:14px}
+.ctag{display:inline-flex;align-items:center;height:22px;padding:0 8px;border-radius:6px;border:1px solid var(--line);font-size:12px;color:var(--muted)}
+.ctag.kit{border-color:var(--accent);color:var(--acc-ink)}
+.ctag.role{border-color:var(--focus);color:var(--ink)}
+.crow{display:flex;align-items:center;gap:10px;min-height:44px;border-bottom:1px solid var(--line)}
+.crow:first-child{border-top:1px solid var(--line)}
+.crow .nm{font-weight:500}
+.crow .sp{flex:1}
+.ck{display:flex;align-items:center;gap:10px;min-height:44px;border-bottom:1px solid var(--line);cursor:pointer}
+.ck input{margin:0;width:16px;height:16px;accent-color:var(--accent);flex:none}
+.ck .sp{flex:1}
+.rcp{display:grid;grid-template-columns:24px minmax(0,1.6fr) minmax(0,1fr) 170px;column-gap:12px;align-items:end;padding:12px 0;border-bottom:1px solid var(--line)}
+.rcp:first-of-type{border-top:1px solid var(--line)}
+.rcp .fld{margin-top:0;max-width:none}
+.rcp .n{font-size:13px;color:var(--muted);padding-bottom:10px}
+.coins{margin-top:10px;border-top:1px solid var(--line);max-height:300px;overflow:auto}
+.coin{display:grid;grid-template-columns:20px minmax(0,1fr) auto 150px;column-gap:14px;align-items:center;min-height:48px;padding:4px 4px;border-bottom:1px solid var(--line);cursor:pointer}
+.coin input{margin:0;width:16px;height:16px;accent-color:var(--accent)}
+.coin .lb{font-weight:500}.coin .lb .muted{font-weight:400}
+.coin .v{text-align:right;font-weight:600}
+.cpill{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 9px;border-radius:12px;border:1px solid var(--line);font-size:12px;color:var(--muted);white-space:nowrap}
+.cpill.near{color:var(--ink)}
+.cpill.w{border-color:var(--warn);color:var(--warn)}
+.cshead{display:flex;align-items:baseline;gap:12px;margin-top:26px}
+.cshead h3{font-size:16px;font-weight:600;flex:1}
+.cshead .st{font-size:13px;color:var(--muted);font-weight:400}
+.frrow{display:flex;align-items:flex-end;gap:12px;margin-top:18px;flex-wrap:wrap}
+.frrow .fld{margin-top:0}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column;position:relative">
+
+  <!-- ===== In-Cube top bar (V2 shell) ===== -->
+  <sc-if value="{{ inCube }}" hint-placeholder-val="{{ true }}">
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip" title="alex@example.test · Signed in"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6.25 9.25l1.9 1.9 3.6-3.9"/></svg>Signed in</span></div>
+      <div class="chip" title="Cube service · Connected"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6.25 9.25l1.9 1.9 3.6-3.9"/></svg>Connected</span></div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9zM9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9zM9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+  </sc-if>
+
+  <!-- ===== Launcher top bar ===== -->
+  <sc-if value="{{ isLauncher }}" hint-placeholder-val="{{ false }}">
+  <header class="ltop">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="vsep"></div>
+    <sc-if value="{{ v.split }}" hint-placeholder-val="{{ true }}"><button type="button" class="chip on" aria-haspopup="true" aria-expanded="false">{{ se.chip }}<svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5.5 7.5 9 11l3.5-3.5"/></svg></button></sc-if>
+    <sc-if value="{{ v.connect }}" hint-placeholder-val="{{ false }}"><a class="tbtn" href="P-Launcher.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>All Cubes</a></sc-if>
+    <span style="flex:1"></span>
+    <a class="tbtn" href="P-SignIn.dc.html" title="{{ connTitle }}" aria-label="{{ connAria }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>Connect <span class="muted">{{ connWord }}</span></a>
+    <a class="tbtn" href="P-AppPrefs.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5.5h8M14 5.5h1M3 12.5h3M9 12.5h6M12.5 4a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3M7.5 11a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3"/></svg>App preferences</a>
+  </header>
+  </sc-if>
+
+  <!-- ================= #4 LAUNCHER: SPLIT A BITCOIN WALLET ENTRY ================= -->
+  <sc-if value="{{ v.split }}" hint-placeholder-val="{{ true }}">
+  <main class="stage" aria-labelledby="se-h">
+    <div class="lwrap">
+      <div class="crumbs"><h1 id="se-h" class="ph" style="margin-top:0">Your Cubes</h1><span class="route">App: Home sidebar › Split a Bitcoin wallet</span></div>
+      <ul aria-label="Cubes on this device" style="margin-top:12px;border-top:1px solid var(--line)">
+        <sc-for list="{{ se.cubes }}" as="c" hint-placeholder-count="4">
+          <li class="lrow">
+            <img src="{{ c.img }}" alt="">
+            <span><span class="nm">{{ c.name }}</span><sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ c.tagCls }}">{{ c.tag }}</span></sc-if><span class="sub" style="display:block">{{ c.line }}</span></span>
+            <span class="sub">{{ c.state }}</span>
+          </li>
+        </sc-for>
+      </ul>
+    </div>
+  </main>
+  <div class="lbottom">
+    <button type="button" class="btn pri"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3.5v11M3.5 9h11"/></svg>Create Cube</button>
+    <a class="btn" href="P-Restore.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3v8.5M5.5 8 9 11.5 12.5 8M3.5 14.5h11"/></svg>Import or restore a Cube</a>
+    <sc-if value="{{ se.shown }}" hint-placeholder-val="{{ true }}"><a class="btn demo-focus" href="P-GapsInstaller.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M2.5 5.5h13v9h-13zM2.5 5.5l2-2.5h9l2 2.5M11.5 10h4"/></svg>Split a Bitcoin wallet</a></sc-if>
+    <span class="grow"></span>
+  </div>
+  </sc-if>
+
+  <!-- ================= CONNECT (Launcher world): #45 / #46 / #48 ================= -->
+  <sc-if value="{{ v.connect }}" hint-placeholder-val="{{ false }}">
+  <main class="stage">
+    <div class="cwrap">
+      <nav class="cnav" aria-label="Connect">
+        <h2 class="gh">Connect</h2>
+        <sc-for list="{{ cnav }}" as="n" hint-placeholder-count="4">
+          <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.cur }}" onClick="{{ n.go }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ n.icon }}"/></svg><span>{{ n.label }}</span></button>
+        </sc-for>
+      </nav>
+      <section class="cbody" aria-labelledby="c-h">
+        <div class="crumbs"><span class="cap">alex@example.test</span><span class="route">{{ route }}</span></div>
+        <h1 id="c-h" class="ph">{{ title }}</h1>
+
+        <!-- #45 Account overview + renewal / expired banners -->
+        <sc-if value="{{ v.banners }}" hint-placeholder-val="{{ false }}">
+          <sc-if value="{{ cb.renewal }}" hint-placeholder-val="{{ false }}">
+            <div class="banner w" role="status"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.5V9l2.5 1.5"/></svg><p class="tx"><b>Renewal reminder</b><span>Your [PLAN NAME] plan renews on [RENEWAL DATE]. Renew now to keep your features.</span></p><span class="bact"><button type="button" class="btn pri sm demo-focus" onClick="{{ cb.renew }}">Renew</button><button type="button" class="btn sm" onClick="{{ cb.dismiss }}">Dismiss</button></span></div>
+          </sc-if>
+          <sc-if value="{{ cb.expired }}" hint-placeholder-val="{{ false }}">
+            <div class="banner b" role="status"><svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.75v4M9 12.25v.01"/></svg><p class="tx"><b>Plan expired</b><span>{{ cb.expiredText }}</span></p><span class="bact"><button type="button" class="btn pri sm" onClick="{{ cb.plans }}">View plans</button></span></div>
+          </sc-if>
+          <dl class="dl" style="margin-top:22px">
+            <div><dt>Plan</dt><dd><b>{{ cb.plan }}</b></dd></div>
+            <sc-if value="{{ cb.hasRenews }}" hint-placeholder-val="{{ true }}"><div><dt>Renews</dt><dd>[RENEWAL DATE] · Annual</dd></div></sc-if>
+            <div><dt>Contacts</dt><dd>2</dd></div>
+            <div><dt>Cubes</dt><dd>4</dd></div>
+          </dl>
+          <div class="acts"><button type="button" class="btn">Sign Out</button></div>
+        </sc-if>
+
+        <!-- #46 Plan checkout -->
+        <sc-if value="{{ v.checkout }}" hint-placeholder-val="{{ false }}">
+          <section class="form" aria-labelledby="co-h" style="max-width:720px">
+            <h2 id="co-h">Checkout</h2>
+            <sc-if value="{{ co.creating }}" hint-placeholder-val="{{ false }}"><p class="stl muted" role="status"><svg class="ic s spin" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 1-6.5 6.5"/></svg>Creating invoice…</p></sc-if>
+            <sc-if value="{{ co.open }}" hint-placeholder-val="{{ true }}">
+              <p style="margin-top:12px;font-weight:600">Upgrade to [PLAN NAME] (Annual)</p>
+              <p class="amt">{{ co.amount }}</p>
+              <div class="qrbox">
+                <div class="qr" role="img" aria-label="Lightning invoice QR code (synthetic)"><svg viewBox="0 0 21 21" aria-hidden="true" shape-rendering="crispEdges"><path fill="#161716" d="M0 0h7v7H0zM1 1v5h5V1zM2 2h3v3H2zM14 0h7v7h-7zM15 1v5h5V1zM16 2h3v3h-3zM0 14h7v7H0zM1 15v5h5v-5zM2 16h3v3H2zM8 0h1v1H8zM10 0h2v1h-2zM9 2h2v1H9zM8 4h1v2H8zM11 4h2v1h-2zM10 6h1v2h-1zM8 8h3v1H8zM12 8h2v1h-2zM0 8h2v1H0zM3 8h1v2H3zM5 9h2v1H5zM1 10h1v2H1zM4 11h2v1H4zM15 8h1v1h-1zM17 8h3v1h-3zM14 10h2v1h-2zM18 10h1v2h-1zM8 10h1v3H8zM11 10h2v1h-2zM9 12h3v1H9zM13 12h1v2h-1zM15 12h2v1h-2zM19 13h2v1h-2zM8 14h2v1H8zM11 14h1v2h-1zM14 14h3v1h-3zM9 16h1v2H9zM12 16h2v1h-2zM16 16h1v3h-1zM18 15h1v2h-1zM8 19h3v1H8zM13 18h2v1h-2zM19 18h2v1h-2zM12 20h1v1h-1zM17 20h3v1h-3z"/></svg></div>
+                <div>
+                  <div class="cprow"><span class="k">Lightning</span><span class="mono">lnbc…synthetic…7q3x</span><button type="button" class="btn sm" onClick="{{ co.copyLn }}">{{ co.lnLabel }}</button></div>
+                  <div class="cprow"><span class="k">On-chain</span><span class="mono">bc1q…synthetic…4k2m</span><button type="button" class="btn sm" onClick="{{ co.copyOc }}">{{ co.ocLabel }}</button></div>
+                  <div class="acts" style="margin-top:14px"><button type="button" class="btn sm">Open in Browser</button><span class="cap">Expires: [EXPIRY TIME]</span></div>
+                  <sc-if value="{{ co.processing }}" hint-placeholder-val="{{ false }}"><p class="stl warn" role="status"><svg class="ic s spin" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 1-6.5 6.5"/></svg>Payment detected, confirming…</p></sc-if>
+                </div>
+              </div>
+              <div class="acts"><span class="sp"></span><button type="button" class="btn" onClick="{{ co.close }}">Cancel</button></div>
+            </sc-if>
+            <sc-if value="{{ co.paid }}" hint-placeholder-val="{{ false }}">
+              <p class="stl ok" role="status" style="font-weight:600"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6.25 9.25l1.9 1.9 3.6-3.9"/></svg>Payment confirmed! Upgraded to [PLAN NAME].</p>
+              <div class="acts"><span class="sp"></span><button type="button" class="btn pri" onClick="{{ co.close }}">Done</button></div>
+            </sc-if>
+            <sc-if value="{{ co.ended }}" hint-placeholder-val="{{ false }}">
+              <p class="stl bad" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.75v4M9 12.25v.01"/></svg>{{ co.endText }}</p>
+              <div class="acts"><span class="sp"></span><button type="button" class="btn pri" onClick="{{ co.retry }}">Try Again</button></div>
+            </sc-if>
+          </section>
+          <p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 8.25v4M9 5.75v.01"/></svg>No recurring subscriptions. Pay upfront; renewal reminders come by email.</p>
+        </sc-if>
+
+        <!-- #48 Contact detail + Add to Cube(s) -->
+        <sc-if value="{{ v.contacts }}" hint-placeholder-val="{{ false }}">
+          <div style="display:flex;align-items:center;gap:10px;margin-top:18px"><b style="font-size:16px">sam@example.test</b><span class="ctag role">Keyholder</span><span class="cap">Connected Sep 12, 2026</span></div>
+          <h2 style="font-size:16px;font-weight:600;margin-top:24px">Associated Cubes</h2>
+          <ul style="margin-top:8px" aria-label="Associated Cubes">
+            <sc-for list="{{ ac.assoc }}" as="c" hint-placeholder-count="2">
+              <li class="crow"><span class="nm">{{ c.name }}</span><span class="ctag">{{ c.net }}</span><span class="sp"></span><sc-if value="{{ c.kit }}" hint-placeholder-val="{{ false }}"><span class="ctag kit">Recovery Kit</span></sc-if></li>
+            </sc-for>
+          </ul>
+          <div class="acts"><button type="button" class="btn pri {{ ac.openFocus }}" onClick="{{ ac.open }}">Add to Cube(s)…</button></div>
+        </sc-if>
+      </section>
+    </div>
+  </main>
+  </sc-if>
+
+  <!-- ================= IN-CUBE BODY: #37 / #66 / #72 / #82 ================= -->
+  <sc-if value="{{ inCube }}" hint-placeholder-val="{{ true }}">
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock {{ cube.name }} and open the Launcher?</p><a class="btn pri sm" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="btn sm" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <sc-for list="{{ navTop }}" as="n" hint-placeholder-count="3">
+          <a class="ni {{ n.cls }}" aria-current="{{ n.cur }}" href="{{ n.href }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ n.icon }}"/></svg><span>{{ n.label }}</span></a>
+        </sc-for>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <sc-for list="{{ navWallets }}" as="n" hint-placeholder-count="3">
+          <a class="ni {{ n.cls }}" aria-current="{{ n.cur }}" href="{{ n.href }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ n.icon }}"/></svg><span>{{ n.label }}</span></a>
+        </sc-for>
+      </div>
+      <div class="sfoot">
+        <a class="ni {{ navSet.cls }}" aria-current="{{ navSet.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5M9 4a5 5 0 1 0 0 10a5 5 0 1 0 0-10M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <!-- Spark Stable Balance notice strip (shell-wide, above page content) -->
+        <sc-if value="{{ sbn.show }}" hint-placeholder-val="{{ false }}">
+          <div class="banner w" role="status" style="margin-top:0;margin-bottom:16px"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01"/></svg><p class="tx">{{ sbn.text }}</p><a class="btn sm" href="P-Overview.dc.html">Spark Settings</a><button type="button" class="xbtn" aria-label="Dismiss for this session" onClick="{{ sbn.dismiss }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M4.5 4.5l9 9M13.5 4.5l-9 9"/></svg></button></div>
+        </sc-if>
+        <div class="crumbs"><a class="back" href="{{ backHref }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>{{ backLabel }}</a><span class="route">{{ route }}</span></div>
+        <h1 class="ph">{{ title }}</h1>
+        <p class="idl"><img src="{{ cube.img }}" alt="">{{ cube.name }} · {{ cube.net }}</p>
+
+        <!-- #37 Overview: USDt pending lines -->
+        <sc-if value="{{ v.overview }}" hint-placeholder-val="{{ false }}">
+          <div class="bal"><p class="k">Total Balance</p><p class="big">{{ ov.total }} <span class="u">BTC</span></p></div>
+          <h2 style="font-size:16px;font-weight:600;margin-top:24px">Wallets</h2>
+          <div class="cards">
+            <sc-for list="{{ ov.cards }}" as="w" hint-placeholder-count="3">
+              <section class="wcard" aria-label="{{ w.name }}">
+                <p class="wk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ w.icon }}"/></svg>{{ w.name }}</p>
+                <p class="cap">{{ w.sub }}</p>
+                <p class="wv">{{ w.amt }} <span class="u">{{ w.unit }}</span></p>
+                <sc-for list="{{ w.pending }}" as="p" hint-placeholder-count="1"><p class="pend"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.5V9l2.5 1.5"/></svg>{{ p.text }}</p></sc-for>
+                <div class="acts"><a class="btn sm" href="P-Send.dc.html">Send</a><a class="btn sm" href="P-Receive.dc.html">Receive</a></div>
+              </section>
+            </sc-for>
+          </div>
+        </sc-if>
+
+        <!-- #66 Spark Send: address-mismatch guard + unconfirmed status -->
+        <sc-if value="{{ v.spark }}" hint-placeholder-val="{{ false }}">
+          <sc-if value="{{ sg.preview }}" hint-placeholder-val="{{ true }}">
+            <section class="form" aria-labelledby="sg-h" style="max-width:640px">
+              <h2 id="sg-h">Preview</h2>
+              <dl class="dl">
+                <div><dt>Method</dt><dd>Lightning</dd></div>
+                <div><dt>Amount</dt><dd>{{ sg.amount }}</dd></div>
+                <div><dt>Fee</dt><dd>{{ sg.fee }}</dd></div>
+                <div><dt>Total</dt><dd><b>{{ sg.total }}</b></dd></div>
+              </dl>
+              <div class="banner b" role="alert"><svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01"/></svg><p class="tx">This payment request’s address does not match its verification data. Do not send. Return and replace the payment request.</p></div>
+              <div class="acts"><button type="button" class="btn pri" disabled="{{ yes }}" aria-describedby="sg-h">Confirm and send</button><button type="button" class="btn demo-focus" onClick="{{ sg.reset }}">Cancel</button></div>
+            </section>
+          </sc-if>
+          <sc-if value="{{ sg.unknown }}" hint-placeholder-val="{{ false }}">
+            <section class="form" aria-labelledby="sg-u" style="max-width:640px">
+              <h2 id="sg-u">Payment status unconfirmed</h2>
+              <p style="margin-top:6px">No answer from the Spark bridge (synthetic).</p>
+              <p class="stl {{ sg.tone }}" role="status"><svg class="ic s {{ sg.spin }}" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ sg.icon }}"/></svg><span>{{ sg.guidance }}</span></p>
+              <div class="acts">
+                <sc-if value="{{ sg.canResend }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn pri">Send again</button></sc-if>
+                <sc-if value="{{ sg.canCheck }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" onClick="{{ sg.check }}">Check again</button></sc-if>
+                <a class="btn" href="P-Activity.dc.html">View transactions</a>
+              </div>
+            </section>
+          </sc-if>
+        </sc-if>
+
+        <!-- #72 Vault Send: batch label + coin selection -->
+        <sc-if value="{{ v.vault }}" hint-placeholder-val="{{ false }}">
+          <h2 style="font-size:20px;font-weight:600;margin-top:20px">{{ vb.heading }}</h2>
+          <sc-if value="{{ vb.batch }}" hint-placeholder-val="{{ true }}">
+            <div class="fld"><label for="vb-label">Batch label</label><input id="vb-label" class="inp" type="text" value="{{ vb.label }}" aria-invalid="{{ vb.labelBadA }}" aria-describedby="{{ vb.labelDesc }}" onInput="{{ vb.editLabel }}">
+              <sc-if value="{{ vb.labelBad }}" hint-placeholder-val="{{ false }}"><p class="err" id="vb-lerr">Label is too long (100 characters max).</p></sc-if>
+            </div>
+          </sc-if>
+          <div style="margin-top:18px">
+            <sc-for list="{{ vb.rcps }}" as="r" hint-placeholder-count="2">
+              <div class="rcp">
+                <span class="n">{{ r.n }}</span>
+                <div class="fld"><label for="{{ r.aid }}">Address</label><input id="{{ r.aid }}" class="inp mono" type="text" value="{{ r.addr }}"></div>
+                <div class="fld"><label for="{{ r.lid }}">Payment label</label><input id="{{ r.lid }}" class="inp" type="text" value="{{ r.label }}"></div>
+                <div class="fld"><label for="{{ r.mid }}">Amount BTC</label><input id="{{ r.mid }}" class="inp" type="text" inputmode="decimal" value="{{ r.amt }}" style="text-align:right"></div>
+              </div>
+            </sc-for>
+          </div>
+          <sc-if value="{{ vb.batchable }}" hint-placeholder-val="{{ true }}"><div class="acts" style="margin-top:12px"><button type="button" class="btn sm"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3.5v11M3.5 9h11"/></svg>Add payment</button></div></sc-if>
+          <div class="frrow">
+            <div class="fld"><span class="lb" id="vb-fr">Feerate</span><span class="seg" role="group" aria-labelledby="vb-fr"><sc-for list="{{ vb.presets }}" as="p" hint-placeholder-count="3"><button type="button" aria-pressed="{{ p.on }}" onClick="{{ p.pick }}">{{ p.label }}</button></sc-for></span></div>
+            <div class="fld"><label for="vb-fee">sats/vbyte</label><input id="vb-fee" class="inp" type="text" inputmode="numeric" value="{{ vb.fr }}" placeholder="42" onInput="{{ vb.editFr }}" style="width:110px"></div>
+            <p class="muted" style="padding-bottom:10px">Fee: {{ vb.fee }}</p>
+          </div>
+          <div class="cshead"><h3 id="vb-cs">Coins selection</h3><span class="st {{ vb.csTone }}" role="status">{{ vb.csStatus }}</span></div>
+          <ul class="coins" aria-labelledby="vb-cs">
+            <sc-for list="{{ vb.coins }}" as="c" hint-placeholder-count="5">
+              <li><label class="coin"><input type="checkbox" checked="{{ c.on }}" onChange="{{ c.toggle }}"><span class="lb"><sc-if value="{{ c.from }}" hint-placeholder-val="{{ false }}"><span class="muted">From </span></sc-if>{{ c.label }}</span><span class="cpill {{ c.pillCls }}" title="{{ c.tip }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ c.icon }}"/></svg>{{ c.pill }}</span><span class="v">{{ c.amt }}</span></label></li>
+            </sc-for>
+          </ul>
+          <sc-if value="{{ vb.hasErr }}" hint-placeholder-val="{{ false }}"><p class="err" style="margin-top:14px" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.75v4M9 12.25v.01"/></svg>{{ vb.err }}</p></sc-if>
+          <div class="acts"><button type="button" class="btn">Clear</button><span class="sp"></span><a class="btn pri" href="P-Signing.dc.html" aria-disabled="{{ vb.blockedA }}" style="{{ vb.nextStyle }}">Next</a></div>
+        </sc-if>
+
+        <!-- #82 Vault Settings: share-wallet invitation -->
+        <sc-if value="{{ v.share }}" hint-placeholder-val="{{ false }}">
+          <nav class="tabs" aria-label="Sections in Vault · Family savings"><a class="tab on" aria-current="page" href="P-Overview.dc.html">Wallet &amp; signers</a><a class="tab" href="P-Overview.dc.html">Pair with Keychain</a><a class="tab" href="P-GapsWallets.dc.html">Connections</a><a class="tab" href="P-Overview.dc.html">Data &amp; exports</a></nav>
+          <dl class="dl">
+            <div><dt>Wallet alias</dt><dd>Family savings</dd></div>
+            <div><dt>Wallet policy</dt><dd>2-of-3 synthetic policy</dd></div>
+          </dl>
+          <section class="panel" aria-labelledby="sh-h">
+            <h3 id="sh-h">Grant access to wallet to another user</h3>
+            <sc-if value="{{ sh.blocked }}" hint-placeholder-val="{{ false }}">
+              <div class="banner w" role="status"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01"/></svg><p class="tx">Remote daemon backends are unavailable for Bitcoin Blake2b.</p></div>
+            </sc-if>
+            <sc-if value="{{ sh.form }}" hint-placeholder-val="{{ true }}">
+              <div class="fld"><label for="sh-email">User email</label><input id="sh-email" class="inp demo-focus" type="email" value="{{ sh.email }}" placeholder="name@example.test" aria-invalid="{{ sh.badA }}" aria-describedby="{{ sh.desc }}" onInput="{{ sh.edit }}" disabled="{{ sh.sending }}">
+                <sc-if value="{{ sh.bad }}" hint-placeholder-val="{{ false }}"><p class="err" id="sh-err">Email is invalid</p></sc-if>
+              </div>
+              <div class="acts">
+                <button type="button" class="btn" disabled="{{ sh.cant }}" onClick="{{ sh.send }}">{{ sh.sendLabel }}</button>
+                <sc-if value="{{ sh.sent }}" hint-placeholder-val="{{ false }}"><p class="stl ok" role="status" style="margin-top:0"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6.25 9.25l1.9 1.9 3.6-3.9"/></svg>Invitation was sent</p></sc-if>
+              </div>
+            </sc-if>
+          </section>
+        </sc-if>
+      </div>
+      <p class="cap pfoot">{{ foot }}</p>
+    </main>
+  </div>
+  </sc-if>
+
+  <!-- #48 Add to Cube(s) dialog, drawn over the whole window -->
+  <sc-if value="{{ ac.dialog }}" hint-placeholder-val="{{ false }}">
+    <div class="overlay">
+      <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="ac-h" aria-describedby="ac-d" style="width:520px">
+        <div style="display:flex;align-items:center;gap:10px"><h2 id="ac-h" style="flex:1">Add to Cube(s)</h2><button type="button" class="xbtn" aria-label="Close" onClick="{{ ac.close }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M4.5 4.5l9 9M13.5 4.5l-9 9"/></svg></button></div>
+        <p id="ac-d" class="muted" style="margin-top:4px">Add sam@example.test to the selected Cubes.</p>
+        <sc-if value="{{ ac.loading }}" hint-placeholder-val="{{ false }}"><p class="stl muted" role="status"><svg class="ic s spin" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 1-6.5 6.5"/></svg>Loading eligible Cubes…</p></sc-if>
+        <sc-if value="{{ ac.none }}" hint-placeholder-val="{{ false }}"><p class="stl muted">No eligible Cubes. The contact is already in all of them, or you have none.</p></sc-if>
+        <sc-if value="{{ ac.hasList }}" hint-placeholder-val="{{ true }}">
+          <fieldset style="margin-top:14px"><legend class="srl">Cubes</legend>
+            <sc-for list="{{ ac.cands }}" as="c" hint-placeholder-count="3">
+              <label class="ck"><input type="checkbox" checked="{{ c.on }}" disabled="{{ ac.submitting }}" onChange="{{ c.toggle }}" aria-describedby="{{ c.errId }}"><span class="nm">{{ c.name }}</span><span class="ctag">{{ c.net }}</span><span class="sp"></span><sc-if value="{{ c.failed }}" hint-placeholder-val="{{ false }}"><span class="err" id="{{ c.errId }}">{{ c.err }}</span></sc-if></label>
+            </sc-for>
+          </fieldset>
+        </sc-if>
+        <div class="acts"><span class="sp"></span><button type="button" class="btn" onClick="{{ ac.close }}">Cancel</button><button type="button" class="btn pri" disabled="{{ ac.cant }}" onClick="{{ ac.confirm }}">{{ ac.addLabel }}</button></div>
+      </div>
+    </div>
+  </sc-if>
+
+  <sc-if value="{{ isLauncher }}" hint-placeholder-val="{{ false }}"><div class="foot">{{ foot }}</div></sc-if>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["splitEntry","stableBalance","connectBanners","checkout","addToCubes","sparkGuard","vaultBatch","shareWallet"],"default":"splitEntry","section":"Review"},"state":{"editor":"enum","options":["auto","shown","hiddenNetwork","hiddenSignedOut","hiddenBetaOff","sbPaused","sbOffWithHolding","usdtPendingSend","usdtPendingReceive","sbDismissed","renewal","renewalDismissed","renewalPurchasingOff","planExpired","planExpiredNoDate","creating","awaiting","processing","paid","expired","failed","detail","loading","list","none","submitting","partialFailure","mismatch","checking","landed","noTraceKey","noTraceUnguarded","inconclusive","rejected","batch","labelTooLong","noCoins","insufficient","feerateUnset","selfTransfer","empty","invalidEmail","sending","sent","blake2b"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { k: null, hide: null, lockAsk: false };
+  }
+  renderVals() {
+    const P = this.props, self = this;
+    const SCR = {
+      splitEntry: ['shown', 'hiddenNetwork', 'hiddenSignedOut', 'hiddenBetaOff'],
+      stableBalance: ['sbPaused', 'sbOffWithHolding', 'usdtPendingSend', 'usdtPendingReceive', 'sbDismissed'],
+      connectBanners: ['renewal', 'renewalDismissed', 'renewalPurchasingOff', 'planExpired', 'planExpiredNoDate'],
+      checkout: ['creating', 'awaiting', 'processing', 'paid', 'expired', 'failed'],
+      addToCubes: ['detail', 'loading', 'list', 'none', 'submitting', 'partialFailure'],
+      sparkGuard: ['mismatch', 'checking', 'landed', 'noTraceKey', 'noTraceUnguarded', 'inconclusive', 'rejected'],
+      vaultBatch: ['batch', 'labelTooLong', 'noCoins', 'insufficient', 'feerateUnset', 'selfTransfer'],
+      shareWallet: ['empty', 'invalidEmail', 'sending', 'sent', 'blake2b']
+    };
+    const lvScr = SCR[P.screen] ? P.screen : 'splitEntry';
+    const lvSt = SCR[lvScr].indexOf(P.state) >= 0 ? P.state : SCR[lvScr][0];
+    const key = lvScr + '|' + lvSt;
+    const LONG = 'October payouts for the household budget, school fees, the shared dinner fund and the annual cabin trip deposit';
+    const init = { key, scr: lvScr, st: lvSt,
+      sbOff: lvSt === 'sbDismissed', renewOff: lvSt === 'renewalDismissed', copied: '',
+      sel: lvSt === 'list' ? { 1: true } : lvSt === 'submitting' || lvSt === 'partialFailure' ? { 1: true, 2: true } : {},
+      label: lvSt === 'labelTooLong' ? LONG : 'October payouts',
+      fr: lvSt === 'feerateUnset' ? '' : '6', preset: lvSt === 'feerateUnset' ? '' : 'Normal (~1h)',
+      coins: lvSt === 'noCoins' ? {} : lvSt === 'selfTransfer' ? { 0: true, 2: true } : lvSt === 'batch' ? { 0: true } : { 0: true, 1: true },
+      email: lvSt === 'empty' ? '' : lvSt === 'invalidEmail' ? 'jordan@example' : 'jordan@example.test' };
+    const S = (this.state.k && this.state.k.key === key) ? this.state.k : init;
+    const set = (patch) => self.setState({ k: Object.assign({}, S, patch) });
+    const go = (scr, st, extra) => set(Object.assign({ scr: scr, st: st }, extra || {}));
+    const later = (from, to, ms) => setTimeout(() => { const c = self.state.k; if (c && c.st === from) self.setState({ k: Object.assign({}, c, { st: to }) }); }, ms);
+    const scr = S.scr, st = S.st;
+    const hb = !!P.hideBalances;
+    const hide = (this.state.hide && this.state.hide.for === hb) ? this.state.hide.v : hb;
+    const H = (s) => hide ? '••••••' : s;
+    const val = (e) => (e && e.target) ? e.target.value : '';
+
+    const I = {
+      ok: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6.25 9.25l1.9 1.9 3.6-3.9',
+      warn: 'M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01',
+      bad: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.75v4M9 12.25v.01',
+      clock: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.5V9l2.5 1.5',
+      spin: 'M9 2.5a6.5 6.5 0 1 1-6.5 6.5',
+      info: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 8.25v4M9 5.75v.01',
+      person: 'M9 3.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25',
+      card: 'M2.5 4.5h13v9h-13zM2.5 7.5h13M5 11h3',
+      people: 'M6.5 4a2.5 2.5 0 1 0 0 5a2.5 2.5 0 1 0 0-5M2 15c.6-2.4 2.3-3.75 4.5-3.75S10.4 12.6 11 15M12 4.5a2.25 2.25 0 0 1 0 4.5M13 11.5c1.5.4 2.5 1.6 3 3.5',
+      device: 'M2.5 4h13v8h-13zM6.5 15h5M9 12v3'
+    };
+    const BTC = '/_blob/dbbfc88f16f7cc27510d81f434c268ea', B2B = '/_blob/c39785504daaef5633099a8ae196c784';
+
+    // ---------- in-Cube shell ----------
+    const NAV = {
+      overview: ['Overview', 'V2-Cube-Overview.dc.html', 'M2.5 2.5h5v5h-5zM10.5 2.5h5v5h-5zM2.5 10.5h5v5h-5zM10.5 10.5h5v5h-5z'],
+      activity: ['Activity', 'V3-Activity.dc.html', I.clock],
+      backup: ['Backup & protection', 'P-Settings.dc.html', 'M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4zM6.5 9l1.8 1.8 3.5-3.5'],
+      spark: ['Spark · Daily spending', 'V2-Cube-Overview.dc.html', 'M10 2 4 10h4.5L8 16l6-8H9.5z'],
+      vault: ['Vault · Family savings', 'V3-Vault-Advanced.dc.html', 'M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z'],
+      liquid: ['Liquid · Travel', 'V6-Liquid.dc.html', 'M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z']
+    };
+    const isB2b = scr === 'shareWallet' && st === 'blake2b';
+    const ACTIVE = { stableBalance: 'overview', sparkGuard: 'spark', vaultBatch: 'vault', shareWallet: 'settings' };
+    const act = ACTIVE[scr];
+    const navKeys = isB2b ? ['vault'] : ['spark', 'vault', 'liquid'];
+    const ni = (k) => ({ label: k === 'vault' && isB2b ? 'Vault · Blake savings' : NAV[k][0], href: NAV[k][1], icon: NAV[k][2], cls: act === k ? 'on' : '', cur: act === k ? 'page' : 'false' });
+    const cube = isB2b ? { name: 'Blake workspace', net: 'Bitcoin Blake2b mainnet', img: B2B, b2b: true } : { name: 'Everyday', net: 'Bitcoin mainnet', img: BTC, b2b: false };
+
+    const TITLE = {
+      stableBalance: 'Overview', sparkGuard: 'Spark · Daily spending · Send', vaultBatch: 'Vault · Family savings · Send',
+      shareWallet: isB2b ? 'Settings · Vault · Blake savings' : 'Settings · Vault · Family savings',
+      connectBanners: 'Account', checkout: 'Plan & billing', addToCubes: 'Contacts'
+    };
+    const ROUTE = {
+      splitEntry: 'App: Home sidebar › Split a Bitcoin wallet',
+      stableBalance: 'App: Cube › Overview · Spark notice strip (every in-Cube page)',
+      connectBanners: 'App: Home › Connect › Overview (renewal banner)',
+      checkout: 'App: Home › Connect › Plan & Billing › Checkout',
+      addToCubes: 'App: Home › Connect › Contacts › contact › Add to Cube(s)…',
+      sparkGuard: 'App: Spark › Send › Preview / Payment status unconfirmed',
+      vaultBatch: 'App: Vault › Send (batch label, Coins selection)',
+      shareWallet: 'App: Vault › Settings › Backend (remote backend sharing)'
+    };
+    const BACK = { stableBalance: ['All Cubes', 'V3-Launcher-Spin.dc.html'], sparkGuard: ['Spark · Daily spending', 'V2-Cube-Overview.dc.html'],
+      vaultBatch: ['Vault · Family savings', 'V3-Vault-Advanced.dc.html'], shareWallet: ['Settings', 'P-Settings.dc.html'] };
+
+    // ---------- #4 split entry ----------
+    const ALL = [
+      { name: 'Everyday', img: BTC, tag: '', tagCls: '', line: 'Backup confirmed · Vault + Spark + Liquid', state: 'Open', n: 'btc' },
+      { name: 'Blake workspace', img: B2B, tag: 'Blake2b', tagCls: 'b2b', line: 'Backup not confirmed · Vault only', state: 'Locked', n: 'b2b' },
+      { name: 'Lab', img: BTC, tag: 'Testnet4', tagCls: 'test', line: 'Backup status unknown · Vault only', state: 'Locked', n: 'test' },
+      { name: 'Archive', img: BTC, tag: '', tagCls: '', line: 'Backup confirmed · No Vault configured · Spark only', state: 'Locked', n: 'btc' }
+    ];
+    const se = {
+      shown: st === 'shown',
+      chip: st === 'hiddenNetwork' ? 'Network: Testnet4' : 'Network: All',
+      cubes: ALL.filter((c) => st === 'hiddenNetwork' ? c.n === 'test' : true)
+        .map((c) => Object.assign({}, c, { hasTag: !!c.tag }))
+    };
+    const signedOut = scr === 'splitEntry' && st === 'hiddenSignedOut';
+
+    // ---------- #45 connect banners ----------
+    const cbRenew = st === 'renewal' && !S.renewOff;
+    const cbExp = st === 'planExpired' || st === 'planExpiredNoDate';
+    const cb = {
+      renewal: cbRenew, expired: cbExp,
+      expiredText: st === 'planExpiredNoDate' ? 'Your plan expired — renew to restore premium features.' : 'Your plan expired on [EXPIRY DATE] — renew to restore premium features.',
+      plan: cbExp ? 'Free' : '[PLAN NAME]', hasRenews: !cbExp,
+      renew: () => { go('checkout', 'creating'); later('creating', 'awaiting', 1000); },
+      dismiss: () => set({ renewOff: true }),
+      plans: () => go('checkout', 'awaiting')
+    };
+
+    // ---------- #46 checkout ----------
+    const co = {
+      creating: st === 'creating', open: st === 'awaiting' || st === 'processing', processing: st === 'processing',
+      paid: st === 'paid', ended: st === 'expired' || st === 'failed',
+      endText: st === 'failed' ? 'Error: [server message · synthetic]' : 'Invoice expired.',
+      amount: H('[PRICE] USD ([SATS] sats)'),
+      lnLabel: S.copied === 'ln' ? 'Copied' : 'Copy', ocLabel: S.copied === 'oc' ? 'Copied' : 'Copy',
+      copyLn: () => set({ copied: 'ln' }), copyOc: () => set({ copied: 'oc' }),
+      close: () => go('connectBanners', 'renewalPurchasingOff'),
+      retry: () => { go('checkout', 'creating'); later('creating', 'awaiting', 1000); }
+    };
+
+    // ---------- #48 add to cubes ----------
+    const CANDS = [['Travel fund', 'Bitcoin mainnet'], ['Household 2024', 'Bitcoin mainnet'], ['Team treasury', 'Bitcoin mainnet']];
+    const acDialog = scr === 'addToCubes' && st !== 'detail';
+    const nSel = Object.keys(S.sel).filter((k) => S.sel[k]).length;
+    const ac = {
+      dialog: acDialog, loading: st === 'loading', none: st === 'none', hasList: ['list', 'submitting', 'partialFailure'].indexOf(st) >= 0,
+      submitting: st === 'submitting',
+      cands: CANDS.map((c, i) => ({ name: c[0], net: c[1], on: !!S.sel[i], failed: st === 'partialFailure' && i === 2, err: 'Couldn’t add (synthetic error)', errId: st === 'partialFailure' && i === 2 ? 'ac-e' + i : '',
+        toggle: () => set({ sel: Object.assign({}, S.sel, { [i]: !S.sel[i] }) }) })),
+      cant: st !== 'list' && st !== 'partialFailure' || nSel === 0,
+      addLabel: st === 'submitting' ? 'Adding…' : 'Add',
+      openFocus: st === 'detail' ? 'demo-focus' : '',
+      assoc: [{ name: 'Everyday', net: 'Bitcoin mainnet', kit: true }, { name: 'Archive', net: 'Bitcoin mainnet', kit: false }],
+      open: () => { go('addToCubes', 'loading'); later('loading', 'list', 900); },
+      close: () => go('addToCubes', 'detail'),
+      confirm: () => { set({ st: 'submitting' }); later('submitting', 'detail', 1000); }
+    };
+
+    // ---------- #37 overview + Stable Balance strip ----------
+    const sbText = st === 'sbPaused'
+      ? 'Stable Balance was paused: converting bitcoin to USDB failed 3 times in a row (synthetic reason). Your funds are unchanged. You can turn it back on in Spark settings once the issue clears.'
+      : "This Spark wallet holds USDB from when Stable Balance was on, but the setting is off on this device — it doesn't travel with your seed. Review it in Spark settings.";
+    const sbn = { show: scr === 'stableBalance' && (st === 'sbPaused' || st === 'sbOffWithHolding') && !S.sbOff, text: sbText, dismiss: () => set({ sbOff: true }) };
+    const pend = [];
+    if (!hide && st === 'usdtPendingSend') pend.push({ text: '-2.50 USDt pending' });
+    if (!hide && st === 'usdtPendingReceive') pend.push({ text: '+5.00 USDt pending' });
+    const ov = {
+      total: H('0.04630000'),
+      cards: [
+        { name: 'Spark · Daily spending', sub: 'Lightning', icon: NAV.spark[2], amt: H('0.00420000'), unit: 'BTC', pending: [] },
+        { name: 'Liquid · Travel', sub: 'Liquid Network', icon: NAV.liquid[2], amt: H('10.37'), unit: 'USDt', pending: pend },
+        { name: 'Vault · Family savings', sub: '2-of-3 synthetic policy', icon: NAV.vault[2], amt: H('0.04210000'), unit: 'BTC', pending: [] }
+      ]
+    };
+
+    // ---------- #66 Spark send guard ----------
+    const G = {
+      checking: ["Checking your payment history to find out whether it went through. Don't send it again until this finishes.", 'unk', I.spin, 'spin', false, false],
+      landed: ["This payment did go through. It's in your transaction history — don't send it again.", 'ok', I.ok, '', false, true],
+      noTraceKey: ["No payment matching this one is in your history. Sending again reuses the same payment key, so if the first attempt did land after all, it can't be paid twice.", 'unk', I.info, '', true, true],
+      noTraceUnguarded: ["No payment matching this one is in your history, but this route can't guarantee a retry won't send twice. Refresh and check Transactions before sending again.", 'warn', I.warn, '', false, true],
+      inconclusive: ["Couldn't confirm what happened to this payment (synthetic reason). Refresh and check Transactions before sending again.", 'warn', I.warn, '', false, true],
+      rejected: ['The payment was rejected, so nothing was sent: synthetic reason', 'bad', I.bad, '', false, true]
+    };
+    const g = G[st] || G.checking;
+    const sg = {
+      preview: st === 'mismatch', unknown: st !== 'mismatch',
+      amount: H('25,000 sats'), fee: H('12 sats'), total: H('25,012 sats'),
+      guidance: g[0], tone: g[1], icon: g[2], spin: g[3], canResend: g[4], canCheck: g[5],
+      reset: () => {}, check: () => { set({ st: 'checking' }); later('checking', 'landed', 1200); }
+    };
+
+    // ---------- #72 Vault batch + coins ----------
+    const self2 = st === 'selfTransfer';
+    const RC = self2 ? [['bc1q…synthetic…self', 'Vault · Family savings', '0.01500000']]
+      : [['bc1q…synthetic…a01', 'Rent', '0.01000000'], ['bc1q…synthetic…b02', 'Shared dinner', st === 'insufficient' ? '0.09000000' : '0.00500000']];
+    const COINS = [
+      { label: 'Salary · October', from: false, sats: 1200000, pill: 'Expires in 5 months, 27 days', pillCls: '', icon: I.clock, tip: '' },
+      { label: 'Exchange withdrawal', from: true, sats: 800000, pill: 'Expires in ≈ 2 days', pillCls: 'near', icon: I.clock, tip: '' },
+      { label: 'No label', from: false, sats: 350000, pill: 'Expires today', pillCls: 'near', icon: I.clock, tip: '' },
+      { label: 'Gift', from: false, sats: 2000000, pill: 'Expired', pillCls: 'w', icon: I.clock, tip: '' },
+      { label: 'No label', from: false, sats: 100000, pill: 'Unconfirmed', pillCls: '', icon: I.info, tip: 'Do not treat this as a payment until it is confirmed' }
+    ];
+    const btc = (sats) => (sats / 1e8).toFixed(8);
+    const frOk = /^[0-9]+$/.test(S.fr) && parseInt(S.fr, 10) >= 1 && parseInt(S.fr, 10) <= 1000;
+    const feeSats = frOk ? parseInt(S.fr, 10) * 141 : 0;
+    const need = RC.reduce((a, r) => a + Math.round(parseFloat(r[2]) * 1e8), 0) + feeSats;
+    const selSats = COINS.reduce((a, c, i) => a + (S.coins[i] ? c.sats : 0), 0);
+    const total = COINS.reduce((a, c) => a + c.sats, 0);
+    const anySel = selSats > 0;
+    const labelBad = S.label.length > 100;
+    let csStatus, csTone = '', err = '';
+    if (self2) { csStatus = H(btc(selSats) + ' BTC') + ' selected'; if (!anySel) err = 'Please select at least one coin.'; }
+    else if (!frOk) { csStatus = 'Feerate needs to be set.'; err = 'Please set a feerate.'; }
+    else if (need > total) { csStatus = 'Select or add more funds.'; err = 'Insufficient funds.'; }
+    else if (!anySel) { csStatus = 'Select at least one coin.'; err = 'Please select at least one coin.'; }
+    else { const left = Math.max(0, need - selSats); csStatus = H(btc(left) + ' BTC') + ' left to select'; csTone = left === 0 ? 'ok' : ''; }
+    const blocked = !!err || labelBad || (!self2 && need > selSats);
+    const vb = {
+      heading: self2 ? 'Self-transfer' : 'Send', batch: RC.length > 1, batchable: !self2,
+      label: S.label, labelBad, labelBadA: String(labelBad), labelDesc: labelBad ? 'vb-lerr' : '', editLabel: (e) => set({ label: val(e) }),
+      rcps: RC.map((r, i) => ({ n: String(i + 1), addr: r[0], label: r[1], amt: H(r[2]), aid: 'vb-a' + i, lid: 'vb-l' + i, mid: 'vb-m' + i })),
+      presets: [['Fast (~10m)', '14'], ['Normal (~1h)', '6'], ['Slow (~4h)', '2']].map((p) => ({ label: p[0], on: String(S.preset === p[0]), pick: () => set({ preset: p[0], fr: p[1] }) })),
+      fr: S.fr, editFr: (e) => set({ fr: val(e), preset: '' }),
+      fee: frOk ? H(btc(feeSats) + ' BTC') + ' (synthetic size)' : '—',
+      csStatus, csTone, hasErr: !!err, err,
+      coins: COINS.map((c, i) => ({ label: c.label, from: c.from, pill: c.pill, pillCls: c.pillCls, icon: c.icon, tip: c.tip, amt: H(btc(c.sats) + ' BTC'), on: !!S.coins[i],
+        toggle: () => set({ coins: Object.assign({}, S.coins, { [i]: !S.coins[i] }) }) })),
+      blockedA: String(blocked), nextStyle: blocked ? 'opacity:.55;pointer-events:none' : ''
+    };
+
+    // ---------- #82 share wallet ----------
+    const emailOk = /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(S.email);
+    const shBad = S.email.length > 0 && !emailOk;
+    const sh = {
+      blocked: isB2b, form: !isB2b, email: S.email, bad: shBad, badA: String(shBad), desc: shBad ? 'sh-err' : '',
+      sending: st === 'sending', sent: st === 'sent', cant: st === 'sending' || !emailOk,
+      sendLabel: 'Send invitation',
+      edit: (e) => set({ email: val(e), st: 'empty' }),
+      send: () => { set({ st: 'sending' }); later('sending', 'sent', 1000); }
+    };
+
+    // ---------- connect nav ----------
+    const CNAV = [['Account', I.person, 'connectBanners', 'renewal'], ['Plan & billing', I.card, 'checkout', 'awaiting'], ['Contacts', I.people, 'addToCubes', 'detail']];
+    const cnav = CNAV.map((c) => ({ label: c[0], icon: c[1], cls: scr === c[2] ? 'on' : '', cur: scr === c[2] ? 'page' : 'false', go: () => go(c[2], c[3]) }));
+    cnav.push({ label: 'Devices & security', icon: I.device, cls: '', cur: 'false', go: () => {} });
+
+    const FOOT = {
+      splitEntry: 'Prototype V6 · entry shows only when Bitcoin mainnet Cubes are in view, BTCB2 beta is on and Connect is signed in · it opens V6-Gaps-Installer › split',
+      stableBalance: 'Prototype V6 · synthetic balances · the Stable Balance strip sits above every in-Cube page until dismissed for the session · USDt pending hides with balances',
+      connectBanners: 'Prototype V6 · Renew opens checkout · the reminder is hidden when purchasing is off; the expired prompt cannot be dismissed',
+      checkout: 'Prototype V6 · placeholders only, no real prices or invoices · one invoice offers both Lightning and on-chain',
+      addToCubes: 'Prototype V6 · synthetic contact and Cubes · only Cubes on the active network are eligible',
+      sparkGuard: 'Prototype V6 · synthetic amounts and reasons · Send again appears only when no trace exists and the payment key protects a retry',
+      vaultBatch: 'Prototype V6 · synthetic coins and fee size · Batch label appears only with two or more payments',
+      shareWallet: 'Prototype V6 · email invitation from source; no copy or revoke exists · no menu reaches this section at baseline 8495c3c0'
+    };
+
+    const inCube = ['stableBalance', 'sparkGuard', 'vaultBatch', 'shareWallet'].indexOf(scr) >= 0;
+    const connect = ['connectBanners', 'checkout', 'addToCubes'].indexOf(scr) >= 0;
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      inCube, isLauncher: !inCube, yes: true,
+      lockIdle: !self.state.lockAsk, lockAsk: !!self.state.lockAsk, askLock: () => self.setState({ lockAsk: true }), cancelLock: () => self.setState({ lockAsk: false }),
+      hideP: String(hide), shown: !hide, hidden: hide, toggleHide: () => self.setState({ hide: { for: hb, v: !hide } }),
+      cube, navTop: ['overview', 'activity', 'backup'].map(ni), navWallets: navKeys.map(ni),
+      navSet: { cls: act === 'settings' ? 'on' : '', cur: act === 'settings' ? 'page' : 'false' },
+      connWord: signedOut ? 'Signed out' : 'Signed in', connTitle: signedOut ? 'Not signed in' : 'alex@example.test',
+      connAria: signedOut ? 'Connect, signed out' : 'Connect, alex@example.test, signed in',
+      title: TITLE[scr] || '', route: ROUTE[scr] || '', backLabel: (BACK[scr] || ['', ''])[0], backHref: (BACK[scr] || ['', 'V2-Cube-Overview.dc.html'])[1],
+      v: { split: scr === 'splitEntry', connect, banners: scr === 'connectBanners', checkout: scr === 'checkout', contacts: scr === 'addToCubes',
+        overview: scr === 'stableBalance', spark: scr === 'sparkGuard', vault: scr === 'vaultBatch', share: scr === 'shareWallet' },
+      se, cb, co, ac, sbn, ov, sg, vb, sh, cnav,
+      foot: FOOT[scr]
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,514 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 · Vault split coins</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--b2b:#d4a62a}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#8a6a10}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu a{color:var(--acc-ink)}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ok{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:var(--muted)}
+/* top bar */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line);flex:none}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img{display:block;width:16px;height:16px;border-radius:50%}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.tbtn.pri{background:var(--accent);border-color:var(--accent);font-weight:600}
+.tenshu a.tbtn.pri{color:var(--on-accent)}
+.lockgrp,.lockask{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;font-weight:500;white-space:nowrap}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;min-height:38px;padding:8px 10px;border-radius:8px;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}.ni.on .ic{color:var(--acc-ink)}
+.attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;text-decoration:none}
+.tenshu a.attn{color:var(--ink)}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{max-width:880px;margin:0 auto;padding:24px 48px 32px}
+/* flow */
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.ph{font-size:22px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl>img{width:16px;height:16px;display:block}
+.stepper{display:flex;gap:4px;margin-top:20px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.stepper li{display:flex;align-items:center;gap:7px;flex:1;min-width:0;font-size:13px;color:var(--muted);white-space:nowrap}
+.stepper .n{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.stepper li.cur{color:var(--ink);font-weight:600}
+.stepper li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.stepper li.done .n{color:var(--good);border-color:var(--good)}
+.form{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:24px}
+.form h2{font-size:18px;font-weight:600;line-height:1.3}
+.lede{color:var(--muted);font-size:13px;margin-top:4px}
+.nx{display:flex;gap:20px;margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-size:13px}
+.nx b{font-weight:600;margin-right:6px}
+.nx span{color:var(--muted)}
+.checks{margin-top:16px;border-top:1px solid var(--line)}
+.checks li{display:flex;align-items:center;gap:10px;min-height:46px;border-bottom:1px solid var(--line)}
+.checks .tx{flex:1}.checks .sv{font-size:13px;color:var(--muted)}
+.crow{display:grid;grid-template-columns:150px minmax(0,1fr) 200px;column-gap:16px;align-items:center;min-height:50px;border-bottom:1px solid var(--line)}
+.crow .amt{font-weight:600;text-align:right}
+.badge{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 8px;border-radius:11px;border:1px solid var(--b2b);font-size:12px;font-weight:500;white-space:nowrap}
+.badge.btc{border-color:var(--accent)}
+.badge>img{width:14px;height:14px;display:block}
+.tot{display:flex;justify-content:space-between;padding:12px 0;font-weight:600}
+.dep{padding:14px 0;border-bottom:1px solid var(--line)}
+.dep:first-of-type{border-top:1px solid var(--line)}
+.dep .h{display:flex;align-items:center;gap:8px;font-weight:600}
+.dep .h>img{width:18px;height:18px}
+.addr{display:flex;align-items:center;gap:10px;margin-top:8px}
+.addr code{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
+.dep .stl{margin-top:8px;font-size:13px}
+.tx2{display:grid;grid-template-columns:1fr 1fr;gap:24px;margin-top:16px}
+.txb h3{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600;padding-bottom:8px;border-bottom:1px solid var(--line)}
+.txb h3>img{width:18px;height:18px}
+.txb dl>div{display:grid;grid-template-columns:96px minmax(0,1fr);column-gap:12px;padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+.txb dt{color:var(--muted)}.txb dd{overflow-wrap:anywhere}
+.txb .now{font-weight:500}
+.sgt{margin-top:16px}
+.sgt li{display:grid;grid-template-columns:18px minmax(0,1fr) 140px 140px;column-gap:12px;align-items:center;min-height:44px;border-bottom:1px solid var(--line)}
+.sgt li.hd{min-height:32px;font-size:12px;color:var(--muted);font-weight:500}
+.sgt .ic{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500;white-space:nowrap}
+.meter{display:flex;gap:6px;margin-top:10px}
+.meter i{flex:1;height:8px;border-radius:4px;background:var(--line)}
+.meter i.f{background:var(--good)}
+.big{font-size:18px;font-weight:600;margin-top:16px}
+.note{display:flex;align-items:flex-start;gap:8px;margin-top:14px;font-size:13px;color:var(--muted)}
+.note .ic{margin-top:1px}
+.acts{display:flex;align-items:center;gap:10px;margin-top:20px;flex-wrap:wrap}
+.acts .sp{flex:1}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn.danger{border-color:var(--bad);color:var(--bad)}
+.btn[disabled]{cursor:not-allowed;background:transparent;border-color:var(--line);color:var(--muted)}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px;font-size:13px}
+.res li{display:grid;grid-template-columns:150px minmax(0,1fr) 150px;column-gap:16px;align-items:center;min-height:56px;border-bottom:1px solid var(--line)}
+.res li:first-child{border-top:1px solid var(--line)}
+.res .w{display:block;font-size:13px;color:var(--muted)}
+.donehd{display:flex;align-items:center;gap:10px}
+.donehd .ic{width:26px;height:26px;color:var(--good)}
+.synth{margin-top:20px;text-align:center}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip" title="alex@example.test"><span class="sr">Connect account alex@example.test: </span><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><span class="ok">Signed in</span></div>
+      <div class="chip" title="Cube service"><span class="sr">Cube service: </span><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><span class="ok">Connected</span></div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="V3-Launcher-Spin.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lock.idle }}" hint-placeholder-val="{{ true }}">
+        <button type="button" class="mi" aria-expanded="false" aria-controls="lock-ask" onClick="{{ lock.ask }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button>
+      </sc-if>
+        <sc-if value="{{ lock.asking }}" hint-placeholder-val="{{ false }}">
+        <div class="lockask" id="lock-ask" role="group" aria-labelledby="lock-q">
+          <span id="lock-q" role="status">Lock Everyday and open the Launcher?</span>
+          <a class="tbtn pri" href="V3-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a>
+          <button type="button" class="tbtn" onClick="{{ lock.cancel }}">Cancel</button>
+        </div>
+      </sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="V3-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni on" aria-current="page" href="V3-Vault-Advanced.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <a class="attn" href="V2-Cube-Overview.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <a class="back" href="V3-Vault-Advanced.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Advanced</a>
+        <h1 class="ph">Split coins</h1>
+        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Family savings · Bitcoin mainnet<span aria-hidden="true">→</span><span class="sr">to</span><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Family savings · Blake2b</p>
+
+        <ol class="stepper" aria-label="Split steps">
+          <sc-for list="{{ steps }}" as="s" hint-placeholder-count="7">
+            <li class="{{ s.cls }}" aria-current="{{ s.cur }}"><span class="n"><sc-if value="{{ s.isDone }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.25 3 3 6-6.5"/></svg></sc-if><sc-if value="{{ s.notDone }}" hint-placeholder-val="{{ true }}">{{ s.num }}</sc-if></span><span>{{ s.label }}</span><span class="sr">{{ s.sr }}</span></li>
+          </sc-for>
+        </ol>
+
+        <section class="form" aria-labelledby="flow-h">
+
+        <!-- CHECK / NO COPY -->
+        <sc-if value="{{ is.check }}" hint-placeholder-val="{{ true }}">
+          <h2 id="flow-h">Before you start</h2>
+          <ol class="checks" aria-label="Requirements">
+            <sc-for list="{{ reqs }}" as="k" hint-placeholder-count="3">
+              <li>
+                <sc-if value="{{ k.ok }}" hint-placeholder-val="{{ true }}"><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                <sc-if value="{{ k.miss }}" hint-placeholder-val="{{ false }}"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6.5 6.5l5 5M11.5 6.5l-5 5"/></svg></sc-if>
+                <span class="tx">{{ k.text }}</span><span class="sv {{ k.svCls }}">{{ k.value }}</span>
+              </li>
+            </sc-for>
+          </ol>
+          <sc-if value="{{ noCopy }}" hint-placeholder-val="{{ false }}">
+            <p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>Spending the Blake2b side needs a matching Vault there.</p>
+          </sc-if>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts">
+            <sc-if value="{{ noCopy }}" hint-placeholder-val="{{ false }}"><a class="btn pri" href="V3-Cube-Transfer.dc.html">Create a Blake2b copy</a></sc-if>
+            <a class="btn" href="V3-Vault-Advanced.dc.html">Cancel</a><span class="sp"></span>
+            <button type="button" class="btn {{ contCls }}" disabled="{{ noCopy }}" onClick="{{ go.coins }}">Continue</button>
+          </div>
+        </sc-if>
+
+        <!-- COINS -->
+        <sc-if value="{{ is.coins }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Coins to split</h2>
+          <p class="lede">Every coin on both chains moves together.</p>
+          <ul style="margin-top:16px;border-top:1px solid var(--line)" aria-label="Coins on both chains">
+            <sc-for list="{{ shared }}" as="c" hint-placeholder-count="2">
+              <li class="crow"><span class="badge"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Before fork · both chains</span><span>{{ c.label }} <span class="mono">{{ c.addr }}</span></span><span class="amt">{{ c.amt }}</span></li>
+            </sc-for>
+          </ul>
+          <p class="tot"><span>2 coins</span><span>{{ sharedTotal }}</span></p>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ go.check }}">Back</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ go.fees }}">Continue</button></div>
+        </sc-if>
+
+        <!-- FEES (funding deposits) -->
+        <sc-if value="{{ is.fees }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Fund the fees on each chain</h2>
+          <p class="lede">Send only the named coin to each address and wait for confirmation.</p>
+          <div style="margin-top:16px">
+            <sc-for list="{{ deps }}" as="d" hint-placeholder-count="2">
+              <div class="dep">
+                <p class="h"><img src="{{ d.mark }}" alt="">{{ d.title }}</p>
+                <div class="addr"><code>{{ d.addr }}</code><button type="button" class="btn" onClick="{{ d.copy }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="6" y="6" width="9" height="9" rx="1.5"/><path d="M3 12V4.5A1.5 1.5 0 0 1 4.5 3H12"/></svg>{{ d.copyLabel }}</button></div>
+                <p class="stl st {{ d.cls }}" role="status">{{ d.status }}</p>
+              </div>
+            </sc-for>
+          </div>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ go.coins }}">Back</button><button type="button" class="btn" onClick="{{ checkDeps }}">Check deposits</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ depsNotReady }}" onClick="{{ go.sign }}">Review and sign both transactions</button></div>
+        </sc-if>
+
+        <!-- SIGN BOTH -->
+        <sc-if value="{{ is.sign }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Sign both transactions</h2>
+          <p class="lede">Check the address and fee on each signing device.</p>
+          <div class="tx2">
+            <sc-for list="{{ txs }}" as="t" hint-placeholder-count="2">
+              <div class="txb"><h3><img src="{{ t.mark }}" alt="">{{ t.chain }}</h3>
+                <dl><div><dt>Spends</dt><dd>2 shared coins + {{ t.only }}</dd></div><div><dt>To</dt><dd>{{ t.to }}</dd></div><div><dt>Amount</dt><dd>{{ t.amt }}</dd></div><div><dt>Fee</dt><dd>{{ t.fee }}</dd></div></dl>
+              </div>
+            </sc-for>
+          </div>
+          <ul class="sgt" aria-label="Signatures, 2 needed on each chain">
+            <li class="hd" aria-hidden="true"><span></span><span>Signer · 2 needed</span><span>Bitcoin</span><span>Blake2b</span></li>
+            <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
+              <li><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg><span>{{ g.name }} <span class="mono">{{ g.fp }}</span></span><span class="st {{ g.bCls }}"><span class="sr">Bitcoin: </span>{{ g.b }}</span><span class="st {{ g.kCls }}"><span class="sr">Blake2b: </span>{{ g.k }}</span></li>
+            </sc-for>
+          </ul>
+          <div class="acts">
+            <button type="button" class="btn" onClick="{{ sg.saveB }}">Save Bitcoin PSBT</button>
+            <button type="button" class="btn" onClick="{{ sg.impB }}">Import Bitcoin signatures</button>
+            <button type="button" class="btn" onClick="{{ sg.saveK }}">Save Blake2b PSBT</button>
+            <button type="button" class="btn" onClick="{{ sg.impK }}">Import Blake2b signatures</button>
+            <button type="button" class="btn" onClick="{{ sg.device }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="4.5" y="4.5" width="9" height="9" rx="1.5"/><path d="M7 2v2.5M11 2v2.5M7 13.5V16M11 13.5V16"/></svg>Sign with connected device</button>
+          </div>
+          <sc-if value="{{ sg.hasNote }}" hint-placeholder-val="{{ false }}"><p class="note" role="status">{{ sg.note }}</p></sc-if>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ go.fees }}">Back</button><button type="button" class="btn danger" onClick="{{ go.abandon }}">Abandon split</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ sg.notReady }}" onClick="{{ go.bitcoin }}">Review Bitcoin broadcast</button></div>
+        </sc-if>
+
+        <!-- BITCOIN BROADCAST REVIEW / BLAKE2B BROADCAST REVIEW -->
+        <sc-if value="{{ is.review }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">{{ rv.title }}</h2>
+          <p class="lede">{{ rv.lede }}</p>
+          <div class="tx2">
+            <sc-for list="{{ rv.blocks }}" as="rb" hint-placeholder-count="2">
+              <div class="txb"><h3><img src="{{ rb.mark }}" alt="">{{ rb.head }}</h3>
+                <dl><div><dt>Transaction</dt><dd class="mono">{{ rb.txid }}</dd></div><div><dt>To</dt><dd>{{ rb.to }}</dd></div><div><dt>Amount</dt><dd>{{ rb.amt }}</dd></div><div><dt>Fee</dt><dd>{{ rb.fee }}</dd></div><div><dt>Now</dt><dd class="now {{ rb.nowCls }}">{{ rb.now }}</dd></div></dl>
+              </div>
+            </sc-for>
+          </div>
+          <sc-if value="{{ rv.sent }}" hint-placeholder-val="{{ false }}"><p class="note" role="status"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>{{ rv.sentText }}</p></sc-if>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts">
+            <button type="button" class="btn" onClick="{{ rv.back }}">Back</button>
+            <sc-if value="{{ rv.canAbandon }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn danger" onClick="{{ go.abandon }}">Abandon split</button></sc-if>
+            <span class="sp"></span>
+            <sc-if value="{{ rv.unsent }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn pri" onClick="{{ rv.cast }}">{{ rv.castLabel }}</button></sc-if>
+            <sc-if value="{{ rv.sent }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn pri" onClick="{{ rv.after }}">{{ rv.afterLabel }}</button></sc-if>
+          </div>
+        </sc-if>
+
+        <!-- CONFIRMING ON BITCOIN -->
+        <sc-if value="{{ is.confirming }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Waiting for Bitcoin confirmations</h2>
+          <p class="lede">Sent once. It is never sent again automatically.</p>
+          <p class="big" role="status">Bitcoin confirmations: {{ cf.n }} of 6</p>
+          <div class="meter" aria-hidden="true"><sc-for list="{{ cf.bars }}" as="b" hint-placeholder-count="6"><i class="{{ b.cls }}"></i></sc-for></div>
+          <p class="note">{{ cf.msg }}</p>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ cf.check }}">Check again</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ cf.notYet }}" onClick="{{ go.blake2b }}">Continue to Blake2b</button></div>
+        </sc-if>
+
+        <!-- REORG: RE-MINED / DROPPED -->
+        <sc-if value="{{ is.reorg }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Step 1 moved to another Bitcoin block</h2>
+          <p class="lede">Blake2b waits until you acknowledge the new block.</p>
+          <div class="txb" style="margin-top:16px"><dl><div><dt>Was</dt><dd>Block 868,402</dd></div><div><dt>Now</dt><dd>Block 868,404</dd></div></dl></div>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ noop }}">Refresh</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ ack }}">Acknowledge new block</button></div>
+        </sc-if>
+        <sc-if value="{{ is.dropped }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Step 1 dropped from Bitcoin</h2>
+          <p class="lede">Blake2b is blocked until Bitcoin confirms it again.</p>
+          <div class="txb" style="margin-top:16px"><dl><div><dt>Transaction</dt><dd class="mono">a1b2…synthetic…btc1</dd></div><div><dt>Fee</dt><dd>1,240 sats · 412 vB</dd></div><div><dt>Route</dt><dd>Connect</dd></div></dl></div>
+          <p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>Fresh checks show its coins unspent. Sends exactly the recorded transaction.</p>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ noop }}">Refresh</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ resend }}">Send again</button></div>
+        </sc-if>
+
+        <!-- RESULT -->
+        <sc-if value="{{ is.done }}" hint-placeholder-val="{{ false }}">
+          <div class="donehd"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="flow-h">Coins split</h2></div>
+          <ul class="res" style="margin-top:16px" aria-label="Resulting coins">
+            <li><span class="badge btc"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin-only</span><span>Vault · Family savings<span class="w">Everyday · Bitcoin mainnet</span></span><span style="font-weight:600;text-align:right">{{ res.btc }}</span></li>
+            <li><span class="badge"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Blake2b-only</span><span>Vault · Family savings<span class="w">Family savings · Blake2b · Bitcoin Blake2b mainnet</span></span><span style="font-weight:600;text-align:right">{{ res.b2b }}</span></li>
+          </ul>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts"><a class="btn pri" href="V3-Vault-Advanced.dc.html">See coins</a><a class="btn" href="V3-Launcher-Spin.dc.html">Open Family savings · Blake2b</a></div>
+        </sc-if>
+
+        <!-- ABANDON -->
+        <sc-if value="{{ is.abandon }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Abandon split</h2>
+          <sc-if value="{{ ab.idle }}" hint-placeholder-val="{{ true }}"><p class="lede">Bitcoin is checked first. Nothing has been sent.</p></sc-if>
+          <sc-if value="{{ ab.checking }}" hint-placeholder-val="{{ false }}"><p class="note" role="status"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5" stroke-dasharray="3 3"/><path d="M9 5.5V9l2 1.5"/></svg>Checking Bitcoin before abandoning…</p></sc-if>
+          <sc-if value="{{ ab.clear }}" hint-placeholder-val="{{ false }}">
+            <ol class="checks" aria-label="Check result">
+              <li><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><span class="tx">Bitcoin shows no step 1 and no spend of its coins</span><span class="sv">Checked</span></li>
+            </ol>
+            <p class="note"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Abandoning deletes the split record from this device.</p>
+          </sc-if>
+          <sc-if value="{{ ab.gone }}" hint-placeholder-val="{{ false }}"><p class="note" role="status"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>The split was abandoned and its record deleted from this device.</p></sc-if>
+          <p class="nx"><span><b>Next</b>{{ nx.next }}</span><span><b>Cost</b>{{ nx.cost }}</span></p>
+          <div class="acts">
+            <sc-if value="{{ ab.open }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ go.sign }}">Keep split</button><span class="sp"></span></sc-if>
+            <sc-if value="{{ ab.idle }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn pri" onClick="{{ ab.check }}">Check before abandoning</button></sc-if>
+            <sc-if value="{{ ab.clear }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn danger" onClick="{{ ab.confirm }}">Abandon split</button></sc-if>
+            <sc-if value="{{ ab.gone }}" hint-placeholder-val="{{ false }}"><a class="btn pri" href="V3-Vault-Advanced.dc.html">Back to Tools</a></sc-if>
+          </div>
+        </sc-if>
+
+        </section>
+        <p class="cap synth">Prototype · synthetic coins, addresses, fees and block heights</p>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["check","noCopy","coins","fees","sign","bitcoin","confirming","reorg","dropped","blake2b","done","abandon"],"default":"check","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
+  renderVals(){
+    const P=this.props,self=this;
+    const lever=P.step||'check';
+    const init={for:lever,step:lever,deps:0,copied:'',sig:{kB:false,kK:false,hw:false},note:'',
+      sentB:lever==='blake2b',sentK:false,conf:lever==='blake2b'?6:3,ab:'idle'};
+    const S=(this.state.k&&this.state.k.for===lever)?this.state.k:init;
+    const set=(p)=>self.setState({k:Object.assign({},S,p)});
+    const go=(st)=>()=>set({step:st,note:''});
+    const hb=!!P.hideBalances;
+    const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
+    const fmt=(n)=>String(n).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    const amt=(n)=>hide?'••••••':fmt(n)+' SATS';
+    const BTC='/_blob/dbbfc88f16f7cc27510d81f434c268ea',B2B='/_blob/c39785504daaef5633099a8ae196c784';
+    const step=S.step,noCopy=step==='noCopy';
+
+    // stepper (source order: funding deposits, paired sign, Bitcoin broadcast, 6 confirmations, Blake2b broadcast)
+    const L=['Check','Coins','Fees','Sign','Bitcoin','Blake2b','Done'];
+    const IX={check:0,noCopy:0,coins:1,fees:2,sign:3,abandon:3,bitcoin:4,confirming:4,reorg:4,dropped:4,blake2b:5,done:7};
+    const ix=IX[step];
+    const steps=L.map((l,i)=>({num:String(i+1),label:l,isDone:i<ix,notDone:!(i<ix),cls:i<ix?'done':(i===ix?'cur':''),cur:i===ix?'step':'false',sr:i<ix?', done':(i===ix?', current':'')}));
+
+    const NX={
+      check:['Review the coins on both chains.','Nothing yet.'],
+      noCopy:['Create a Blake2b copy of this Vault first.','Nothing.'],
+      coins:['Add one fee deposit on each chain.','Nothing yet.'],
+      fees:['Sign both transactions. Nothing is sent.','At least 3,000 sats on each chain.'],
+      sign:['Broadcast on Bitcoin first.','Nothing is sent while signing.'],
+      bitcoin:['Bitcoin needs 6 confirmations, about an hour.','1,240 sats Bitcoin fee.'],
+      confirming:['Broadcast on Blake2b after 6 confirmations.','No more Bitcoin fees.'],
+      reorg:['Confirmations restart from the new block.','Nothing.'],
+      dropped:['The same signed transaction is sent again.','The same 1,240 sats fee, paid once.'],
+      blake2b:['Blake2b confirms, then each side spends alone.','980 sats Blake2b fee.'],
+      done:['Spend each side separately.','2,220 sats in fees, both chains.'],
+      abandon:['Nothing moves. The record is deleted.','None. Deposits stay in this Vault.']
+    };
+    const nx={next:NX[step][0],cost:NX[step][1]};
+
+    const reqs=[
+      {text:'Blake2b copy of this Vault',value:noCopy?'Not found':'Family savings · Blake2b',ok:!noCopy,miss:noCopy,svCls:noCopy?'warn':''},
+      {text:'Signed in to Connect',value:'Signed in',ok:true,miss:false,svCls:''},
+      {text:'Coins on both chains',value:'2 found',ok:true,miss:false,svCls:''}
+    ];
+    const shared=[{label:'Exchange withdrawal',addr:'bc1q…synthetic…7k2f',amt:amt(120000)},{label:'Gift from Sam',addr:'bc1q…synthetic…m4ra',amt:amt(80000)}];
+
+    // funding deposits: Bitcoin found first, Blake2b after a second check
+    const depSt=[
+      [['Confirmed · verified','ok'],['No confirmed coin yet','muted']],
+      [['Confirmed · verified','ok'],['Confirmed · verified','ok']]
+    ][S.deps];
+    const deps=[
+      {mark:BTC,title:'Send at least 3,000 sats of Bitcoin',addr:'bc1q…synthetic…dep1',k:'b'},
+      {mark:B2B,title:'Send at least 3,000 sats of Bitcoin Blake2b',addr:'bc1q…synthetic…dep2',k:'k'}
+    ].map((d,i)=>({mark:d.mark,title:d.title,addr:d.addr,copyLabel:S.copied===d.k?'Copied':'Copy',copy:()=>set({copied:d.k}),
+      status:depSt[i][0],cls:depSt[i][1]}));
+
+    // paired signing: 2 signatures per input on each chain; This device already signed
+    const g=S.sig;
+    const bN=1+(g.kB?1:0)+(g.hw?1:0),kN=1+(g.kK?1:0)+(g.hw?1:0);
+    const mk=(on)=>on?['Signed','ok']:['Waiting','muted'];
+    const signers=[
+      {name:'This device',fp:'a1b2c3d4',b:mk(true),k:mk(true)},
+      {name:"Keychain · Alex's phone",fp:'e5f6a7b8',b:mk(g.kB),k:mk(g.kK)},
+      {name:'Hardware · Ledger-style device',fp:'c9d0e1f2',b:mk(g.hw),k:mk(g.hw)}
+    ].map((s)=>({name:s.name,fp:s.fp,b:s.b[0],bCls:s.b[1],k:s.k[0],kCls:s.k[1]}));
+    const sigSet=(p,note)=>()=>set({sig:Object.assign({},g,p),note:note});
+    const sg={saveB:()=>set({note:'Saved family-savings-split-bitcoin.psbt'}),saveK:()=>set({note:'Saved family-savings-split-blake2b.psbt'}),
+      impB:sigSet({kB:true},'Imported Bitcoin signatures from Keychain · Alex’s phone.'),
+      impK:sigSet({kK:true},'Imported Blake2b signatures from Keychain · Alex’s phone.'),
+      device:sigSet({hw:true},'Signed both on Hardware · Ledger-style device.'),
+      hasNote:!!S.note,note:S.note,notReady:bN<2||kN<2};
+    const txs=[
+      {mark:BTC,chain:'Bitcoin',only:'Bitcoin-only coin',to:'Family savings · this Vault',amt:amt(201760),fee:'1,240 sats'},
+      {mark:B2B,chain:'Bitcoin Blake2b',only:'Blake2b-only coin',to:'Family savings · Blake2b',amt:amt(202020),fee:'980 sats'}
+    ];
+
+    // broadcast reviews (source: "broadcast now" / "recorded, not sent now")
+    const isB=step==='bitcoin',isK=step==='blake2b';
+    const btcBlock={mark:BTC,head:'Bitcoin',txid:'a1b2…synthetic…btc1',to:'Family savings · this Vault',amt:amt(201760),fee:'1,240 sats'};
+    const b2bBlock={mark:B2B,head:'Bitcoin Blake2b',txid:'c3d4…synthetic…b2b1',to:'Family savings · Blake2b',amt:amt(202020),fee:'980 sats'};
+    const rv=isB?{title:'Broadcast on Bitcoin',lede:'Only Bitcoin is sent now. Blake2b gets its own review later.',
+        blocks:[Object.assign({now:'Broadcast now',nowCls:'warn'},btcBlock),Object.assign({now:'Recorded, not sent now',nowCls:'muted'},b2bBlock)],
+        unsent:true,sent:false,castLabel:'Broadcast on Bitcoin',cast:()=>set({step:'confirming',conf:0}),canAbandon:true,back:go('sign'),sentText:'',afterLabel:'',after:()=>{}}
+      :{title:'Broadcast on Bitcoin Blake2b',lede:'Bitcoin has 6 confirmations. Check the Blake2b address and fee.',
+        blocks:[Object.assign({now:'Already recorded · 6 of 6',nowCls:'ok'},btcBlock),Object.assign({now:S.sentK?'Sent · waiting for confirmation':'Broadcast now',nowCls:S.sentK?'ok':'warn'},b2bBlock)],
+        unsent:!S.sentK,sent:S.sentK,castLabel:'Broadcast on Blake2b',cast:()=>set({sentK:true}),canAbandon:false,back:go('confirming'),
+        sentText:'Accepted for relay. Waiting for confirmation on Bitcoin Blake2b.',afterLabel:'Check again',after:go('done')};
+
+    const n=Math.min(6,S.conf);
+    const cf={n:String(n),bars:[0,1,2,3,4,5].map((i)=>({cls:i<n?'f':''})),notYet:n<6,
+      msg:n===0?'Connect accepted it. Waiting for the first block.':(n<6?'Blake2b waits for 6 confirmations, checked on both chains.':'Step 1 has the confirmations Blake2b needs.'),
+      check:()=>set({conf:Math.min(6,S.conf+1)})};
+
+    const abSt=S.ab;
+    const ab={idle:abSt==='idle',checking:abSt==='checking',clear:abSt==='clear',gone:abSt==='gone',open:abSt!=='gone',
+      check:()=>{set({ab:'checking'});setTimeout(()=>{const k=self.state.k;if(k&&k.ab==='checking')self.setState({k:Object.assign({},k,{ab:'clear'})});},1200);},
+      confirm:()=>set({ab:'gone'})};
+
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,
+      toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
+      lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
+      steps:steps,nx:nx,reqs:reqs,noCopy:noCopy,contCls:noCopy?'':'pri',
+      shared:shared,sharedTotal:amt(200000),deps:deps,depsNotReady:S.deps<1,checkDeps:()=>set({deps:1}),
+      signers:signers,sg:sg,txs:txs,rv:rv,cf:cf,ab:ab,
+      res:{btc:amt(201760),b2b:amt(202020)},
+      ack:()=>set({step:'confirming',conf:0}),resend:()=>set({step:'confirming',conf:0}),noop:()=>{},
+      is:{check:step==='check'||noCopy,coins:step==='coins',fees:step==='fees',sign:step==='sign',review:isB||isK,
+        confirming:step==='confirming',reorg:step==='reorg',dropped:step==='dropped',done:step==='done',abandon:step==='abandon'},
+      go:{check:go('check'),coins:go('coins'),fees:go('fees'),sign:()=>set({step:'sign',note:'',ab:'idle'}),bitcoin:go('bitcoin'),blake2b:()=>set({step:'blake2b',sentK:false}),abandon:()=>set({step:'abandon',ab:'idle'})}
+    };
+  }
+}
+</script>
+</body>
+</html>

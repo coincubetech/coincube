@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Locking Cube (hand-off to Launcher)</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+</helmet>
+<div style="width:1440px;height:900px;overflow:hidden">
+  <dc-import name="P-Launcher" hint-size="1440px,900px"></dc-import>
+</div>
+<script type="text/x-dc" data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};}
+  renderVals() {
+    // Prototype-only hand-off page: the runtime navigates on a link before the link's own handlers run,
+    // so "Lock" links land here; this clears the open-Cube flag and mounts the Launcher in place.
+    try { localStorage.removeItem('tenshu.proto.open'); localStorage.removeItem('tenshu.proto.seen'); } catch (e) {}
+    return {};
+  }
+}
+</script>
+</x-dc>
+</body>
+</html>

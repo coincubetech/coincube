@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Wallet Receive</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--teal:#2a9d7f;--hover:rgba(245,240,232,.06);--shadow:rgba(0,0,0,.45)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--teal:#1f7a62;--hover:rgba(32,32,32,.05);--shadow:rgba(60,40,10,.18)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol{margin:0}
+.tenshu a{color:var(--acc-ink)}
+.vh,.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+/* top bar (single-Cube model) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tring{display:inline-grid;place-items:center;width:20px;height:20px;border:1.5px dashed var(--muted);border-radius:50%}
+.tring>img{width:14px;height:14px;opacity:.6;display:block}
+.ttag{font-size:11.5px;font-weight:600;padding:1px 7px;border:1px solid var(--muted);border-radius:9px;color:var(--ink)}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 6px 0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.chip .end{padding-right:6px}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+.mini{height:24px;padding:0 10px;border-radius:12px;border:0;background:var(--accent);color:#1a1208;font-weight:600;font-size:12px;cursor:pointer}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.tenshu .lkb{display:inline-flex;align-items:center;height:28px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font:inherit;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu .lkb:hover{background:var(--hover)}
+.tenshu .lkb.go{background:var(--accent);border-color:var(--accent);color:#1a1208;font-weight:600}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni,.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.ni:disabled{cursor:not-allowed;background:transparent}
+.ni:disabled .ds{display:block;font-size:12px;color:var(--muted);font-weight:400}
+.attn{display:flex;align-items:center;gap:6px;width:calc(100% - 12px);margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;text-align:left;font-size:12.5px;text-decoration:none}
+.tenshu a.attn{color:var(--ink)}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{display:grid;grid-template-columns:minmax(0,680px) 240px;column-gap:40px;justify-content:center;padding:28px 40px 48px}
+.hd{grid-column:1 / -1;margin-bottom:20px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none;padding:2px 0;border-radius:4px}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:8px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+/* the one bounded form region (matches Send) */
+.form{border:1px solid var(--line);border-radius:16px;background:var(--panel);min-width:0}
+.fh{display:flex;align-items:center;gap:12px;padding:16px 24px;min-height:64px}
+.fh h2{font-size:17px;font-weight:600;flex:1}
+.fs{padding:20px 24px;border-top:1px solid var(--line)}
+.lbr{display:flex;align-items:center;gap:10px;min-height:28px;margin-bottom:8px}
+.lbr label,.lbr .lt{font-weight:600}
+.lbr .rt{margin-left:auto;display:flex;align-items:center;gap:8px}
+.inp{width:100%;height:44px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:15px;outline:none}
+.inp::placeholder{color:var(--muted)}
+.inp:focus,.inp.kf{border-color:var(--focus);box-shadow:0 0 0 1px var(--focus)}
+.inp.mono{font-size:14px}
+.inw{position:relative}.inw .inp{padding-right:64px}
+.suf{position:absolute;right:14px;top:0;height:44px;display:flex;align-items:center;color:var(--muted);font-size:13px;font-weight:500;pointer-events:none}
+.sub{display:flex;justify-content:space-between;gap:12px;margin-top:8px;font-size:13px;color:var(--muted)}
+.rail{display:inline-block;padding:1px 8px;border:1px solid var(--acc-ink);border-radius:10px;color:var(--acc-ink);font-size:11.5px;font-weight:500;letter-spacing:.04em}
+.seg{display:inline-flex;flex-wrap:wrap;border:1px solid var(--line);border-radius:10px;padding:2px;gap:2px;background:var(--bg)}
+.seg button{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:0;border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted);white-space:nowrap}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.seg button:disabled{cursor:not-allowed;opacity:.6}
+.seg.sm button{height:26px;padding:0 10px;font-size:12px}
+.proto{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:10px}
+.proto .pl{font-size:12px;color:var(--muted);margin-right:4px}
+.pb{height:26px;padding:0 10px;border:1px dashed var(--line);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
+.tenshu .pb{color:var(--muted)}
+.pb:hover{background:var(--hover)}
+/* route blocks */
+.route{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:40px}
+.route .arr{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:var(--muted)}
+.blk{padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);min-width:0}
+.blk .asset{display:flex;align-items:center;gap:10px;margin-top:6px;font-size:18px;font-weight:600}
+.blk .am{margin-top:6px;font-size:14px;min-height:20px}
+.blk .rail{margin-top:8px}
+.coin{position:relative;display:block;flex:none;width:40px;height:40px}.coin>img{position:absolute;left:1px;top:1px;width:34px;height:34px}.coin>svg{position:absolute;left:0;top:0}
+/* stablecoin rail picker */
+.rails{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.rr{display:flex;align-items:center;gap:10px;min-height:52px;padding:6px 12px 6px 8px;border:1px solid var(--line);border-radius:10px;background:var(--bg);cursor:pointer;text-align:left}
+.rr[aria-pressed="true"]{border-color:var(--acc-ink);background:var(--selected)}
+.rr:disabled{cursor:not-allowed;opacity:.6}
+.rr .coin{transform:scale(.8);transform-origin:left center;margin-right:-8px}
+.rr .nm{flex:1;min-width:0}.rr .nm b{font-weight:600}
+/* receive output */
+.two{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+.recv{display:grid;grid-template-columns:160px minmax(0,1fr);gap:24px;align-items:start}
+.qr{width:160px}
+.qr svg{display:block;border-radius:8px;border:1px solid var(--line)}
+.qrph{width:160px;height:160px;border:1px dashed var(--line);border-radius:8px}
+.cpy{display:flex;gap:8px}
+.cpy .inp{flex:1;min-width:0;font-size:13px}
+.say{font-size:14px;margin-top:12px}
+.kr{display:flex;justify-content:space-between;gap:16px;padding:9px 0;border-bottom:1px solid var(--line);font-size:13px}
+.kr .k{color:var(--muted)}.kr .v{text-align:right;overflow-wrap:anywhere}
+.kvs{margin-top:12px;border-top:1px solid var(--line)}
+.once{display:flex;align-items:center;gap:8px;margin-top:12px;font-weight:600}
+.sk{height:12px;border-radius:6px;background:var(--hover);margin-top:12px}
+.alert{display:flex;align-items:flex-start;gap:12px}
+.alert .tx{flex:1}
+.alert b{display:block;font-weight:600}
+.alert p{font-size:13px;color:var(--muted);margin-top:2px}
+.ffoot{display:flex;align-items:center;gap:12px;padding:16px 24px;border-top:1px solid var(--line)}
+.ffoot .hint{flex:1;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.pill{height:40px;padding:0 22px;border-radius:20px;font-weight:600;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.pill.fill{background:var(--accent);border:1px solid var(--accent);color:#1a1208}
+.pill.out{background:transparent;border:1px solid var(--acc-ink)}
+.tenshu .pill.out{color:var(--acc-ink)}
+.pill:disabled{opacity:.45;cursor:not-allowed}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;white-space:nowrap}
+.btn.lg{height:44px;padding:0 16px;border-radius:10px}
+.spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--acc-ink);border-radius:50%;animation:sp .8s linear infinite;flex:none;display:inline-block}
+@keyframes sp{to{transform:rotate(360deg)}}
+/* aside */
+.aside{padding-top:4px}
+.aside .bv{font-size:15px;font-weight:600;margin-top:6px}
+.aside .bv .u{color:var(--muted);font-weight:400}
+.ab{margin-top:20px;padding-top:16px;border-top:1px solid var(--line)}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip" title="{{ chipTitle.acct }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="srl">Connect account alex@example.test:</span><span class="st ok end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></sc-if>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span><a class="mini" href="V3-Launcher-Connect.dc.html" style="display:inline-flex;align-items:center;text-decoration:none;color:#1a1208">Sign in</a></sc-if>
+      </div>
+      <div class="chip" title="{{ chipTitle.conn }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="st ok end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="st unk end"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M7.2 7.2a1.9 1.9 0 1 1 2.6 1.75c-.5.25-.8.6-.8 1.15v.4M9 12.6v.01"/></svg>Not checked</span></sc-if>
+      </div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="V3-Launcher-Spin.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock {{ cube.name }} and open the Launcher?</p><a class="lkb go" href="V3-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="lkb" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="V3-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}">
+          <button type="button" class="ni {{ nv.spark.cls }}" aria-current="{{ nv.spark.cur }}" onClick="{{ nv.spark.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></button>
+        </sc-if>
+        <button type="button" class="ni {{ nv.vault.cls }}" aria-current="{{ nv.vault.cur }}" onClick="{{ nv.vault.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>{{ cube.vault }}</span></button>
+        <sc-if value="{{ cube.main }}" hint-placeholder-val="{{ true }}">
+          <button type="button" class="ni {{ nv.liquid.cls }}" aria-current="{{ nv.liquid.cur }}" onClick="{{ nv.liquid.pick }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></button>
+        </sc-if>
+        <sc-if value="{{ cube.test }}" hint-placeholder-val="{{ false }}">
+          <button type="button" class="ni" disabled><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span><span>Spark</span><span class="ds">Not available on Testnet4</span></span></button>
+        </sc-if>
+      </div>
+      <a class="attn" href="V2-Cube-Overview.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <div class="hd">
+          <a class="back" href="V2-Cube-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>{{ w.name }}</a>
+          <h1 class="ph">Receive</h1>
+          <p class="idl"><sc-if value="{{ w.btcNet }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if><sc-if value="{{ w.liqNet }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>{{ w.ctx }}</p>
+        </div>
+
+        <section class="form" aria-labelledby="form-h" aria-busy="{{ busyA }}">
+          <div class="fh">
+            <h2 id="form-h">Payment details</h2>
+            <sc-if value="{{ v.kindSeg }}" hint-placeholder-val="{{ true }}">
+              <div class="seg" role="group" aria-label="Receive kind">
+                <sc-for list="{{ kinds }}" as="o" hint-placeholder-count="2"><button type="button" aria-pressed="{{ o.p }}" disabled="{{ v.lockMethods }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+              </div>
+            </sc-if>
+          </div>
+
+          <!-- Testnet gate -->
+          <sc-if value="{{ v.gate }}" hint-placeholder-val="{{ false }}">
+            <div class="fs alert">
+              <svg class="ic unk" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>
+              <div class="tx"><b>{{ gate.title }}</b><p>{{ gate.text }}</p></div>
+              <button type="button" class="btn" onClick="{{ toVault }}">Receive with Vault</button>
+            </div>
+          </sc-if>
+
+          <sc-if value="{{ v.main }}" hint-placeholder-val="{{ true }}">
+            <!-- secondary selector: Bitcoin methods -->
+            <sc-if value="{{ v.methodRow }}" hint-placeholder-val="{{ true }}">
+              <div class="fs">
+                <div class="lbr"><span class="lt" id="m-l">Method</span></div>
+                <div class="seg" role="group" aria-labelledby="m-l">
+                  <sc-for list="{{ methods }}" as="o" hint-placeholder-count="4"><button type="button" aria-pressed="{{ o.p }}" disabled="{{ v.lockMethods }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+                </div>
+              </div>
+            </sc-if>
+            <!-- secondary selector: stablecoin rails -->
+            <sc-if value="{{ v.railRow }}" hint-placeholder-val="{{ false }}">
+              <div class="fs">
+                <div class="lbr"><span class="lt" id="rail-l">Stablecoin and network</span></div>
+                <div class="rails" role="group" aria-labelledby="rail-l">
+                  <sc-for list="{{ rails }}" as="rr" hint-placeholder-count="7">
+                    <button type="button" class="rr" aria-pressed="{{ rr.p }}" disabled="{{ v.lockMethods }}" onClick="{{ rr.pick }}">
+                      <span class="coin" aria-hidden="true">
+                        <sc-if value="{{ rr.usdt }}" hint-placeholder-val="{{ true }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2a9d7f"/><path d="M11.5 12h13M18 12v13M13 17.5c1.6.7 3.2 1 5 1s3.4-.3 5-1" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.usdc }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2775ca"/><path d="M21.5 13.5c-.8-1-2-1.5-3.5-1.5-2 0-3.5 1.1-3.5 2.8 0 4 7.2 2.2 7.2 6.3 0 1.8-1.6 2.9-3.7 2.9-1.6 0-3-.6-3.8-1.7M18 9.5v2.5M18 24v2.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bLiquid }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#2a9d7f" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8c1.6 2 2.7 3.5 2.7 4.8a2.7 2.7 0 0 1-5.4 0c0-1.3 1.1-2.8 2.7-4.8z" fill="#fff"/></svg></sc-if>
+                        <sc-if value="{{ rr.bEth }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.4 35.2 32 32 36.6 28.8 32z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bTron }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M28.6 28.8h6.8L32 35.6z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bBnb }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8l3.6 2.1v4.2L32 36.2l-3.6-2.1v-4.2z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bSol }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M29.4 29.6h5.6M29 32h5.6M29.4 34.4h5.6" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                      </span>
+                      <span class="nm"><b>{{ rr.asset }}</b> <span class="muted">on {{ rr.net }}</span></span>
+                      <span class="rail">{{ rr.tag }}</span>
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- They send / You receive -->
+            <sc-if value="{{ v.route }}" hint-placeholder-val="{{ true }}">
+              <div class="fs">
+                <div class="route">
+                  <sc-for list="{{ route }}" as="rt" hint-placeholder-count="2">
+                    <div class="blk">
+                      <p class="cap">{{ rt.cap }}</p>
+                      <p class="asset">
+                        <span class="coin" aria-hidden="true">
+                          <sc-if value="{{ rt.btc }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+                          <sc-if value="{{ rt.usdt }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2a9d7f"/><path d="M11.5 12h13M18 12v13M13 17.5c1.6.7 3.2 1 5 1s3.4-.3 5-1" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.usdc }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2775ca"/><path d="M21.5 13.5c-.8-1-2-1.5-3.5-1.5-2 0-3.5 1.1-3.5 2.8 0 4 7.2 2.2 7.2 6.3 0 1.8-1.6 2.9-3.7 2.9-1.6 0-3-.6-3.8-1.7M18 9.5v2.5M18 24v2.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.bSpark }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#111211" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 28v8M28.5 30l7 4M28.5 34l7-4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.bLn }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#f5c542" style="stroke:var(--bg)" stroke-width="2"/><path d="M33 27.5 29.6 32.6h2.8l-1 3.9 3.4-5.1H32z" fill="#1a1208"/></svg></sc-if>
+                          <sc-if value="{{ rt.bLiquid }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#2a9d7f" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8c1.6 2 2.7 3.5 2.7 4.8a2.7 2.7 0 0 1-5.4 0c0-1.3 1.1-2.8 2.7-4.8z" fill="#fff"/></svg></sc-if>
+                          <sc-if value="{{ rt.bChain }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#f3821d" style="stroke:var(--bg)" stroke-width="2"/><path d="M30.3 33.7l3.4-3.4M31.2 29.5l.8-.8a2.3 2.3 0 0 1 3.3 3.3l-.8.8M32.8 34.5l-.8.8a2.3 2.3 0 0 1-3.3-3.3l.8-.8" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.bEth }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.4 35.2 32 32 36.6 28.8 32z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.bTron }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M28.6 28.8h6.8L32 35.6z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.bBnb }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8l3.6 2.1v4.2L32 36.2l-3.6-2.1v-4.2z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                          <sc-if value="{{ rt.bSol }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M29.4 29.6h5.6M29 32h5.6M29.4 34.4h5.6" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        </span>{{ rt.asset }}
+                      </p>
+                      <p class="am {{ rt.amCls }}">{{ rt.amt }}</p>
+                      <span class="rail">{{ rt.rail }}</span>
+                    </div>
+                  </sc-for>
+                  <svg class="ic arr" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 9h12M11 5l4 4-4 4"/></svg>
+                </div>
+              </div>
+            </sc-if>
+
+            <!-- loading -->
+            <sc-if value="{{ v.loading }}" hint-placeholder-val="{{ false }}">
+              <div class="fs recv">
+                <div class="qrph" aria-hidden="true"></div>
+                <div><p class="st unk"><span class="spin" aria-hidden="true"></span>Loading {{ w.name }}…</p><div class="sk" style="width:90%"></div><div class="sk" style="width:70%"></div><div class="sk" style="width:40%"></div></div>
+              </div>
+            </sc-if>
+            <!-- offline -->
+            <sc-if value="{{ v.offline }}" hint-placeholder-val="{{ false }}">
+              <div class="fs alert" role="alert">
+                <svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>
+                <div class="tx"><b class="warn">{{ off.title }}</b><p>Receiving is off until it reconnects.</p></div>
+                <button type="button" class="btn" onClick="{{ retry }}">Retry</button>
+              </div>
+            </sc-if>
+            <!-- Lightning address: signed out -->
+            <sc-if value="{{ v.claim }}" hint-placeholder-val="{{ false }}">
+              <div class="fs alert">
+                <svg class="ic unk" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+                <div class="tx"><b>Sign in to use your Lightning address</b><p>Other methods work signed out.</p></div>
+                <a class="btn" href="V3-Launcher-Connect.dc.html" style="text-decoration:none;color:var(--ink)">Sign in</a>
+              </div>
+            </sc-if>
+            <!-- swap could not be set up (stablecoin) -->
+            <sc-if value="{{ v.failed }}" hint-placeholder-val="{{ false }}">
+              <div class="fs alert" role="alert">
+                <svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>
+                <div class="tx"><b class="bad">Something went wrong</b><p>The swap couldn't be set up.</p></div>
+              </div>
+            </sc-if>
+
+            <!-- request form (Lightning invoice) -->
+            <sc-if value="{{ v.form }}" hint-placeholder-val="{{ false }}">
+              <div class="fs">
+                <div class="two">
+                  <div>
+                    <div class="lbr"><label for="r-amt">{{ form.amtLabel }}</label><span class="rt"><span class="seg sm" role="group" aria-label="Amount unit"><button type="button" aria-pressed="{{ form.satsP }}" onClick="{{ form.toSats }}">sats</button><button type="button" aria-pressed="{{ form.btcP }}" onClick="{{ form.toBtc }}">BTC</button></span></span></div>
+                    <div class="inw"><input id="r-amt" class="inp kf" type="text" inputmode="decimal" autocomplete="off" placeholder="{{ form.ph }}" value="{{ form.amt }}" aria-describedby="r-fx" onChange="{{ onAmt }}"><span class="suf">{{ form.unit }}</span></div>
+                    <p class="sub" id="r-fx"><span>{{ form.fiat }}</span></p>
+                  </div>
+                  <div>
+                    <div class="lbr"><label for="r-desc">Description</label><span class="rt cap">Optional</span></div>
+                    <input id="r-desc" class="inp" type="text" autocomplete="off" placeholder="Shown to the payer" value="{{ form.desc }}" onChange="{{ onDesc }}">
+                  </div>
+                </div>
+                <sc-if value="{{ form.limits }}" hint-placeholder-val="{{ false }}"><p class="sub" aria-live="polite"><span>{{ limitsText }}</span></p></sc-if>
+              </div>
+            </sc-if>
+
+            <!-- generate step (deposit, swap, stablecoin shift) -->
+            <sc-if value="{{ v.gen }}" hint-placeholder-val="{{ false }}">
+              <div class="fs">
+                <p>{{ gen.text }}</p>
+                <sc-if value="{{ gen.refund }}" hint-placeholder-val="{{ false }}">
+                  <div style="margin-top:16px">
+                    <div class="lbr"><label for="r-ref">Refund address</label></div>
+                    <input id="r-ref" class="inp mono" type="text" autocomplete="off" spellcheck="false" placeholder="{{ gen.refundPh }}" value="{{ gen.refundVal }}" aria-describedby="r-ref-h" onChange="{{ onRefund }}">
+                    <p class="sub" id="r-ref-h"><span>{{ gen.refundHelp }}</span></p>
+                    <div class="proto" role="group" aria-label="Example refund address"><span class="pl">Example</span><button type="button" class="pb" onClick="{{ gen.fillRefund }}">{{ gen.exLabel }}</button></div>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ gen.liqAmt }}" hint-placeholder-val="{{ false }}">
+                  <div class="two" style="margin-top:16px">
+                    <div>
+                      <div class="lbr"><label for="r-samt">Amount (optional)</label></div>
+                      <div class="inw"><input id="r-samt" class="inp" type="text" inputmode="decimal" autocomplete="off" placeholder="e.g. 100.00" value="{{ gen.samt }}" aria-describedby="r-samt-h" onChange="{{ onSamt }}"><span class="suf">USDt</span></div>
+                      <p class="sub" id="r-samt-h"><span>Leave blank for a variable rate.</span></p>
+                    </div>
+                    <div>
+                      <div class="lbr"><span class="lt" id="rate-l">Rate</span></div>
+                      <div class="seg" role="group" aria-labelledby="rate-l"><sc-for list="{{ gen.rates }}" as="o" hint-placeholder-count="2"><button type="button" aria-pressed="{{ o.p }}" disabled="{{ o.off }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for></div>
+                      <p class="sub"><span>{{ gen.rateNote }}</span></p>
+                    </div>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ gen.busy }}" hint-placeholder-val="{{ false }}"><p class="st unk" style="margin-top:12px" aria-live="polite"><span class="spin" aria-hidden="true"></span>{{ gen.busyText }}</p></sc-if>
+              </div>
+            </sc-if>
+
+            <!-- ready: QR + copy -->
+            <sc-if value="{{ v.ready }}" hint-placeholder-val="{{ true }}">
+              <div class="fs recv">
+                <div class="qr">
+                  <svg width="160" height="160" viewBox="0 0 25 25" shape-rendering="crispEdges" role="img" aria-label="Synthetic QR placeholder"><rect width="25" height="25" fill="#ffffff"/><path fill="#161716" fill-rule="evenodd" d="M2 2h7v7H2zM3 3v5h5V3zM4 4h3v3H4zM16 2h7v7h-7zM17 3v5h5V3zM18 4h3v3h-3zM2 16h7v7H2zM3 17v5h5v-5zM4 18h3v3H4z"/><path fill="#161716" d="M11 2h1v1h-1zM13 3h1v2h-1zM11 5h2v1h-2zM10 7h1v2h-1zM12 8h2v1h-2zM2 11h2v1H2zM5 10h1v2H5zM7 12h2v1H7zM10 10h3v1h-3zM14 11h1v3h-1zM11 12h2v2h-2zM16 11h2v1h-2zM19 10h1v2h-1zM21 12h2v1h-2zM17 13h1v2h-1zM10 15h1v2h-1zM12 16h2v1h-2zM15 16h1v1h-1zM17 17h3v1h-3zM21 15h1v3h-1zM11 19h1v2h-1zM13 20h2v1h-2zM16 19h1v2h-1zM18 20h1v3h-1zM20 21h3v1h-3zM10 22h3v1h-3zM14 22h2v1h-2zM22 19h1v1h-1z"/></svg>
+                </div>
+                <div style="min-width:0">
+                  <label for="r-val" style="font-weight:600">{{ out.label }}</label>
+                  <div class="cpy" style="margin-top:8px"><input id="r-val" class="inp mono" type="text" readonly value="{{ out.value }}"><button type="button" class="btn lg" onClick="{{ copy }}" aria-label="Copy {{ out.label }}">{{ copyLabel }}</button></div>
+                  <p class="vh" aria-live="polite">{{ copiedSr }}</p>
+                  <sc-if value="{{ out.hasOnce }}" hint-placeholder-val="{{ false }}"><p class="once warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>{{ out.once }}</p></sc-if>
+                  <p class="say">{{ out.say }}</p>
+                  <sc-if value="{{ out.hasRows }}" hint-placeholder-val="{{ false }}">
+                    <div class="kvs"><sc-for list="{{ out.rows }}" as="q" hint-placeholder-count="2"><div class="kr"><span class="k">{{ q.k }}</span><span class="v {{ q.vcls }}">{{ q.v }}</span></div></sc-for></div>
+                  </sc-if>
+                  <sc-if value="{{ v.verify }}" hint-placeholder-val="{{ false }}">
+                    <div class="kvs" style="padding-top:12px">
+                      <sc-if value="{{ ver.idle }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ ver.start }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="3" y="6" width="10" height="6" rx="1.5"/><path d="M13 8h2.5v2H13"/></svg>Verify on hardware device</button></sc-if>
+                      <sc-if value="{{ ver.waiting }}" hint-placeholder-val="{{ false }}"><p class="st unk" aria-live="polite"><span class="spin" aria-hidden="true"></span>Check the address on Hardware · Ledger-style device</p></sc-if>
+                      <sc-if value="{{ ver.done }}" hint-placeholder-val="{{ false }}"><p class="st ok" aria-live="polite"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Matches on Hardware · Ledger-style device</p></sc-if>
+                    </div>
+                  </sc-if>
+                </div>
+              </div>
+              <sc-if value="{{ v.label }}" hint-placeholder-val="{{ false }}">
+                <div class="fs">
+                  <div class="lbr"><label for="r-lbl">Label</label><span class="rt cap">Optional</span></div>
+                  <input id="r-lbl" class="inp" type="text" autocomplete="off" placeholder="e.g. Salary" value="{{ label }}" onChange="{{ onLabel }}">
+                </div>
+              </sc-if>
+            </sc-if>
+
+            <sc-if value="{{ v.foot }}" hint-placeholder-val="{{ true }}">
+              <div class="ffoot">
+                <p class="hint" aria-live="polite">{{ foot.hint }}</p>
+                <sc-if value="{{ foot.hasSec }}" hint-placeholder-val="{{ false }}"><button type="button" class="pill out" onClick="{{ foot.sec }}">{{ foot.secLabel }}</button></sc-if>
+                <sc-if value="{{ foot.hasPri }}" hint-placeholder-val="{{ false }}"><button type="button" class="pill fill" disabled="{{ foot.priOff }}" onClick="{{ foot.pri }}">{{ foot.priLabel }}</button></sc-if>
+              </div>
+            </sc-if>
+          </sc-if>
+        </section>
+
+        <aside class="aside" aria-label="Wallet">
+          <p class="cap">Receiving into</p>
+          <p style="font-weight:600;margin-top:4px">{{ w.name }}</p>
+          <sc-for list="{{ bal }}" as="b" hint-placeholder-count="1"><p class="bv">{{ b.num }} <span class="u">{{ b.unit }}</span></p></sc-for>
+          <div class="ab">
+            <sc-for list="{{ notes }}" as="n" hint-placeholder-count="1"><p class="cap" style="margin-bottom:10px">{{ n.t }}</p></sc-for>
+            <a class="back" href="V3-Activity.dc.html">See all in Activity</a>
+          </div>
+          <p class="cap" style="margin-top:24px">Prototype · synthetic addresses, invoices and QR · stablecoin rails, limits and rates subject to SDK validation</p>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"wallet":{"editor":"enum","options":["spark","liquid","vault"],"default":"spark","section":"Review"},"kind":{"editor":"enum","options":["bitcoin","stablecoin"],"default":"bitcoin","section":"Review"},"method":{"editor":"enum","options":["invoice","lnaddress","sparkaddress","deposit","lightning","liquidaddress","btcswap","address","usdt-eth","usdt-tron","usdt-bnb","usdt-sol","usdt-liquid","usdc-eth","usdc-sol"],"default":"invoice","section":"Review"},"state":{"editor":"enum","options":["ready","loading","offline","signedOut","testnetGate","swapFailed"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};}
+  renderVals(){
+    const P=this.props,self=this;
+    const pw=P.wallet||'spark',pk=P.kind||'bitcoin',pm=P.method||'invoice',pst=P.state||'ready',hb=!!P.hideBalances;
+    const key=[pw,pk,pm,pst,hb].join('|');
+    const RATE=0.00082784,D='••••••';
+    const fmt=n=>Math.round(n).toLocaleString('en-US');
+    // secondary selectors per wallet and kind
+    const BM={
+      spark:[['invoice','Lightning invoice'],['lnaddress','Lightning address'],['sparkaddress','Spark address'],['deposit','Bitcoin address · deposit']],
+      liquid:[['lightning','Lightning'],['liquidaddress','Liquid address'],['btcswap','Bitcoin address · on-chain swap']],
+      vault:[['address','Address']]
+    };
+    // stablecoin receive rails (SideShift in source; USDt on Liquid is native for the Liquid wallet)
+    const RAILS=[['usdt-eth','USDt','Ethereum','eth','ERC-20'],['usdt-tron','USDt','Tron','tron','TRC-20'],['usdt-bnb','USDt','Binance','bnb','BEP-20'],['usdt-sol','USDt','Solana','sol','SPL'],['usdt-liquid','USDt','Liquid','liquid',''],['usdc-eth','USDC','Ethereum','eth','ERC-20'],['usdc-sol','USDC','Solana','sol','SPL']];
+    const SR={spark:['usdt-eth','usdt-tron','usdt-bnb','usdt-sol','usdt-liquid','usdc-eth','usdc-sol'],liquid:['usdt-liquid','usdt-eth','usdt-tron','usdt-bnb','usdt-sol']};
+    const NADDR={eth:'0x7a…synthetic…e41',tron:'T9y…synthetic…r4u',bnb:'0x3c…synthetic…b07',sol:'5Fz…synthetic…9pk',liquid:'lq1q…synthetic…u5t'};
+    const fixKind=(w,k)=>w==='vault'?'bitcoin':(k==='stablecoin'?'stablecoin':'bitcoin');
+    const fixM=(w,k,m)=>{if(k==='stablecoin'){const l=SR[w];return l.indexOf(m)>=0?m:l[w==='spark'?1:0];}const l=BM[w];return l.some(x=>x[0]===m)?m:l[0][0];};
+    const init=(w,k,m,st)=>{const kk=fixKind(w,k);return{w:w,kd:kk,m:fixM(w,kk,m),st:st,created:true,amt:'5000',desc:'Coffee · synthetic',unit:'sats',dep:'none',swap:'ready',shift:st==='swapFailed'?'failed':'none',refund:'',rate:'fixed',samt:'',ver:'idle',idx:0,label:'',copied:false,busy:false,limits:'ready'};};
+    const lockAsk=!!this.state.lockAsk;
+    const S=this.state.k===key?this.state:Object.assign(init(pw,pk,pm,pst),{k:key,hide:hb,lockAsk:lockAsk});
+    const set=o=>self.setState(Object.assign({},S,o));
+    const later=(o,ms)=>setTimeout(()=>{if(self.state.k===key)self.setState(Object.assign({},self.state,o));},ms);
+    const w=S.w,k=S.kd,m=S.m,st=S.st,hide=S.hide;
+    const isS=w==='spark',isL=w==='liquid',isV=w==='vault',stable=k==='stablecoin';
+    const test=st==='testnetGate',signedOut=st==='signedOut';
+    const gated=test&&!isV;
+    const RL=stable?(RAILS.filter(r=>r[0]===m)[0]||RAILS[1]):null;
+    const native=stable&&isL&&m==='usdt-liquid';
+    const isShift=stable&&!native;
+    const CFG={
+      spark:{name:'Spark · Daily spending',ctx:'Everyday · Bitcoin mainnet',btcNet:true,off:'Spark bridge disconnected'},
+      liquid:{name:'Liquid · Travel',ctx:'Everyday · Liquid network',btcNet:false,off:'Liquid backend unreachable'},
+      vault:{name:test?'Vault · Lab':'Vault · Family savings',ctx:test?'Lab · Testnet4':'Everyday · Bitcoin mainnet',btcNet:true,off:'Bitcoin node offline'}
+    }[w];
+    const VADDR=['8hn','3qd','7ue','k2m'];
+    const vAddr=(test?'tb1q…synthetic…':'bc1q…synthetic…')+VADDR[S.idx%VADDR.length];
+
+    // request form (Spark invoice, Liquid Lightning)
+    const isReq=!stable&&(m==='invoice'||m==='lightning');
+    const parse=t=>{t=String(t||'');if(S.unit==='btc')return Math.round((parseFloat(t)||0)*1e8);return parseInt(t.replace(/[^0-9]/g,''),10)||0;};
+    const sats=isReq?parse(S.amt):0;
+    const conv=u=>{if(u===S.unit)return;set({unit:u,amt:S.amt?(u==='btc'?(parse(S.amt)/1e8).toFixed(8):String(parse(S.amt))):''});};
+    const form={amtLabel:isL?'Amount':'Amount (optional)',satsP:S.unit==='sats'?'true':'false',btcP:S.unit==='btc'?'true':'false',
+      toSats:()=>conv('sats'),toBtc:()=>conv('btc'),unit:S.unit==='btc'?'BTC':'sats',amt:S.amt,desc:S.desc,
+      ph:isL?'Enter amount':S.unit==='btc'?'Amount in BTC (optional)':'Amount in sats (optional)',
+      fiat:sats>0?'≈ $'+(sats*RATE).toFixed(2):'Any amount',limits:isL};
+    const create=()=>{set({busy:true});later({busy:false,created:true},800);};
+
+    // generate steps
+    const shiftNeeded=isShift&&(S.shift==='none'||S.shift==='busy');
+    const genNeeded=(!stable&&m==='deposit'&&S.dep!=='ready')||(!stable&&m==='btcswap'&&S.swap!=='ready')||shiftNeeded;
+    const genBusy=stable?S.shift==='busy':m==='deposit'?S.dep==='busy':S.swap==='busy';
+    const rateFixed=S.rate==='fixed'&&!!S.samt.trim();
+    const gen={busy:genBusy,
+      text:stable?(isS?RL[1]+' on '+RL[2]+' arrives as bitcoin in Spark.':RL[2]+' USDt will be swapped and delivered as Liquid USDt.'):m==='deposit'?'Receive on-chain bitcoin into Spark.':'Bitcoin sent on-chain arrives as L-BTC.',
+      busyText:stable?(isS?'Setting up your deposit address…':'Creating deposit address…'):m==='deposit'?'Creating deposit address…':'Generating Address…',
+      refund:isShift&&isS,refundVal:S.refund,refundPh:stable?'Your '+RL[1]+' address on '+RL[2]:'',
+      refundHelp:stable?'If the swap can’t complete, your deposit returns here, on '+RL[2]+', not as bitcoin.':'',
+      exLabel:stable?RL[1]+' on '+RL[2]:'',fillRefund:()=>set({refund:stable?NADDR[RL[3]]:''}),
+      liqAmt:isShift&&isL,samt:S.samt,
+      rates:[['fixed','Fixed Rate'],['variable','Variable Rate']].map(o=>({label:o[1],p:(o[0]==='fixed'?rateFixed:!rateFixed)?'true':'false',off:o[0]==='fixed'&&!S.samt.trim(),pick:()=>set({rate:o[0]})})),
+      rateNote:rateFixed?'Rate locked until expiry':'Rate determined at settlement'};
+    const genGo=()=>{
+      if(stable){set({shift:'busy'});later({shift:'ready'},1000);return;}
+      if(m==='deposit'){set({dep:'busy'});later({dep:'ready'},1000);}else{set({swap:'busy',limits:'fetching'});later({swap:'ready',limits:'ready'},1000);}};
+
+    // rails row
+    const coin=(asset,b)=>({btc:asset!=='USDt'&&asset!=='USDC',usdt:asset==='USDt',usdc:asset==='USDC',bSpark:b==='spark',bLn:b==='ln',bChain:b==='chain',bLiquid:b==='liquid',bEth:b==='eth',bTron:b==='tron',bBnb:b==='bnb',bSol:b==='sol'});
+    const rails=stable?SR[w].map(id=>{const r=RAILS.filter(x=>x[0]===id)[0];return Object.assign({asset:r[1],net:r[2],tag:r[2].toUpperCase(),p:m===id?'true':'false',pick:()=>set({m:id,copied:false,shift:'none',refund:'',samt:'',rate:'fixed'})},coin(r[1],r[3]));}):[];
+
+    // outputs
+    const invVal=sats>0?'lnbc'+Math.max(1,Math.round(sats/100))+'u1p…synthetic…7xk':'lnbc1p…synthetic…q8f';
+    const amtRow={k:'Amount',v:sats>0?fmt(sats)+' SATS':'Any amount',vcls:''};
+    const descRow=S.desc?[{k:'Description',v:S.desc,vcls:''}]:[];
+    let o;
+    if(stable&&native)o={label:'Liquid address',value:NADDR.liquid,say:'Share this address to receive USDt (Liquid Tether) from any Liquid wallet',rows:[]};
+    else if(stable&&isS)o={label:RL[1]+' on '+RL[2]+' · deposit address',value:NADDR[RL[3]],once:'Only send '+RL[1]+' on '+RL[2]+(RL[4]?' ('+RL[4]+')':''),say:'Send between [MIN] and [MAX] '+RL[1]+'. Amounts outside this range are refunded.',
+      rows:[{k:'Status',v:'Waiting for deposit',vcls:''},{k:'Refund address',v:S.refund||NADDR[RL[3]],vcls:'mono'},{k:'Shift ID',v:'a1b2…synthetic…d9e',vcls:'mono'}]};
+    else if(stable)o={label:RL[2]+' USDt deposit address',value:NADDR[RL[3]],once:'Only send '+RL[2]+' USDt'+(RL[4]?' ('+RL[4]+')':''),say:'USDt sent here is swapped to Liquid USDt.',
+      rows:[{k:'Status',v:'Waiting for deposit',vcls:''},{k:'Rate',v:rateFixed?'Fixed · '+S.samt+' USDt':'Variable',vcls:''},{k:'Min deposit',v:'[MIN] USDt',vcls:''},{k:'Max deposit',v:'[MAX] USDt',vcls:''},{k:'Swap ID',v:'a1b2…synthetic…d9e',vcls:'mono'}]};
+    else o={
+      invoice:{label:'Lightning invoice',value:invVal,say:'Share this invoice to receive sats via Lightning',rows:[amtRow].concat(descRow,[{k:'Expires',v:'In [N] minutes',vcls:''}])},
+      lnaddress:{label:'Lightning address',value:'alex@ln.example.test',say:'Anyone can pay this address, any amount, any time.',rows:[]},
+      sparkaddress:{label:'Spark address',value:'sp1q…synthetic…v9d',say:'For payments from other Spark wallets.',rows:[]},
+      deposit:{label:'Bitcoin deposit address',value:'bc1q…synthetic…4kz',say:'Deposits arrive in Spark after on-chain confirmation.',rows:[{k:'Pending deposits',v:'None',vcls:''}]},
+      lightning:{label:'Lightning invoice',value:invVal,say:'Share this invoice to receive sats via Lightning',rows:[amtRow].concat(descRow,[{k:'Arrives as',v:'L-BTC after the swap',vcls:''}])},
+      liquidaddress:{label:'Liquid address',value:'lq1q…synthetic…m2r',say:'Share this address to receive L-BTC from any Liquid wallet',rows:[]},
+      btcswap:{label:'Swap Address',value:'bc1q…synthetic…9wp',once:'Use this address for ONE deposit only.',say:'Bitcoin sent here is swapped to L-BTC.',rows:[{k:'Swap ID',v:'a1b2…synthetic…e7f',vcls:'mono'},{k:'Limits',v:S.limits==='fetching'?'Fetching current swap limits…':'[MIN] to [MAX] sats',vcls:''}]},
+      address:{label:'Bitcoin address',value:vAddr,say:'Addresses are single-use; a new one is generated each time.',rows:[{k:'Network',v:test?'Testnet4':'Bitcoin mainnet',vcls:''}]}
+    }[m];
+    const out={label:o.label,value:o.value,say:o.say,once:o.once||'',hasOnce:!!o.once,rows:o.rows,hasRows:o.rows.length>0};
+
+    // They send / You receive (source labels THEY SEND / YOU RECEIVE)
+    const SENDB={invoice:['Bitcoin','ln','LIGHTNING'],lnaddress:['Bitcoin','ln','LIGHTNING'],lightning:['Bitcoin','ln','LIGHTNING'],sparkaddress:['Bitcoin','spark','SPARK'],deposit:['Bitcoin','chain','ON-CHAIN'],btcswap:['Bitcoin','chain','ON-CHAIN'],address:['Bitcoin','chain','ON-CHAIN'],liquidaddress:['L-BTC','liquid','LIQUID']};
+    const sb=stable?[RL[1],RL[3],RL[2].toUpperCase()]:SENDB[m];
+    const rb=isS?['Bitcoin','spark','SPARK']:isV?['Bitcoin','chain','ON-CHAIN']:stable?['USDt','liquid','LIQUID']:['L-BTC','liquid','LIQUID'];
+    const swapped=isShift||(isL&&!stable&&(m==='lightning'||m==='btcswap'));
+    const sendAmt=sats>0?fmt(sats)+' SATS':(isShift&&isL&&S.samt.trim())?S.samt+' USDt':'Any amount';
+    const recvAmt=swapped?(sendAmt==='Any amount'?'Any amount, after swap fees':'≈ '+sendAmt+' less swap fees'):sendAmt;
+    const route=[
+      Object.assign({cap:'They send',asset:sb[0],rail:sb[2],amt:sendAmt,amCls:sendAmt==='Any amount'?'muted':''},coin(sb[0],sb[1])),
+      Object.assign({cap:'You receive',asset:rb[0],rail:rb[2],amt:recvAmt,amCls:swapped||sendAmt==='Any amount'?'muted':''},coin(rb[0],rb[1]))
+    ];
+
+    // view flags
+    const loading=st==='loading'&&!gated,offline=st==='offline'&&!gated;
+    const failed=isShift&&S.shift==='failed'&&!loading&&!offline;
+    const claim=signedOut&&!stable&&m==='lnaddress'&&!loading&&!offline;
+    const formOn=!gated&&!loading&&!offline&&isReq&&!S.created;
+    const genOn=!gated&&!loading&&!offline&&!failed&&genNeeded;
+    const readyOn=!gated&&!loading&&!offline&&!claim&&!failed&&!formOn&&!genOn;
+    const v={gate:gated,main:!gated,kindSeg:!gated&&!isV,methodRow:!stable,railRow:stable,route:!loading,
+      loading:loading,offline:offline,claim:claim,failed:failed,form:formOn,gen:genOn,ready:readyOn,
+      verify:readyOn&&isV,label:readyOn&&isV,lockMethods:loading||offline,foot:!gated&&!loading};
+
+    // footer actions
+    let foot={hint:'',hasPri:false,pri:()=>{},priLabel:'',priOff:false,hasSec:false,sec:()=>{},secLabel:''};
+    if(offline)foot.hint='Payments to earlier addresses still arrive once it reconnects.';
+    else if(failed)foot=Object.assign(foot,{hasPri:true,priLabel:'Start over',pri:()=>set({shift:'none'})});
+    else if(claim)foot.hint='';
+    else if(formOn)foot=Object.assign(foot,{hint:S.busy?'Creating invoice…':'',hasPri:true,priLabel:'Create invoice',priOff:S.busy||(isL&&sats<=0),pri:create});
+    else if(genOn)foot=Object.assign(foot,{hint:m==='btcswap'?'Swap ID appears with the address.':'',hasPri:true,
+      priLabel:stable?(isS?'Generate deposit address':'Generate Deposit Address'):m==='deposit'?'Generate deposit address':'Generate Address',
+      priOff:genBusy||(isShift&&isS&&!S.refund.trim()),pri:genGo});
+    else if(readyOn){
+      if(isReq)foot=Object.assign(foot,{hint:'Waiting for payment.',hasSec:true,secLabel:'New invoice',sec:()=>set({created:false,copied:false})});
+      else if(isV)foot=Object.assign(foot,{hasSec:true,secLabel:'New address',sec:()=>set({idx:S.idx+1,ver:'idle',copied:false,label:''})});
+      else if(isShift)foot=Object.assign(foot,{hint:'Waiting for deposit',hasSec:true,secLabel:'Start over',sec:()=>set({shift:'none',copied:false})});
+      else if(m==='deposit')foot=Object.assign(foot,{hint:'Waiting for a deposit.',hasSec:true,secLabel:'Generate another',sec:()=>{set({dep:'busy',copied:false});later({dep:'ready'},1000);}});
+      else if(m==='btcswap')foot=Object.assign(foot,{hint:'Waiting for the deposit.',hasSec:true,secLabel:'Generate New Address',sec:()=>{set({swap:'busy',limits:'fetching',copied:false});later({swap:'ready',limits:'ready'},1000);}});
+      else foot.hint='Waiting for payment.';
+    }
+    const ver={idle:S.ver==='idle',waiting:S.ver==='waiting',done:S.ver==='done',start:()=>{set({ver:'waiting'});later({ver:'done'},1200);}};
+
+    const kinds=[['bitcoin','Bitcoin'],['stablecoin','Stablecoin']].map(x=>({label:x[1],p:k===x[0]?'true':'false',pick:()=>{const kk=fixKind(w,x[0]);set({kd:kk,m:fixM(w,kk,''),copied:false,shift:'none',refund:'',samt:''});}}));
+    const methods=BM[w].map(x=>({label:x[1],p:m===x[0]?'true':'false',pick:()=>set({m:x[0],copied:false})}));
+    const nvi=x=>({cls:w===x?'on':'',cur:w===x?'page':'false',pick:()=>self.setState(Object.assign(init(x,x==='vault'?'bitcoin':k,'',st),{k:key,hide:S.hide,lockAsk:false}))});
+    const balRaw=isL?[{num:'12,784',unit:'SATS L-BTC'},{num:'10.37',unit:'USDt'}]:isV?[{num:'250,000',unit:'SATS'}]:[{num:'25,053',unit:'SATS'}];
+
+    // the method's note (aside); safety wording quoted from source
+    let notes=[];
+    if(!gated){
+      if(isShift&&isS)notes=['Conversion is performed by SideShift, a third-party service. It isn’t available in all jurisdictions, and swaps may be held for review.','Bitcoin arrives on-chain and is added after about [N] confirmations.'];
+      else if(isShift)notes=['Swaps run through SideShift.','Deposits outside the min and max are refunded.'];
+      else if(native)notes=['Arrives as Liquid USDt. No swap.'];
+      else if(m==='lnaddress')notes=['This app must be open and active to receive payments.'];
+      else if(m==='sparkaddress')notes=['Static and reusable. Spark-to-Spark transfers settle instantly.'];
+      else if(m==='deposit')notes=['Spendable after [N] on-chain confirmations.'];
+      else if(m==='lightning')notes=['Lightning payments to Liquid arrive through a swap.'];
+      else if(m==='btcswap')notes=['If your deposit is outside the range or the swap fails, funds are recoverable via Refund in the Transactions tab.'];
+    }
+
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,toggleHide:()=>set({hide:!hide}),
+      lockAsk:!!S.lockAsk,lockIdle:!S.lockAsk,askLock:()=>set({lockAsk:true}),cancelLock:()=>set({lockAsk:false}),
+      chipTitle:{acct:signedOut?'Connect account · Signed out':'alex@example.test · Signed in',conn:'Cube service · '+(signedOut?'Not checked':'Connected')},
+      signedIn:!signedOut,signedOut:signedOut,
+      cube:{name:test?'Lab':'Everyday',net:test?'Testnet4':'Bitcoin mainnet',main:!test,test:test,vault:test?'Vault · Lab':'Vault · Family savings'},
+      nv:{spark:nvi('spark'),vault:nvi('vault'),liquid:nvi('liquid')},
+      w:{name:gated?(isS?'Spark':'Liquid'):CFG.name,ctx:gated?'Lab · Testnet4':CFG.ctx,btcNet:CFG.btcNet,liqNet:!CFG.btcNet},
+      gate:isS?{title:'Spark isn’t available on Testnet4',text:'Spark supports Bitcoin mainnet and Regtest only.'}:{title:'Lab has no Liquid wallet',text:'Liquid · Travel lives in the Everyday Cube.'},
+      toVault:()=>self.setState(Object.assign(init('vault','bitcoin','address',st),{k:key,hide:S.hide,lockAsk:false})),
+      kinds:kinds,methods:methods,rails:rails,route:route,v:v,busyA:loading?'true':'false',
+      off:{title:CFG.off},retry:()=>set({st:'ready'}),
+      form:form,onAmt:e=>set({amt:e.target.value}),onDesc:e=>set({desc:e.target.value}),
+      limitsText:S.limits==='fetching'?'Fetching current swap limits…':'Receive between [MIN] and [MAX] sats',
+      gen:gen,onRefund:e=>set({refund:e.target.value}),onSamt:e=>set({samt:e.target.value}),
+      out:out,copyLabel:S.copied?'Copied':'Copy',copiedSr:S.copied?out.label+' copied':'',copy:()=>set({copied:true}),
+      ver:ver,label:S.label,onLabel:e=>set({label:e.target.value}),
+      foot:foot,
+      bal:balRaw.map(b=>hide?{num:D,unit:''}:b),notes:notes.map(t=>({t:t}))
+    };
+  }
+}
+</script>
+</body>
+</html>

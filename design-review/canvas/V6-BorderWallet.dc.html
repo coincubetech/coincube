@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 Border Wallet</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+.tenshu{--on-accent:#201407;--scrim:rgba(10,10,9,.55);--cell:#262725;font-variant-numeric:tabular-nums}
+.tenshu.light{--scrim:rgba(60,50,40,.28);--cell:#f1ede6}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu .sr{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.crumb{display:flex;align-items:center;gap:8px;font-size:14px;white-space:nowrap}
+.crumb .sep{color:var(--muted)}
+.net{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.net img{width:18px;height:18px;border-radius:50%;display:block}
+
+/* page behind the modal */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.page{position:absolute;inset:0;padding:40px 96px;box-sizing:border-box}
+.page.dim{opacity:.4}
+.page h1{margin:0;font-size:24px;font-weight:600}
+.page .sub{margin:4px 0 0;color:var(--muted);font-size:13px}
+.blk{margin-top:28px;max-width:760px}
+.blk h2{margin:0 0 8px;font-size:14px;font-weight:600}
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.r{display:flex;align-items:center;gap:16px;min-height:52px;padding:8px 0;border-bottom:1px solid var(--line)}
+.r .main{flex:1}
+.r .t{font-weight:500}
+.r .s{font-size:13px;color:var(--muted)}
+.stt{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.stt svg{width:16px;height:16px}
+.ok{color:var(--good)}
+.alert{display:flex;align-items:flex-start;gap:10px;margin-top:20px;max-width:760px;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--bad);border-radius:8px;background:var(--panel)}
+.alert svg{width:18px;height:18px;color:var(--bad);margin-top:1px}
+
+/* modal */
+.scrim{position:absolute;inset:0;background:var(--scrim);z-index:3}
+.dlg{position:absolute;left:50%;top:40px;transform:translateX(-50%);box-sizing:border-box;padding:20px 24px 24px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);z-index:4;display:flex;flex-direction:column;gap:12px}
+.light .dlg{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
+.dlg.w500{width:500px}.dlg.w550{width:560px}.dlg.wgrid{width:912px}
+.mh{display:flex;align-items:center;gap:12px}
+.mh h2{margin:0;font-size:20px;font-weight:600;flex:1}
+.x{width:32px;height:32px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:6px;background:none;cursor:pointer;color:var(--muted)}
+.x:hover{border-color:var(--line)}
+.x svg{width:16px;height:16px}
+.steps{display:flex;gap:16px;margin:0;padding:0 0 10px;list-style:none;border-bottom:1px solid var(--line);font-size:12px;color:var(--muted)}
+.steps li{display:flex;align-items:center;gap:6px}
+.steps .n{width:18px;height:18px;border-radius:50%;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:11px}
+.steps li[aria-current="step"]{color:var(--ink);font-weight:600}
+.steps li[aria-current="step"] .n{border-color:var(--accent);background:var(--selected)}
+.steps li.done .n{border-color:var(--good);color:var(--good)}
+.dlg p{margin:0}
+.dlg b{font-weight:600}
+.dlg ol{margin:0;padding-left:20px;display:flex;flex-direction:column;gap:4px}
+.imp{padding:12px 14px;border-left:3px solid var(--warn);background:var(--selected);border-radius:0 8px 8px 0}
+.words{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.wd{display:flex;align-items:center;gap:6px}
+.wd span{width:22px;text-align:right;font-size:12px;color:var(--muted)}
+.inp{height:36px;width:100%;box-sizing:border-box;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.inp:focus{border-color:var(--focus)}
+.cap{font-size:12px;color:var(--muted)}
+.err{display:flex;align-items:flex-start;gap:6px;color:var(--bad);font-size:13px}
+.err svg{width:16px;height:16px;margin-top:1px}
+.tools{display:flex;align-items:center;gap:8px}
+.tools .cnt{flex:1;font-size:13px}
+.gridcap{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--muted)}
+.gridbox{height:400px;overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--bg);padding:4px}
+.grid{display:grid;grid-template-columns:28px repeat(16,50px);gap:1px}
+.rn{font-size:10px;color:var(--muted);display:flex;align-items:center;justify-content:flex-end;padding-right:4px}
+.cell{width:50px;height:28px;padding:0;border:1px solid var(--line);border-radius:4px;background:var(--cell);cursor:pointer;font-size:11px;font-family:'IBM Plex Mono',ui-monospace,monospace}
+.cell:hover{border-color:var(--muted)}
+.cell[aria-pressed="true"]{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:12px}
+.chk{font-weight:600;color:var(--good)}
+.kv{display:flex;flex-direction:column;gap:4px;padding:12px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.foot2{display:flex;align-items:center;gap:10px;margin-top:4px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.btn:hover{border-color:var(--muted)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.primary:hover:not(:disabled){background:#ffa54d;border-color:#ffa54d}
+.btn.ghost{border-color:transparent}
+.btn.full{flex:1}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="vsep"></span>
+    <p class="crumb"><b>Everyday</b><span class="sep">›</span><span>{{ crumb }}</span></p>
+    <span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><span>Bitcoin mainnet</span></span>
+  </header>
+
+  <main class="stage">
+    <!-- ENROL page: installer "Set keys" -->
+    <sc-if value="{{ v.enrolPage }}" hint-placeholder-val="{{ true }}">
+      <div class="page {{ pageDim }}" aria-hidden="{{ pageHidden }}">
+        <h1>Set keys</h1>
+        <p class="sub">Vault · Family savings · Bitcoin mainnet</p>
+        <section class="blk">
+          <h2>Primary spending option:</h2>
+          <ul class="rows">
+            <li class="r"><span class="main"><span class="t">Primary key #1</span><br><span class="s">Cube Key · This device · <span class="mono">a1b2c3d4</span></span></span></li>
+            <li class="r"><span class="main"><span class="t">Primary key #2</span><br><span class="s">Keychain · Alex's phone · <span class="mono">b2c3d4e5</span></span></span></li>
+          </ul>
+        </section>
+        <section class="blk">
+          <h2>Safety Net:</h2>
+          <ul class="rows">
+            <li class="r">
+              <span class="main"><span class="t">Safety Net key</span><br><span class="s">{{ safetyText }}</span></span>
+              <sc-if value="{{ v.enrolled }}" hint-placeholder-val="{{ false }}">
+                <span class="stt ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Enrolled</span>
+              </sc-if>
+              <button type="button" class="btn sm" onClick="{{ reopen }}">{{ slotAction }}</button>
+            </li>
+            <li class="r"><span class="main"><span class="t">Keys can move the funds after inactivity of:</span><br><span class="s">[blocks] (synthetic)</span></span></li>
+          </ul>
+        </section>
+      </div>
+    </sc-if>
+
+    <!-- SIGN page: Vault PSBT detail -->
+    <sc-if value="{{ v.signPage }}" hint-placeholder-val="{{ false }}">
+      <div class="page {{ pageDim }}" aria-hidden="{{ pageHidden }}">
+        <h1>Self-transfer</h1>
+        <p class="sub">Vault · Family savings · Bitcoin mainnet</p>
+        <section class="blk">
+          <h2>Finalizing this transaction requires:</h2>
+          <p class="s muted">Available after inactivity of ~[duration] (synthetic)</p>
+          <ul class="rows" style="margin-top:8px">
+            <li class="r"><span class="main"><span class="t">This computer</span><br><span class="s mono">a1b2c3d4</span></span>
+              <span class="stt ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Signed</span></li>
+            <li class="r"><span class="main"><span class="t">Border Wallet</span><br><span class="s mono">e5f6a7b8</span></span>
+              <sc-if value="{{ v.signed }}" hint-placeholder-val="{{ false }}">
+                <span class="stt ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Signed</span>
+              </sc-if>
+              <sc-if value="{{ v.unsigned }}" hint-placeholder-val="{{ true }}">
+                <button type="button" class="btn sm" onClick="{{ reopen }}">Reconstruct Border Wallet</button>
+              </sc-if>
+            </li>
+          </ul>
+          <p style="margin-top:12px">{{ sigCount }}</p>
+          <sc-if value="{{ v.wrongKey }}" hint-placeholder-val="{{ false }}">
+            <p class="alert" role="alert">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 21.5 20h-19z"></path><path d="M12 10v4.5M12 17.2v.01"></path></svg>
+              <span>Border wallet signing failed: fingerprint mismatch: expected e5f6a7b8, got 9c8d7e6f</span>
+            </p>
+          </sc-if>
+          <sc-if value="{{ v.signed }}" hint-placeholder-val="{{ false }}">
+            <div class="foot2" style="margin-top:16px"><button type="button" class="btn primary">Broadcast the transaction</button></div>
+          </sc-if>
+        </section>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ v.modal }}" hint-placeholder-val="{{ true }}">
+      <div class="scrim" aria-hidden="true"></div>
+
+      <!-- 1 INTRO -->
+      <sc-if value="{{ v.intro }}" hint-placeholder-val="{{ false }}">
+        <section class="dlg w550" role="dialog" aria-modal="true" aria-labelledby="bw-t">
+          <div class="mh"><h2 id="bw-t">Border Wallet</h2><button type="button" class="x" aria-label="Close" onClick="{{ close }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+          <p><b>What is a Border Wallet?</b></p>
+          <p>A Border Wallet key is derived from a visual pattern you select on a word grid. The key is never stored — it exists only while you are using it.</p>
+          <p>To create one, you will:</p>
+          <ol>
+            <li>Generate or enter a 12-word recovery phrase (the Entropy Grid seed)</li>
+            <li>Select 11 cells from the word grid (your Pattern)</li>
+            <li>Memorize the checksum word (the final derived word)</li>
+            <li>Review and confirm the derived key</li>
+          </ol>
+          <p class="imp">Important: To reconstruct this key you need all three components: the recovery phrase, the exact pattern, and the checksum word. Write them down and store them securely.</p>
+          <div class="foot2">
+            <button type="button" class="btn ghost" onClick="{{ toSource }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"></path></svg>Back</button>
+            <span class="grow"></span>
+            <button type="button" class="btn primary demo-focus" onClick="{{ toPhrase }}">Get Started</button>
+          </div>
+        </section>
+      </sc-if>
+
+      <!-- 2 RECOVERY PHRASE (enrol and reconstruct) -->
+      <sc-if value="{{ v.phrase }}" hint-placeholder-val="{{ false }}">
+        <section class="dlg w550" role="dialog" aria-modal="true" aria-labelledby="ph-t">
+          <div class="mh"><h2 id="ph-t">{{ phraseTitle }}</h2><button type="button" class="x" aria-label="Close" onClick="{{ close }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+          <sc-if value="{{ v.enrolSteps }}" hint-placeholder-val="{{ true }}">
+            <ol class="steps"><sc-for list="{{ steps }}" as="k" hint-placeholder-count="4"><li class="{{ k.cls }}" aria-current="{{ k.cur }}"><span class="n">{{ k.n }}</span>{{ k.label }}</li></sc-for></ol>
+          </sc-if>
+          <p>{{ phraseLead }}</p>
+          <sc-if value="{{ v.enrolMode }}" hint-placeholder-val="{{ true }}">
+            <div><button type="button" class="btn" onClick="{{ derive }}">Derive from Master Key</button></div>
+          </sc-if>
+          <fieldset class="words" style="border:0;margin:0;padding:0">
+            <legend class="sr">Recovery phrase, 12 words</legend>
+            <sc-for list="{{ words }}" as="w" hint-placeholder-count="12">
+              <label class="wd"><span>{{ w.n }}.</span><input class="inp" type="text" autocomplete="off" spellcheck="false" placeholder="{{ w.ph }}" aria-label="{{ w.ph }}" value="{{ w.val }}" onChange="{{ w.set }}"></label>
+            </sc-for>
+          </fieldset>
+          <sc-if value="{{ v.prefilled }}" hint-placeholder-val="{{ false }}">
+            <p class="cap">Filled in for you. Edit any word if this key was enrolled from a different phrase.</p>
+          </sc-if>
+          <sc-if value="{{ v.phraseErr }}" hint-placeholder-val="{{ false }}">
+            <p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg><span>Invalid recovery phrase. Please enter a valid 12-word BIP39 mnemonic.</span></p>
+          </sc-if>
+          <div class="foot2">
+            <button type="button" class="btn ghost" onClick="{{ phraseBack }}">{{ phraseBackLabel }}</button>
+            <button type="button" class="btn primary full" disabled="{{ phraseNextOff }}" onClick="{{ phraseNext }}">Next</button>
+          </div>
+        </section>
+      </sc-if>
+
+      <!-- 3 PATTERN (enrol and reconstruct) -->
+      <sc-if value="{{ v.pattern }}" hint-placeholder-val="{{ true }}">
+        <section class="dlg wgrid" role="dialog" aria-modal="true" aria-labelledby="pt-t">
+          <div class="mh"><h2 id="pt-t">Select Pattern</h2><button type="button" class="x" aria-label="Close" onClick="{{ close }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+          <sc-if value="{{ v.enrolSteps }}" hint-placeholder-val="{{ true }}">
+            <ol class="steps"><sc-for list="{{ steps }}" as="k" hint-placeholder-count="4"><li class="{{ k.cls }}" aria-current="{{ k.cur }}"><span class="n">{{ k.n }}</span>{{ k.label }}</li></sc-for></ol>
+          </sc-if>
+          <p>{{ patternLead }}</p>
+          <div class="tools">
+            <span class="cnt" aria-live="polite">Selected: {{ selCount }} / 11 cells</span>
+            <button type="button" class="btn sm" disabled="{{ noneSel }}" onClick="{{ undo }}">Undo</button>
+            <button type="button" class="btn sm" disabled="{{ noneSel }}" onClick="{{ clear }}">Clear</button>
+          </div>
+          <p class="gridcap"><span>Synthetic grid · placeholder words, not derived from any phrase</span><span class="grow"></span><span>128 rows × 16 columns · first four letters shown</span></p>
+          <div class="gridbox" role="group" aria-label="Word grid">
+            <div class="grid">
+              <sc-for list="{{ grid }}" as="row" hint-placeholder-count="12">
+                <span class="rn" aria-hidden="true">{{ row.n }}</span>
+                <sc-for list="{{ row.cells }}" as="c" hint-placeholder-count="16">
+                  <button type="button" class="cell {{ c.cls }}" aria-pressed="{{ c.on }}" aria-label="{{ c.aria }}" onClick="{{ c.pick }}">{{ c.label }}</button>
+                </sc-for>
+              </sc-for>
+            </div>
+          </div>
+          <sc-if value="{{ v.showChecksum }}" hint-placeholder-val="{{ false }}">
+            <p class="chk">Checksum word: "[synthetic]"</p>
+          </sc-if>
+          <sc-if value="{{ v.patternErr }}" hint-placeholder-val="{{ false }}">
+            <p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg><span>{{ patternErr }}</span></p>
+          </sc-if>
+          <div class="foot2">
+            <button type="button" class="btn ghost" onClick="{{ patternBack }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"></path></svg>Back</button>
+            <button type="button" class="btn primary full" disabled="{{ patternNextOff }}" onClick="{{ patternNext }}">{{ patternNextLabel }}</button>
+          </div>
+        </section>
+      </sc-if>
+
+      <!-- 4 CHECKSUM & KEY -->
+      <sc-if value="{{ v.checksum }}" hint-placeholder-val="{{ false }}">
+        <section class="dlg w500" role="dialog" aria-modal="true" aria-labelledby="ck-t">
+          <div class="mh"><h2 id="ck-t">Checksum &amp; Key</h2><button type="button" class="x" aria-label="Close" onClick="{{ close }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+          <ol class="steps"><sc-for list="{{ steps }}" as="k" hint-placeholder-count="4"><li class="{{ k.cls }}" aria-current="{{ k.cur }}"><span class="n">{{ k.n }}</span>{{ k.label }}</li></sc-for></ol>
+          <p><b>Checksum word: "[synthetic]"</b></p>
+          <p>This is the only word you need to memorize. The checksum word is the 12th word of the derived mnemonic, calculated automatically from your pattern. Together with the recovery phrase and your pattern, it forms the three components needed to reconstruct this key.</p>
+          <div class="kv">
+            <p><b>Derived Key Info</b></p>
+            <p>Fingerprint: <span class="mono">e5f6a7b8</span></p>
+            <p>Derivation Path: <span class="mono">m/48'/0'/0'/2'</span></p>
+            <p>Network: Bitcoin</p>
+          </div>
+          <div class="foot2">
+            <button type="button" class="btn ghost" onClick="{{ toPattern }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"></path></svg>Back</button>
+            <button type="button" class="btn primary full" onClick="{{ toConfirm }}">Next</button>
+          </div>
+        </section>
+      </sc-if>
+
+      <!-- 5 CONFIRM -->
+      <sc-if value="{{ v.confirm }}" hint-placeholder-val="{{ false }}">
+        <section class="dlg w500" role="dialog" aria-modal="true" aria-labelledby="cf-t">
+          <div class="mh"><h2 id="cf-t">Confirm</h2><button type="button" class="x" aria-label="Close" onClick="{{ close }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg></button></div>
+          <ol class="steps"><sc-for list="{{ steps }}" as="k" hint-placeholder-count="4"><li class="{{ k.cls }}" aria-current="{{ k.cur }}"><span class="n">{{ k.n }}</span>{{ k.label }}</li></sc-for></ol>
+          <div class="imp">
+            <p><b>Important — Read carefully</b></p>
+            <p style="margin-top:6px">After confirming, the mnemonic and private keys will be permanently erased from memory. Only the public key (xpub) and fingerprint will be stored in the wallet descriptor.</p>
+            <p style="margin-top:6px">To reconstruct this key in the future, you need all three components:</p>
+            <ol style="margin-top:4px">
+              <li>The recovery phrase (12 words that seed the grid)</li>
+              <li>Your exact pattern (the 11 cells in order)</li>
+              <li><b>The checksum word: "[synthetic]"</b></li>
+            </ol>
+            <p style="margin-top:6px">Write down and securely store all three. Without any one of them, the key cannot be recovered.</p>
+          </div>
+          <p><b>Key fingerprint: <span class="mono">e5f6a7b8</span></b></p>
+          <div class="foot2">
+            <button type="button" class="btn ghost" onClick="{{ toChecksum }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"></path></svg>Back</button>
+            <button type="button" class="btn primary full" onClick="{{ enrol }}">Confirm &amp; Enroll Key</button>
+          </div>
+        </section>
+      </sc-if>
+    </sc-if>
+  </main>
+  <div class="foot">{{ foot }}</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["intro","phrase","pattern","checksum","confirm","enrolled","reconPhrase","reconPattern","reconMismatch","reconWrongKey","reconSigned"],"default":"pattern","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { lv: null }; }
+  renderVals() {
+    const P = this.props;
+    const theme = P.theme ?? 'dark';
+    const lever = P.step || 'pattern';
+    const ROWS = 128, COLS = 16, LEN = 11;
+    // a fixed synthetic pattern (cell ids = row * 16 + col) used to seed the review states
+    const SEED = [3 * 16 + 2, 3 * 16 + 9, 7 * 16 + 5, 11 * 16 + 14, 14 * 16 + 1, 18 * 16 + 7, 21 * 16 + 12, 25 * 16 + 3, 29 * 16 + 10, 33 * 16 + 6, 36 * 16 + 15];
+    const DERIVED = Array.from({ length: 12 }, (_, i) => '[word ' + (i + 1) + ']');
+    const init = (st) => ({
+      st, closed: false, err: '',
+      pat: st === 'pattern' ? SEED.slice(0, 6)
+        : (st === 'reconPattern' || st === 'reconMismatch') ? SEED.slice() : [],
+      words: (st === 'reconPhrase') ? DERIVED.slice() : Array.from({ length: 12 }, () => '')
+    });
+    const s = this.state.lv !== lever ? init(lever) : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: lever }, patch));
+    const st = s.st;
+    const recon = st.indexOf('recon') === 0;
+
+    // synthetic 4-letter prefixes (not the BIP39 list); the real grid is a seeded shuffle of the 2048 BIP39 words
+    const SYL = ['ka', 'lo', 'mi', 'nu', 're', 'ta', 'vo', 'si', 'pe', 'du', 'fa', 'ge', 'hi', 'jo', 'ru', 'be'];
+    const word = (id) => SYL[(id * 7) % 16] + SYL[(id * 11 + 5) % 16];
+
+    const pat = s.pat;
+    const full = pat.length === LEN;
+    const togg = (id) => {
+      const at = pat.indexOf(id);
+      if (at >= 0) { const n = pat.slice(); n.splice(at, 1); go({ pat: n, err: '' }); return; }
+      if (pat.length >= LEN) { go({ err: 'Your pattern already has all 11 cells. Deselect one before choosing another.' }); return; }
+      go({ pat: pat.concat([id]), err: '' });
+    };
+    const grid = [];
+    for (let r = 0; r < ROWS; r++) {
+      const cells = [];
+      for (let c = 0; c < COLS; c++) {
+        const id = r * COLS + c;
+        const at = pat.indexOf(id);
+        const w = word(id);
+        cells.push({
+          label: at >= 0 ? String(at + 1) : w,
+          on: at >= 0 ? 'true' : 'false',
+          cls: (id === SEED[6] && st === 'pattern') ? 'demo-focus' : '',
+          aria: 'Row ' + (r + 1) + ', column ' + (c + 1) + ', ' + w + (at >= 0 ? ', pattern cell ' + (at + 1) : ''),
+          pick: () => togg(id)
+        });
+      }
+      grid.push({ n: String(r + 1), cells });
+    }
+
+    const STEP_OF = { phrase: 0, pattern: 1, checksum: 2, confirm: 3 };
+    const cur = STEP_OF[st];
+    const steps = ['Phrase', 'Pattern', 'Checksum', 'Confirm'].map((label, i) => ({
+      label, n: String(i + 1),
+      cur: i === cur ? 'step' : 'false',
+      cls: cur !== undefined && i < cur ? 'done' : ''
+    }));
+
+    const words = s.words.map((val, i) => ({
+      n: String(i + 1), val, ph: 'Word ' + (i + 1),
+      set: (e) => { const nw = s.words.slice(); nw[i] = e && e.target ? String(e.target.value) : ''; go({ words: nw, err: '' }); }
+    }));
+    const allFilled = s.words.every((x) => x.trim() !== '');
+    // prototype check: the derived placeholders stand in for a valid phrase; anything else fails like a bad BIP39 checksum
+    const phraseOk = s.words.every((x, i) => x === DERIVED[i]);
+
+    const modal = !s.closed && ['enrolled', 'reconWrongKey', 'reconSigned'].indexOf(st) < 0;
+    const signed = st === 'reconSigned';
+    const FOOT = {
+      enrolled: 'Prototype · synthetic data · only the xpub and fingerprint are kept after enrolment',
+      reconWrongKey: 'Prototype · synthetic data · a valid but different pattern derives another key, so signing is refused',
+      reconSigned: 'Prototype · synthetic data · the rebuilt key signs once, then is erased from memory'
+    };
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      crumb: recon ? 'Vault · Family savings › PSBTs' : 'Create Vault · Set keys',
+      v: {
+        enrolPage: !recon, signPage: recon,
+        enrolled: st === 'enrolled',
+        signed, unsigned: !signed,
+        wrongKey: st === 'reconWrongKey',
+        modal,
+        intro: st === 'intro',
+        phrase: st === 'phrase' || st === 'reconPhrase',
+        pattern: st === 'pattern' || st === 'reconPattern' || st === 'reconMismatch',
+        checksum: st === 'checksum',
+        confirm: st === 'confirm',
+        enrolSteps: !recon,
+        enrolMode: !recon,
+        prefilled: st === 'reconPhrase',
+        phraseErr: s.err === 'phrase',
+        showChecksum: full && recon,
+        patternErr: !!s.err && s.err !== 'phrase'
+      },
+      pageDim: modal ? 'dim' : '',
+      pageHidden: modal ? 'true' : 'false',
+      safetyText: st === 'enrolled' ? 'Border Wallet · e5f6a7b8' : 'Border Wallet · enrolling',
+      slotAction: st === 'enrolled' ? 'Edit' : 'Select key source',
+      sigCount: signed ? '2 of 2 signatures collected' : '1 of 2 signatures collected',
+      reopen: () => go(recon ? { st: 'reconPhrase', closed: false, words: DERIVED.slice(), pat: [], err: '' } : { st: 'intro', closed: false, pat: [], words: Array.from({ length: 12 }, () => ''), err: '' }),
+      close: () => go({ closed: true }),
+      steps,
+      toSource: () => go({ closed: true }),
+      toPhrase: () => go({ st: 'phrase', err: '' }),
+      phraseTitle: recon ? 'Reconstruct Border Wallet' : 'Recovery Phrase',
+      phraseLead: recon ? 'Recovery phrase for key #3, re-derived from the seed it was created with' : 'Enter or generate the 12-word recovery phrase that will seed the word grid.',
+      derive: () => go({ words: DERIVED.slice(), err: '' }),
+      words,
+      phraseBackLabel: recon ? 'Cancel' : 'Back',
+      phraseBack: () => recon ? go({ closed: true }) : go({ st: 'intro', err: '' }),
+      phraseNextOff: !allFilled,
+      phraseNext: () => {
+        if (!phraseOk) { go({ err: 'phrase' }); return; }
+        go({ st: recon ? 'reconPattern' : 'pattern', err: '', pat: [] });
+      },
+      patternLead: recon
+        ? 'Select 11 cells from the grid in order — the same pattern you used during enrollment.'
+        : 'Select 11 cells from the grid in order. This pattern is your key — remember it exactly.',
+      selCount: String(pat.length),
+      noneSel: pat.length === 0,
+      undo: () => go({ pat: pat.slice(0, -1), err: '' }),
+      clear: () => go({ pat: [], err: '' }),
+      grid,
+      patternErr: s.err === 'mismatch'
+        ? "That pattern doesn't rebuild this wallet's recovery phrase. Check the grid and your cell order, then try again."
+        : (st === 'reconMismatch' && !s.err ? "That pattern doesn't rebuild this wallet's recovery phrase. Check the grid and your cell order, then try again." : s.err),
+      patternBack: () => go({ st: recon ? 'reconPhrase' : 'phrase', err: '', words: recon ? DERIVED.slice() : s.words }),
+      patternNextLabel: recon ? 'Sign' : 'Next',
+      patternNextOff: recon ? !full : false,
+      patternNext: () => {
+        if (!full) { go({ err: 'Please select exactly 11 cells. Currently selected: ' + pat.length }); return; }
+        if (recon) { go({ st: st === 'reconMismatch' ? 'reconMismatch' : 'reconSigned', err: st === 'reconMismatch' ? 'mismatch' : '' }); return; }
+        go({ st: 'checksum', err: '' });
+      },
+      toPattern: () => go({ st: 'pattern', err: '' }),
+      toConfirm: () => go({ st: 'confirm' }),
+      toChecksum: () => go({ st: 'checksum' }),
+      enrol: () => go({ st: 'enrolled' }),
+      foot: FOOT[st] || 'Prototype · synthetic data and synthetic grid · copy quoted from the app; the enrolment wizard runs while setting a Safety Net key'
+    };
+  }
+}
+</script>
+</body>
+</html>

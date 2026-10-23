@@ -1,0 +1,671 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 · Cube transfer</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--b2b:#d4a62a}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#8a6a10}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd,.tenshu fieldset{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu fieldset{border:0;padding:0;min-width:0}
+.tenshu a{color:var(--acc-ink)}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ok{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}.unk{color:var(--muted)}
+/* top bar: single open Cube, no tab list */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line);flex:none}
+.cid{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}
+.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.mk>img{display:block;width:16px;height:16px;flex:none;border-radius:50%}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.lockgrp{display:flex;align-items:center;gap:8px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.chip .k{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+/* shell (V2) */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;line-height:1.3;text-decoration:none}
+.tenshu a.attn{color:var(--ink)}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{max-width:820px;margin:0 auto;padding:28px 48px 48px}
+/* flow */
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.ph{font-size:22px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl>img{width:16px;height:16px;display:block}
+.stepper{display:flex;gap:4px;margin-top:24px;padding-bottom:16px;border-bottom:1px solid var(--line)}
+.stepper li{display:flex;align-items:center;gap:8px;flex:1;min-width:0;font-size:13px;color:var(--muted)}
+.stepper .n{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.stepper li.cur{color:var(--ink);font-weight:600}
+.stepper li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.stepper li.done .n{color:var(--good);border-color:var(--good)}
+.ctx{display:flex;align-items:center;gap:8px;margin-top:16px;font-size:13px}
+.form{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:24px}
+.form h2{font-size:18px;font-weight:600;line-height:1.3}
+.form .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:60ch}
+.grp{margin-top:20px}
+.grp+.grp{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+.lg{font-size:14px;font-weight:600;margin-bottom:8px}
+.opt{display:grid;grid-template-columns:20px 18px minmax(0,1fr) auto;align-items:center;column-gap:12px;min-height:52px;padding:8px 12px;border-radius:8px;cursor:pointer}
+.opt:hover{background:var(--hover)}
+.opt.on{background:var(--selected)}
+.opt.off{cursor:default}.opt.off:hover{background:transparent}
+.opt input{margin:0;width:16px;height:16px;accent-color:var(--accent)}
+.opt .nm{font-weight:500;overflow-wrap:anywhere}
+.opt .sub{display:block;font-size:13px;color:var(--muted);margin-top:1px}
+.opt .bal{font-size:13px;text-align:right;white-space:nowrap}
+.opt .ic{color:var(--muted)}
+.opt.cube{grid-template-columns:20px 22px minmax(0,1fr) auto}
+.mk{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%}
+.mk.tn{border:1px dashed var(--muted);padding:2px}.mk.tn>img{opacity:.6}
+.tag{display:inline-flex;align-items:center;height:18px;padding:0 6px;margin-left:6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;color:var(--ink);vertical-align:1px}
+.tag.b2b{border-color:var(--b2b)}.tag.test{border-style:dashed}
+.why{display:flex;align-items:flex-start;gap:6px;font-size:13px;color:var(--muted);margin-top:2px}
+.why .ic{margin-top:2px}
+.alt{display:flex;align-items:center;gap:10px;width:100%;margin-top:24px;padding:14px 12px;border:0;border-top:1px solid var(--line);background:none;cursor:pointer;text-align:left;color:var(--ink);border-radius:0}
+.alt:hover{background:var(--hover)}
+.alt .tx{flex:1}
+.alt.clone{margin:2px 0 6px 32px;width:calc(100% - 32px);padding:10px 12px;border:1px solid var(--line);border-radius:8px}
+.sgn li{display:grid;grid-template-columns:18px minmax(0,1fr) auto;column-gap:10px;align-items:center;min-height:44px;border-bottom:1px solid var(--line)}
+.sgn li .ic{color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:var(--muted)}
+.txt{height:40px;width:360px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.txt:focus{border-color:var(--focus)}
+.netfix{display:flex;align-items:center;gap:8px;min-height:40px}
+.next li{padding:8px 0;border-bottom:1px solid var(--line);font-size:13px}
+.next b{font-weight:600}.alt .ds{display:block;font-size:13px;color:var(--muted)}
+.acts{display:flex;align-items:center;gap:10px;margin-top:24px}
+.acts .sp{flex:1}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn[disabled]{cursor:not-allowed;background:transparent;border-color:var(--line);color:var(--muted)}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px;font-size:13px}
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:20px}
+.fld label{font-weight:600}
+.pin{height:44px;width:240px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:18px;letter-spacing:.25em}
+.pin:focus,.amt:focus{border-color:var(--focus)}
+.help{font-size:13px;color:var(--muted)}
+.unlockp{margin-top:20px;padding-top:20px;border-top:1px solid var(--line)}
+.checks{margin-top:16px;border-top:1px solid var(--line)}
+.checks li{display:flex;align-items:center;gap:10px;min-height:44px;border-bottom:1px solid var(--line)}
+.checks .tx{flex:1}.checks .sv{font-size:13px;color:var(--muted)}
+.amtrow{display:flex;align-items:center;gap:10px}
+.amt{height:44px;width:260px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:18px;font-weight:500;text-align:right}
+.amt[aria-invalid="true"]{border-color:var(--bad)}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px}
+.seg button{height:36px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.err{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--bad);font-weight:500}
+.dl{margin-top:16px;border-top:1px solid var(--line)}
+.dl>div{display:grid;grid-template-columns:180px minmax(0,1fr);column-gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
+.dl dt{color:var(--muted)}
+.dl dd{overflow-wrap:anywhere}
+.dl .tot dd,.dl .tot dt{font-weight:600;color:var(--ink)}
+.note{display:flex;align-items:flex-start;gap:8px;margin-top:16px;font-size:13px;color:var(--muted)}
+.note .ic{margin-top:1px}
+.donehd{display:flex;align-items:center;gap:10px}
+.donehd .ic{width:28px;height:28px;color:var(--good)}
+.req li{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-bottom:1px solid var(--line)}
+.req li:first-child{border-top:1px solid var(--line)}
+.req .ic{margin-top:2px;color:var(--muted)}
+.val{display:inline-flex;align-items:center;gap:6px;margin-top:16px;font-size:13px;font-weight:500;color:var(--warn)}
+.synth{margin-top:20px;text-align:center}
+.lockask{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.tbtn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.tbtn.pri{color:var(--on-accent)}
+.tbtn.pri:hover{background:#ff9a3f}
+.acts.top0{align-items:flex-start}
+.secact{display:flex;flex-direction:column;gap:6px;max-width:46ch}
+.pin[aria-invalid="true"]{border-color:var(--bad)}
+.dl .sgn li:last-child{border-bottom:0}
+
+/* prototype links */
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{background:var(--hover,var(--selected))}.tenshu a.ni,.tenshu a.row{color:var(--ink);text-decoration:none}.tenshu a.pill,.tenshu a.rlink,.tenshu a.attn{text-decoration:none}.tenshu span.mini{display:inline-flex;align-items:center}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <a class="chip" href="P-Connect.dc.html">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <span>alex@example.test</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
+      </a>
+      <div class="chip">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
+        <span class="k">Cube service</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span>
+      </div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lock.idle }}" hint-placeholder-val="{{ true }}">
+        <button type="button" class="mi" aria-expanded="false" aria-controls="lock-ask" onClick="{{ lock.ask }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button>
+      </sc-if>
+        <sc-if value="{{ lock.asking }}" hint-placeholder-val="{{ false }}">
+        <div class="lockask" id="lock-ask" role="group" aria-labelledby="lock-q">
+          <span id="lock-q" role="status">Lock Everyday and open the Launcher?</span>
+          <a class="tbtn pri" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a>
+          <button type="button" class="tbtn" onClick="{{ lock.cancel }}">Cancel</button>
+        </div>
+      </sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni on" aria-current="page" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <a class="attn" href="P-Settings.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Overview</a>
+        <h1 class="ph">{{ title }}</h1>
+        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
+
+        <sc-if value="{{ showStepper }}" hint-placeholder-val="{{ true }}">
+          <ol class="stepper" aria-label="Transfer steps">
+            <sc-for list="{{ steps }}" as="s" hint-placeholder-count="5">
+              <li class="{{ s.cls }}" aria-current="{{ s.cur }}"><span class="n"><sc-if value="{{ s.isDone }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.25 3 3 6-6.5"/></svg></sc-if><sc-if value="{{ s.notDone }}" hint-placeholder-val="{{ true }}">{{ s.num }}</sc-if></span><span>{{ s.label }}</span><span class="sr">{{ s.sr }}</span></li>
+            </sc-for>
+          </ol>
+        </sc-if>
+
+        <sc-if value="{{ second.show }}" hint-placeholder-val="{{ false }}">
+          <p class="ctx" role="status"><sc-if value="{{ second.open }}" hint-placeholder-val="{{ true }}"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0"/></svg></sc-if><sc-if value="{{ second.locked }}" hint-placeholder-val="{{ false }}"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg></sc-if><span>{{ second.text }}</span></p>
+        </sc-if>
+
+        <section class="form" aria-labelledby="flow-h">
+
+        <!-- 1 FROM / TO -->
+        <sc-if value="{{ is.fromto }}" hint-placeholder-val="{{ true }}">
+          <h2 id="flow-h">Transfer between wallets</h2>
+          <fieldset class="grp">
+            <legend class="lg">From</legend>
+            <sc-for list="{{ fromRows }}" as="r" hint-placeholder-count="3">
+              <label class="opt {{ r.cls }}" for="{{ r.id }}">
+                <input type="radio" name="xfer-from" id="{{ r.id }}" checked="{{ r.checked }}" disabled="{{ r.disabled }}" aria-describedby="{{ r.descId }}" onChange="{{ r.pick }}">
+                <sc-if value="{{ r.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                <sc-if value="{{ r.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                <sc-if value="{{ r.liquid }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+                <span><span class="nm">{{ r.name }}</span><span class="sub" id="{{ r.descId }}">{{ r.sub }}</span></span>
+                <span class="bal">{{ r.bal }}</span>
+              </label>
+              <sc-if value="{{ r.clone }}" hint-placeholder-val="{{ false }}">
+                <button type="button" class="alt clone" onClick="{{ goSplit }}"><span class="mk" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span><span class="tx">Create a Bitcoin Blake2b copy of this Vault…<span class="ds">New Blake2b Cube, same keys and policy</span></span><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></button>
+              </sc-if>
+            </sc-for>
+          </fieldset>
+          <fieldset class="grp">
+            <legend class="lg">To</legend>
+            <sc-for list="{{ toRows }}" as="r" hint-placeholder-count="3">
+              <label class="opt {{ r.cls }}" for="{{ r.id }}">
+                <input type="radio" name="xfer-to" id="{{ r.id }}" checked="{{ r.checked }}" aria-describedby="{{ r.descId }}" onChange="{{ r.pick }}">
+                <sc-if value="{{ r.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                <sc-if value="{{ r.vault }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                <sc-if value="{{ r.liquid }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+                <sc-if value="{{ r.other }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></sc-if>
+                <span><span class="nm">{{ r.name }}</span><span class="sub" id="{{ r.descId }}">{{ r.sub }}</span></span>
+                <span class="bal">{{ r.bal }}</span>
+              </label>
+            </sc-for>
+          </fieldset>
+          <div class="acts"><button type="button" class="btn pri" disabled="{{ contDisabled }}" aria-describedby="cont-d" onClick="{{ fromtoNext }}">Continue</button><span class="help" id="cont-d">{{ contNote }}</span></div>
+        </sc-if>
+
+        <!-- 2 PICK THE OTHER CUBE -->
+        <sc-if value="{{ is.pickcube }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Choose the other Cube</h2>
+          <p class="lede">Bitcoin mainnet Cubes only.</p>
+          <fieldset class="grp">
+            <legend class="lg">Other Cubes</legend>
+            <sc-for list="{{ cubes }}" as="c" hint-placeholder-count="3">
+              <label class="opt cube {{ c.cls }}" for="{{ c.id }}">
+                <input type="radio" name="xfer-cube" id="{{ c.id }}" checked="{{ c.checked }}" disabled="{{ c.disabled }}" aria-describedby="{{ c.descId }}" onChange="{{ c.pick }}">
+                <sc-if value="{{ c.btc }}" hint-placeholder-val="{{ true }}"><span class="mk" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                <sc-if value="{{ c.b2b }}" hint-placeholder-val="{{ false }}"><span class="mk" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                <sc-if value="{{ c.test }}" hint-placeholder-val="{{ false }}"><span class="mk tn" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                <span>
+                  <span class="nm">{{ c.name }}</span><sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tag {{ c.tagCls }}">{{ c.tag }}</span></sc-if>
+                  <span class="sub">{{ c.net }} · {{ c.wallets }}</span>
+                  <sc-if value="{{ c.disabled }}" hint-placeholder-val="{{ false }}"><span class="why" id="{{ c.descId }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M4.5 13.5l9-9"/></svg>{{ c.reason }}</span></sc-if>
+                </span>
+                <span class="bal muted"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18" style="vertical-align:-3px"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg> Locked</span>
+              </label>
+            </sc-for>
+          </fieldset>
+          <p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>Locked Cubes show no balances.</p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ back }}">Back</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ pickNext }}">Continue with {{ cubeName }}</button></div>
+        </sc-if>
+
+        <!-- 3 UNLOCK THE SECOND CUBE, INLINE -->
+        <sc-if value="{{ is.unlock }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Unlock Archive for this transfer only</h2>
+          <p class="lede">Locks again when the transfer ends.</p>
+          <p class="idl" style="margin-top:12px"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Archive · Bitcoin mainnet · Spark only</p>
+          <sc-if value="{{ un.pin }}" hint-placeholder-val="{{ true }}">
+            <div class="unlockp">
+              <div class="fld">
+                <label for="second-pin">Archive PIN</label>
+                <input id="second-pin" class="pin" type="password" inputmode="numeric" autocomplete="off" autoFocus aria-describedby="second-pin-help">
+                <span class="help" id="second-pin-help">Not Everyday's PIN.</span>
+              </div>
+              <div class="acts">
+                <button type="button" class="btn pri" onClick="{{ un.withPin }}">Unlock</button>
+                <button type="button" class="btn" onClick="{{ un.withKey }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg>Use passkey</button>
+                <span class="sp"></span>
+                <button type="button" class="btn" onClick="{{ back }}">Cancel</button>
+              </div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ un.checking }}" hint-placeholder-val="{{ false }}">
+            <ol class="checks" aria-live="polite" aria-label="Archive checks">
+              <sc-for list="{{ un.rows }}" as="k" hint-placeholder-count="3">
+                <li>
+                  <sc-if value="{{ k.done }}" hint-placeholder-val="{{ true }}"><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                  <sc-if value="{{ k.run }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5" stroke-dasharray="3 3"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
+                  <sc-if value="{{ k.wait }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/></svg></sc-if>
+                  <span class="tx">{{ k.text }}</span><span class="sv">{{ k.status }}</span>
+                </li>
+              </sc-for>
+            </ol>
+            <div class="acts">
+              <button type="button" class="btn" onClick="{{ back }}">Cancel and lock Archive</button><span class="sp"></span>
+              <button type="button" class="btn pri" disabled="{{ un.notReady }}" onClick="{{ un.next }}">Continue</button>
+            </div>
+          </sc-if>
+        </sc-if>
+
+        <!-- 4 DESTINATION WALLET AND AMOUNT -->
+        <sc-if value="{{ is.amount }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Destination and amount</h2>
+          <p class="lede">From {{ fromName }} · Available {{ avail }}</p>
+          <sc-if value="{{ cross }}" hint-placeholder-val="{{ true }}">
+            <fieldset class="grp">
+              <legend class="lg">Wallet in Archive</legend>
+              <label class="opt on" for="dest-spark">
+                <input type="radio" name="xfer-dest" id="dest-spark" checked="{{ destChecked }}" aria-describedby="dest-spark-d" onChange="{{ noop }}">
+                <svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg>
+                <span><span class="nm">Spark</span><span class="sub" id="dest-spark-d"></span></span><span></span>
+              </label>
+            </fieldset>
+          </sc-if>
+          <sc-if value="{{ same }}" hint-placeholder-val="{{ false }}">
+            <div class="grp"><p class="lg">To</p><p>{{ toName }} <span class="muted">· this Cube</span></p></div>
+          </sc-if>
+          <div class="grp">
+            <div class="fld" style="margin-top:0">
+              <label for="xfer-amt">Amount</label>
+              <div class="amtrow">
+                <input id="xfer-amt" class="amt" type="text" inputmode="decimal" autocomplete="off" value="{{ amt.value }}" aria-invalid="{{ amt.invalid }}" aria-describedby="xfer-amt-fx xfer-amt-lim" onInput="{{ amt.onInput }}">
+                <div class="seg" role="group" aria-label="Amount unit">
+                  <button type="button" aria-pressed="{{ amt.satsP }}" onClick="{{ amt.toSats }}">SATS</button>
+                  <button type="button" aria-pressed="{{ amt.btcP }}" onClick="{{ amt.toBtc }}">BTC</button>
+                </div>
+                <button type="button" class="lbtn" aria-describedby="max-d" onClick="{{ amt.max }}">Use maximum</button><span class="sr" id="max-d">leaves room for the fee</span>
+              </div>
+              <span class="help" id="xfer-amt-fx">{{ amt.fx }}</span>
+              <sc-if value="{{ amt.hasErr }}" hint-placeholder-val="{{ false }}"><span class="err" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>{{ amt.err }}</span></sc-if>
+              <span class="help" id="xfer-amt-lim">Minimum [N] sats · Maximum [M] sats</span>
+            </div>
+          </div>
+          <div class="acts"><button type="button" class="btn" onClick="{{ back }}">Back</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ amt.cannot }}" onClick="{{ amt.prepare }}">Prepare</button></div>
+        </sc-if>
+
+        <!-- 5 QUOTE AND CONFIRM -->
+        <sc-if value="{{ is.quote }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Review and confirm</h2>
+          <p class="lede">Nothing moves until you confirm.</p>
+          <dl class="dl">
+            <div><dt>Sending from</dt><dd>{{ fromName }} · Everyday</dd></div>
+            <div><dt>Receiving wallet</dt><dd>{{ q.dest }}</dd></div>
+            <div><dt>Route</dt><dd>{{ q.route }}</dd></div>
+            <div><dt>Amount</dt><dd>{{ q.amount }}</dd></div>
+            <div><dt>Fees</dt><dd>{{ q.fee }}</dd></div>
+            <div class="tot"><dt>Total</dt><dd>{{ q.total }}</dd></div>
+          </dl>
+          <sc-if value="{{ cross }}" hint-placeholder-val="{{ true }}"><p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg>Archive locks again once sent, or if you leave.</p></sc-if>
+          <div class="acts"><button type="button" class="btn" onClick="{{ back }}">Back</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ confirm }}">Confirm transfer</button></div>
+        </sc-if>
+
+        <!-- 6 DONE -->
+        <sc-if value="{{ is.done }}" hint-placeholder-val="{{ false }}">
+          <div class="donehd"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="flow-h">Transfer sent</h2></div>
+          <dl class="dl">
+            <div><dt>Status</dt><dd><span class="st warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg>Pending</span> <span class="muted">· you can leave this page</span></dd></div>
+            <div><dt>Amount</dt><dd>{{ q.amount }}</dd></div>
+            <div><dt>To</dt><dd>{{ q.dest }}</dd></div>
+          </dl>
+          <div class="acts">
+            <a class="btn pri" href="P-Activity.dc.html">See it in Activity</a>
+            <a class="btn" href="P-Overview.dc.html">Back to Overview</a>
+            <span class="sp"></span>
+            <button type="button" class="btn" onClick="{{ restart }}">New transfer</button>
+          </div>
+        </sc-if>
+
+        <!-- CLONE THE VAULT TO BITCOIN BLAKE2B (step split, sub-state splitStage) -->
+        <sc-if value="{{ sp.explain }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Create a Bitcoin Blake2b copy of this Vault</h2>
+          <p class="lede">A new Bitcoin Blake2b Cube gets a Vault with these keys.</p>
+          <dl class="dl">
+            <div><dt>Source Vault</dt><dd>Vault · Family savings <span class="muted">· Everyday · Bitcoin mainnet</span></dd></div>
+            <div><dt>Policy</dt><dd>2-of-3 synthetic policy <span class="muted">· recovery after 180 days, 1-of-2</span></dd></div>
+            <div><dt>Signers</dt><dd><ul class="sgn">
+              <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
+                <li><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg><span>{{ g.name }}</span><span class="mono">{{ g.fp }}</span></li>
+              </sc-for>
+            </ul></dd></div>
+          </dl>
+          <div class="acts"><button type="button" class="btn" onClick="{{ back }}">Back</button><span class="sp"></span><button type="button" class="btn pri" onClick="{{ sp.toNew }}">Continue</button></div>
+        </sc-if>
+        <sc-if value="{{ sp.newcube }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">New Cube</h2>
+          <div class="fld">
+            <label for="clone-name">Cube name</label>
+            <input id="clone-name" class="txt" type="text" autocomplete="off" value="{{ sp.name }}" onInput="{{ sp.onName }}">
+          </div>
+          <div class="fld">
+            <span style="font-weight:600" id="clone-net-l">Network</span>
+            <p class="netfix" aria-labelledby="clone-net-l"><span class="mk" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span><span>Bitcoin Blake2b mainnet</span></p>
+          </div>
+          <sc-if value="{{ sp.usePin }}" hint-placeholder-val="{{ true }}">
+            <div class="fld">
+              <label for="clone-pin">PIN</label>
+              <input id="clone-pin" class="pin" type="password" inputmode="numeric" autocomplete="new-password" value="{{ sp.pin1 }}" onInput="{{ sp.onPin1 }}">
+            </div>
+            <div class="fld">
+              <label for="clone-pin2">Confirm PIN</label>
+              <input id="clone-pin2" class="pin" type="password" inputmode="numeric" autocomplete="new-password" value="{{ sp.pin2 }}" aria-invalid="{{ sp.mismatchA }}" aria-describedby="clone-pin2-err" onInput="{{ sp.onPin2 }}">
+              <sc-if value="{{ sp.mismatch }}" hint-placeholder-val="{{ false }}"><span class="err" id="clone-pin2-err" role="alert"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>PINs don't match</span></sc-if>
+              <div><button type="button" class="btn" onClick="{{ sp.toKey }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg>Use passkey</button></div>
+            </div>
+          </sc-if>
+          <sc-if value="{{ sp.useKey }}" hint-placeholder-val="{{ false }}">
+            <div class="fld">
+              <p class="netfix" role="status"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="6" cy="11.5" r="3"/><path d="M8.2 9.3 14.5 3M12 5.5l1.9 1.9M10.3 7.2l1.5 1.5"/></svg>Passkey will be set on this device</p>
+              <div><button type="button" class="lbtn" onClick="{{ sp.toPin }}">Use a PIN instead</button></div>
+            </div>
+          </sc-if>
+          <p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>Same seed as this Vault.</p>
+          <div class="acts"><button type="button" class="btn" onClick="{{ sp.toExplain }}">Back</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ sp.cannotCreate }}" onClick="{{ sp.toCreate }}">Create Cube</button></div>
+        </sc-if>
+        <sc-if value="{{ sp.creating }}" hint-placeholder-val="{{ false }}">
+          <h2 id="flow-h">Creating {{ sp.name }}</h2>
+          <p class="idl" style="margin-top:8px"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b mainnet</p>
+          <ol class="checks" aria-live="polite" aria-label="Creation steps">
+            <sc-for list="{{ sp.rows }}" as="k" hint-placeholder-count="4">
+              <li>
+                <sc-if value="{{ k.done }}" hint-placeholder-val="{{ true }}"><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                <sc-if value="{{ k.run }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5" stroke-dasharray="3 3"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
+                <sc-if value="{{ k.wait }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/></svg></sc-if>
+                <span class="tx">{{ k.text }}</span><span class="sv">{{ k.status }}</span>
+              </li>
+            </sc-for>
+          </ol>
+          <p class="val"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>Mechanics subject to source validation</p>
+          <div class="acts"><span class="sp"></span><button type="button" class="btn pri" disabled="{{ sp.notReady }}" onClick="{{ sp.toDone }}">Continue</button></div>
+        </sc-if>
+        <sc-if value="{{ sp.done }}" hint-placeholder-val="{{ false }}">
+          <div class="donehd"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><h2 id="flow-h">{{ sp.name }} created</h2></div>
+          <p class="idl" style="margin-top:8px"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b mainnet · Locked</p>
+          <p style="margin-top:16px">Your coins now exist on both chains and can be spent separately.</p>
+          <div class="acts top0">
+            <a class="btn pri" href="P-Launcher.dc.html">Open the new Cube</a>
+            <div class="secact">
+              <a class="btn" href="P-Split.dc.html" aria-describedby="split-d" style="align-self:flex-start">Split coins now</a>
+              <p class="cap" id="split-d">Splitting separates each coin into a Bitcoin-only and a Blake2b-only coin. Two transactions, then confirmations on each chain.</p>
+            </div>
+          </div>
+        </sc-if>
+
+        </section>
+        <p class="cap synth">Prototype · synthetic Cubes, balances and quotes · limits, routes and fees come from the rails, subject to source validation</p>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["fromto","pickcube","unlock","amount","quote","done","split"],"default":"fromto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"btcb2Beta":{"editor":"boolean","default":true,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
+  renderVals(){
+    const P=this.props,self=this;
+    const lever=P.step||'fromto';
+    const init={for:lever,step:lever,from:lever==='split'?'vault':'spark',stage:'explain',prog:0,cname:'Family savings · Blake2b',to:'other',cube:'archive',phase:'pin',method:'pin',sats:10000,unit:'sats',text:null,cmethod:'pin',pin1:'',pin2:''};
+    const S=(this.state.k&&this.state.k.for===lever)?this.state.k:init;
+    const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
+    const hb=!!P.hideBalances;
+    const beta=P.btcb2Beta!==false;
+    const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
+    const D='••••••';
+    const W={
+      spark:{name:'Spark · Daily spending',fiat:'$20.74',sats:25053},
+      vault:{name:'Vault · Family savings',fiat:'$0.00',sats:0},
+      liquid:{name:'Liquid · Travel',fiat:'$20.95',sats:25307}
+    };
+    const fmt=(n)=>String(Math.round(n)).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    const bal=(k)=>hide?D:(W[k].fiat+' · '+fmt(W[k].sats)+' SATS');
+    const cross=S.to==='other';
+    const step=S.step;
+    const go=(st)=>()=>set({step:st});
+
+    // back: one step earlier in whichever path is active
+    const prev={pickcube:'fromto',unlock:'pickcube',amount:cross?'unlock':'fromto',quote:'amount',split:'fromto'};
+    const back=()=>set({step:prev[step]||'fromto',phase:'pin',from:step==='split'?'vault':S.from});
+
+    const icons=(k)=>({spark:k==='spark',vault:k==='vault',liquid:k==='liquid',other:k==='other'});
+    const fromRows=['spark','vault','liquid'].map((k)=>{
+      const empty=W[k].sats===0;
+      return Object.assign(icons(k),{
+        id:'from-'+k,descId:'from-'+k+'-d',name:W[k].name,bal:bal(k),
+        sub:empty?'Empty':'',
+        checked:S.from===k,disabled:false,cls:S.from===k?'on':'',
+        clone:k==='vault'&&S.from==='vault'&&beta,
+        pick:()=>set({from:k,to:S.to===k?'other':S.to})
+      });
+    });
+    const toRows=['spark','vault','liquid'].filter((k)=>k!==S.from).map((k)=>Object.assign(icons(k),{
+      id:'to-'+k,descId:'to-'+k+'-d',name:W[k].name,bal:bal(k),sub:'',
+      checked:S.to===k,cls:S.to===k?'on':'',pick:()=>set({to:k})
+    })).concat([Object.assign(icons('other'),{
+      id:'to-other',descId:'to-other-d',name:'Another Cube…',bal:'',
+      sub:'Unlocks for this transfer only',
+      checked:cross,cls:cross?'on':'',pick:()=>set({to:'other'})
+    })]);
+
+    const CUBES=[
+      {key:'blake',name:'Blake workspace',net:'Bitcoin Blake2b mainnet',mark:'b2b',tag:'Blake2b',tagCls:'b2b',wallets:'Vault only',
+       reason:'Different network: can’t receive this transfer'},
+      {key:'lab',name:'Lab',net:'Testnet4',mark:'test',tag:'Testnet4',tagCls:'test',wallets:'Vault only',
+       reason:'Different network: can’t receive this transfer'},
+      {key:'archive',name:'Archive',net:'Bitcoin mainnet',mark:'btc',tag:'',tagCls:'',wallets:'Spark only',reason:''}
+    ];
+    const cubes=CUBES.map((c)=>{
+      const dis=!!c.reason;
+      return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },name:c.name,net:c.net,wallets:c.wallets,tag:c.tag,tagCls:c.tagCls,hasTag:!!c.tag,reason:c.reason,
+        btc:c.mark==='btc',b2b:c.mark==='b2b',test:c.mark==='test',
+        id:'cube-'+c.key,descId:'cube-'+c.key+'-d',disabled:dis,checked:S.cube===c.key&&!dis,
+        cls:(S.cube===c.key&&!dis?'on':'')+(dis?' off':''),pick:()=>set({cube:c.key})};
+    });
+
+    // inline unlock: PIN live at once; checks after acceptance; the turn never waits on anything
+    const unlockWith=(method)=>()=>{
+      set({phase:'checks',method:method});
+      setTimeout(()=>{const cur=self.state.k;if(cur&&cur.phase==='checks'&&cur.step==='unlock'){self.setState({k:Object.assign({},cur,{phase:'ready'})});}},1400);
+    };
+    const accepted=S.method==='key'?'Passkey accepted':'PIN accepted';
+    const unRows=S.phase==='ready'
+      ?[{text:accepted,status:'Done',done:true},{text:'Bitcoin mainnet admission passed',status:'Done',done:true},{text:'Spark loaded in Archive',status:'Done',done:true}]
+      :[{text:accepted,status:'Done',done:true},{text:'Checking Bitcoin mainnet admission…',status:'In progress',run:true},{text:'Loading Spark in Archive',status:'Waiting',wait:true}];
+    const un={pin:S.phase==='pin',checking:S.phase!=='pin',
+      rows:unRows.map((r)=>({text:r.text,status:r.status,done:!!r.done,run:!!r.run,wait:!!r.wait})),
+      notReady:S.phase!=='ready',withPin:unlockWith('pin'),withKey:unlockWith('key'),next:go('amount')};
+
+    // amount
+    const avail=W[S.from].sats;
+    const rate=20.74/25053;
+    const sats=S.sats;
+    const shownVal=S.text!==null?S.text:(S.unit==='btc'?(sats/1e8).toFixed(8).replace(/0+$/,'').replace(/\.$/,''):fmt(sats));
+    const tooMuch=sats>avail, zero=!(sats>0);
+    const amt={
+      value:shownVal,invalid:tooMuch?'true':'false',satsP:S.unit==='sats'?'true':'false',btcP:S.unit==='btc'?'true':'false',
+      fx:zero?'Enter an amount':('≈ $'+(sats*rate).toFixed(2)+' USD'),
+      hasErr:tooMuch,err:'More than the '+(hide?D:fmt(avail)+' SATS')+' available',
+      cannot:tooMuch||zero,
+      onInput:(e)=>{const t=(e&&e.target)?e.target.value:'';const n=S.unit==='btc'?Math.round(parseFloat(t||'0')*1e8):parseInt(String(t).replace(/[^0-9]/g,'')||'0',10);set({text:t,sats:isNaN(n)?0:n});},
+      toSats:()=>set({unit:'sats',text:null}),toBtc:()=>set({unit:'btc',text:null}),
+      max:()=>set({sats:Math.max(0,avail-3),text:null}),prepare:go('quote')
+    };
+
+    const fee=3;
+    const destName=cross?'Spark · Archive':W[S.to]?W[S.to].name:'';
+    const q={
+      dest:destName+(cross?' · Bitcoin mainnet':' · Everyday'),
+      route:cross?'Spark → Spark via Lightning':'[ROUTE]',
+      amount:fmt(sats)+' SATS · ≈ $'+(sats*rate).toFixed(2),
+      fee:fee+' SATS',total:fmt(sats+fee)+' SATS'
+    };
+
+    const pathSteps=step==='split'
+      ?[['explain','Source'],['newcube','New Cube'],['creating','Create'],['done','Done']]
+      :cross
+      ?[['fromto','Wallets'],['pickcube','Other Cube'],['unlock','Unlock'],['amount','Amount'],['quote','Review']]
+      :[['fromto','Wallets'],['amount','Amount'],['quote','Review']];
+    const ix=step==='split'?pathSteps.findIndex((p)=>p[0]===S.stage)+(S.stage==='done'?1:0):step==='done'?pathSteps.length:pathSteps.findIndex((p)=>p[0]===step);
+    const steps=pathSteps.map((p,i)=>({num:String(i+1),isDone:i<ix,notDone:!(i<ix),label:p[1],
+      cls:i<ix?'done':(i===ix?'cur':''),cur:i===ix?'step':'false',sr:i<ix?', done':(i===ix?', current':'')}));
+
+    const secondOpen=cross&&(step==='amount'||step==='quote');
+    const second={show:cross&&(secondOpen||step==='done'),open:secondOpen,locked:step==='done',
+      text:secondOpen?'Archive · Bitcoin mainnet · unlocked for this transfer':'Archive is locked again.'};
+
+    // clone flow: explain -> newcube -> creating (timed checks) -> done
+    const CR=['Checking Bitcoin Blake2b admission','Creating Cube','Creating Vault with mirrored policy','Registering signers'];
+    const tick=()=>{const cur=self.state.k;if(!cur||cur.stage!=='creating'||cur.prog>=CR.length)return;self.setState({k:Object.assign({},cur,{prog:cur.prog+1})});setTimeout(tick,700);};
+    const mismatch=S.cmethod!=='key'&&S.pin2!==''&&S.pin1!==S.pin2;
+    const cannotCreate=S.cmethod!=='key'&&(S.pin1===''||S.pin1!==S.pin2);
+    const sp={explain:step==='split'&&S.stage==='explain',newcube:step==='split'&&S.stage==='newcube',creating:step==='split'&&S.stage==='creating',done:step==='split'&&S.stage==='done',
+      name:S.cname,onName:(e)=>set({cname:(e&&e.target)?e.target.value:''}),
+      toNew:()=>set({stage:'newcube'}),toExplain:()=>set({stage:'explain'}),
+      toCreate:()=>{if(cannotCreate)return;set({stage:'creating',prog:0});setTimeout(tick,700);},toDone:()=>set({stage:'done'}),
+      usePin:S.cmethod!=='key',useKey:S.cmethod==='key',toKey:()=>set({cmethod:'key'}),toPin:()=>set({cmethod:'pin'}),
+      pin1:S.pin1,pin2:S.pin2,onPin1:(e)=>set({pin1:(e&&e.target)?e.target.value:''}),onPin2:(e)=>set({pin2:(e&&e.target)?e.target.value:''}),
+      mismatch:mismatch,mismatchA:mismatch?'true':'false',cannotCreate:cannotCreate,
+      notReady:S.prog<CR.length,
+      rows:CR.map((t,i)=>i<S.prog?{text:t,status:'Done',done:true,run:false,wait:false}:i===S.prog?{text:t+'…',status:'In progress',done:false,run:true,wait:false}:{text:t,status:'Waiting',done:false,run:false,wait:true})};
+    const signers=[{name:'This device',fp:'a1b2c3d4'},{name:"Keychain · Alex's phone",fp:'e5f6a7b8'},{name:'Hardware · Ledger-style device',fp:'c9d0e1f2'}];
+    const titles={fromto:'Transfer',pickcube:'Transfer',unlock:'Transfer',amount:'Transfer',quote:'Transfer',done:'Transfer',split:'Bitcoin Blake2b copy'};
+    return {
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,
+      lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
+      toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
+      title:titles[step]||'Transfer',
+      showStepper:true,sp:sp,signers:signers,
+      contDisabled:W[S.from].sats===0,contNote:W[S.from].sats===0?W[S.from].name+' has nothing to transfer.':'',steps:steps,second:second,
+      is:{fromto:step==='fromto',pickcube:step==='pickcube',unlock:step==='unlock',amount:step==='amount',quote:step==='quote',done:step==='done',split:step==='split'},
+      cross:cross,same:!cross,
+      fromRows:fromRows,toRows:toRows,fromName:W[S.from].name,toName:W[S.to]?W[S.to].name:'',
+      fromtoNext:()=>set({step:cross?'pickcube':'amount',phase:'pin'}),
+      goSplit:()=>set({step:'split',stage:'explain',prog:0,cmethod:'pin',pin1:'',pin2:''}),back:back,
+      cubes:cubes,cubeName:'Archive',pickNext:()=>set({step:'unlock',phase:'pin',cube:'archive'}),
+      destChecked:true,noop:()=>{},
+      un:un,avail:hide?D:fmt(avail)+' SATS',amt:amt,q:q,
+      confirm:go('done'),
+      restart:()=>set({step:'fromto',stage:'explain',prog:0,to:'other',phase:'pin',sats:10000,text:null,cmethod:'pin',pin1:'',pin2:''})
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,568 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Vault signing and data</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--scrim:rgba(0,0,0,.55)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--scrim:rgba(60,45,25,.3)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu a{color:var(--acc-ink)}
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;color:var(--muted)}
+/* top bar */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap;color:var(--ink)}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500;white-space:nowrap}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.mini{height:24px;padding:0 10px;border-radius:12px;border:0;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12px;cursor:pointer}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.sfoot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto;display:flex;flex-direction:column;position:relative}
+.pg{flex:1;width:100%;max-width:900px;padding:28px 48px 32px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.pfoot{padding:0 0 14px;text-align:center}
+/* controls */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.pri:hover{background:#ff9a3f}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn[disabled]{cursor:not-allowed;opacity:.55}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px;font-size:13px;text-decoration:none}
+.inp{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.err{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--bad);font-weight:500}
+/* shared page parts */
+.sec{margin-top:28px}
+.sec h2{font-size:16px;font-weight:600}
+.sec .ds{font-size:13px;color:var(--muted);margin-top:4px;max-width:64ch}
+.rows{margin-top:10px;border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:22px minmax(0,1fr) auto;column-gap:12px;align-items:center;min-height:56px;padding:10px 0;border-bottom:1px solid var(--line)}
+.row.noic{grid-template-columns:minmax(0,1fr) auto}
+.row .nm{font-weight:500;overflow-wrap:anywhere}
+.row .sub{display:block;font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.row .ic{color:var(--muted)}
+.row .act{display:flex;gap:8px;align-items:center;justify-content:flex-end;flex-wrap:wrap}
+.row .stack{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.req{display:flex;align-items:center;gap:10px;margin-top:16px;font-size:14px}
+.req .k{display:inline-flex;gap:3px}
+.req .k i{display:block;width:10px;height:10px;border-radius:50%;border:1.5px solid var(--muted)}
+.req .k i.on{background:var(--good);border-color:var(--good)}
+.path{margin-top:20px}
+.path h3{font-size:15px;font-weight:600}
+.path .pd{font-size:13px;color:var(--muted)}
+.banner{display:flex;align-items:flex-start;gap:10px;margin-top:20px;padding:12px 14px;border:1px solid var(--warn);border-radius:8px}
+.banner.bad{border-color:var(--bad)}
+.banner .tx{flex:1}
+.banner b{display:block;font-weight:600}
+.banner p{margin-top:2px;font-size:13px;color:var(--muted)}
+.banner .ref{margin-top:6px;font-size:12px;color:var(--muted)}
+/* advisory */
+.adv{display:inline-flex;align-items:center;gap:5px;height:22px;padding:0 9px;border-radius:11px;border:1px solid var(--warn);color:var(--warn);font-size:12px;font-weight:600;background:none;cursor:pointer}
+.advp{grid-column:2 / 4;margin:8px 0 2px;padding:12px 14px;border:1px solid var(--warn);border-radius:8px}
+.advp b{display:block;font-weight:600}
+.advp p{margin-top:4px;font-size:13px;color:var(--muted);max-width:72ch}
+.advp .acts{display:flex;gap:12px;margin-top:10px}
+/* pair */
+.keyc{margin-top:12px;padding:12px 14px;border:1px solid var(--accent);border-radius:8px;background:var(--selected)}
+.keyc .nm{font-weight:600}
+.qr{width:168px;height:168px;border:1px solid var(--line);border-radius:8px;background:repeating-conic-gradient(var(--ink) 0 25%,transparent 0 50%) 0 0/24px 24px;opacity:.85}
+.offer{display:flex;gap:20px;align-items:flex-start;margin-top:14px}
+.fail{margin-top:14px;padding:14px;border:1px solid var(--bad);border-radius:8px}
+.fail b{display:block;color:var(--bad);font-weight:600}
+.fail p{margin:4px 0 12px;font-size:13px;max-width:62ch}
+.pfields{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+/* branta */
+.idc{margin-top:12px;max-width:440px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.idc .k{font-size:13px;color:var(--muted)}
+.idc .hd{display:flex;align-items:center;gap:10px;margin-top:8px;font-weight:500}
+.idc .logo{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;background:var(--selected);color:var(--acc-ink);font-weight:700}
+.idc p.d{margin-top:8px;font-size:13px;color:var(--muted)}
+.dl{margin-top:12px;border-top:1px solid var(--line)}
+.dl>div{display:grid;grid-template-columns:180px minmax(0,1fr);column-gap:16px;padding:12px 0;border-bottom:1px solid var(--line)}
+.dl dt{color:var(--muted)}
+.dl dd{overflow-wrap:anywhere}
+.tog{width:40px;height:22px;border-radius:11px;border:1px solid var(--line);background:var(--bg);position:relative;cursor:pointer;flex:none;padding:0}
+.tog::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted)}
+.tog[aria-checked="true"]{background:var(--accent);border-color:var(--accent)}
+.tog[aria-checked="true"]::after{left:20px;background:var(--on-accent)}
+/* export dialog */
+.scrim{position:absolute;inset:0;background:var(--scrim);display:grid;place-items:center;z-index:5}
+.dlg{width:560px;padding:20px 24px 24px;border:1px solid var(--line);border-radius:12px;background:var(--panel);box-shadow:0 24px 64px -16px rgba(0,0,0,.5)}
+.dlg .hd{display:flex;align-items:center;gap:12px}
+.dlg h2{flex:1;font-size:18px;font-weight:600}
+.bar{height:8px;border-radius:4px;background:var(--line);margin-top:24px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.dlg .msg{margin-top:14px;text-align:center}
+.dlg .acts{display:flex;justify-content:center;gap:12px;margin-top:18px}
+.x{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.x:hover{background:var(--hover);color:var(--ink)}
+.fxt{display:inline-block;margin-top:8px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:13px}
+.fxt p+p{margin-top:2px;color:var(--muted)}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip" title="{{ acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><a href="P-Connect.dc.html" style="color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:6px"><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a></sc-if>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span><a class="mini" href="P-SignIn.dc.html" style="display:inline-flex;align-items:center;text-decoration:none">Sign in</a></sc-if>
+      </div>
+      <div class="chip" title="{{ connTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="st unk">Not checked</span></sc-if>
+      </div>
+      <button type="button" class="eye" aria-pressed="false" aria-label="Hide balances"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock Everyday and open the Launcher?</p><a class="btn pri sm" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="btn sm" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni {{ nav.vault }}" aria-current="{{ nav.vaultCur }}" href="P-Advanced.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <div class="sfoot">
+        <a class="ni {{ nav.settings }}" aria-current="{{ nav.settingsCur }}" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <a class="back" href="{{ head.backHref }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>{{ head.back }}</a>
+        <h1 class="ph">{{ head.title }}</h1>
+        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ head.line }}</p>
+
+        <!-- ===== HARDWARE SIGNING SESSION + FIRMWARE ADVISORIES ===== -->
+        <sc-if value="{{ is.hardware }}" hint-placeholder-val="{{ true }}">
+          <p class="req"><span class="k" aria-hidden="true"><i class="{{ hw.dot1 }}"></i><i class="{{ hw.dot2 }}"></i></span><span>{{ hw.collected }}</span></p>
+          <section class="sec" aria-labelledby="h-hw">
+            <h2 id="h-hw">Hardware wallet</h2>
+            <p class="ds">Select a connected device to sign.</p>
+            <ul class="rows">
+              <li class="row">
+                <svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="4" y="2.5" width="10" height="13" rx="2"/><path d="M7 12.5h4"/></svg>
+                <span><span class="nm">Coldcard <span class="mono">#a1b2c3d4</span></span><span class="sub">{{ hw.ccSub }}</span>
+                  <button type="button" class="adv" aria-expanded="{{ hw.advOpenA }}" aria-controls="adv-cc" title="This device is covered by a firmware advisory. It stays fully usable — expand the notice for what to do." onClick="{{ hw.toggleAdv }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>Firmware advisory</button></span>
+                <span class="stack">
+                  <sc-if value="{{ hw.ccIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn pri sm" onClick="{{ hw.sign }}">Sign</button></sc-if>
+                  <sc-if value="{{ hw.ccBusy }}" hint-placeholder-val="{{ false }}"><span class="st unk" role="status">Processing…</span><span class="cap">Please check your device</span></sc-if>
+                  <sc-if value="{{ hw.ccSigned }}" hint-placeholder-val="{{ false }}"><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed</span></sc-if>
+                  <sc-if value="{{ hw.ccConn }}" hint-placeholder-val="{{ false }}"><span class="st bad">Connection error</span><button type="button" class="btn sm" onClick="{{ hw.sign }}">Retry</button></sc-if>
+                </span>
+                <sc-if value="{{ hw.advOpen }}" hint-placeholder-val="{{ true }}">
+                  <div class="advp" id="adv-cc"><b>Coldcard firmware advisory</b>
+                    <p>This Coldcard reports firmware covered by Coinkite's advisory of 30 July 2026: seeds generated on it may have far less randomness than intended. Update the device firmware, then generate a new seed on the device and rotate this key out of your Cube. A single key in a multisig Cube cannot move funds on its own, so you have time to do this properly. Seeds created with 50 or more of your own dice rolls are not affected.</p>
+                    <div class="acts"><a class="lbtn" href="#adv-cc">Read the rotation guide</a><button type="button" class="lbtn" onClick="{{ hw.dismiss }}">Dismiss</button></div></div>
+                </sc-if>
+              </li>
+              <sc-if value="{{ hw.ccBusy }}" hint-placeholder-val="{{ false }}"><li class="row noic"><span class="cap" style="margin:0">Confirm on your hardware wallet. Check the amounts and the address on its screen before you approve.</span><span></span></li></sc-if>
+              <sc-for list="{{ hw.others }}" as="d" hint-placeholder-count="4">
+                <li class="row"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="4" y="2.5" width="10" height="13" rx="2"/><path d="M7 12.5h4"/></svg>
+                  <span><span class="nm">{{ d.name }} <span class="mono">{{ d.fp }}</span></span><span class="sub">{{ d.why }}</span></span>
+                  <span class="st {{ d.tone }}">{{ d.state }}</span></li>
+              </sc-for>
+            </ul>
+          </section>
+          <sc-if value="{{ hw.ccSigned }}" hint-placeholder-val="{{ false }}"><div style="margin-top:20px"><button type="button" class="btn pri">Broadcast the transaction</button></div></sc-if>
+        </sc-if>
+
+        <!-- ===== KEYCHAIN REMOTE SIGNING (Send › Sign) ===== -->
+        <sc-if value="{{ is.keychain }}" hint-placeholder-val="{{ false }}">
+          <sc-if value="{{ kc.needsConnect }}" hint-placeholder-val="{{ false }}">
+            <div class="banner"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><div class="tx"><b>Keychain signing needs Connect</b></div><a class="btn sm" href="P-SignIn.dc.html">Sign in to Connect</a></div>
+          </sc-if>
+          <div class="req" style="justify-content:space-between"><span style="display:inline-flex;gap:10px;align-items:center"><span class="k" aria-hidden="true"><i class="on"></i><i class="{{ kc.dot2 }}"></i></span>{{ kc.collected }}</span><button type="button" class="btn sm" disabled="{{ kc.reqOff }}" onClick="{{ kc.request }}">Request from everyone</button></div>
+          <section class="path" aria-labelledby="h-pp">
+            <h3 id="h-pp">Primary path</h3><p class="pd">Able to move the funds at any time.</p>
+            <ul class="rows">
+              <li class="row"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="9.5" rx="1.5"/><path d="M6 15.5h6M9 12.5v3"/></svg><span><span class="nm">This device <span class="mono">a1b2c3d4</span></span><span class="sub">This computer</span></span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed</span></li>
+              <li class="row"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="5" y="1.75" width="8" height="14.5" rx="1.75"/><path d="M8 13.5h2"/></svg><span><span class="nm">Keychain · Alex's phone <span class="mono">e5f6a7b8</span></span><span class="sub">{{ kc.kind }}</span><sc-if value="{{ kc.hasReason }}" hint-placeholder-val="{{ false }}"><span class="sub {{ kc.reasonTone }}">{{ kc.reason }}</span></sc-if></span>
+                <span class="stack">
+                  <sc-if value="{{ kc.showStatus }}" hint-placeholder-val="{{ true }}"><span class="st {{ kc.tone }}" role="status">{{ kc.status }}</span></sc-if>
+                  <sc-if value="{{ kc.canRequest }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn sm" onClick="{{ kc.request }}">Request</button></sc-if>
+                  <sc-if value="{{ kc.canRetry }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn sm" onClick="{{ kc.request }}">Retry</button></sc-if>
+                  <sc-if value="{{ kc.lan }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn pri sm" onClick="{{ kc.request }}">Send through Connect</button><button type="button" class="btn sm" onClick="{{ kc.request }}">Try Wi-Fi again</button></sc-if>
+                  <sc-if value="{{ kc.out }}" hint-placeholder-val="{{ false }}"><a class="btn sm" href="P-SignIn.dc.html">Sign in to Connect</a></sc-if>
+                </span></li>
+              <li class="row"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="4" y="2.5" width="10" height="13" rx="2"/><path d="M7 12.5h4"/></svg><span><span class="nm">Hardware · Ledger-style device <span class="mono">c9d0e1f2</span></span><span class="sub">Hardware wallet</span></span><button type="button" class="btn sm" onClick="{{ go.hardware }}">Sign</button></li>
+            </ul>
+          </section>
+          <section class="path" aria-labelledby="h-rp">
+            <h3 id="h-rp">Recovery path</h3><p class="pd">Available after inactivity of ~180d</p>
+            <ul class="rows"><li class="row"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M8 11a3.5 3.5 0 1 1 3-5.25h5v2.5h-1.5v1.5h-2.25v-1.5H11A3.5 3.5 0 0 1 8 11z"/></svg><span><span class="nm">Recovery key 1 <span class="mono">3a4b5c6d</span></span><span class="sub">Inactive path</span></span><span class="st unk">Unavailable</span></li></ul>
+          </section>
+        </sc-if>
+
+        <!-- ===== PAIR WITH KEYCHAIN (LAN phone signing) ===== -->
+        <sc-if value="{{ is.pair }}" hint-placeholder-val="{{ false }}">
+          <p class="ds muted" style="margin-top:14px">Phones paired here sign for this Vault · ID <span class="mono">9c1e44ab</span></p>
+          <section class="sec" aria-labelledby="h-pa">
+            <h2 id="h-pa">Pair a phone</h2>
+            <sc-if value="{{ pr.idle }}" hint-placeholder-val="{{ true }}"><div style="margin-top:12px"><button type="button" class="btn pri" onClick="{{ pr.start }}">Pair phone</button></div></sc-if>
+            <sc-if value="{{ pr.noKeys }}" hint-placeholder-val="{{ false }}"><p class="ds" style="margin-top:10px;color:var(--ink);font-weight:500">No Keychain keys to pair</p></sc-if>
+            <sc-if value="{{ pr.key }}" hint-placeholder-val="{{ false }}">
+              <p class="ds" style="margin-top:10px">The Keychain key this phone will sign for:</p>
+              <div class="keyc"><p class="nm">Keychain · Alex's phone</p><p class="mono">Key e5f6a7b8</p>
+                <button type="button" class="lbtn" aria-expanded="{{ pr.detA }}" onClick="{{ pr.toggleDet }}">{{ pr.detLabel }}</button>
+                <sc-if value="{{ pr.det }}" hint-placeholder-val="{{ false }}"><p class="mono" style="margin-top:6px">[e5f6a7b8/48'/0'/0'/2']xpub…synthetic…q7Lm</p><p class="cap">Key names can be changed in Vault → Settings → Wallet.</p></sc-if>
+              </div>
+              <div style="display:flex;gap:10px;margin-top:14px"><button type="button" class="btn" onClick="{{ pr.reset }}">Back</button><button type="button" class="btn pri" onClick="{{ pr.discover }}">Pair phone</button></div>
+            </sc-if>
+            <sc-if value="{{ pr.looking }}" hint-placeholder-val="{{ false }}"><p class="ds" role="status" style="margin-top:10px">Looking for phones…</p></sc-if>
+            <sc-if value="{{ pr.pick }}" hint-placeholder-val="{{ false }}">
+              <p class="ds" style="margin-top:10px;color:var(--ink);font-weight:500">Pick a phone to pair with</p>
+              <ul class="rows"><li class="row"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="5" y="1.75" width="8" height="14.5" rx="1.75"/><path d="M8 13.5h2"/></svg><span><span class="nm">Phone 3f9a21c0</span><span class="sub">192.0.2.24:54502</span></span><button type="button" class="btn pri sm" onClick="{{ pr.offer }}">Pair</button></li></ul>
+              <div style="margin-top:12px"><button type="button" class="btn sm" onClick="{{ pr.reset }}">Back</button></div>
+            </sc-if>
+            <sc-if value="{{ pr.offering }}" hint-placeholder-val="{{ false }}">
+              <div class="offer"><div class="qr" role="img" aria-label="Pairing QR code (synthetic)"></div><div><p>Scan this QR with the Keychain app on phone 3f9a21c0 (192.0.2.24:54502).</p><p class="ds" role="status" style="margin-top:8px">{{ pr.wait }}</p><div style="margin-top:14px"><button type="button" class="btn sm" onClick="{{ pr.reset }}">Back</button></div></div></div>
+            </sc-if>
+            <sc-if value="{{ pr.failed }}" hint-placeholder-val="{{ false }}">
+              <div class="fail" role="alert"><b>{{ pr.fTitle }}</b><p>{{ pr.fText }}</p><button type="button" class="btn sm" onClick="{{ pr.start }}">Try again</button></div>
+            </sc-if>
+          </section>
+          <section class="sec" aria-labelledby="h-pp2">
+            <h2 id="h-pp2">Paired phones</h2>
+            <sc-if value="{{ pr.noPaired }}" hint-placeholder-val="{{ false }}"><p class="ds" style="margin-top:10px">No paired phones for this vault yet. Use 'Pair phone' above to add one.</p></sc-if>
+            <ul class="rows">
+              <sc-for list="{{ pr.phones }}" as="p" hint-placeholder-count="2">
+                <li class="row" style="align-items:start"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18" style="margin-top:8px"><rect x="5" y="1.75" width="8" height="14.5" rx="1.75"/><path d="M8 13.5h2"/></svg>
+                  <span><span class="nm">{{ p.name }}</span><span class="sub mono">{{ p.cert }}</span><span class="sub {{ p.tone }}">{{ p.bind }}</span>
+                    <span class="pfields"><label class="srl" for="{{ p.nid }}">Phone name</label><input id="{{ p.nid }}" class="inp" placeholder="Phone name" value="{{ p.name }}"><label class="srl" for="{{ p.hid }}">Fallback host:port (mDNS-blocked networks)</label><input id="{{ p.hid }}" class="inp mono" style="width:280px" placeholder="Fallback host:port (mDNS-blocked networks)" value="{{ p.host }}"></span></span>
+                  <span class="act"><button type="button" class="btn sm">Save</button><button type="button" class="btn sm" aria-label="{{ p.rm }}" onClick="{{ p.remove }}">Remove</button></span></li>
+              </sc-for>
+            </ul>
+          </section>
+        </sc-if>
+
+        <!-- ===== LABELS (BIP 329) ===== -->
+        <sc-if value="{{ is.labels }}" hint-placeholder-val="{{ false }}">
+          <section class="sec" aria-labelledby="h-lb">
+            <h2 id="h-lb">Labels</h2>
+            <ul class="rows">
+              <sc-for list="{{ lb.rows }}" as="r" hint-placeholder-count="3">
+                <li class="row noic"><span><span class="cap" style="display:block">{{ r.kind }}</span>
+                  <sc-if value="{{ r.view }}" hint-placeholder-val="{{ true }}"><span class="nm">{{ r.label }}</span><span class="sub mono">{{ r.ref }}</span></sc-if>
+                  <sc-if value="{{ r.edit }}" hint-placeholder-val="{{ false }}"><span style="display:flex;gap:8px;align-items:center;margin-top:4px"><label class="srl" for="{{ r.id }}">Label</label><input id="{{ r.id }}" class="inp" style="width:380px" placeholder="Label" value="{{ r.draft }}" aria-invalid="{{ r.badA }}" aria-describedby="{{ r.eid }}" onInput="{{ r.onInput }}"><button type="button" class="btn pri sm" disabled="{{ r.bad }}" onClick="{{ r.save }}">Save</button><button type="button" class="btn sm" onClick="{{ r.cancel }}">Cancel</button></span>
+                    <sc-if value="{{ r.bad }}" hint-placeholder-val="{{ false }}"><span class="err" id="{{ r.eid }}" role="alert" style="margin-top:6px">Invalid label length, cannot be superior to 100</span></sc-if></sc-if>
+                </span>
+                <sc-if value="{{ r.view }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn sm" onClick="{{ r.start }}">{{ r.action }}</button></sc-if></li>
+              </sc-for>
+            </ul>
+          </section>
+        </sc-if>
+
+        <!-- ===== IMPORT / EXPORT ===== -->
+        <sc-if value="{{ is.export }}" hint-placeholder-val="{{ false }}">
+          <ul class="rows" style="margin-top:20px">
+            <sc-for list="{{ ex.rows }}" as="r" hint-placeholder-count="5">
+              <li class="row noic"><span><span class="nm">{{ r.name }}</span><span class="sub">{{ r.desc }}</span></span><button type="button" class="btn sm" onClick="{{ r.go }}">{{ r.verb }}</button></li>
+            </sc-for>
+          </ul>
+        </sc-if>
+
+        <!-- ===== WARNINGS ===== -->
+        <sc-if value="{{ is.warnings }}" hint-placeholder-val="{{ false }}">
+          <div class="banner bad" role="alert"><svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg><div class="tx"><b>{{ wn.title }}</b><p>{{ wn.guide }}</p><p class="ref">Ref: {{ wn.ref }}</p></div></div>
+          <section class="sec" aria-labelledby="h-fx">
+            <h2 id="h-fx">Fiat value</h2>
+            <p style="margin-top:8px;font-size:20px;font-weight:600">$0.00 <button type="button" class="lbtn" aria-expanded="true" aria-controls="fx-tip">Rate</button></p>
+            <div class="fxt" id="fx-tip" role="tooltip"><sc-if value="{{ wn.stale }}" hint-placeholder-val="{{ false }}"><p class="warn" style="color:var(--warn)">BTCB2 quote is unavailable or stale</p></sc-if><sc-if value="{{ wn.fresh }}" hint-placeholder-val="{{ true }}"><p>Exchange rate: 1 BTC ~ 82,760 USD</p><p>Source: [SOURCE]</p><p>Last updated at source: 09:10</p></sc-if></div>
+          </section>
+        </sc-if>
+
+        <!-- ===== RECIPIENT IDENTITY (Branta) on Send review ===== -->
+        <sc-if value="{{ is.branta }}" hint-placeholder-val="{{ false }}">
+          <dl class="dl" style="margin-top:20px">
+            <div><dt>Recipient</dt><dd class="mono">lnbc25u1p…synthetic…7xk</dd></div>
+            <div><dt>Amount</dt><dd>2,500 SATS · ≈ $2.07</dd></div>
+          </dl>
+          <sc-if value="{{ br.card }}" hint-placeholder-val="{{ true }}">
+            <div class="idc"><p class="k">Recipient identified</p><p class="hd"><span class="logo" aria-hidden="true">E</span>Example Coffee Co.</p><p class="d">Synthetic merchant description.</p><div style="margin-top:10px"><button type="button" class="btn sm">View with Branta</button></div></div>
+          </sc-if>
+          <section class="sec" aria-labelledby="h-rc">
+            <div style="display:flex;align-items:center;gap:12px"><h2 id="h-rc" style="flex:1">Recipient identity checks</h2><button type="button" class="tog" role="switch" aria-checked="{{ br.onA }}" aria-labelledby="h-rc" onClick="{{ br.toggle }}"></button></div>
+            <p class="ds">Check supported payment requests with Branta before sending. Strict mode does not share the plaintext destination or payment amount, but Branta can still observe lookup timing and your network connection.</p>
+            <button type="button" class="lbtn" style="margin-top:6px">Branta privacy information</button>
+          </section>
+        </sc-if>
+      </div>
+      <p class="cap pfoot">{{ foot }}</p>
+
+      <!-- export progress dialog -->
+      <sc-if value="{{ ex.open }}" hint-placeholder-val="{{ false }}">
+        <div class="scrim">
+          <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="dlg-h">
+            <div class="hd"><h2 id="dlg-h">{{ ex.title }}</h2><sc-if value="{{ ex.closable }}" hint-placeholder-val="{{ false }}"><button type="button" class="x" aria-label="Close" onClick="{{ ex.close }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 5l8 8M13 5l-8 8"/></svg></button></sc-if></div>
+            <div class="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ ex.pct }}" aria-label="Progress"><i style="{{ ex.barStyle }}"></i></div>
+            <p class="msg {{ ex.msgTone }}" role="status">{{ ex.msg }}</p>
+            <sc-if value="{{ ex.advisory }}" hint-placeholder-val="{{ false }}"><div class="advp" style="margin-top:16px"><b>Coldcard firmware advisory</b><p>This key was exported from a Coldcard. A file carries no firmware information, so Coincube cannot tell which firmware generated the seed behind it. If that seed was created on firmware covered by Coinkite's advisory of 30 July 2026 — and without 50 or more of your own dice rolls — generate a new seed on the device and rotate this key out of your Cube. A single key in a multisig Cube cannot move funds on its own, so you have time to do this properly.</p><div class="acts"><a class="lbtn" href="#dlg-h">Read the rotation guide</a></div></div></sc-if>
+            <div class="acts">
+              <sc-if value="{{ ex.cancelable }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" onClick="{{ ex.cancel }}">Cancel</button></sc-if>
+              <sc-if value="{{ ex.conflict }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" onClick="{{ ex.resolve }}">Overwrite</button><button type="button" class="btn" onClick="{{ ex.resolve }}">Ignore</button></sc-if>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["hardware","keychain","pair","labels","export","warnings","branta"],"default":"hardware","section":"Review"},"state":{"editor":"enum","options":["ready","processing","signed","connectionError","advisoryDismissed","requested","delivered","viewed","approved","signing","rejected","expired","lanFailed","signedOut","keyPick","discovering","pickPhone","offer","offerExpired","wrongWallet","qrUsed","verifyFailed","needsUpdate","networkError","noPaired","noKeys","editing","tooLong","choosePath","progress","timeout","canceled","success","labelsConflict","aliasesConflict","importAdvisory","coinSelection","backendDown","quoteStale","notIdentified","checksOff"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={k:null,lockAsk:false};}
+  renderVals(){
+    const P=this.props,self=this;
+    const L={sec:P.section||'hardware',st:P.state||'ready'};
+    const key=L.sec+'|'+L.st;
+    const st=L.st;
+    const KC=['requested','delivered','viewed','approved','signing','signed','rejected','expired','lanFailed','signedOut'];
+    const PR=['keyPick','discovering','pickPhone','offer','offerExpired','wrongWallet','qrUsed','verifyFailed','needsUpdate','networkError'];
+    const EX=['choosePath','progress','timeout','canceled','success','labelsConflict','aliasesConflict','importAdvisory'];
+    const init={key:key,sec:L.sec,
+      hw:['processing','signed','connectionError'].indexOf(st)>=0?st:'ready',adv:st!=='advisoryDismissed',advDismissed:st==='advisoryDismissed',
+      kc:KC.indexOf(st)>=0?st:'idle',
+      pr:PR.indexOf(st)>=0?st:'idle',det:false,secs:54,
+      phones:st==='noPaired'?[]:[{id:'p1',name:"Alex's phone",cert:'cert 3f9a21c0',host:'',exact:true},{id:'p2',name:'Old tablet',cert:'cert 7b2d90e4',host:'192.0.2.31:54502',exact:false}],
+      editing:st==='editing'||st==='tooLong'?'out1':'',draft:st==='tooLong'?'Coffee roaster invoice for October, split between the household and the shop, includes the grinder deposit and shipping':'Coffee roaster invoice',
+      labels:{tx:'',out1:'Coffee roaster invoice',out2:''},
+      ex:EX.indexOf(st)>=0?st:'closed',pct:42,exTitle:st==='importAdvisory'||st==='labelsConflict'||st==='aliasesConflict'?'Import wallet':'BIP 329 labels',
+      brOn:st!=='checksOff'};
+    const S=(this.state.k&&this.state.k.key===key)?this.state.k:init;
+    const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
+    const later=(ms,pred,patch)=>setTimeout(()=>{const c=self.state.k;if(c&&pred(c))self.setState({k:Object.assign({},c,typeof patch==='function'?patch(c):patch)});},ms);
+    const val=(e)=>(e&&e.target)?e.target.value:'';
+    const sec=S.sec;
+
+    const HEAD={
+      hardware:{back:'PSBTs',backHref:'P-Advanced.dc.html',title:'Sign transaction',line:'Vault · Family savings · Bitcoin mainnet · 120,000 SATS out'},
+      keychain:{back:'Send',backHref:'P-Send.dc.html',title:'Sign transaction',line:'Vault · Family savings · Bitcoin mainnet · 120,000 SATS out'},
+      pair:{back:'Settings',backHref:'P-Settings.dc.html',title:'Pair with Keychain',line:'Vault · Family savings · Bitcoin mainnet'},
+      labels:{back:'Activity',backHref:'P-Activity.dc.html',title:'Outgoing transaction',line:'Vault · Family savings · Bitcoin mainnet'},
+      export:{back:'Settings',backHref:'P-Settings.dc.html',title:'Import/Export',line:'Vault · Family savings · Bitcoin mainnet'},
+      warnings:{back:'Overview',backHref:'P-Overview.dc.html',title:'Vault · Family savings',line:'Everyday · Bitcoin mainnet'},
+      branta:{back:'Send',backHref:'P-Send.dc.html',title:'Review payment',line:'Spark · Daily spending · Bitcoin mainnet'}
+    };
+
+    // hardware
+    const hwSigned=S.hw==='signed';
+    const hw={
+      collected:hwSigned?'2 of 2 signatures collected':'1 of 2 signatures collected · 1 more signature',
+      dot1:'on',dot2:hwSigned?'on':'',
+      ccSub:'Mk4 · firmware 5.x (synthetic)',
+      ccIdle:S.hw==='ready',ccBusy:S.hw==='processing',ccSigned:hwSigned,ccConn:S.hw==='connectionError',
+      advOpen:S.adv&&!S.advDismissed,advOpenA:S.adv&&!S.advDismissed?'true':'false',
+      toggleAdv:()=>set({adv:!S.adv,advDismissed:false}),dismiss:()=>set({advDismissed:true,adv:false}),
+      sign:()=>{set({hw:'processing'});later(1600,(c)=>c.hw==='processing',{hw:'signed'});},
+      others:[
+        {name:'BitBox02',fp:'#b7c8d9e0',why:'Locked, check code: 4F2-K9',state:'Locked',tone:'warn'},
+        {name:'Hardware device',fp:'#c9d0e1f2',why:'Install version 2.1.0 or later',state:'Unsupported firmware version',tone:'warn'},
+        {name:'Hardware device',fp:'#d1e2f3a4',why:'The wrong bitcoin application is open or the device was initialized with the wrong network',state:'Wrong network in the device settings',tone:'bad'},
+        {name:'Hardware device',fp:'#e3f4a5b6',why:'This signing device is not part of this spending path.',state:'Cannot sign',tone:'unk'},
+        {name:'Hardware device',fp:'#f5a6b7c8',why:'The wallet descriptor is not registered on the device. You can register it in the settings.',state:'Not registered',tone:'warn'}]
+    };
+
+    // keychain remote session
+    const KS={idle:['','unk'],creating:['Requesting…','unk'],requested:['Requested…','unk'],delivered:['Delivered','unk'],viewed:['Viewed','unk'],approved:['Approved','ok'],signing:['Signing…','unk'],signed:['Signed','ok'],rejected:['Rejected','bad'],expired:['Expired','bad'],cancelled:['Cancelled','unk'],failed:['Failed','bad']};
+    const k=S.kc;
+    const ORDER=['creating','requested','delivered','viewed','approved','signing','signed'];
+    const advance=()=>{const c=self.state.k;if(!c)return;const i=ORDER.indexOf(c.kc);if(i>=0&&i<ORDER.length-1){self.setState({k:Object.assign({},c,{kc:ORDER[i+1]})});setTimeout(advance,800);}};
+    const lan=k==='lanFailed',out=k==='signedOut';
+    const kc={
+      kind:lan?'Keychain · local network':'Keychain',
+      status:(KS[k]||['',''])[0],tone:(KS[k]||['','unk'])[1],showStatus:!!(KS[k]&&KS[k][0]),
+      canRequest:k==='idle',canRetry:k==='rejected'||k==='expired'||k==='failed',lan:lan,out:out,
+      hasReason:lan||out,reason:lan?"Couldn't sign over Wi-Fi":(out?'Connect a device to sign with this key.':''),reasonTone:lan?'bad':'',
+      needsConnect:out,reqOff:out||ORDER.indexOf(k)>=0,
+      dot2:k==='signed'?'on':'',collected:k==='signed'?'2 of 2 signatures collected':'1 of 2 signatures collected',
+      request:()=>{set({kc:'creating'});setTimeout(advance,800);}
+    };
+
+    // pair
+    const FAIL={
+      offerExpired:['Offer expired','The pairing offer ran out before any phone scanned it. Generate a new offer and try again.'],
+      wrongWallet:['Wrong wallet','The phone reports it can sign for wallet 2d7e01aa but this wallet expects 9c1e44ab. Confirm the phone is paired with the right vault.'],
+      qrUsed:['QR already used','This pairing QR has already completed a pairing. Go back and start a fresh offer rather than re-using it.'],
+      verifyFailed:["Couldn't verify the phone","The device that scanned the QR couldn't prove it's the phone you're pairing. This can happen on an untrusted network. Make sure both devices are on a network you trust, then start a fresh pairing."],
+      needsUpdate:['Keychain needs updating',"This Keychain didn't send an encryption key, so signing requests to it couldn't be encrypted. Update the Keychain app on the phone, then pair again."],
+      networkError:['Network error','Could not finish the TLS handshake or stream the pairing envelope. Confirm both devices are on the same Wi-Fi and try again. (connection reset)']
+    };
+    const p=S.pr;
+    const phones=S.phones.map((x)=>({name:x.name,cert:x.cert,host:x.host,nid:'pn-'+x.id,hid:'ph-'+x.id,
+      bind:x.exact?'Exact vault key paired':'Pair again and select the exact vault key held by this phone.',tone:x.exact?'ok':'warn',
+      rm:'Remove '+x.name,remove:()=>set({phones:S.phones.filter((y)=>y.id!==x.id)})}));
+    const pr={
+      idle:p==='idle'&&st!=='noKeys',noKeys:st==='noKeys'&&p==='idle',key:p==='keyPick',looking:p==='discovering',pick:p==='pickPhone',
+      offering:p==='offer'||p==='offerWait',failed:!!FAIL[p],fTitle:FAIL[p]?FAIL[p][0]:'',fText:FAIL[p]?FAIL[p][1]:'',
+      det:S.det,detA:S.det?'true':'false',detLabel:S.det?'Hide key details':'Show key details',toggleDet:()=>set({det:!S.det}),
+      wait:S.secs>0?'Waiting for 3f9a21c0 — expires in '+S.secs+'s':'Pairing offer expired.',
+      start:()=>set({pr:'keyPick'}),reset:()=>set({pr:'idle'}),
+      discover:()=>{set({pr:'discovering'});later(1200,(c)=>c.pr==='discovering',{pr:'pickPhone'});},
+      offer:()=>{set({pr:'offer',secs:54});},
+      noPaired:phones.length===0,phones:phones
+    };
+
+    // labels
+    const LB=[['tx','Transaction label','Txid 4e1f…synthetic…9a2c'],['out1','Output 1 · payment','bc1q…synthetic…8hd · 120,000 SATS'],['out2','Output 2 · change','bc1q…synthetic…2mf · 54,880 SATS']];
+    const lb={rows:LB.map((r)=>{
+      const editing=S.editing===r[0];const draft=editing?S.draft:'';const bad=editing&&draft.length>100;
+      const cur=S.labels[r[0]];
+      return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },id:'lb-'+r[0],eid:'lb-e-'+r[0],kind:r[1],ref:r[2],
+        label:cur||(r[0]==='out1'?'(External Output)':'No label'),
+        action:cur?'Edit':'Add label',view:!editing,edit:editing,draft:draft,bad:bad,badA:bad?'true':'false',
+        onInput:(e)=>set({draft:val(e)}),start:()=>set({editing:r[0],draft:cur||''}),cancel:()=>set({editing:''}),
+        save:()=>{if(bad)return;const nl=Object.assign({},S.labels);nl[r[0]]=S.draft.trim();set({labels:nl,editing:''});}};
+    })};
+
+    // export
+    const exStep=(c)=>{if(c.ex!=='progress')return null;return c.pct>=100?{ex:'success',pct:100}:{pct:Math.min(100,c.pct+29)};};
+    const tick=()=>{const c=self.state.k;if(!c)return;const n=exStep(c);if(n){self.setState({k:Object.assign({},c,n)});if(n.ex!=='success')setTimeout(tick,700);}};
+    const startEx=(title)=>()=>{set({ex:'choosePath',pct:5,exTitle:title});later(900,(c)=>c.ex==='choosePath',{ex:'progress',pct:10});setTimeout(tick,1700);};
+    const XR=[
+      ['Connect Recovery Kit','Back up your Wallet Descriptor (and Master Seed Phrase) to your Connect account. Encrypted on-device with a password you choose.','Open','kit'],
+      ['Encrypted descriptor','.bed file, can be decrypted with one of your signing devices or xpubs.','Export',''],
+      ['Descriptor only - plain-text','Plain-text (not encrypted) descriptor file only, to use with other wallets.','Export',''],
+      ['Transactions table','.CSV file of past transactions, for accounting purposes.','Export',''],
+      ['BIP 329 labels','Bip 329 label export, compatible with other wallets.','Export',''],
+      ['Export wallet','File (not encrypted) with wallet info useful to sync labels and data on other devices.','Export',''],
+      ['Import wallet','Upload a backup file to update wallet info.','Import','imp']];
+    const MSG={choosePath:'Select the path you want to export in the popup window...',progress:'Progress: '+Math.round(S.pct)+'%',timeout:'Export failed: timeout',canceled:'Export canceled',
+      success:S.exTitle==='Import wallet'?'Import successful':'Export successful!',labelsConflict:'Labels conflict, what do you want to do?',aliasesConflict:'Aliases conflict, what do you want to do?',importAdvisory:'Import successful'};
+    const ended=['timeout','canceled','success','importAdvisory'].indexOf(S.ex)>=0;
+    const pct=S.ex==='choosePath'?5:(S.ex==='progress'?S.pct:(S.ex==='labelsConflict'||S.ex==='aliasesConflict'?50:100));
+    const ex={
+      rows:XR.map((r)=>({name:r[0],desc:r[1],verb:r[2],go:r[3]==='kit'?()=>{}:(r[3]==='imp'?()=>{set({ex:'labelsConflict',exTitle:'Import wallet'});}:startEx(r[0]))})),
+      open:S.ex!=='closed',title:S.exTitle,closable:ended,cancelable:S.ex==='choosePath'||S.ex==='progress',conflict:S.ex==='labelsConflict'||S.ex==='aliasesConflict',
+      advisory:S.ex==='importAdvisory',msg:MSG[S.ex]||'',msgTone:S.ex==='timeout'?'bad':'',
+      pct:String(Math.round(pct)),barStyle:'width:'+Math.max(2.5,pct)+'%',
+      close:()=>set({ex:'closed'}),cancel:()=>set({ex:'canceled',pct:100}),
+      resolve:()=>set({ex:S.ex==='labelsConflict'?'aliasesConflict':'importAdvisory',pct:100})
+    };
+
+    // warnings
+    const WN={ready:['The wallet engine stopped','Restart the app to reconnect. Your funds are unaffected.','CC-DMN-DOWN'],
+      coinSelection:['Not enough spendable coins',"Your balance can't cover this amount plus the network fee. Try a smaller amount, or a lower fee rate.",'CC-DMN-COINSELECT'],
+      backendDown:["Can't reach your Bitcoin backend",'Check that your node or Electrum server is running and reachable, then try again.','CC-DMN-DOWN']};
+    const w=WN[st]||WN.ready;
+    const wn={title:w[0],guide:w[1],ref:w[2],stale:st==='quoteStale',fresh:st!=='quoteStale'};
+
+    // branta
+    const br={card:S.brOn&&st!=='notIdentified',onA:S.brOn?'true':'false',toggle:()=>set({brOn:!S.brOn})};
+
+    const out2=sec==='keychain'&&k==='signedOut';
+    const FOOT={
+      hardware:'Prototype · synthetic devices and fingerprints · advisory copy quoted from the app; a dismissed advisory keeps its badge',
+      keychain:'Prototype · synthetic signers · Request animates the session states the phone reports',
+      pair:'Prototype · synthetic phone, QR and documentation-range address · same Wi-Fi, no Connect account needed',
+      labels:'Prototype · synthetic transaction · labels export as BIP 329 from Import/Export',
+      export:'Prototype · synthetic files · the system file picker stands in as the first step',
+      warnings:'Prototype · one shared error card for every Vault failure: title, next step, Ref code',
+      branta:'Prototype · synthetic merchant · the card appears only for a current identification; otherwise nothing shows'
+    };
+    const vaultish=['hardware','keychain','labels','warnings'].indexOf(sec)>=0;
+    return {
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      lockIdle:!self.state.lockAsk,lockAsk:!!self.state.lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
+      signedIn:!out2,signedOut:out2,acctTitle:out2?'Connect account · Signed out':'alex@example.test · Signed in',connTitle:'Cube service · '+(out2?'Not checked':'Connected'),
+      nav:{vault:vaultish?'on':'',vaultCur:vaultish?'page':'false',settings:(sec==='pair'||sec==='export')?'on':'',settingsCur:(sec==='pair'||sec==='export')?'page':'false'},
+      head:HEAD[sec],
+      is:{hardware:sec==='hardware',keychain:sec==='keychain',pair:sec==='pair',labels:sec==='labels',export:sec==='export',warnings:sec==='warnings',branta:sec==='branta'},
+      go:{hardware:()=>set({sec:'hardware'})},
+      hw:hw,kc:kc,pr:pr,lb:lb,ex:ex,wn:wn,br:br,
+      foot:FOOT[sec]
+    };
+  }
+}
+</script>
+</body>
+</html>

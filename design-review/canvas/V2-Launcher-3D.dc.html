@@ -1,0 +1,506 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V2 Launcher · 3D floor</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens: flat neutral greys, top lightest; edge hue = chain family; aura = selection only */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--aura:rgba(243,130,29,.4);--on-accent:#201407;--pshadow:0 18px 40px -12px rgba(0,0,0,.65),0 2px 6px rgba(0,0,0,.3);font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--aura:rgba(243,130,29,.34);--pshadow:0 18px 40px -14px rgba(70,52,30,.34),0 2px 6px rgba(70,52,30,.12)}
+.tenshu button{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg{flex:none}
+
+/* top bar: identity, filters, count, account */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail);position:relative;z-index:5}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.h1{margin:0 8px 0 0;font-size:20px;font-weight:600}
+.chips{display:flex;align-items:center;gap:8px;border:0;margin:0;padding:0}
+.chip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px}
+.chip:hover{border-color:var(--muted)}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.chip svg{width:14px;height:14px}
+.chipwrap{position:relative}
+.menu{position:absolute;top:40px;left:0;width:272px;padding:6px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:var(--pshadow)}
+.mi{display:flex;align-items:center;gap:8px;width:100%;height:34px;padding:0 10px;border:0;border-radius:6px;background:none;cursor:pointer;font-size:13px;text-align:left}
+.mi:hover{background:var(--selected)}
+.mi.on{font-weight:600}
+.mi .n{margin-left:auto;color:var(--muted);font-size:12px}
+.mi .ck{width:14px;height:14px;display:inline-flex}
+.mi svg{width:14px;height:14px}
+.mnote{margin:6px 6px 4px;padding-top:8px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.count{font-size:13px;color:var(--muted)}
+.linkbtn{border:0;background:none;padding:2px 4px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px}
+.tbtn:hover{border-color:var(--line)}
+.tbtn svg{width:16px;height:16px}
+
+/* stage */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.floor{position:absolute;left:0;right:0;bottom:0;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.field{position:absolute;inset:0;overflow-x:hidden;overflow-y:auto}
+.rows{display:flex;flex-direction:column;box-sizing:border-box}
+.rows.big{padding:84px 48px 24px;gap:0}
+.rows.mid{padding:40px 360px 24px 48px;gap:12px}
+.rows.dense{padding:28px 360px 24px 48px;gap:8px}
+.row{display:flex;justify-content:center}
+.rows.big .row{gap:40px}
+.rows.mid .row{gap:28px}
+.rows.dense .row{gap:20px}
+
+/* cube object: real button = 3D scene (aria-hidden) + flat label */
+.cb{display:flex;flex-direction:column;align-items:center;border:0;background:none;padding:8px 4px 10px;border-radius:12px;cursor:pointer;text-align:center;box-sizing:border-box}
+.cb:hover .nm{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+.cb.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+.scene{position:relative;display:block;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px}
+.aura{position:absolute;left:50%;top:calc(47.5% + var(--s) * .52);width:calc(var(--s) * 2);height:calc(var(--s) * .95);transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(closest-side,var(--aura),transparent);opacity:0}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(calc(var(--s) * .055));transition:transform .24s cubic-bezier(.2,.8,.2,1),opacity .24s ease}
+.lift{position:absolute;inset:0;transform-style:preserve-3d;transition:transform .24s cubic-bezier(.2,.8,.2,1)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.cube.btc{--edge:var(--edge-btc)}
+.cube.b2b{--edge:var(--edge-b2b)}
+.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:calc(var(--s) * .04);transform:rotate(45deg)}
+/* Network marks: the supplied Bitcoin and Bitcoin Blake2b coin images. Test network = 60% image inside a dashed ring, plus the text tag */
+.coin{display:inline-flex;align-items:center;justify-content:center;flex:none;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.coin img{display:block;width:100%;height:100%;border-radius:50%}
+.coin.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.coin.tn img{opacity:.6}
+.pnet .coin{width:18px;height:18px;color:var(--ink)}
+.pnet .coin.tn{border-width:1px;padding:1.5px}
+.lg .coin{width:16px;height:16px}
+.ftag{font-size:calc(var(--s) * .095);font-weight:600;line-height:1.2;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.cube.test .ftag{border-style:dashed}
+.lc{display:flex;align-items:center;gap:calc(var(--s) * .04)}
+.wi{width:calc(var(--s) * .25);height:calc(var(--s) * .25)}
+.rc{display:flex;align-items:flex-start;gap:calc(var(--s) * .02)}
+.pad{width:calc(var(--s) * .36);height:calc(var(--s) * .36)}
+.bdg{width:calc(var(--s) * .21);height:calc(var(--s) * .21);margin-top:calc(var(--s) * -.03)}
+.bdg.warn{color:var(--warn)}
+.bdg.unk{color:var(--muted)}
+/* the one authored motion moment: selected lift */
+.is-sel .aura{opacity:1}
+.is-sel .lift{transform:translateY(-14px)}
+.is-sel .shadow{transform:translate(-46%,-46%) scale(.88);opacity:.6}
+.tenshu.reduced .is-sel .lift{transform:none}
+.tenshu.reduced .is-sel .shadow{transform:translate(-46%,-46%);opacity:1}
+@media (prefers-reduced-motion: reduce){.tenshu .is-sel .lift{transform:none}.tenshu .is-sel .shadow{transform:translate(-46%,-46%);opacity:1}}
+
+/* shrunken label: name + state */
+.lbl{display:flex;flex-direction:column;align-items:center;gap:2px;width:100%;margin-top:2px}
+.nm{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-weight:600;font-size:14px;line-height:1.3;word-break:break-word}
+.dense .nm{font-size:13px}
+.st{font-size:13px;color:var(--muted)}
+.ntag{font-size:12px;color:var(--muted)}
+
+/* detail panel for the selected Cube */
+.panel{position:absolute;right:24px;bottom:24px;z-index:3;width:328px;box-sizing:border-box;padding:20px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:var(--pshadow)}
+.pn{margin:0;font-size:18px;font-weight:600;line-height:1.3;word-break:break-word}
+.pnet{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:6px 0 0;font-size:13px}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;line-height:1}
+.tb.b2b{border-color:#d4a62a}
+.tb.test{border-style:dashed}
+.pdl{margin:16px 0 0;padding:12px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.pdl div{display:flex;align-items:flex-start;gap:12px}
+.pdl dt{width:64px;flex:none;font-size:13px;color:var(--muted)}
+.pdl dd{margin:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px 10px;font-size:14px}
+.pdl dd svg,.wch svg{width:16px;height:16px}
+.wch{display:inline-flex;align-items:center;gap:6px}
+.tone-good{color:var(--good)}
+.tone-warn{color:var(--warn)}
+.tone-muted{color:var(--muted)}
+.pnote{margin:10px 0 0;font-size:12px;color:var(--muted);line-height:1.4}
+.pact{display:flex;align-items:center;gap:12px;margin-top:16px}
+.pact .pnote{margin:0}
+.pempty{margin:0;font-size:13px;color:var(--muted)}
+
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
+
+/* empty / no-match */
+.empty{position:absolute;left:0;right:0;top:32%;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
+.empty h2{margin:0;font-size:20px;font-weight:600}
+.empty p{margin:0;color:var(--muted);font-size:14px}
+.empty .ghost{width:64px;height:64px;margin-bottom:8px;color:var(--muted)}
+
+/* bottom bar: legend left, create/import anchored right */
+.bottom{height:64px;flex:none;display:flex;align-items:center;gap:24px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+.legend{display:flex;align-items:center;gap:24px;margin:0;padding:0;list-style:none;font-size:12px;color:var(--muted)}
+.lg{display:flex;align-items:center;gap:6px}
+.lg svg{width:16px;height:16px;color:var(--ink)}
+.sw{width:12px;height:12px;box-sizing:border-box;border:1.5px solid;border-radius:2px;background:var(--face-t)}
+.sw.btc{border-color:var(--edge-btc)}
+.sw.b2b{border-color:var(--edge-b2b)}
+.sw.test{border-color:var(--edge-test);border-style:dashed}
+.dock{display:flex;align-items:center;gap:8px}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="vsep"></span>
+    <h1 class="h1">All Cubes</h1>
+    <sc-if value="{{ hasAny }}" hint-placeholder-val="{{ true }}">
+      <fieldset class="chips"><legend class="sr">Show Cubes by network</legend>
+        <sc-for list="{{ chips }}" as="c" hint-placeholder-count="3">
+          <button type="button" class="chip {{ c.cls }}" aria-pressed="{{ c.pressed }}" onClick="{{ c.pick }}">{{ c.label }}</button>
+        </sc-for>
+        <span class="chipwrap">
+          <button type="button" class="chip {{ chainCls }}" aria-pressed="{{ chainPressed }}" aria-expanded="{{ chainExpanded }}" aria-haspopup="true" onClick="{{ toggleChain }}">
+            <span>{{ chainLabel }}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg>
+          </button>
+          <sc-if value="{{ chainMenu }}" hint-placeholder-val="{{ false }}">
+            <div class="menu">
+              <sc-for list="{{ chainItems }}" as="m" hint-placeholder-count="6">
+                <button type="button" class="mi {{ m.cls }}" aria-pressed="{{ m.pressed }}" onClick="{{ m.pick }}">
+                  <span class="ck"><sc-if value="{{ m.on }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></sc-if></span>
+                  <span>{{ m.label }}</span>
+                  <span class="n">{{ m.n }}</span>
+                </button>
+              </sc-for>
+              <p class="mnote">Filters change what is shown, never a Cube's network.</p>
+            </div>
+          </sc-if>
+        </span>
+      </fieldset>
+      <span class="count" aria-live="polite">{{ countText }}</span>
+      <sc-if value="{{ filterActive }}" hint-placeholder-val="{{ false }}">
+        <button type="button" class="linkbtn" onClick="{{ clear }}">Clear filters</button>
+      </sc-if>
+    </sc-if>
+    <span class="grow"></span>
+    <button type="button" class="tbtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>alex@example.test</span><span class="muted">· Signed in</span>
+    </button>
+    <button type="button" class="tbtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </button>
+  </header>
+
+  <main class="stage" aria-label="Cubes on this device">
+    <div class="floor" style="{{ floorStyle }}" aria-hidden="true"></div>
+
+    <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+      <div class="empty">
+        <svg class="ghost" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+        <h2>No Cubes yet</h2>
+        <p>Create a Cube or import one. You choose its network when you create it.</p>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ noMatch }}" hint-placeholder-val="{{ false }}">
+      <div class="empty">
+        <h2>No Cubes match these filters</h2>
+        <p>{{ hiddenText }} <button type="button" class="linkbtn" onClick="{{ clear }}">Clear filters</button></p>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ hasCubes }}" hint-placeholder-val="{{ true }}">
+      <div class="field">
+        <div class="rows {{ mode }}">
+          <sc-for list="{{ rows }}" as="row" hint-placeholder-count="1">
+            <div class="row">
+              <sc-for list="{{ row.items }}" as="item" hint-placeholder-count="4">
+                <button type="button" class="cb {{ item.cls }}" style="{{ item.slotStyle }}" aria-pressed="{{ item.pressed }}" aria-label="{{ item.aria }}" onClick="{{ item.pick }}">
+                  <span class="scene" style="{{ item.sceneStyle }}" aria-hidden="true">
+                    <span class="aura"></span>
+                    <span class="shadow"></span>
+                    <span class="lift"><span class="cube {{ item.edge }}">
+                      <span class="f t"><span class="tc">
+                        <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                        <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                        <sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ item.tag }}</span></sc-if>
+                      </span></span>
+                      <span class="f l"><span class="lc">
+                        <sc-if value="{{ item.hasVault }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg></sc-if>
+                        <sc-if value="{{ item.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg></sc-if>
+                        <sc-if value="{{ item.hasLiquid }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg></sc-if>
+                      </span></span>
+                      <span class="f r"><span class="rc">
+                        <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ item.lockPath }}"></path></svg>
+                        <sc-if value="{{ item.warn }}" hint-placeholder-val="{{ false }}"><svg class="bdg warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg></sc-if>
+                        <sc-if value="{{ item.unk }}" hint-placeholder-val="{{ false }}"><svg class="bdg unk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3"></path></svg></sc-if>
+                      </span></span>
+                    </span></span>
+                  </span>
+                  <span class="lbl">
+                    <span class="nm" title="{{ item.name }}">{{ item.name }}</span>
+                    <span class="st">{{ item.state }}</span>
+                    <sc-if value="{{ item.showNet }}" hint-placeholder-val="{{ false }}"><span class="ntag">{{ item.tag }}</span></sc-if>
+                  </span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+
+      <aside class="panel" aria-label="Selected Cube">
+        <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ true }}">
+          <h2 class="pn">{{ sel.name }}</h2>
+          <p class="pnet">
+            <sc-if value="{{ sel.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ sel.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+            <sc-if value="{{ sel.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ sel.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+            <span>{{ sel.net }}</span>
+            <sc-if value="{{ sel.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ sel.tagCls }}">{{ sel.tag }}</span></sc-if>
+          </p>
+          <dl class="pdl">
+            <div><dt>Lock</dt><dd><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ sel.lockPath }}"></path></svg><span>{{ sel.lock }}</span></dd></div>
+            <div><dt>Backup</dt><dd class="{{ sel.bTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ sel.bPath }}"></path></svg><span>{{ sel.bText }}</span></dd></div>
+            <div><dt>Wallets</dt><dd>
+              <sc-for list="{{ sel.wallets }}" as="w" hint-placeholder-count="3">
+                <span class="wch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="{{ w.path }}"></path></svg><span>{{ w.label }}</span></span>
+              </sc-for>
+            </dd></div>
+          </dl>
+          <sc-if value="{{ sel.hasNote }}" hint-placeholder-val="{{ false }}"><p class="pnote">{{ sel.note }}</p></sc-if>
+          <div class="pact">
+            <a class="btn primary" href="Journey.dc.html" aria-label="{{ sel.openLabel }}">Open</a>
+            <span class="pnote">{{ sel.openNote }}</span>
+          </div>
+        </sc-if>
+        <sc-if value="{{ noSel }}" hint-placeholder-val="{{ false }}">
+          <p class="pempty">Select a Cube to see its network, lock and backup.</p>
+        </sc-if>
+      </aside>
+    </sc-if>
+  </main>
+
+  <div class="bottom">
+    <sc-if value="{{ hasAny }}" hint-placeholder-val="{{ true }}">
+      <ul class="legend" aria-label="How to read a Cube">
+        <li class="lg">
+          <span class="coin" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+          <span class="coin" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span>
+          <span>Top: network</span>
+        </li>
+        <li class="lg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
+          <span>Left: wallets</span>
+        </li>
+        <li class="lg">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg>
+          <span>Right: lock, backup attention</span>
+        </li>
+        <li class="lg">
+          <span class="sw btc" aria-hidden="true"></span><span class="sw b2b" aria-hidden="true"></span><span class="sw test" aria-hidden="true"></span>
+          <span>Edge: network family</span>
+        </li>
+      </ul>
+    </sc-if>
+    <span class="grow"></span>
+    <div class="dock">
+      <button type="button" class="btn {{ createCls }}">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        <span>Create Cube</span>
+      </button>
+      <button type="button" class="btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+        <span>Import or restore a Cube</span>
+      </button>
+    </div>
+  </div>
+  <div class="foot">Concept prototype V2 · synthetic data · CSS 3D stand-in for a native Iced shader scene</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","20"],"default":"4","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { filter: 'all', chainMenu: false, selected: 1 };
+  }
+  renderVals() {
+    const CH = {
+      btc: { menu: 'Bitcoin mainnet', full: 'Bitcoin mainnet', live: true, edge: 'btc', tag: '' },
+      b2b: { menu: 'Bitcoin Blake2b mainnet', full: 'Bitcoin Blake2b mainnet', live: true, edge: 'b2b', tag: 'Blake2b', logo: true },
+      t4: { menu: 'Testnet4', full: 'Bitcoin Testnet4', live: false, edge: 'test', tag: 'Testnet4' },
+      sig: { menu: 'Signet', full: 'Bitcoin Signet', live: false, edge: 'test', tag: 'Signet' },
+      reg: { menu: 'Regtest', full: 'Bitcoin Regtest', live: false, edge: 'test', tag: 'Regtest' },
+      b2t: { menu: 'Blake2b Testnet4', full: 'Bitcoin Blake2b Testnet4', live: false, edge: 'test', tag: 'Blake2b Testnet4', logo: true }
+    };
+    const ORDER = ['btc', 'b2b', 't4', 'sig', 'reg', 'b2t'];
+    const CIRC = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18';
+    const LOCKED = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3';
+    const OPEN = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 5.8-1.1';
+    const ICON = {
+      V: { label: 'Vault', path: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z' },
+      S: { label: 'Spark', path: 'M13 3L5 13.5h6L10 21l8-10.5h-6z' },
+      L: { label: 'Liquid', path: 'M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z' }
+    };
+    const BK = {
+      ok: { text: 'Confirmed', aria: 'Backup confirmed', tone: 'tone-good', path: 'M5 12.5l4.5 4.5L19 7.5' },
+      warn: { text: 'Not confirmed', aria: 'Backup not confirmed', tone: 'tone-warn', path: CIRC + 'M12 7.5v5.5M12 16.2v.3' },
+      unk: { text: 'Status unknown', aria: 'Backup status unknown', tone: 'tone-muted', path: CIRC + 'M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3' },
+      na: { text: 'Watch-only, no local keys', aria: 'Watch-only, no local keys', tone: 'tone-muted', path: CIRC + 'M8.5 12h7' }
+    };
+    const B2 = 'Bitcoin Blake2b supports Vault creation only.';
+    const NOV = 'No Vault configured.';
+    const CUBES = [
+      [1, 'Everyday', 'btc', true, 'warn', 'VSL', ''],
+      [2, 'Blake workspace', 'b2b', false, 'warn', 'V', B2],
+      [3, 'Lab', 't4', false, 'unk', 'V', 'Spark is unavailable on Testnet4.'],
+      [4, 'Archive', 'btc', false, 'ok', 'S', NOV],
+      [5, 'Household 2024', 'btc', false, 'ok', 'VS', ''],
+      [6, 'Travel fund', 'btc', false, 'unk', 'VSL', ''],
+      [7, 'Signet scratch', 'sig', false, 'unk', 'V', 'Spark is unavailable on Signet.'],
+      [8, 'Regtest bench', 'reg', false, 'unk', 'VS', ''],
+      [9, 'Blake test', 'b2t', false, 'warn', 'V', B2],
+      [10, 'Imported Vault (watch)', 'btc', false, 'na', 'V', 'Imported Vault. Signing keys live elsewhere.'],
+      [11, 'A very long Cube name that keeps going to test wrapping behaviour', 'btc', false, 'ok', 'VS', ''],
+      [12, 'Team treasury', 'b2b', false, 'ok', 'V', B2],
+      [13, 'Grandparents', 'btc', false, 'ok', 'VS', ''],
+      [14, 'Donations', 'btc', false, 'warn', 'S', NOV],
+      [15, 'Side project', 'btc', false, 'unk', 'VS', ''],
+      [16, 'Cold archive 2', 'btc', false, 'ok', 'V', ''],
+      [17, 'Lab 2', 't4', false, 'unk', 'V', 'Spark is unavailable on Testnet4.'],
+      [18, 'Lab 3', 'sig', false, 'unk', 'V', 'Spark is unavailable on Signet.'],
+      [19, 'Emergency', 'btc', false, 'ok', 'VSL', ''],
+      [20, 'Shop till', 'btc', false, 'ok', 'S', NOV]
+    ];
+
+    const theme = this.props.theme ?? 'dark';
+    const count = parseInt(this.props.cubeCount ?? '4', 10) || 0;
+    const focusDemo = !!this.props.focusDemo;
+    const f = this.state.filter;
+    const set = (patch) => this.setState(patch);
+    const matches = (c) => f === 'all' ? true : f === 'live' ? CH[c.chain].live : f === 'test' ? !CH[c.chain].live : c.chain === f;
+
+    const all = CUBES.slice(0, count).map((r) => ({ id: r[0], name: r[1], chain: r[2], open: r[3], bk: r[4], w: r[5], note: r[6] }));
+    const vis = all.filter(matches);
+    const n = vis.length;
+    const hidden = all.length - n;
+
+    const chips = [['all', 'All networks'], ['live', 'Live networks'], ['test', 'Test networks']].map(([k, label]) => ({
+      label, cls: f === k ? 'on' : '', pressed: String(f === k),
+      pick: () => set({ filter: k, chainMenu: false })
+    }));
+    const chainOn = !!CH[f];
+    const chainItems = ORDER.map((k) => ({
+      label: CH[k].menu, n: String(all.filter((c) => c.chain === k).length),
+      on: f === k, cls: f === k ? 'on' : '', pressed: String(f === k),
+      pick: () => set({ filter: k, chainMenu: false })
+    }));
+
+    let countText = '';
+    if (count > 0 && f === 'all') countText = n + (n === 1 ? ' Cube' : ' Cubes');
+    else if (count > 0) countText = n + ' of ' + count + ' shown · ' + hidden + ' hidden';
+
+    // size tiers from BRIEF-V2: 1-4 big (~220px on screen), 5-8 two rows (~170px), 9-20 rows of 5 (~120px)
+    const T = n <= 4 ? { mode: 'big', s: 152, slot: 232, cols: 4 }
+      : n <= 8 ? { mode: 'mid', s: 120, slot: 192, cols: 4 }
+      : { mode: 'dense', s: 85, slot: 152, cols: 5 };
+
+    const selCube = vis.find((c) => c.id === this.state.selected) || null;
+    const lockState = (c) => c.open ? 'Open · this tab' : 'Locked';
+
+    const rows = [];
+    for (let r = 0; r * T.cols < n; r++) {
+      const items = vis.slice(r * T.cols, (r + 1) * T.cols).map((c, i) => {
+        const ch = CH[c.chain];
+        const idx = r * T.cols + i;
+        const isSel = !!selCube && selCube.id === c.id;
+        const demo = focusDemo && idx === 1;
+        const ws = c.w.split('').map((k) => ICON[k].label).join(', ');
+        return {
+          name: c.name, state: lockState(c),
+          tag: ch.tag, hasTag: !!ch.tag, showNet: T.mode === 'dense' && !!ch.tag,
+          edge: ch.edge,
+          btcLogo: !ch.logo, logo: !!ch.logo, coinCls: ch.live ? '' : 'tn',
+          hasVault: c.w.indexOf('V') >= 0, hasSpark: c.w.indexOf('S') >= 0, hasLiquid: c.w.indexOf('L') >= 0,
+          lockPath: c.open ? OPEN : LOCKED,
+          warn: c.bk === 'warn', unk: c.bk === 'unk',
+          pressed: String(isSel),
+          aria: c.name + ', ' + ch.full + ', ' + (c.open ? 'open in this tab' : 'locked') + ', ' + BK[c.bk].aria + ', wallets: ' + ws,
+          cls: T.mode + (isSel ? ' is-sel' : '') + (demo ? ' demo-focus' : ''),
+          slotStyle: 'width:' + T.slot + 'px',
+          sceneStyle: '--s:' + T.s + 'px',
+          pick: () => set({ selected: c.id, chainMenu: false })
+        };
+      });
+      rows.push({ items });
+    }
+
+    let sel = { name: '', net: '', btcLogo: true, logo: false, coinCls: '', hasTag: false, tag: '', tagCls: '', lock: '', lockPath: LOCKED, bText: '', bTone: '', bPath: '', wallets: [], hasNote: false, note: '', openNote: '', openLabel: 'Open' };
+    if (selCube) {
+      const ch = CH[selCube.chain];
+      const b = BK[selCube.bk];
+      sel = {
+        name: selCube.name, net: ch.full,
+        btcLogo: !ch.logo, logo: !!ch.logo, coinCls: ch.live ? '' : 'tn',
+        hasTag: !!ch.tag, tag: ch.tag, tagCls: ch.edge,
+        lock: selCube.open ? 'Open in this tab' : 'Locked', lockPath: selCube.open ? OPEN : LOCKED,
+        bText: b.text, bTone: b.tone, bPath: b.path,
+        wallets: selCube.w.split('').map((k) => ICON[k]),
+        hasNote: !!selCube.note, note: selCube.note,
+        openNote: selCube.open ? 'Switches to its tab. Nothing locks or closes.' : 'PIN or passkey, then network checks.',
+        openLabel: 'Open ' + selCube.name
+      };
+    }
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: this.props.reducedMotion ? 'reduced' : '',
+      hasAny: count > 0,
+      chips, chainItems,
+      chainCls: chainOn ? 'on' : '', chainPressed: String(chainOn),
+      chainExpanded: String(!!this.state.chainMenu), chainMenu: !!this.state.chainMenu,
+      chainLabel: chainOn ? 'Network: ' + CH[f].menu : 'Network',
+      toggleChain: () => set({ chainMenu: !this.state.chainMenu }),
+      clear: () => set({ filter: 'all', chainMenu: false }),
+      filterActive: f !== 'all',
+      countText,
+      isEmpty: count === 0,
+      noMatch: count > 0 && n === 0,
+      hasCubes: n > 0,
+      hiddenText: hidden + (hidden === 1 ? ' Cube hidden.' : ' Cubes hidden.'),
+      mode: T.mode,
+      rows,
+      floorStyle: n === 0 ? 'top:44%' : T.mode === 'big' ? 'top:30%' : 'top:6%',
+      hasSel: !!selCube, noSel: !selCube, sel,
+      createCls: count === 0 ? 'primary' : ''
+    };
+  }
+}
+</script>
+</body>
+</html>

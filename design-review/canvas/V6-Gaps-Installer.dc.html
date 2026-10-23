@@ -1,0 +1,819 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Installer gaps</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+.tenshu{--on-accent:#201407;--accent-ink:#f3821d;--hover:rgba(245,240,232,.06);font-variant-numeric:tabular-nums}
+.tenshu.light{--accent-ink:#8a4304;--hover:rgba(32,32,32,.05)}
+.tenshu *{box-sizing:border-box}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.tenshu h2,.tenshu h3,.tenshu p,.tenshu ul,.tenshu ol{margin:0}
+.tenshu ul,.tenshu ol{padding:0;list-style:none}
+.tenshu fieldset{border:0;margin:0;padding:0;min-width:0}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg{flex:none}
+.ic{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+
+/* Launcher-world top bar (V3-Launcher-Spin / V6-Cube-Create tokens) */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;white-space:nowrap;text-decoration:none}
+.tbtn:hover{border-color:var(--line)}
+a.tbtn,a.tbtn:hover{color:var(--ink)}
+.tbtn svg{width:16px;height:16px}
+.tbtn .stw{font-size:12px;color:var(--muted)}
+.chip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.chip svg{width:14px;height:14px}
+
+.stage{flex:1;min-height:0;display:flex;justify-content:center;padding:28px 24px;overflow:hidden}
+.region{width:960px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.rhead{flex:none;display:flex;align-items:center;gap:12px;padding:16px 28px;border-bottom:1px solid var(--line)}
+.rhead .ttl{font-size:13px;font-weight:600}
+.route{margin-left:auto;font-size:12px;color:var(--muted)}
+.ident{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.ident img{width:16px;height:16px;border-radius:50%}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;line-height:1;color:var(--ink)}
+.tb.b2b{border-color:#D4A62A}
+.steps{flex:none;display:flex;align-items:center;gap:6px;padding:14px 28px;border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.steps li{display:inline-flex;align-items:center;gap:6px;color:var(--muted)}
+.steps .n{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.steps li.cur{color:var(--ink);font-weight:600}
+.steps li.cur .n{border-color:var(--accent);background:var(--selected)}
+.steps li.done{color:var(--ink)}
+.steps li.done .n{border-color:var(--good)}
+.steps .rule{width:14px;height:1px;background:var(--line)}
+.body{flex:1;min-height:0;overflow-y:auto;padding:28px;position:relative}
+.body h2{font-size:22px;font-weight:600;line-height:1.3}
+.lead{margin:6px 0 0;font-size:14px;color:var(--muted);max-width:640px}
+.rfoot{flex:none;display:flex;align-items:center;gap:12px;padding:14px 28px;border-top:1px solid var(--line)}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap}
+.tenshu a.btn{color:var(--ink)}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.tenshu a.btn.primary{color:var(--on-accent)}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn:disabled{opacity:.55;cursor:default}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+.acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:20px}
+
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:18px;max-width:560px}
+.fld>label,.fld .lbl{font-size:13px;font-weight:500}
+.inp{height:40px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);width:100%}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.inp:disabled{opacity:.55}
+textarea.inp{height:72px;padding:10px 12px;resize:none;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+.err,.okline,.warnline,.info{display:flex;align-items:flex-start;gap:6px;font-size:13px}
+.err{color:var(--bad)}.okline{color:var(--good)}.warnline{color:var(--warn)}.info{color:var(--muted)}
+.err .ic,.okline .ic,.warnline .ic,.info .ic{margin-top:2px}
+.alert{display:flex;gap:10px;align-items:flex-start;margin:16px 0 0;padding:12px 14px;border:1px solid var(--bad);border-radius:8px;max-width:680px}
+.alert .ic{width:18px;height:18px;color:var(--bad);margin-top:1px}
+.alert.warnb{border-color:var(--warn)}
+.alert.warnb .ic{color:var(--warn)}
+.alert b{display:block;font-weight:600}
+.alert span{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.chk{display:flex;align-items:flex-start;gap:10px;margin-top:20px;max-width:640px;font-size:14px;cursor:pointer}
+.chk input{margin:3px 0 0;width:16px;height:16px;accent-color:var(--accent);flex:none}
+.copy{margin-top:14px;max-width:640px;font-size:14px}
+.copy.m{color:var(--muted);font-size:13px}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{height:34px;padding:0 14px;border:0;background:none;cursor:pointer;font-size:13px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--selected);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.h3{font-size:15px;font-weight:600;margin-top:24px}
+
+/* rows: aligned, ruled; no card per row */
+.rows{margin-top:12px;max-width:760px;border-top:1px solid var(--line)}
+.r{display:flex;align-items:center;gap:12px;min-height:52px;padding:8px;border-bottom:1px solid var(--line)}
+.r .ic{width:18px;height:18px;color:var(--muted)}
+.r .m{flex:1;min-width:0}
+.r .m b{display:block;font-weight:500}
+.r .m span{font-size:13px;color:var(--muted)}
+.r .s{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.r .s .ic{width:16px;height:16px;color:currentColor}
+.r.sel{background:var(--selected)}
+.r.pick{width:100%;border:0;border-bottom:1px solid var(--line);background:none;cursor:pointer;text-align:left;color:var(--ink)}
+.r.pick:hover{background:var(--hover)}
+.r.pick:disabled{cursor:default}
+.r.pick:disabled:hover{background:none}
+.tone-ok{color:var(--good)}.tone-warn{color:var(--warn)}.tone-bad{color:var(--bad)}.tone-muted{color:var(--muted)}
+.kv{margin-top:12px;max-width:760px;border-top:1px solid var(--line)}
+.kv>div{display:grid;grid-template-columns:200px minmax(0,1fr);gap:16px;padding:10px 0;border-bottom:1px solid var(--line);font-size:14px}
+.kv dt{color:var(--muted);font-size:13px}
+.kv dd{margin:0;overflow-wrap:anywhere}
+.desc{display:flex;align-items:center;gap:10px;margin-top:8px;max-width:760px;padding:10px 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.desc .mono{flex:1;color:var(--muted)}
+
+/* key-source picker */
+.keys{display:flex;gap:24px;margin-top:20px;align-items:flex-start}
+.paths{flex:1;min-width:0}
+.slot{display:flex;align-items:center;gap:10px;min-height:44px;padding:4px 8px;border-bottom:1px solid var(--line);font-size:14px}
+.slot:first-child{border-top:1px solid var(--line)}
+.slot .sl{width:140px;flex:none;color:var(--muted);font-size:13px}
+.slot.editing{background:var(--selected)}
+.picker{width:400px;flex:none;border:1px solid var(--line);border-radius:10px;padding:16px;background:var(--bg)}
+.picker h3{font-size:16px;font-weight:600}
+.srcb{display:flex;align-items:flex-start;gap:10px;width:100%;text-align:left;padding:10px 8px;border:0;border-top:1px solid var(--line);background:none;cursor:pointer;color:var(--ink)}
+.srcb[aria-pressed="true"]{background:var(--selected)}
+.srcb .ic{width:18px;height:18px;color:var(--muted);margin-top:1px}
+.srcb .t{font-weight:500;font-size:14px;display:block}
+.srcb .d{font-size:12px;color:var(--muted);display:block}
+.grp{font-size:12px;font-weight:600;color:var(--muted);margin:14px 0 4px}
+.dev{display:flex;align-items:flex-start;gap:10px;width:100%;padding:9px 8px;border:0;border-top:1px solid var(--line);background:none;text-align:left;color:var(--ink);cursor:pointer}
+.dev:last-child{border-bottom:1px solid var(--line)}
+.dev[aria-pressed="true"]{background:var(--selected)}
+.dev:disabled{cursor:default}
+.dev .m{flex:1;min-width:0}
+.dev .m b{display:block;font-weight:500;font-size:14px}
+.dev .m span{display:block;font-size:12px}
+.empty{padding:12px 8px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:13px;color:var(--muted)}
+
+/* launcher pieces */
+.lrow{display:flex;align-items:center;gap:12px;min-height:56px;padding:8px;border-bottom:1px solid var(--line)}
+.lrow img{width:20px;height:20px;border-radius:50%}
+.lrow .m{flex:1}
+.lrow .m b{display:block;font-weight:500}
+.lrow .m span{font-size:13px;color:var(--muted)}
+.unav{max-width:560px;margin:40px auto 0;text-align:left;padding:24px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.unav h3{display:flex;align-items:center;gap:8px;font-size:20px;font-weight:600}
+.unav h3 img{width:20px;height:20px;border-radius:50%}
+.sect{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}
+.sect .tag{display:inline-flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:14px;font-size:13px}
+.sect .tag.off{border-style:dashed;color:var(--muted)}
+
+/* modal (drawn over the step) */
+.scrim{position:absolute;inset:0;background:rgba(0,0,0,.45);display:flex;justify-content:center;align-items:flex-start;padding-top:24px}
+.tenshu.light .scrim{background:rgba(32,32,32,.25)}
+.dlg{width:600px;max-height:calc(100% - 48px);overflow:auto;background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:22px 24px}
+.dlg h3{font-size:18px;font-weight:600}
+.disc{margin-top:14px;border-top:1px solid var(--line)}
+.disc>button{display:flex;align-items:center;gap:8px;width:100%;padding:12px 0;border:0;background:none;cursor:pointer;color:var(--ink);font-weight:500;text-align:left}
+.disc .inner{padding:0 0 12px 24px}
+.unsafe{margin-top:10px;padding:12px;border:1px solid var(--bad);border-radius:8px}
+.unsafe b{color:var(--bad)}
+
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="vsep"></span>
+    <sc-if value="{{ topBack }}" hint-placeholder-val="{{ true }}">
+      <a class="tbtn" href="V3-Launcher-Spin.dc.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg><span>Back to Cube list</span></a>
+    </sc-if>
+    <sc-if value="{{ topNet }}" hint-placeholder-val="{{ false }}">
+      <button type="button" class="chip on" aria-pressed="true" aria-haspopup="true" aria-expanded="false"><span>{{ netChip }}</span><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg></button>
+    </sc-if>
+    <span class="grow"></span>
+    <a class="tbtn" href="V6-Connect-SignIn.dc.html" aria-label="{{ connAria }}" title="{{ connTitle }}">
+      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="stw">{{ connWord }}</span>
+    </a>
+    <a class="tbtn" href="V3-Launcher-AppPrefs.dc.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg><span>App preferences</span></a>
+  </header>
+
+  <main class="stage">
+    <section class="region" aria-labelledby="g-h">
+      <div class="rhead">
+        <span class="ttl">{{ regionTitle }}</span>
+        <span class="vsep"></span>
+        <span class="ident">
+          <span>{{ cubeName }}</span><span aria-hidden="true">·</span>
+          <sc-if value="{{ netB2b }}" hint-placeholder-val="{{ false }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></sc-if>
+          <sc-if value="{{ netBtc }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+          <span>{{ netName }}</span>
+          <sc-if value="{{ netB2b }}" hint-placeholder-val="{{ false }}"><span class="tb b2b">Blake2b</span></sc-if>
+        </span>
+        <span class="route">{{ route }}</span>
+      </div>
+
+      <sc-if value="{{ hasSteps }}" hint-placeholder-val="{{ true }}">
+        <ol class="steps" aria-label="{{ stepsLabel }}">
+          <sc-for list="{{ steps }}" as="s" hint-placeholder-count="10">
+            <li class="{{ s.cls }}" aria-current="{{ s.current }}"><span class="n">{{ s.n }}</span><span>{{ s.label }}</span></li>
+            <sc-if value="{{ s.hasRule }}" hint-placeholder-val="{{ true }}"><li aria-hidden="true"><span class="rule"></span></li></sc-if>
+          </sc-for>
+        </ol>
+      </sc-if>
+
+      <div class="body" aria-live="polite">
+
+        <!-- ===================== #20 BACK UP DESCRIPTOR ===================== -->
+        <sc-if value="{{ v.backup }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Back up your wallet configuration (descriptor)</h2>
+          <p class="lead">This backup is required to recover your funds.</p>
+          <p class="copy m">The encrypted file opens only with one of your keys. Copying the text is less private.</p>
+          <p class="lbl" style="margin-top:20px;font-size:13px;font-weight:500">The descriptor:</p>
+          <div class="desc"><span class="mono">[DESCRIPTOR · synthetic, not shown]</span><button type="button" class="btn sm"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4h6v3H9zM7 5.5H5.5V21h13V5.5H17"></path></svg>Copy</button></div>
+          <p class="lbl" style="margin-top:20px;font-size:13px;font-weight:500">The wallet policy:</p>
+          <dl class="kv">
+            <sc-for list="{{ policy }}" as="p" hint-placeholder-count="2">
+              <div><dt>{{ p.k }}</dt><dd>{{ p.v }}</dd></div>
+            </sc-for>
+          </dl>
+          <div class="acts">
+            <button type="button" class="{{ bkBtnCls }}" onClick="{{ doBackup }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"></path></svg>Back Up Descriptor</button>
+            <sc-if value="{{ bkSaved }}" hint-placeholder-val="{{ false }}"><span class="okline" role="status"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Saved as an encrypted .bed file</span></sc-if>
+          </div>
+          <p class="warnline" style="margin-top:18px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 21 19H3zM12 9.5v4M12 16.3v.2"></path></svg>This file does not include your seed phrase(s). Back those up separately.</p>
+          <label class="chk"><input type="checkbox" checked="{{ bkAck }}" onChange="{{ toggleBkAck }}"><span>I have backed up my descriptor</span></label>
+        </sc-if>
+
+        <!-- ===================== #20 REGISTER DESCRIPTOR ===================== -->
+        <sc-if value="{{ v.register }}" hint-placeholder-val="{{ true }}">
+          <h2 id="g-h">Register descriptor</h2>
+          <p class="lead">Only needed if you use a signing device.</p>
+          <sc-if value="{{ regFailed }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Failed to register descriptor</b><span>[Device error text from source]</span></div></div>
+          </sc-if>
+          <p class="h3">Select hardware wallet to register descriptor on:</p>
+          <ul class="rows" aria-label="Signing devices">
+            <sc-for list="{{ regDevices }}" as="d" hint-placeholder-count="4">
+              <li class="r">
+                <svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v16H7zM10 17h4"></path></svg>
+                <span class="m"><b>{{ d.name }}</b><span>{{ d.sub }}</span></span>
+                <span class="s {{ d.tone }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="{{ d.icon }}"></path></svg>{{ d.status }}</span>
+                <sc-if value="{{ d.canRegister }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn sm" onClick="{{ d.register }}">Register</button></sc-if>
+              </li>
+            </sc-for>
+          </ul>
+          <p class="copy m">Registration on a device is not a substitute for backing up the descriptor.</p>
+          <label class="chk"><input type="checkbox" checked="{{ regAck }}" onChange="{{ toggleRegAck }}"><span>I have registered the descriptor on my device(s)</span></label>
+        </sc-if>
+
+        <!-- ===================== #2 CHAIN UNAVAILABLE ===================== -->
+        <sc-if value="{{ v.unavailable }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h" class="sr">Network unavailable</h2>
+          <div class="unav" role="status">
+            <h3><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b <span class="tb b2b">Blake2b</span></h3>
+            <p class="copy">Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability.</p>
+            <div class="acts">
+              <a class="btn" href="V3-Launcher-Spin.dc.html">Back to Bitcoin</a>
+              <a class="linkbtn" href="V3-Launcher-AppPrefs.dc.html">App preferences</a>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ===================== #2 BLAKE2B-ONLY LAUNCHER MODE ===================== -->
+        <sc-if value="{{ v.b2bList }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Your Cubes</h2>
+          <sc-if value="{{ b2bBlocked }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Bitcoin Blake2b supports a PIN-protected Vault using a local node or Connect</b><span>Import or restore was chosen on Bitcoin Blake2b.</span></div></div>
+          </sc-if>
+          <div style="margin-top:16px;border-top:1px solid var(--line);max-width:760px">
+            <sc-for list="{{ b2bCubes }}" as="c" hint-placeholder-count="2">
+              <div class="lrow">
+                <img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">
+                <span class="m"><b>{{ c.name }}</b><span>{{ c.line }}</span></span>
+                <span class="tb b2b">{{ c.tag }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <p class="h3">Available on Bitcoin Blake2b</p>
+          <div class="sect">
+            <sc-for list="{{ b2bOn }}" as="t" hint-placeholder-count="5"><span class="tag">{{ t }}</span></sc-for>
+          </div>
+          <p class="h3">Not on Bitcoin Blake2b</p>
+          <div class="sect">
+            <sc-for list="{{ b2bOff }}" as="t" hint-placeholder-count="5"><span class="tag off"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>{{ t }}</span></sc-for>
+          </div>
+          <div class="acts">
+            <button type="button" class="btn primary" onClick="{{ toB2bCreate }}">Create Vault</button>
+            <button type="button" class="btn" onClick="{{ toB2bBlocked }}">Import or restore</button>
+            <a class="btn" href="V3-Launcher-Spin.dc.html">Back to Bitcoin</a>
+          </div>
+        </sc-if>
+        <sc-if value="{{ v.b2bCreate }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Create a new Cube</h2>
+          <p class="copy">Create a Bitcoin Blake2b Vault. Other wallet and recovery flows are unavailable.</p>
+          <div class="acts">
+            <a class="btn primary demo-focus" href="V6-Cube-Create.dc.html">Create Vault</a>
+            <button type="button" class="btn" onClick="{{ toB2bList }}">Back to Cube list</button>
+          </div>
+        </sc-if>
+
+        <!-- ===================== #13 SPLIT A BITCOIN WALLET (launcher) ===================== -->
+        <sc-if value="{{ v.split }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Split a Bitcoin wallet</h2>
+          <p class="lead">Find BTCB2 held by a Sparrow, Electrum, Coldcard or other non-Cube Bitcoin wallet. It scans public keys only; it cannot sign or move funds.</p>
+          <div class="fld">
+            <label for="sp-dest">Destination Cube</label>
+            <select id="sp-dest" class="inp" disabled="{{ sp.noVault }}">
+              <option>{{ sp.destText }}</option>
+            </select>
+          </div>
+          <p class="h3">Original Bitcoin wallet</p>
+          <div style="margin-top:10px"><span class="seg" role="group" aria-label="Wallet source"><button type="button" aria-pressed="{{ sp.descPressed }}" onClick="{{ sp.pickDesc }}">Public descriptor</button><button type="button" aria-pressed="{{ sp.hwPressed }}" onClick="{{ sp.pickHw }}">Hardware wallet</button></span></div>
+          <sc-if value="{{ sp.desc }}" hint-placeholder-val="{{ true }}">
+            <div class="fld"><label for="sp-ext">External / receive descriptor</label><input id="sp-ext" class="inp mono" type="text" placeholder="wpkh([fingerprint/path]xpub.../0/*)" value="[synthetic receive descriptor]"></div>
+            <div class="fld"><label for="sp-int">Internal / change descriptor (optional)</label><input id="sp-int" class="inp mono" type="text" placeholder="wpkh([fingerprint/path]xpub.../1/*)" value=""></div>
+          </sc-if>
+          <sc-if value="{{ sp.hw }}" hint-placeholder-val="{{ false }}">
+            <ul class="rows" aria-label="Hardware wallets"><li class="r sel"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v16H7zM10 17h4"></path></svg><span class="m"><b>Ledger-style device</b><span class="mono">c9d0e1f2 · Account #0</span></span><span class="s tone-ok">Account read</span></li></ul>
+          </sc-if>
+          <div class="acts" style="align-items:center">
+            <sc-if value="{{ sp.idle }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn primary" onClick="{{ sp.scan }}">Scan wallet</button></sc-if>
+            <sc-if value="{{ sp.scanning }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn primary" disabled="{{ yes }}">Scanning…</button><button type="button" class="btn" onClick="{{ sp.cancel }}">Cancel</button></sc-if>
+            <sc-if value="{{ sp.canContinue }}" hint-placeholder-val="{{ false }}"><a class="btn primary" href="V6-Claim.dc.html">Continue to destination Cube</a></sc-if>
+          </div>
+          <div style="margin-top:18px;max-width:760px" role="status">
+            <sc-if value="{{ sp.ready }}" hint-placeholder-val="{{ true }}"><p class="info">Ready to scan. An incomplete scan is always an error, never a zero balance.</p></sc-if>
+            <sc-if value="{{ sp.scanning }}" hint-placeholder-val="{{ false }}"><p class="info">Scanning with fresh, authenticated chain observations…</p></sc-if>
+            <sc-if value="{{ sp.failed }}" hint-placeholder-val="{{ false }}"><p class="warnline"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 21 19H3zM12 9.5v4M12 16.3v.2"></path></svg>{{ sp.failText }}</p></sc-if>
+            <sc-if value="{{ sp.done }}" hint-placeholder-val="{{ false }}">
+              <p style="font-weight:600">{{ sp.found }}</p>
+              <dl class="kv">
+                <sc-for list="{{ sp.lines }}" as="l" hint-placeholder-count="3"><div><dt>{{ l.k }}</dt><dd>{{ l.v }}</dd></div></sc-for>
+              </dl>
+              <p class="copy">{{ sp.conclusion }}</p>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- ===================== #17 KEY SOURCE: HARDWARE DETECTION ===================== -->
+        <sc-if value="{{ v.keys }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Set keys</h2>
+          <div class="keys">
+            <div class="paths">
+              <p style="font-size:13px;font-weight:600;margin-bottom:6px">Primary spending option: <span class="muted" style="font-weight:400">Threshold: 2 of 2</span></p>
+              <div class="slot"><span class="sl">Primary key #1</span><span>This device · Cube Key</span><span class="mono muted">a1b2c3d4</span></div>
+              <div class="slot editing"><span class="sl">Primary key #2</span><span class="muted">Choosing a source…</span></div>
+              <p style="font-size:13px;font-weight:600;margin:16px 0 6px">Recovery option #1: <span class="muted" style="font-weight:400">after 25920 blocks (~180 days)</span></p>
+              <div class="slot"><span class="sl">Recovery key</span><span class="muted">Not set</span></div>
+            </div>
+            <div class="picker" role="group" aria-labelledby="ks-h">
+              <h3 id="ks-h">Select key source</h3>
+              <button type="button" class="srcb" aria-pressed="true"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v16H7zM10 17h4"></path></svg><span><span class="t">Hardware Device</span><span class="d">Supported: Ledger Nano S/S+/X, Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY.</span></span></button>
+
+              <sc-if value="{{ ks.list }}" hint-placeholder-val="{{ true }}">
+                <p class="grp">Detected hardware</p>
+                <sc-if value="{{ ks.none }}" hint-placeholder-val="{{ false }}">
+                  <p class="empty">Plug in a hardware device</p>
+                  <p class="empty" style="border-top:0">- No other sources detected -</p>
+                </sc-if>
+                <div>
+                  <sc-for list="{{ ks.devices }}" as="d" hint-placeholder-count="5">
+                    <button type="button" class="dev" aria-pressed="{{ d.pressed }}" disabled="{{ d.off }}" onClick="{{ d.pick }}">
+                      <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px;color:var(--muted);margin-top:2px"><path d="M7 4h10v16H7zM10 17h4"></path></svg>
+                      <span class="m"><b>{{ d.name }}</b><span class="{{ d.tone }}">{{ d.status }}</span></span>
+                    </button>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ ks.hasUsed }}" hint-placeholder-val="{{ true }}">
+                  <p class="grp">Already used sources</p>
+                  <button type="button" class="dev" disabled="{{ yes }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" style="width:18px;height:18px;color:var(--muted);margin-top:2px"><path d="M7 4h10v16H7zM10 17h4"></path></svg><span class="m"><b>Hardware · Second device</b><span class="muted mono">d4e5f6a7 · Already used in this Vault</span></span></button>
+                </sc-if>
+              </sc-if>
+
+              <sc-if value="{{ ks.form }}" hint-placeholder-val="{{ false }}">
+                <p class="grp">Ledger-style device · <span class="mono">c9d0e1f2</span></p>
+                <sc-if value="{{ ks.err }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Wrong network</p></sc-if>
+                <div class="fld" style="max-width:none"><label for="ks-alias">Key name (alias):</label><input id="ks-alias" class="inp" type="text" placeholder="E.g. My Hardware Wallet" value="{{ ks.alias }}" aria-invalid="{{ ks.aliasInvalid }}" aria-describedby="{{ ks.aliasDesc }}">
+                  <sc-if value="{{ ks.err }}" hint-placeholder-val="{{ false }}"><p class="err" id="ks-alias-err"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>This alias is already used for another key</p></sc-if>
+                </div>
+                <div class="fld" style="max-width:none"><label for="ks-acct">Key path account:</label><select id="ks-acct" class="inp"><option>Account #0</option><option>Account #1</option></select><p class="info">Switch account if you already use the same hardware in another setup.</p></div>
+                <div class="acts"><button type="button" class="btn" onClick="{{ ks.back }}">Back</button><button type="button" class="btn primary" disabled="{{ ks.err }}">Apply</button></div>
+              </sc-if>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ===================== #21 CONNECT STEP ===================== -->
+        <sc-if value="{{ v.connect }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">COINCUBE | Connect</h2>
+          <div style="margin-top:14px"><span class="seg" role="group" aria-label="Account"><button type="button" aria-pressed="{{ cn.createPressed }}" onClick="{{ cn.toCreate }}">Create Account</button><button type="button" aria-pressed="{{ cn.signPressed }}" onClick="{{ cn.toSign }}">Sign In</button></span></div>
+          <sc-if value="{{ cn.isCreate }}" hint-placeholder-val="{{ true }}">
+            <p class="copy">Create a free COINCUBE | Connect account to unlock:</p>
+            <ul style="margin-top:8px;max-width:640px;border-top:1px solid var(--line)">
+              <sc-for list="{{ cn.benefits }}" as="b" hint-placeholder-count="3">
+                <li style="display:flex;gap:10px;align-items:center;padding:10px 4px;border-bottom:1px solid var(--line)"><svg class="ic tone-ok" viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span>{{ b }}</span></li>
+              </sc-for>
+            </ul>
+          </sc-if>
+          <sc-if value="{{ cn.emailStep }}" hint-placeholder-val="{{ true }}">
+            <div class="fld"><label for="cn-email">Email</label><input id="cn-email" class="inp" type="email" placeholder="your@email.com" value="alex@example.test"></div>
+            <p class="copy m"><button type="button" class="linkbtn" onClick="{{ cn.swap }}">{{ cn.swapLabel }}</button></p>
+          </sc-if>
+          <sc-if value="{{ cn.codeStep }}" hint-placeholder-val="{{ false }}">
+            <div class="fld"><label for="cn-code">Enter the verification code sent to alex@example.test</label><input id="cn-code" class="inp mono" type="text" inputmode="numeric" placeholder="6-digit code" value="{{ cn.code }}" aria-invalid="{{ cn.codeInvalid }}" aria-describedby="{{ cn.codeDesc }}">
+              <sc-if value="{{ cn.bad }}" hint-placeholder-val="{{ false }}"><p class="err" id="cn-code-err"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Invalid verification code</p></sc-if>
+            </div>
+            <p class="copy m"><button type="button" class="linkbtn">Resend Code</button></p>
+          </sc-if>
+          <sc-if value="{{ cn.b2b }}" hint-placeholder-val="{{ false }}">
+            <p class="info" style="margin-top:18px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>Connect authentication is required for Bitcoin Blake2b</p>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===================== #27 IMPORT EXTRAS: SHARED WALLET ===================== -->
+        <sc-if value="{{ v.shared }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Load a previously used wallet</h2>
+          <p class="copy m">You have no current wallets</p>
+          <p class="h3">Load a shared wallet</p>
+          <sc-if value="{{ sh.entry }}" hint-placeholder-val="{{ true }}">
+            <p class="copy m">Type the invitation token you received by email</p>
+            <div class="fld"><label for="sh-inv">Paste invitation:</label><input id="sh-inv" class="inp mono" type="text" placeholder="Invitation" value="{{ sh.token }}" aria-invalid="{{ sh.invalidA }}" aria-describedby="{{ sh.desc }}">
+              <sc-if value="{{ sh.invalid }}" hint-placeholder-val="{{ false }}"><p class="err" id="sh-err"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Invitation token is invalid or expired</p></sc-if>
+            </div>
+            <div class="acts"><button type="button" class="btn" onClick="{{ sh.next }}">Next</button></div>
+          </sc-if>
+          <sc-if value="{{ sh.accept }}" hint-placeholder-val="{{ false }}">
+            <dl class="kv"><div><dt>Accept invitation for wallet:</dt><dd><b>Team treasury</b> <span class="muted">· shared by sam@example.test</span></dd></div></dl>
+            <div class="acts"><button type="button" class="btn primary">Accept</button><button type="button" class="btn" onClick="{{ sh.back }}">Back</button></div>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===================== #27 IMPORT EXTRAS: .bed DECRYPT ===================== -->
+        <sc-if value="{{ v.bed }}" hint-placeholder-val="{{ false }}">
+          <h2 id="g-h">Load a wallet from descriptor</h2>
+          <div class="fld"><label for="bd-desc">Descriptor:</label><input id="bd-desc" class="inp mono" type="text" placeholder="Descriptor" value=""></div>
+          <div class="acts"><button type="button" class="btn">Import descriptor</button><button type="button" class="btn primary">Import backup</button></div>
+          <div class="scrim">
+            <div class="dlg" role="dialog" aria-modal="true" aria-labelledby="bd-h">
+              <h3 id="bd-h">Decrypt backup file</h3>
+              <sc-if value="{{ bd.unsupported }}" hint-placeholder-val="{{ false }}">
+                <div class="alert" role="alert"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>The file was decrypted, but its content type isn't supported.</b><span>Choose another backup file.</span></div></div>
+              </sc-if>
+              <p class="copy">Plug in and unlock a hardware device belonging to this setup to automatically decrypt the backup.</p>
+              <ul class="rows" aria-label="Devices">
+                <sc-for list="{{ bd.devices }}" as="d" hint-placeholder-count="3">
+                  <li class="r"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4h10v16H7zM10 17h4"></path></svg><span class="m"><b>{{ d.name }}</b><span class="mono">{{ d.fp }}</span></span><span class="s {{ d.tone }}">{{ d.status }}</span></li>
+                </sc-for>
+              </ul>
+              <div class="disc">
+                <button type="button" aria-expanded="true" aria-controls="bd-other"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg>Other options</button>
+                <div class="inner" id="bd-other">
+                  <p class="copy m" style="margin-top:0">Provide one of the xpubs used in this wallet.</p>
+                  <div class="acts" style="margin-top:10px"><button type="button" class="btn sm">Upload extended public key file</button></div>
+                  <div class="fld" style="max-width:none"><label for="bd-xpub">Paste an extended public key</label><input id="bd-xpub" class="inp mono" type="text" placeholder="xpub…" value=""></div>
+                  <div class="disc" style="margin-top:16px">
+                    <button type="button" aria-expanded="{{ bd.unsafeOpenA }}" aria-controls="bd-unsafe" onClick="{{ bd.toggleUnsafe }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="{{ bd.chev }}"></path></svg><span class="tone-bad">UNSAFE: Enter mnemonic of one of the keys</span></button>
+                    <sc-if value="{{ bd.unsafeOpen }}" hint-placeholder-val="{{ false }}">
+                      <div class="unsafe" id="bd-unsafe">
+                        <label class="chk" style="margin-top:0"><input type="checkbox" checked="{{ bd.unsafeAck }}" onChange="{{ bd.toggleAck }}"><span><b>This option is not secure.</b> I understand that entering a mnemonic on a computer may result in theft of my funds.</span></label>
+                        <div class="fld" style="max-width:none"><label for="bd-mn">Mnemonic</label><input id="bd-mn" class="inp mono" type="password" placeholder="word word word …" value="" disabled="{{ bd.mnOff }}"></div>
+                      </div>
+                    </sc-if>
+                  </div>
+                </div>
+              </div>
+              <div class="acts" style="justify-content:flex-end"><button type="button" class="btn">Close</button></div>
+            </div>
+          </div>
+        </sc-if>
+
+        <!-- ===================== #35 LEGACY LOGIN (tab Login) ===================== -->
+        <sc-if value="{{ v.login }}" hint-placeholder-val="{{ false }}">
+          <sc-if value="{{ lg.failed }}" hint-placeholder-val="{{ false }}">
+            <div class="alert warnb" role="alert" style="margin:0 0 20px"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 21 19H3zM12 9.5v4M12 16.3v.2"></path></svg><div><b>Connection failed</b><span>Remote servers are unresponsive</span></div></div>
+          </sc-if>
+          <h2 id="g-h">COINCUBE | Connect</h2>
+          <p class="lead">Login · Team treasury</p>
+          <sc-if value="{{ lg.deleted }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Wallet deleted</b><span>This wallet was deleted by its creator for all participants and cannot be opened. To access it again, restore it using a backup file or the wallet descriptor.</span></div></div>
+            <div class="acts"><a class="btn" href="V6-Cube-Restore.dc.html">Import or restore</a></div>
+          </sc-if>
+          <sc-if value="{{ lg.email }}" hint-placeholder-val="{{ true }}">
+            <dl class="kv"><div><dt>Account</dt><dd>alex@example.test</dd></div></dl>
+            <div class="acts"><button type="button" class="btn primary demo-focus" onClick="{{ lg.send }}">Login</button></div>
+          </sc-if>
+          <sc-if value="{{ lg.token }}" hint-placeholder-val="{{ false }}">
+            <p class="copy">An authentication was sent to your email: <b>alex@example.test</b></p>
+            <sc-if value="{{ lg.authErr }}" hint-placeholder-val="{{ false }}"><p class="warnline" style="margin-top:12px" role="alert"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3.5 21 19H3zM12 9.5v4M12 16.3v.2"></path></svg>{{ lg.authErrText }}</p></sc-if>
+            <div class="fld"><label for="lg-tok">Token</label><input id="lg-tok" class="inp mono" type="text" placeholder="Token" value="{{ lg.tok }}" aria-invalid="{{ lg.badA }}" aria-describedby="{{ lg.badDesc }}">
+              <sc-if value="{{ lg.bad }}" hint-placeholder-val="{{ false }}"><p class="err" id="lg-tok-err"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Token is not valid</p></sc-if>
+            </div>
+            <div class="acts"><button type="button" class="btn">Resend token</button></div>
+          </sc-if>
+          <div class="acts" style="margin-top:28px"><a class="btn" href="V3-Launcher-Spin.dc.html"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg>Go back</a></div>
+        </sc-if>
+
+        <!-- ===================== #35 LEGACY REMOTE BACKEND (installer AddWallet) ===================== -->
+        <sc-if value="{{ v.backend }}" hint-placeholder-val="{{ false }}">
+          <sc-if value="{{ be.choose }}" hint-placeholder-val="{{ true }}">
+            <h2 id="g-h">Choose backend</h2>
+            <ul class="rows" style="margin-top:20px">
+              <li class="r"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16v5H4zM4 13h16v5H4zM7 8.5h.01M7 15.5h.01"></path></svg><span class="m"><b>Use your own node</b></span><button type="button" class="btn sm">Select</button></li>
+              <li class="r"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg><span class="m"><b>Use COINCUBE | Connect</b></span><button type="button" class="btn sm" onClick="{{ be.toEmail }}">Select</button></li>
+            </ul>
+          </sc-if>
+          <sc-if value="{{ be.email }}" hint-placeholder-val="{{ false }}">
+            <h2 id="g-h">Login</h2>
+            <p class="copy m">Choose an account you are already using:</p>
+            <ul class="rows"><li class="r"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg><span class="m"><b>alex@example.test</b></span><button type="button" class="btn sm" onClick="{{ be.toToken }}">Send token</button></li></ul>
+            <div class="fld"><label for="be-email">Or enter a new email you want to associate with the wallet:</label><input id="be-email" class="inp" type="email" placeholder="email" value=""></div>
+            <div class="acts"><button type="button" class="btn">Send token</button></div>
+          </sc-if>
+          <sc-if value="{{ be.token }}" hint-placeholder-val="{{ false }}">
+            <h2 id="g-h">Login</h2>
+            <p class="copy">An authentication token has been emailed to you</p>
+            <div class="fld"><label for="be-tok">Token</label><input id="be-tok" class="inp mono" type="text" placeholder="Token" value=""></div>
+            <div class="acts"><button type="button" class="btn" onClick="{{ be.toEmail }}"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg>Change Email</button><button type="button" class="btn">Resend token</button></div>
+          </sc-if>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ showFoot }}" hint-placeholder-val="{{ true }}">
+        <div class="rfoot">
+          <button type="button" class="btn"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg><span>Back</span></button>
+          <span class="grow"></span>
+          <sc-if value="{{ canSkip }}" hint-placeholder-val="{{ false }}"><button type="button" class="linkbtn" style="margin-right:8px">Skip for now</button></sc-if>
+          <button type="button" class="btn primary demo-focus" disabled="{{ nextDisabled }}" onClick="{{ footNext }}">{{ nextLabel }}</button>
+        </div>
+      </sc-if>
+    </section>
+  </main>
+
+  <div class="foot">{{ foot }}</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["register","chainUnavailable","blake2bMode","split","keySource","connectStep","importExtras","legacyLogin"],"default":"register","section":"Review"},"state":{"editor":"enum","options":["auto","backupDescriptor","backupAcked","registerDevices","registerFailed","registerAcked","b2bList","b2bCreate","b2bBlocked","splitReady","splitScanning","splitFound","splitIncomplete","splitNothing","splitTaproot","splitSignedOut","splitNoVault","hwNone","hwMixed","hwSelected","hwError","connectCreate","connectCode","connectCodeInvalid","connectSignIn","connectBlake2b","sharedToken","sharedInvalid","sharedAccept","bedDecrypt","bedUnsafe","bedUnsupported","loginEmail","loginToken","loginInvalid","loginExpired","loginFailed","walletDeleted","backendChoose","backendEmail","backendToken"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { k: null };
+  }
+  renderVals() {
+    const P = this.props, self = this;
+    // each screen owns its states; "auto" or a state from another screen falls back to the screen's first state
+    const SCR = {
+      register: ['backupDescriptor', 'backupAcked', 'registerDevices', 'registerFailed', 'registerAcked'],
+      chainUnavailable: ['none'],
+      blake2bMode: ['b2bList', 'b2bCreate', 'b2bBlocked'],
+      split: ['splitReady', 'splitScanning', 'splitFound', 'splitIncomplete', 'splitNothing', 'splitTaproot', 'splitSignedOut', 'splitNoVault'],
+      keySource: ['hwMixed', 'hwNone', 'hwSelected', 'hwError'],
+      connectStep: ['connectCreate', 'connectCode', 'connectCodeInvalid', 'connectSignIn', 'connectBlake2b'],
+      importExtras: ['sharedToken', 'sharedInvalid', 'sharedAccept', 'bedDecrypt', 'bedUnsafe', 'bedUnsupported'],
+      legacyLogin: ['loginEmail', 'loginToken', 'loginInvalid', 'loginExpired', 'loginFailed', 'walletDeleted', 'backendChoose', 'backendEmail', 'backendToken']
+    };
+    const scr = SCR[P.screen] ? P.screen : 'register';
+    const lvState = SCR[scr].indexOf(P.state) >= 0 ? P.state : SCR[scr][0];
+    const key = scr + '|' + lvState;
+    const S = (this.state.k && this.state.k.key === key) ? this.state.k
+      : { key, st: lvState, bkSaved: lvState === 'backupAcked', srcHw: false, ksPick: lvState === 'hwSelected' || lvState === 'hwError', unsafeOpen: lvState === 'bedUnsafe', unsafeAck: false };
+    const set = (patch) => self.setState({ k: Object.assign({}, S, patch) });
+    const st = S.st;
+    const hide = !!P.hideBalances;
+    const H = (s) => hide ? '••••••' : s;
+
+    const I = {
+      ok: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6',
+      warn: 'M12 3.5 21 19H3zM12 9.5v4M12 16.3v.2',
+      bad: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3',
+      sync: 'M4 12a8 8 0 0 1 13.7-5.7L20 8.5M20 4v4.5h-4.5M20 12a8 8 0 0 1-13.7 5.7L4 15.5M4 20v-4.5h4.5',
+      lock: 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3',
+      dash: 'M6 12h12'
+    };
+
+    // ---------- shared chrome ----------
+    const isB2bNet = scr === 'chainUnavailable' || scr === 'blake2bMode' || st === 'connectBlake2b';
+    const launcher = scr === 'chainUnavailable' || scr === 'blake2bMode' || scr === 'split';
+    const signedOut = st === 'splitSignedOut' || scr === 'connectStep' || scr === 'legacyLogin';
+    const vaultPath = ['Type', 'Policy', 'Keys', 'Seed', 'Descriptor', 'Register', 'Connect', 'Node', 'Name', 'Done'];
+    const addPath = ['Backend', 'Login', 'Wallet', 'Import', 'Kit', 'Register', 'Connect', 'Node', 'Done'];
+    const stepper = (path, cur) => path.map((label, i) => ({ n: String(i + 1), label, cls: i === cur ? 'cur' : i < cur ? 'done' : '', current: i === cur ? 'step' : 'false', hasRule: i < path.length - 1 }));
+    let steps = [], stepsLabel = '';
+    if (scr === 'register') { steps = stepper(vaultPath, st.indexOf('backup') === 0 ? 4 : 5); stepsLabel = 'Create Vault steps'; }
+    if (scr === 'keySource') { steps = stepper(vaultPath, 2); stepsLabel = 'Create Vault steps'; }
+    if (scr === 'connectStep') { steps = stepper(vaultPath, 6); stepsLabel = 'Create Vault steps'; }
+    if (scr === 'importExtras') { steps = stepper(addPath, st.indexOf('shared') === 0 ? 2 : 3); stepsLabel = 'Add wallet steps'; }
+    if (scr === 'legacyLogin' && st.indexOf('backend') === 0) { steps = stepper(addPath, st === 'backendChoose' ? 0 : 1); stepsLabel = 'Add wallet steps'; }
+
+    const TITLE = {
+      register: st.indexOf('backup') === 0 ? 'Create Vault · Back up descriptor' : 'Create Vault · Register descriptor',
+      chainUnavailable: 'Launcher · Network unavailable',
+      blake2bMode: 'Launcher · Bitcoin Blake2b',
+      split: 'Launcher · Split a Bitcoin wallet',
+      keySource: 'Create Vault · Select key source',
+      connectStep: 'Create Vault · Connect',
+      importExtras: st.indexOf('shared') === 0 ? 'Add wallet · Shared wallet' : 'Add wallet · Encrypted backup',
+      legacyLogin: st.indexOf('backend') === 0 ? 'Add wallet · Remote backend login' : 'Login · Remote backend'
+    };
+    const ROUTE = {
+      register: st.indexOf('backup') === 0 ? 'App: Installer › BackupDescriptor' : 'App: Installer › RegisterDescriptor',
+      chainUnavailable: 'App: Home › Cubes (network Bitcoin Blake2b, unavailable)',
+      blake2bMode: 'App: Home › Cubes (network Bitcoin Blake2b)',
+      split: 'App: Home sidebar › Split a Bitcoin wallet',
+      keySource: 'App: Installer › Set keys › Select key source',
+      connectStep: 'App: Installer › CoincubeConnect',
+      importExtras: st.indexOf('shared') === 0 ? 'App: Installer (AddWallet) › ImportRemoteWallet' : 'App: Installer (AddWallet) › ImportDescriptor › Decrypt',
+      legacyLogin: st.indexOf('backend') === 0 ? 'App: Installer (AddWallet) › ChooseBackend / RemoteBackendLogin' : 'App: tab Login (services/connect/login.rs)'
+    };
+    const cubeName = scr === 'blake2bMode' || scr === 'chainUnavailable' ? 'All Cubes' : scr === 'split' ? 'All Cubes' : scr === 'legacyLogin' || scr === 'importExtras' ? 'Team treasury' : st === 'connectBlake2b' ? 'Blake savings' : 'Travel fund';
+
+    // ---------- #20 register / back up descriptor ----------
+    const policy = [
+      { k: 'Primary path', v: '2 signatures from This device · Cube Key (a1b2c3d4), Hardware · Ledger-style device (c9d0e1f2)' },
+      { k: 'Recovery path #1', v: '2 signatures from 3 keys, after 25920 blocks (~180 days) · synthetic policy' }
+    ];
+    const regAck = st === 'registerAcked';
+    const regDevices = [
+      { name: 'Hardware · Ledger-style device', sub: 'c9d0e1f2', status: 'Registered', tone: 'tone-ok', icon: I.ok, canRegister: false },
+      { name: 'Hardware · Second device', sub: 'd4e5f6a7', status: st === 'registerFailed' ? 'Not registered' : 'Processing... Please check your device', tone: st === 'registerFailed' ? 'tone-bad' : 'tone-muted', icon: st === 'registerFailed' ? I.bad : I.sync, canRegister: st === 'registerFailed', register: () => set({ st: 'registerDevices' }) },
+      { name: 'Jade-style device', sub: 'Fingerprint unknown until unlocked', status: 'Locked', tone: 'tone-warn', icon: I.lock, canRegister: false },
+      { name: 'BitBox-style device', sub: 'e3f4a5b6', status: 'This signing device is not related to this Vault wallet.', tone: 'tone-muted', icon: I.dash, canRegister: false }
+    ];
+
+    // ---------- #2 blake2b mode ----------
+    const b2bCubes = [
+      { name: 'Blake workspace', line: 'Locked · Backup not confirmed · Vault only', tag: 'Blake2b' },
+      { name: 'Blake savings', line: 'Locked · Backup confirmed · Vault only', tag: 'Blake2b' }
+    ];
+    const b2bOn = ['Cubes', 'Create Vault', 'Split a Bitcoin wallet', 'Connect', 'Settings'];
+    const b2bOff = ['Create Cube (Spark, Liquid)', 'Import or restore', 'Recover a Vault', 'Passkey unlock', 'Cubes on your Connect account'];
+
+    // ---------- #13 split ----------
+    const spStates = { splitReady: 'ready', splitScanning: 'scanning', splitFound: 'done', splitIncomplete: 'failed', splitNothing: 'done', splitTaproot: 'done', splitSignedOut: 'failed', splitNoVault: 'failed' };
+    const spPhase = spStates[st] || 'ready';
+    const FAIL = {
+      splitIncomplete: 'The scan did not cover every saved receive and change address on both chains. No balance conclusion was made. Scan again.',
+      splitSignedOut: 'Sign in to Connect before scanning a Bitcoin wallet.',
+      splitNoVault: 'Create a Bitcoin Blake2b Vault before scanning a Bitcoin wallet.'
+    };
+    const spLines = st === 'splitFound' ? [
+      { k: 'Pre-fork (splittable)', v: H('2 UTXOs, 1,000,000 sats') },
+      { k: 'Confirmed after the fork', v: '1 · not part of this split; may still be replayable' },
+      { k: 'Unclassified (excluded)', v: '0' },
+      { k: 'Unspent on both chains (splittable)', v: H('2 UTXOs, 1,000,000 sats') }
+    ] : st === 'splitTaproot' ? [
+      { k: 'Pre-fork (splittable)', v: H('1 UTXO, 400,000 sats') }
+    ] : [];
+    const sp = {
+      noVault: st === 'splitNoVault', destText: st === 'splitNoVault' ? 'Choose a Bitcoin Blake2b Cube' : 'Blake workspace · Bitcoin Blake2b',
+      desc: !S.srcHw, hw: !!S.srcHw, descPressed: String(!S.srcHw), hwPressed: String(!!S.srcHw),
+      pickDesc: () => set({ srcHw: false }), pickHw: () => set({ srcHw: true }),
+      idle: spPhase !== 'scanning', scanning: spPhase === 'scanning',
+      ready: spPhase === 'ready', failed: spPhase === 'failed', failText: FAIL[st] || '', done: spPhase === 'done',
+      found: st === 'splitNothing' ? H('Found 0 UTXOs (0 confirmed), totaling 0 sats') : st === 'splitTaproot' ? H('Found 1 UTXO (1 confirmed), totaling 400,000 sats') : H('Found 3 UTXOs (3 confirmed), totaling 1,250,000 sats'),
+      lines: spLines,
+      conclusion: st === 'splitNothing' ? 'No spendable outputs were found in this bounded scan.'
+        : st === 'splitTaproot' ? 'Taproot (tr) wallets can be scanned but not split: there is no signing route for them yet.'
+        : 'Continue to unlock the destination Cube and review the sweep. Spending remains locked.',
+      canContinue: st === 'splitFound',
+      scan: () => {
+        if (st === 'splitSignedOut' || st === 'splitNoVault') return;
+        set({ st: 'splitScanning' });
+        setTimeout(() => { const c = self.state.k; if (c && c.st === 'splitScanning') self.setState({ k: Object.assign({}, c, { st: 'splitFound' }) }); }, 1400);
+      },
+      cancel: () => set({ st: 'splitReady' })
+    };
+
+    // ---------- #17 key source ----------
+    const sel = !!S.ksPick;
+    const hwList = st === 'hwNone' ? [] : [
+      { name: 'Ledger-style device · c9d0e1f2', status: 'Account #0 · Ready', tone: 'tone-ok', off: false, pressed: String(sel), pick: () => set({ ksPick: true }) },
+      { name: 'Coldcard-style device', status: 'Please unlock the device', tone: 'tone-warn', off: true, pressed: 'false', pick: () => {} },
+      { name: 'Jade-style device', status: 'Pairing code: 4F2A', tone: 'tone-muted', off: true, pressed: 'false', pick: () => {} },
+      { name: 'BitBox-style device', status: 'Please open the app on device', tone: 'tone-warn', off: true, pressed: 'false', pick: () => {} },
+      { name: 'Trezor-style device', status: 'This device does not support taproot', tone: 'tone-bad', off: true, pressed: 'false', pick: () => {} },
+      { name: 'Specter-style device', status: 'Device version not supported, upgrade to version > [VERSION]', tone: 'tone-bad', off: true, pressed: 'false', pick: () => {} }
+    ];
+    const ks = {
+      list: !sel, none: st === 'hwNone', devices: hwList, hasUsed: st !== 'hwNone',
+      form: sel, err: st === 'hwError', alias: st === 'hwError' ? 'Ledger-style device' : 'Kitchen drawer Ledger',
+      aliasInvalid: String(st === 'hwError'), aliasDesc: st === 'hwError' ? 'ks-alias-err' : '',
+      back: () => set({ ksPick: false })
+    };
+
+    // ---------- #21 connect ----------
+    const cnCreate = st !== 'connectSignIn';
+    const cn = {
+      isCreate: cnCreate && st !== 'connectCode' && st !== 'connectCodeInvalid',
+      createPressed: String(cnCreate), signPressed: String(!cnCreate),
+      toCreate: () => set({ st: 'connectCreate' }), toSign: () => set({ st: 'connectSignIn' }),
+      benefits: ['Hosted Esplora server — use your Vault instantly while your node syncs', 'Encrypted wallet descriptor backup', 'Integration with the companion Keychain mobile app'],
+      emailStep: st === 'connectCreate' || st === 'connectSignIn' || st === 'connectBlake2b',
+      codeStep: st === 'connectCode' || st === 'connectCodeInvalid',
+      swap: () => set({ st: cnCreate ? 'connectSignIn' : 'connectCreate' }),
+      swapLabel: cnCreate ? 'Already have an account? Sign in' : 'New to COINCUBE | Connect? Create account',
+      bad: st === 'connectCodeInvalid', code: st === 'connectCodeInvalid' ? '481 9' : '',
+      codeInvalid: String(st === 'connectCodeInvalid'), codeDesc: st === 'connectCodeInvalid' ? 'cn-code-err' : '',
+      b2b: st === 'connectBlake2b'
+    };
+
+    // ---------- #27 shared / bed ----------
+    const sh = {
+      entry: st === 'sharedToken' || st === 'sharedInvalid', accept: st === 'sharedAccept',
+      invalid: st === 'sharedInvalid', invalidA: String(st === 'sharedInvalid'), desc: st === 'sharedInvalid' ? 'sh-err' : '',
+      token: st === 'sharedInvalid' ? '[expired invitation token]' : '[invitation token]',
+      next: () => set({ st: st === 'sharedInvalid' ? 'sharedInvalid' : 'sharedAccept' }),
+      back: () => set({ st: 'sharedToken' })
+    };
+    const bd = {
+      unsupported: st === 'bedUnsupported',
+      devices: [
+        { name: 'Hardware · Ledger-style device', fp: 'c9d0e1f2', status: st === 'bedUnsupported' ? 'Decrypted' : 'Try to decrypt with this device...', tone: st === 'bedUnsupported' ? 'tone-ok' : 'tone-muted' },
+        { name: 'Hardware · Second device', fp: 'd4e5f6a7', status: 'Please unlock or open app on the device', tone: 'tone-warn' },
+        { name: 'BitBox-style device', fp: 'e3f4a5b6', status: 'Failed to decrypt file with this device', tone: 'tone-bad' }
+      ],
+      unsafeOpen: !!S.unsafeOpen, unsafeOpenA: String(!!S.unsafeOpen), chev: S.unsafeOpen ? 'M7 10l5 5 5-5' : 'M10 7l5 5-5 5',
+      toggleUnsafe: () => set({ unsafeOpen: !S.unsafeOpen, unsafeAck: false }),
+      unsafeAck: !!S.unsafeAck, toggleAck: () => set({ unsafeAck: !S.unsafeAck }), mnOff: !S.unsafeAck
+    };
+
+    // ---------- #35 legacy login ----------
+    const lg = {
+      failed: st === 'loginFailed', deleted: st === 'walletDeleted',
+      email: st === 'loginEmail' || st === 'loginFailed',
+      token: st === 'loginToken' || st === 'loginInvalid' || st === 'loginExpired',
+      authErr: st === 'loginExpired', authErrText: 'Token is expired or is invalid',
+      bad: st === 'loginInvalid', badA: String(st === 'loginInvalid'), badDesc: st === 'loginInvalid' ? 'lg-tok-err' : '',
+      tok: st === 'loginInvalid' ? '12' : st === 'loginExpired' ? '[expired token]' : '',
+      send: () => set({ st: 'loginToken' })
+    };
+    const be = {
+      choose: st === 'backendChoose', email: st === 'backendEmail', token: st === 'backendToken',
+      toEmail: () => set({ st: 'backendEmail' }), toToken: () => set({ st: 'backendToken' })
+    };
+
+    // ---------- footer + primary action ----------
+    const isLoginTab = scr === 'legacyLogin' && st.indexOf('backend') !== 0;
+    const showFoot = !launcher && !isLoginTab && scr !== 'importExtras';
+    let nextLabel = 'Next', nextDisabled = false, footNext = () => {};
+    if (scr === 'register' && st.indexOf('backup') === 0) { nextDisabled = !(st === 'backupAcked' || S.bkSaved && st === 'backupAcked'); footNext = () => set({ st: 'registerDevices' }); }
+    if (scr === 'register' && st.indexOf('register') === 0) { nextDisabled = !regAck; }
+    if (scr === 'keySource') { nextLabel = 'Continue'; nextDisabled = true; }
+    if (scr === 'connectStep') { nextLabel = 'Continue'; nextDisabled = false; footNext = () => { if (st === 'connectCreate' || st === 'connectSignIn') set({ st: 'connectCode' }); }; }
+    if (scr === 'legacyLogin') { nextLabel = 'Next'; nextDisabled = true; }
+
+    const FOOT = {
+      register: 'Prototype V6 · synthetic keys, fingerprints and policy · descriptor never shown · App order: Back up descriptor, then Register descriptor',
+      chainUnavailable: 'Prototype V6 · shown when the network filter selects Bitcoin Blake2b and its beta preference or account grant is missing',
+      blake2bMode: 'Prototype V6 · Blake2b mode allows Cubes, Create Vault, Split, Connect and Settings; other launcher actions show the error above',
+      split: 'Prototype V6 · synthetic scan totals · launcher entry shows only on Bitcoin with Blake2b available via Connect',
+      keySource: 'Prototype V6 · synthetic devices and fingerprints · device states from the installer key modal and the shared hardware list',
+      connectStep: 'Prototype V6 · installer Connect step · Skip for now hidden on Bitcoin Blake2b',
+      importExtras: 'Prototype V6 · AddWallet flow · synthetic invitation and devices · mnemonic field stays disabled until the warning is accepted',
+      legacyLogin: 'Prototype V6 · legacy remote-backend login (shared wallets) · the token submits when complete, as in the app'
+    };
+
+    const v = {
+      backup: scr === 'register' && st.indexOf('backup') === 0,
+      register: scr === 'register' && st.indexOf('register') === 0,
+      unavailable: scr === 'chainUnavailable',
+      b2bList: scr === 'blake2bMode' && st !== 'b2bCreate', b2bCreate: scr === 'blake2bMode' && st === 'b2bCreate',
+      split: scr === 'split', keys: scr === 'keySource', connect: scr === 'connectStep',
+      shared: scr === 'importExtras' && st.indexOf('shared') === 0, bed: scr === 'importExtras' && st.indexOf('bed') === 0,
+      login: isLoginTab, backend: scr === 'legacyLogin' && st.indexOf('backend') === 0
+    };
+
+    return {
+      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      topBack: !launcher, topNet: launcher, netChip: isB2bNet ? 'Network: Bitcoin Blake2b' : 'Network: Bitcoin',
+      connWord: signedOut ? 'Signed out' : 'Signed in',
+      connAria: signedOut ? 'Connect, signed out' : 'Connect, alex@example.test, signed in',
+      connTitle: signedOut ? 'Signed out' : 'alex@example.test',
+      regionTitle: TITLE[scr], route: ROUTE[scr], cubeName,
+      netB2b: isB2bNet, netBtc: !isB2bNet, netName: isB2bNet ? 'Bitcoin Blake2b' : 'Bitcoin',
+      hasSteps: steps.length > 0, steps, stepsLabel,
+      v, yes: true,
+      // backup / register
+      policy, bkSaved: !!S.bkSaved, bkBtnCls: S.bkSaved ? 'btn' : 'btn primary',
+      doBackup: () => set({ bkSaved: true }),
+      bkAck: st === 'backupAcked', toggleBkAck: () => set({ st: st === 'backupAcked' ? 'backupDescriptor' : 'backupAcked' }),
+      regFailed: st === 'registerFailed', regDevices, regAck,
+      toggleRegAck: () => set({ st: regAck ? 'registerDevices' : 'registerAcked' }),
+      // blake2b mode
+      b2bBlocked: st === 'b2bBlocked', b2bCubes, b2bOn, b2bOff,
+      toB2bCreate: () => set({ st: 'b2bCreate' }), toB2bBlocked: () => set({ st: 'b2bBlocked' }), toB2bList: () => set({ st: 'b2bList' }),
+      sp, ks, cn, sh, bd, lg, be,
+      showFoot, canSkip: scr === 'connectStep' && st !== 'connectBlake2b', nextLabel, nextDisabled, footNext,
+      foot: FOOT[scr]
+    };
+  }
+}
+</script>
+</body>
+</html>

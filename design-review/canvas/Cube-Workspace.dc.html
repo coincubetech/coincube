@@ -1,0 +1,1032 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cube workspace · Settings</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--shadow:rgba(0,0,0,.45)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--shadow:rgba(60,40,10,.18)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.tenshu a{color:var(--acc-ink)}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p{margin:0}
+.muted{color:var(--muted)}.small{font-size:13px}.cap{font-size:12px;color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12.5px}
+.hdr{height:52px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--rail);border-bottom:1px solid var(--line);position:relative;z-index:5}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;letter-spacing:.01em}
+.vsep{width:1px;height:24px;background:var(--line)}
+.switch{display:flex;align-items:center;gap:10px;height:36px;max-width:520px;padding:0 10px 0 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer}
+.switch .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.bm{font-weight:600;color:var(--ink)}
+.tb{border:1px solid currentColor;color:var(--warn);font-size:11px;line-height:16px;padding:0 5px;border-radius:3px;font-weight:600}
+.menu{position:absolute;top:48px;left:118px;width:320px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 28px var(--shadow);padding:6px;z-index:10}
+.menu .ml{font-size:12px;color:var(--muted);padding:6px 10px 4px}
+.mi{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:8px 10px;border:0;border-radius:5px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink)}
+.mi:hover{background:var(--selected)}
+.mi.on{background:var(--selected)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:15px;font-size:12px;background:var(--panel);white-space:nowrap}
+.chip .k{color:var(--muted)}
+.chip .btn{height:22px;padding:0 8px;font-size:12px}
+.st{display:inline-flex;align-items:center;gap:6px;font-weight:500}
+.st::before{display:inline-grid;place-items:center;width:15px;height:15px;font-size:10px;line-height:1;border-radius:50%;flex:none;border:1.5px solid currentColor}
+.s-ok{color:var(--good)}.s-ok::before{content:"\2713"}
+.s-warn{color:var(--warn)}.s-warn::before{content:"!";border-radius:3px;font-weight:700}
+.s-bad{color:var(--bad)}.s-bad::before{content:"\2715"}
+.s-unk{color:var(--muted)}.s-unk::before{content:"?";border-style:dashed}
+.s-busy{color:var(--muted)}.s-busy::before{content:"\2026";border-style:dotted}
+.s-off{color:var(--muted)}.s-off::before{content:"\2013"}
+.body{flex:1;display:flex;min-height:0}
+.side{width:232px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.ident{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.ident .cn{font-weight:600;font-size:15px;overflow-wrap:anywhere;line-height:1.3;margin:2px 0 4px}
+.nav{padding:8px;display:flex;flex-direction:column;gap:2px}
+.ni{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;width:100%;min-height:34px;padding:6px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;color:var(--ink)}
+.ni:hover{background:color-mix(in srgb,var(--ink) 7%,transparent)}
+.ni.on{background:var(--selected);box-shadow:inset 3px 0 0 var(--accent);font-weight:600}
+.ni .sub{font-size:12px;color:var(--muted);font-weight:400;overflow-wrap:anywhere}
+.ni .sub.w{color:var(--warn)}
+.mid{flex:1;min-height:0;overflow:auto;border-top:1px solid var(--line);padding:4px 8px 8px}
+.gl{font-size:12px;color:var(--muted);font-weight:500;padding:10px 10px 4px}
+.xbtn{display:flex;align-items:center;gap:8px;width:100%;min-height:34px;padding:6px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;color:var(--ink);font-weight:500}
+.xbtn:hover{background:color-mix(in srgb,var(--ink) 7%,transparent)}
+.xbtn .cnt{margin-left:auto;font-size:12px;color:var(--muted);font-weight:400}
+.chev{transition:transform .15s}
+.open .chev{transform:rotate(90deg)}
+.xlist{padding-left:12px;border-left:1px solid var(--line);margin-left:16px}
+.attn{display:flex;align-items:center;gap:8px;width:calc(100% - 16px);margin:0 8px 8px;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;text-align:left;font-size:13px}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.attn .more{font-size:12px;color:var(--muted)}
+.foot{border-top:1px solid var(--line);padding:8px;display:flex;flex-direction:column;gap:2px}
+.main{flex:1;min-width:0;overflow:auto;background:var(--bg)}
+.pg{padding:28px 40px 56px;max-width:980px}
+.pg h1{font-size:24px;font-weight:600;line-height:1.25}
+.pg h1 .sc1{color:var(--muted);font-weight:400}
+.lede{color:var(--muted);margin-top:6px;max-width:680px}
+.scopes{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px;align-items:center}
+.scopes .lbl{font-size:12px;color:var(--muted);margin-right:4px}
+.sb{height:30px;padding:0 12px;border:1px solid var(--line);border-radius:15px;background:transparent;cursor:pointer;font-size:13px;color:var(--ink)}
+.sb[aria-pressed="true"]{background:var(--selected);border-color:var(--accent);font-weight:600}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line);margin-top:16px}
+.tab{padding:10px 12px;border:0;background:none;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.tab:hover{color:var(--ink)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.tab.kf{outline:2px solid var(--focus);outline-offset:-2px;border-radius:4px 4px 0 0}
+.sect{margin-top:8px}
+.grp{margin-top:28px}
+.grp h2{font-size:20px;font-weight:600}
+.grp h3{font-size:16px;font-weight:600}
+.grp .intro{color:var(--muted);font-size:13px;margin:4px 0 12px;max-width:680px}
+.rows{border-bottom:1px solid var(--line)}
+.row{display:grid;grid-template-columns:210px minmax(0,1fr) 270px;column-gap:24px;padding:14px 0;border-top:1px solid var(--line);align-items:start}
+.row .lb{font-weight:500}
+.row .ds{color:var(--muted);font-size:13px}
+.row .ct{display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+.row .ct .hint{font-size:12px;color:var(--muted)}
+.row .ct .btn{white-space:normal;height:auto;min-height:32px;padding:6px 12px;text-align:left;max-width:100%}
+.row .ct select{width:100%}
+.row .ct select,.row .ct .in{max-width:100%;min-width:0}
+.row.wide{grid-template-columns:210px minmax(0,1fr)}
+.sc{display:inline-block;font-size:11px;line-height:16px;padding:0 6px;margin-top:5px;border:1px solid var(--line);border-radius:3px;color:var(--muted);font-weight:400}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;color:var(--ink);text-decoration:none;white-space:nowrap}
+.btn:hover{border-color:var(--muted)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#1a1208}
+.btn.pri:hover{background:#ff9536}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.lnk{background:none;border:0;padding:0;color:var(--acc-ink);cursor:pointer;text-decoration:underline;text-underline-offset:2px;font-size:13px}
+.in{height:32px;min-width:220px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
+.in.err{border-color:var(--bad)}
+.tog{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 10px 0 4px;border:1px solid var(--line);border-radius:15px;background:var(--panel);cursor:pointer;font-size:13px}
+.tog .kn{width:30px;height:18px;border-radius:9px;background:var(--line);position:relative;flex:none}
+.tog .kn::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink);transition:left .15s}
+.tog[aria-pressed="true"] .kn{background:var(--accent)}
+.tog[aria-pressed="true"] .kn::after{left:14px;background:#1a1208}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{height:30px;padding:0 12px;border:0;background:transparent;cursor:pointer;font-size:13px;color:var(--ink)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--selected);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.note{border-left:3px solid var(--warn);padding:10px 14px;margin:12px 0;background:color-mix(in srgb,var(--warn) 7%,transparent);font-size:13px}
+.note.bad{border-left-color:var(--bad);background:color-mix(in srgb,var(--bad) 7%,transparent)}
+.note.info{border-left-color:var(--line);background:color-mix(in srgb,var(--ink) 4%,transparent)}
+.note b{font-weight:600}
+.note .acts{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.lead{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:center;padding:18px 0;border-top:2px solid var(--warn);border-bottom:1px solid var(--line);margin-top:16px}
+.lead.ok{border-top-color:var(--good)}
+.lead h2{font-size:20px;font-weight:600;margin-top:4px}
+.lead .ct{display:flex;flex-direction:column;align-items:flex-end;gap:6px}
+.fbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 0}
+.fbar .msg{margin-right:auto;font-size:13px;color:var(--muted)}
+.dsc{display:flex;align-items:center;gap:8px;width:100%;padding:12px 0;border:0;border-top:1px solid var(--line);background:none;cursor:pointer;text-align:left;font-weight:500;color:var(--ink)}
+.dsc .cap{margin-left:auto}
+.dbody{padding:0 0 12px 22px}
+.tbl{width:100%;border-collapse:collapse;font-size:13px}
+.tbl th{text-align:left;font-weight:500;color:var(--muted);padding:8px 12px 8px 0;border-bottom:1px solid var(--line)}
+.tbl td{padding:9px 12px 9px 0;border-bottom:1px solid var(--line);vertical-align:top}
+.tl{border-top:1px solid var(--line);font-size:13px}
+.tr{display:grid;column-gap:12px;padding:9px 0;border-bottom:1px solid var(--line);align-items:start}
+.tr.th{color:var(--muted);font-weight:500;padding:8px 0}
+.sk{height:12px;border-radius:3px;background:var(--line);opacity:.55}
+.skrow{display:grid;grid-template-columns:210px minmax(0,1fr) 200px;gap:24px;padding:18px 0;border-top:1px solid var(--line)}
+.ava{width:64px;height:64px;border:1px dashed var(--muted);border-radius:8px;display:grid;place-items:center;font-size:11px;color:var(--muted);text-align:center;flex:none}
+.qr{width:148px;height:148px;border:1px solid var(--line);background:#fff;padding:8px;border-radius:6px}
+.radio{display:flex;gap:10px;align-items:flex-start;padding:10px 0;border-top:1px solid var(--line)}
+.radio:first-child{border-top:0}
+.radio input{margin-top:3px;accent-color:var(--accent)}
+.wal{display:grid;grid-template-columns:minmax(0,1fr) 220px auto;gap:24px;align-items:center;padding:18px 0;border-top:1px solid var(--line)}
+.wal .amt{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.rv{margin:4px 0 0;padding:12px 14px;border-left:3px solid var(--accent);background:color-mix(in srgb,var(--accent) 6%,transparent);font-size:13px}
+.empty{padding:28px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-top:24px;max-width:640px}
+.empty h2{font-size:20px;font-weight:600;margin-bottom:6px}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="hdr">
+    <div class="brand"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2 17 6v8l-7 4-7-4V6z"/><path d="M3 6l7 4 7-4M10 10v8"/></svg>Tenshu</div>
+    <div class="vsep"></div>
+    <button type="button" class="switch" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Switch Cube. Current: {{ cube.name }}, {{ cube.netFull }}" onClick="{{ toggleMenu }}">
+      <span class="nm">{{ cube.name }}</span>
+      <span class="net"><span class="bm" aria-hidden="true">₿</span>{{ cube.net }}<sc-if value="{{ cube.test }}" hint-placeholder-val="{{ false }}"><span class="tb">Testnet4</span></sc-if></span>
+      <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 4.5 3 3 3-3"/></svg>
+    </button>
+    <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+      <div class="menu">
+        <p class="ml">Open Cube tabs</p>
+        <sc-for list="{{ openTabs }}" as="t" hint-placeholder-count="2">
+          <button type="button" class="mi {{ t.cls }}" aria-current="{{ t.cur }}" onClick="{{ toggleMenu }}"><span><b>{{ t.name }}</b> <span class="net"><span class="bm" aria-hidden="true">₿</span>{{ t.net }}</span></span><span class="cap">{{ t.state }}</span></button>
+        </sc-for>
+        <hr>
+        <a class="mi" href="Launcher-Catalog.dc.html"><span><b>All Cubes</b><br><span class="cap">Open Cubes stay open</span></span><svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg></a>
+      </div>
+    </sc-if>
+    <div class="chips">
+      <div class="chip"><span class="k">Account</span><span class="st {{ acct.cls }}">{{ acct.text }}</span><sc-if value="{{ acct.signIn }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn pri">Sign in</button></sc-if></div>
+      <div class="chip"><span class="k">Cube connection</span><span class="st {{ conn.cls }}">{{ conn.text }}</span></div>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+      <div class="ident">
+        <p class="cap">Cube</p>
+        <p class="cn">{{ cube.name }}</p>
+        <span class="net"><span class="bm" aria-hidden="true">₿</span>{{ cube.net }}<sc-if value="{{ cube.test }}" hint-placeholder-val="{{ false }}"><span class="tb">Testnet4</span></sc-if></span>
+      </div>
+      <div class="nav">
+        <sc-for list="{{ navPrimary }}" as="n" hint-placeholder-count="3">
+          <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.cur }}" onClick="{{ n.pick }}">{{ n.label }}</button>
+        </sc-for>
+      </div>
+      <div class="mid">
+        <p class="gl" id="wl">Wallets</p>
+        <div class="nav" style="padding:0" aria-labelledby="wl">
+          <sc-for list="{{ navWallets }}" as="n" hint-placeholder-count="3">
+            <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.cur }}" onClick="{{ n.pick }}"><span>{{ n.label }}</span><span class="sub {{ n.subCls }}">{{ n.sub }}</span></button>
+          </sc-for>
+        </div>
+        <div class="{{ expertCls }}" style="margin-top:8px">
+          <button type="button" class="xbtn" aria-expanded="{{ expertOpen }}" aria-controls="xl" onClick="{{ toggleExpert }}">
+            <svg class="chev" aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg>Expert<span class="cnt">5 tools</span>
+          </button>
+          <sc-if value="{{ expertOpen }}" hint-placeholder-val="{{ false }}">
+            <div class="xlist nav" id="xl" style="padding:2px 0 2px 8px">
+              <sc-for list="{{ navExpert }}" as="n" hint-placeholder-count="5">
+                <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.cur }}" onClick="{{ n.pick }}"><span>{{ n.label }}</span><sc-if value="{{ n.hasSub }}" hint-placeholder-val="{{ false }}"><span class="sub">{{ n.sub }}</span></sc-if></button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <sc-if value="{{ attn.show }}" hint-placeholder-val="{{ true }}">
+        <button type="button" class="attn" onClick="{{ attn.pick }}"><span class="st {{ attn.cls }}">{{ attn.text }}</span><sc-if value="{{ attn.hasMore }}" hint-placeholder-val="{{ false }}"><span class="more">+1 more</span></sc-if><span class="go">Review</span></button>
+      </sc-if>
+      <div class="foot">
+        <button type="button" class="ni {{ navSettings.cls }}" aria-current="{{ navSettings.cur }}" onClick="{{ navSettings.pick }}">Settings</button>
+        <button type="button" class="ni {{ navAccount.cls }}" aria-current="{{ navAccount.cur }}" onClick="{{ navAccount.pick }}"><span>Connect account</span><span class="sub">{{ navAccount.sub }}</span></button>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+
+      <!-- ============ OVERVIEW ============ -->
+      <sc-if value="{{ pg.overview }}" hint-placeholder-val="{{ false }}">
+        <h1>Overview</h1>
+        <p class="lede">Each wallet keeps its own network. Balances are shown per wallet and never combined across networks. <span class="cap">Synthetic balances.</span></p>
+        <div style="margin-top:20px;border-bottom:1px solid var(--line)">
+          <sc-for list="{{ wallets }}" as="w" hint-placeholder-count="3">
+            <div class="wal">
+              <div><p style="font-weight:600">{{ w.name }}</p><p class="cap">{{ w.kind }}</p><span class="net" style="margin-top:4px"><span class="bm" aria-hidden="true">₿</span>{{ w.net }}<sc-if value="{{ w.test }}" hint-placeholder-val="{{ false }}"><span class="tb">Testnet4</span></sc-if></span></div>
+              <div><p class="amt">{{ w.amt }}</p><p class="cap">{{ w.amtNote }}</p></div>
+              <div class="acts">
+                <sc-if value="{{ w.usable }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></sc-if>
+                <button type="button" class="lnk" onClick="{{ w.open }}">Open {{ w.short }}</button>
+              </div>
+            </div>
+          </sc-for>
+        </div>
+        <sc-if value="{{ noVault }}" hint-placeholder-val="{{ false }}"><p class="cap" style="margin-top:12px">No Vault configured in this Cube · Spark and Liquid only. This is capability information, not a warning.</p></sc-if>
+      </sc-if>
+
+      <!-- ============ ACTIVITY ============ -->
+      <sc-if value="{{ pg.activity }}" hint-placeholder-val="{{ false }}">
+        <h1>Activity</h1>
+        <p class="lede">All wallets in {{ cube.name }}, newest first. Each row names its wallet and network. <span class="cap">Synthetic records.</span></p>
+        <div class="tl" style="margin-top:20px">
+          <div class="tr th" style="grid-template-columns:110px 200px minmax(0,1fr) 150px 150px"><span>Date</span><span>Wallet</span><span>Description</span><span>Status</span><span style="text-align:right">Amount</span></div>
+          <sc-for list="{{ activity }}" as="a" hint-placeholder-count="5">
+            <div class="tr" style="grid-template-columns:110px 200px minmax(0,1fr) 150px 150px"><span>{{ a.date }}</span><span>{{ a.wallet }}</span><span>{{ a.desc }}</span><span class="st {{ a.cls }}">{{ a.status }}</span><span class="mono" style="text-align:right">{{ a.amt }}</span></div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <!-- ============ WALLET: SPARK ============ -->
+      <sc-if value="{{ pg.spark }}" hint-placeholder-val="{{ false }}">
+        <h1>{{ sparkName }}</h1>
+        <p class="lede">Spark wallet · Lightning payments · <span class="bm">₿</span> {{ cube.netFull }}</p>
+        <sc-if value="{{ hasSpark }}" hint-placeholder-val="{{ true }}">
+          <div class="wal"><div><p class="cap">Balance</p><p class="amt">0.01240000 BTC</p><p class="cap">Includes 25.00 USDB held by this wallet · synthetic</p></div><div></div><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+          <div class="note"><b>This wallet holds USDB but Stable Balance is off on this device.</b> Stable Balance is a device preference and did not travel with the restored seed. Nothing converts until you review.<div class="acts"><button type="button" class="btn" onClick="{{ go.setSpark }}">Review in Spark settings</button></div></div>
+          <div class="rows"><div class="row wide"><span class="lb">Lightning Address</span><span>alex@ln.example.test <span class="cap">· synthetic</span></span></div></div>
+        </sc-if>
+        <sc-if value="{{ noSpark }}" hint-placeholder-val="{{ false }}">
+          <div class="empty"><h2>Spark isn't available on Testnet4</h2><p class="muted">Spark is supported on Bitcoin mainnet and Regtest only. This Cube's network was set when it was created and does not change here.</p></div>
+        </sc-if>
+      </sc-if>
+
+      <!-- ============ WALLET: VAULT ============ -->
+      <sc-if value="{{ pg.vault }}" hint-placeholder-val="{{ false }}">
+        <sc-if value="{{ hasVault }}" hint-placeholder-val="{{ true }}">
+          <h1>Vault · {{ vaultAlias }}</h1>
+          <p class="lede">Vault · 2-of-3 synthetic policy · <span class="bm">₿</span> {{ cube.netFull }}</p>
+          <sc-if value="{{ offline }}" hint-placeholder-val="{{ false }}"><div class="note bad"><b>Node offline.</b> Balance and history may be out of date. <button type="button" class="lnk" onClick="{{ go.setVaultConn }}">Open Connections</button></div></sc-if>
+          <div class="wal"><div><p class="cap">Balance</p><p class="amt">0.85000000 BTC</p><p class="cap">Synthetic</p></div><div></div><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+          <div class="grp">
+            <h3>Recovery path</h3>
+            <p class="intro">Time-locked spending, separate from backup. A backup restores keys; it never unlocks this time lock.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Recovery path</p></div><p class="ds">After 180 days without spending, 1-of-2 recovery keys can spend from this Vault (synthetic policy). Availability follows the live policy and chain state.</p><div class="ct"><span class="st s-off">Not open yet</span><button type="button" class="btn">View recovery path</button></div></div>
+            </div>
+          </div>
+          <p class="cap" style="margin-top:16px">Coin control and PSBT proposals are under Expert in the sidebar. <button type="button" class="lnk" onClick="{{ go.setVault }}">Vault settings</button></p>
+        </sc-if>
+        <sc-if value="{{ noVault }}" hint-placeholder-val="{{ false }}">
+          <div class="empty"><h2>No Vault in this Cube</h2><p class="muted">Vault settings don't apply. See available wallets.</p><div class="acts" style="margin-top:12px"><button type="button" class="btn" onClick="{{ go.overview }}">See available wallets</button></div></div>
+        </sc-if>
+      </sc-if>
+
+      <!-- ============ WALLET: LIQUID ============ -->
+      <sc-if value="{{ pg.liquid }}" hint-placeholder-val="{{ false }}">
+        <h1>Liquid · Travel</h1>
+        <p class="lede">Liquid wallet · Liquid network</p>
+        <div class="wal"><div><p class="cap">Balance</p><p class="amt">0.05000000 L-BTC</p><p class="cap">Synthetic</p></div><div></div><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+        <p class="cap" style="margin-top:16px">Liquid has no separate settings. Its seed is protected with the rest of the Cube in <button type="button" class="lnk" onClick="{{ go.backup }}">Backup &amp; protection</button>.</p>
+      </sc-if>
+
+      <!-- ============ EXPERT ============ -->
+      <sc-if value="{{ pg.expert }}" hint-placeholder-val="{{ false }}">
+        <p class="cap">Expert · Vault · {{ vaultAlias }}</p>
+        <h1>{{ expertTool }}</h1>
+        <p class="lede">Specialist tool. It stays under Expert and is never placed next to Send or Receive. Final availability follows this Vault's network and capabilities.</p>
+        <div class="empty"><p class="muted">Tool content is outside this review. <button type="button" class="lnk" onClick="{{ go.setVaultConn }}">Node health and Maintenance live in Vault › Connections.</button></p></div>
+      </sc-if>
+
+      <!-- ============ BACKUP PAGE HEADER ============ -->
+      <sc-if value="{{ pg.backup }}" hint-placeholder-val="{{ false }}">
+        <h1>Backup &amp; protection</h1>
+        <p class="lede">Applies to the whole Cube · {{ cube.name }}. The Vault recovery path is a separate spending route, shown at the end.</p>
+      </sc-if>
+
+      <!-- ============ SETTINGS HEADER ============ -->
+      <sc-if value="{{ pg.settings }}" hint-placeholder-val="{{ true }}">
+        <h1>Settings <span class="sc1">· {{ scopeTitle }}</span></h1>
+        <p class="lede">{{ scopeLine }}</p>
+        <div class="scopes" aria-label="Settings scope">
+          <span class="lbl">Scope</span>
+          <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="5">
+            <button type="button" class="sb" aria-pressed="{{ s.pressed }}" onClick="{{ s.pick }}">{{ s.label }}</button>
+          </sc-for>
+        </div>
+        <nav class="tabs" aria-label="Sections in this scope">
+          <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
+            <button type="button" class="tab {{ t.cls }}" aria-current="{{ t.cur }}" onClick="{{ t.pick }}">{{ t.label }}</button>
+          </sc-for>
+        </nav>
+        <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+          <div class="grp" aria-busy="true">
+            <p class="muted">Loading…</p>
+            <div class="skrow"><div class="sk" style="width:60%"></div><div><div class="sk"></div><div class="sk" style="width:70%;margin-top:8px"></div></div><div class="sk" style="width:50%"></div></div>
+            <div class="skrow"><div class="sk" style="width:50%"></div><div><div class="sk"></div><div class="sk" style="width:55%;margin-top:8px"></div></div><div class="sk" style="width:60%"></div></div>
+            <div class="skrow"><div class="sk" style="width:65%"></div><div><div class="sk"></div><div class="sk" style="width:40%;margin-top:8px"></div></div><div class="sk" style="width:45%"></div></div>
+            <div class="skrow"><div class="sk" style="width:45%"></div><div><div class="sk"></div></div><div class="sk" style="width:55%"></div></div>
+          </div>
+        </sc-if>
+      </sc-if>
+
+      <!-- ======== DISPLAY & APPEARANCE ======== -->
+      <sc-if value="{{ sec.display }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <p class="cap" style="margin-top:16px">Network · <span class="bm">₿</span> {{ cube.netFull }} · set when the Cube was created; read-only</p>
+          <div class="grp">
+            <h3>Amounts &amp; currency</h3>
+            <p class="intro">Each row names where it is stored. Grouping on one screen does not mean one storage scope.</p>
+            <sc-if value="{{ form.error }}" hint-placeholder-val="{{ false }}">
+              <div class="note bad" role="alert"><b>Couldn't save Amounts &amp; currency.</b> Currency and Exchange-rate source were not saved; your edits are kept below. Bitcoin unit and Primary amount are unchanged. <div class="acts"><button type="button" class="btn" onClick="{{ form.save }}">Try again</button></div></div>
+            </sc-if>
+            <div class="rows">
+              <div class="row"><div><p class="lb" id="u-l">Bitcoin unit</p><span class="sc">This Cube</span></div><p class="ds">How Bitcoin amounts appear across every wallet in this Cube.</p><div class="ct"><div class="seg" aria-labelledby="u-l"><button type="button" aria-pressed="{{ form.btc }}" onClick="{{ form.setBtc }}">BTC</button><button type="button" aria-pressed="{{ form.sats }}" onClick="{{ form.setSats }}">Sats</button></div></div></div>
+              <div class="row"><div><p class="lb" id="p-l">Primary amount</p><span class="sc">This Cube</span></div><p class="ds">Which amount is shown large; the other appears beneath it when fiat estimates are on.</p><div class="ct"><div class="seg" aria-labelledby="p-l"><button type="button" aria-pressed="{{ form.pBtc }}" onClick="{{ form.setPBtc }}">Bitcoin</button><button type="button" aria-pressed="{{ form.pFiat }}" onClick="{{ form.setPFiat }}">Fiat</button></div></div></div>
+              <div class="row"><div><p class="lb">Fiat estimates</p><span class="sc">This Cube</span></div><p class="ds">Show approximate fiat values next to Bitcoin amounts. Estimates are informational and use the source below.</p><div class="ct"><button type="button" class="tog" aria-pressed="{{ form.fiat }}" onClick="{{ form.togFiat }}"><span class="kn"></span>{{ form.fiatText }}</button></div></div>
+              <div class="row"><div><label class="lb" for="cur">Currency</label><br><span class="sc">This Cube</span></div><p class="ds">Currencies unavailable for this chain stay listed but can't be selected.</p><div class="ct"><select id="cur" class="{{ form.errCls }}" value="{{ form.currency }}" onChange="{{ form.setCurrency }}"><option value="USD">USD · US dollar</option><option value="EUR">EUR · Euro</option><option value="GBP">GBP · Pound sterling</option><option value="CHF">CHF · Swiss franc</option><option value="XXX" disabled>[CURRENCY] · unavailable on this chain</option></select></div></div>
+              <div class="row"><div><label class="lb" for="src">Exchange-rate source</label><br><span class="sc">This Cube</span></div><p class="ds">Where fiat estimates come from. Changing it doesn't affect any balance.</p><div class="ct"><select id="src" class="{{ form.errCls }}" value="{{ form.source }}" onChange="{{ form.setSource }}"><option value="A">[RATE SOURCE A]</option><option value="B">[RATE SOURCE B]</option></select></div></div>
+              <div class="row"><div><p class="lb">Direction badges</p><span class="sc">This device</span></div><p class="ds">Mark incoming and outgoing transactions with a text badge in Activity.</p><div class="ct"><button type="button" class="tog" aria-pressed="{{ form.badges }}" onClick="{{ form.togBadges }}"><span class="kn"></span>{{ form.badgesText }}</button></div></div>
+            </div>
+            <div class="fbar"><span class="msg">{{ form.msg }}</span><button type="button" class="btn" disabled="{{ form.clean }}" onClick="{{ form.discard }}">Discard</button><button type="button" class="btn pri" disabled="{{ form.clean }}" onClick="{{ form.save }}">{{ form.saveLabel }}</button></div>
+          </div>
+          <div class="grp">
+            <h3>Cube identity</h3>
+            <div class="rows">
+              <div class="row"><div><label class="lb" for="cname">Cube name</label><br><span class="sc">This Cube</span></div><p class="ds">Shown in the header, the sidebar and All Cubes. Available where the existing rename capability supports it.</p><div class="ct"><input id="cname" class="in" value="{{ form.name }}" onChange="{{ form.setName }}"></div></div>
+              <div class="row"><div><p class="lb">Avatar</p><span class="sc">This Cube</span></div>
+                <div class="ds">
+                  <sc-if value="{{ avatar.ready }}" hint-placeholder-val="{{ true }}"><div style="display:flex;gap:14px;align-items:flex-start"><div class="ava">Current avatar<br>placeholder</div><div><p>Regenerations remaining: [N from service]</p><p class="cap">A regenerated avatar is shown as a preview; nothing changes until you confirm.</p></div></div></sc-if>
+                  <sc-if value="{{ avatar.loading }}" hint-placeholder-val="{{ false }}"><p class="st s-busy">Loading avatar…</p></sc-if>
+                  <sc-if value="{{ avatar.error }}" hint-placeholder-val="{{ false }}"><p class="st s-bad">{{ avatar.errText }}</p></sc-if>
+                </div>
+                <div class="ct"><button type="button" class="btn" disabled="{{ avatar.noRegen }}">Regenerate avatar</button><span class="hint">Opens the preview; uses one regeneration on confirm</span><sc-if value="{{ avatar.error }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn">Retry</button></sc-if></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Application appearance</h3>
+            <div class="rows"><div class="row"><div><p class="lb">Theme</p><span class="sc">This device · all Cubes</span></div><p class="ds">Theme applies to the whole installation, so it lives in This device settings.</p><div class="ct"><button type="button" class="btn" onClick="{{ go.setAbout }}">Open This device › About &amp; app preferences</button></div></div></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== BACKUP & PROTECTION ======== -->
+      <sc-if value="{{ sec.backup }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="lead {{ bk.leadCls }}">
+            <div><span class="st {{ bk.cls }}">{{ bk.status }}</span><h2>{{ bk.title }}</h2><p class="muted small">{{ bk.detail }}</p></div>
+            <div class="ct"><button type="button" class="btn pri">{{ bk.next }}</button><span class="cap">{{ bk.nextHint }}</span></div>
+          </div>
+          <div class="grp">
+            <h3>Backup methods</h3>
+            <p class="intro">Each method restores this Cube's keys: Vault signing key on this device, Spark and Liquid. They are not interchangeable; requirements differ.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Seed phrase</p><span class="st {{ bk.seedCls }}" style="font-size:13px;margin-top:4px">{{ bk.seed }}</span></div><div class="ds"><p>12 words written down offline. Restores this Cube on any device.</p><p style="margin-top:6px"><b class="muted">Requirements:</b> PIN or passkey re-authentication; private surroundings; confirmation of selected words.</p></div><div class="ct"><button type="button" class="btn">Reveal seed phrase</button><span class="hint">Opens the authenticated reveal flow</span></div></div>
+              <div class="row" id="recovery-kit"><div><p class="lb">Connect Recovery Kit</p><span class="st {{ bk.kitCls }}" style="font-size:13px;margin-top:4px">{{ bk.kit }}</span></div><div class="ds"><p>Encrypted copy of the seed and the Vault descriptor, stored with your Connect account.</p><p style="margin-top:6px"><b class="muted">Methods:</b> password-encrypted or Keychain-encrypted. <b class="muted">Requirements:</b> signed in to Connect, this Cube connected, and a password or Keychain phone.</p><p style="margin-top:6px">Descriptor in kit: {{ bk.kitDesc }}</p></div><div class="ct"><button type="button" class="btn" disabled="{{ bk.kitBlocked }}">{{ bk.kitAction }}</button><span class="hint">{{ bk.kitHint }}</span></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Vault recovery path</h3>
+            <p class="intro">Spending, not backup. A time-locked route for spending from the Vault when normal signers are unavailable. A backup never unlocks it.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Recovery path</p><p class="cap">Vault · {{ vaultAlias }}</p></div><p class="ds">{{ bk.rpText }}</p><div class="ct"><sc-if value="{{ hasVault }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ go.vault }}">View recovery path</button><span class="hint">Opens the Vault's recovery-path spending route</span></sc-if><sc-if value="{{ noVault }}" hint-placeholder-val="{{ false }}"><span class="st s-off">Not applicable</span></sc-if></div></div>
+              <div class="row"><div><p class="lb">Recovery alerts</p><span class="st {{ alerts.cls }}" style="font-size:13px;margin-top:4px">{{ alerts.status }}</span></div><p class="ds">{{ alerts.text }}</p><div class="ct"><sc-if value="{{ alerts.hasAction }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn">{{ alerts.action }}</button></sc-if><span class="hint">{{ alerts.hint }}</span></div></div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== PAYMENT CHECKS ======== -->
+      <sc-if value="{{ sec.payments }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Recipient identity checks</h3>
+            <p class="intro">What is checked and when: before you send to a supported payment request, Tenshu asks Branta whether the recipient matches a verified identity. The result appears in the send review. It never replaces your own review of the transaction.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Check supported payment requests</p><span class="sc">Storage per current preference</span></div><p class="ds">On. Turning checks off goes through the existing confirmation and its safeguards.</p><div class="ct"><button type="button" class="tog" aria-pressed="true"><span class="kn"></span>On</button><span class="hint">Turning off opens a confirmation</span></div></div>
+              <div class="row"><div><p class="lb">Strict mode</p><span class="sc">Storage per current preference</span></div><div class="ds"><p>Strict mode does not share the plaintext destination or payment amount. Branta can still observe lookup timing and your network connection.</p><p style="margin-top:6px"><a href="#branta-privacy">Read Branta privacy information</a></p></div><div class="ct"><button type="button" class="tog" aria-pressed="{{ strictP }}" onClick="{{ togStrict }}"><span class="kn"></span>{{ strictText }}</button></div></div>
+            </div>
+            <p class="cap" style="margin-top:12px">A check never guarantees who the recipient is. Unverifiable recipients are shown as "Not verified" in the send review.</p>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== DATA & EXPORTS (Cube) ======== -->
+      <sc-if value="{{ sec.dataCube }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Protection material</h3>
+            <p class="intro">Material that can restore this Cube. Treat it like the seed phrase.</p>
+            <div class="rows"><div class="row"><div><p class="lb">Recovery Kit</p><span class="sc">This Cube</span></div><p class="ds">Created and checked in Backup &amp; protection, not exported from here.</p><div class="ct"><button type="button" class="btn" onClick="{{ go.setBackup }}">Open Backup &amp; protection › Recovery Kit</button></div></div></div>
+          </div>
+          <div class="grp">
+            <h3>Wallet portability and records</h3>
+            <p class="intro">Wallet files, descriptors, labels and transaction tables are exported per wallet.</p>
+            <div class="rows"><div class="row"><div><p class="lb">Vault files and records</p></div><p class="ds">Encrypted descriptor, wallet import/export, BIP329 labels and transaction tables.</p><div class="ct"><button type="button" class="btn" onClick="{{ go.setVaultData }}" disabled="{{ noVault }}">Open Vault › Data &amp; exports</button><sc-if value="{{ noVault }}" hint-placeholder-val="{{ false }}"><span class="hint">No Vault in this Cube</span></sc-if></div></div></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== DATA & EXPORTS (Vault) ======== -->
+      <sc-if value="{{ sec.dataVault }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Protection material</h3>
+            <p class="intro">Privacy: anyone with this material can see every address and balance in the Vault. Store it encrypted.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Recovery Kit</p><span class="sc">Cube · {{ cube.name }}</span></div><p class="ds">Lives with Cube protection.</p><div class="ct"><button type="button" class="btn" onClick="{{ go.setBackup }}">Open Backup &amp; protection › Recovery Kit</button></div></div>
+              <div class="row"><div><p class="lb">Encrypted descriptor</p></div><p class="ds">Password-protected file describing this Vault's policy and keys. Needed alongside keys to restore a multisig Vault.</p><div class="ct"><button type="button" class="btn">Export encrypted descriptor</button><span class="hint">Opens the encrypted export; asks for a password and a save location</span></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Wallet portability</h3>
+            <p class="intro">Privacy: plaintext files reveal the Vault's full history to whoever holds them. They don't contain private keys.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Import / export wallet</p></div><p class="ds">Move this Vault to another coordinator. Imports are validated against this network before anything changes.</p><div class="ct"><button type="button" class="btn">Export wallet file</button><button type="button" class="btn">Import wallet file</button><span class="hint">Both open the native file dialog with validation</span></div></div>
+              <div class="row"><div><p class="lb">Plaintext descriptor</p></div><p class="ds">Readable descriptor for hardware registration or other software.</p><div class="ct"><button type="button" class="btn">Export plaintext descriptor</button><span class="hint">Shows a privacy warning first</span></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Records</h3>
+            <p class="intro">Privacy: records list amounts, dates and your labels. Records don't replace recovery material.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Labels (BIP329)</p></div><p class="ds">Address and transaction labels in a standard format.</p><div class="ct"><button type="button" class="btn">Export labels</button><button type="button" class="btn">Import labels</button></div></div>
+              <div class="row"><div><p class="lb">Transaction table</p></div><p class="ds">CSV for accounting. Fiat values use this Cube's rate source.</p><div class="ct"><button type="button" class="btn">Export transactions</button></div></div>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== WALLET & SIGNERS ======== -->
+      <sc-if value="{{ sec.wallet }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <sc-if value="{{ imported }}" hint-placeholder-val="{{ false }}"><div class="note info" style="margin-top:20px"><b>Imported Vault · no local keys.</b> This Cube holds no signing key for this Vault. Signing needs the external signers listed below.</div></sc-if>
+          <div class="grp">
+            <h3>Identity</h3>
+            <div class="rows">
+              <div class="row"><div><label class="lb" for="valias">Vault name</label><br><span class="sc">This Vault</span></div><p class="ds">Shown in the sidebar and on approval requests.</p><div class="ct"><input id="valias" class="in" value="{{ vaultAliasInput }}" onChange="{{ setVaultAlias }}" style="width:260px"></div></div>
+              <div class="row"><div><p class="lb">Network</p></div><p class="ds"><span class="bm">₿</span> {{ cube.netFull }} · fixed for this Vault</p><div class="ct"><span class="mono">Wallet ID [CHECKSUM]-[TIMESTAMP]</span></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Policy <span class="cap">· synthetic</span></h3>
+            <div class="rows">
+              <div class="row wide"><p class="lb">Normal spending</p><p>Any 2 of 3 signers approve. <span class="muted small">2-of-3 synthetic policy.</span></p></div>
+              <div class="row wide"><p class="lb">Recovery path</p><p>After 180 days without spending, 1-of-2 recovery keys can spend. <button type="button" class="lnk" onClick="{{ go.vault }}">View recovery path</button></p></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Signers</h3>
+            <p class="intro">Aliases help you recognise approval requests. Fingerprints identify keys and are different from the Vault ID.</p>
+            <div class="rows">
+              <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
+                <div class="row"><div><label class="lb" for="{{ g.id }}">Signer {{ g.n }} alias</label><p class="mono muted">{{ g.fp }}</p></div><div class="ds"><p>{{ g.kind }}</p><p class="cap">{{ g.owner }}</p></div><div class="ct"><input id="{{ g.id }}" class="in" value="{{ g.alias }}" onChange="{{ g.set }}" style="width:260px"></div></div>
+              </sc-for>
+            </div>
+            <div class="fbar"><span class="msg">{{ aliasMsg }}</span><button type="button" class="btn" disabled="{{ aliasClean }}" onClick="{{ aliasDiscard }}">Discard</button><button type="button" class="btn pri" disabled="{{ aliasClean }}" onClick="{{ aliasSave }}">Save names</button></div>
+          </div>
+          <div class="grp">
+            <h3>Phone signing and members</h3>
+            <div class="rows">
+              <div class="row"><div><p class="lb">Pair with Keychain</p></div><p class="ds">Put an eligible signer key on a phone over the same Wi-Fi. No Connect account needed.</p><div class="ct"><button type="button" class="btn" onClick="{{ go.setPair }}">Open Pair with Keychain</button></div></div>
+              <div class="row"><div><p class="lb">Members</p><span class="st s-off" style="font-size:13px;margin-top:4px">Not enabled</span></div><p class="ds">Available for eligible Connect Vaults · not enabled for this Vault.</p><div class="ct"><span class="hint">No member controls until this Vault is eligible</span></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <button type="button" class="dsc {{ open.wx.cls }}" aria-expanded="{{ open.wx.on }}" onClick="{{ open.wx.tog }}"><svg class="chev" aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg>Expert · descriptor, key details, hardware registration<span class="cap">{{ open.wx.hint }}</span></button>
+            <sc-if value="{{ open.wx.on }}" hint-placeholder-val="{{ false }}">
+              <div class="dbody">
+                <div class="rows">
+                  <div class="row"><div><p class="lb">Descriptor</p><p class="cap">Synthetic · masked</p></div><p class="mono" style="overflow-wrap:anywhere">wsh(multi(2,[a1b2c3d4/…]••••,[e5f6a7b8/…]••••,[c9d0e1f2/…]••••))#•••••••• </p><div class="ct"><button type="button" class="btn">Copy</button><span class="hint">Shows a privacy warning before copying</span><button type="button" class="btn">Export encrypted</button><span class="hint">Asks for a password and a save location</span></div></div>
+                  <div class="row wide"><div><p class="lb">Key details</p></div>
+                    <div class="tl">
+                      <div class="tr th" style="grid-template-columns:minmax(0,1fr) 100px 170px 90px"><span>Signer</span><span>Fingerprint</span><span>Path</span><span>Held by</span></div>
+                      <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3"><div class="tr" style="grid-template-columns:minmax(0,1fr) 100px 170px 90px"><span style="overflow-wrap:anywhere">{{ g.alias }}</span><span class="mono">{{ g.fp }}</span><span class="mono">m/48'/0'/0'/2' <span class="cap">synthetic</span></span><span>{{ g.held }}</span></div></sc-for>
+                    </div>
+                  </div>
+                  <div class="row"><div><p class="lb">Hardware registration</p></div><p class="ds">Hardware · Ledger-style device: registered [DATE]. Re-register after changing the policy or aliases on the device.</p><div class="ct"><button type="button" class="btn">Register on device</button><span class="hint">Opens the hardware registration flow</span></div></div>
+                </div>
+              </div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== PAIR WITH KEYCHAIN ======== -->
+      <sc-if value="{{ sec.pair }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Key the phone will hold</h3>
+            <p class="intro">Only Keychain-eligible keys can move to a phone. Full key details stay under Wallet &amp; signers › Expert.</p>
+            <div class="rows" style="padding:4px 0">
+              <sc-for list="{{ pairKeys }}" as="k" hint-placeholder-count="3">
+                <label class="radio"><input type="radio" name="pairkey" checked="{{ k.checked }}" disabled="{{ k.disabled }}" onChange="{{ noop }}"><span><b>{{ k.alias }}</b> <span class="mono muted">{{ k.fp }}</span><br><span class="cap">{{ k.reason }}</span></span></label>
+              </sc-for>
+            </div>
+            <p class="cap" style="margin-top:8px">Alias: change it in <button type="button" class="lnk" onClick="{{ go.setWallet }}">Wallet &amp; signers › Signers</button></p>
+          </div>
+          <div class="grp">
+            <h3>How pairing works</h3>
+            <div class="rows"><div class="row wide"><p class="lb">Same Wi-Fi · no Connect account needed</p><p class="ds">This computer and the phone must be on the same Wi-Fi network. Pairing and signing happen locally with a cryptographic handshake you confirm on both screens. Remote signing through Connect is a separate capability.</p></div></div>
+          </div>
+          <div class="grp">
+            <h3>Pair a phone</h3>
+            <sc-if value="{{ pair.disabled }}" hint-placeholder-val="{{ false }}">
+              <div class="rows"><div class="row"><div><p class="lb">Pair phone</p></div><p class="ds"><span class="st s-off">Pair phone unavailable: no Keychain-eligible key in this Vault</span></p><div class="ct"><button type="button" class="btn" disabled="true">Pair phone</button></div></div></div>
+            </sc-if>
+            <sc-if value="{{ pair.idle }}" hint-placeholder-val="{{ true }}">
+              <div class="rows"><div class="row"><div><p class="lb">Pair phone</p></div><p class="ds">Open Keychain on the phone first. Tenshu looks for phones on this Wi-Fi only.</p><div class="ct"><button type="button" class="btn pri" onClick="{{ pair.toPicker }}">Pair phone</button><span class="hint">Starts looking for phones on this network</span></div></div></div>
+            </sc-if>
+            <sc-if value="{{ pair.picker }}" hint-placeholder-val="{{ false }}">
+              <p class="st s-busy" style="margin:8px 0">Looking for phones on this Wi-Fi…</p>
+              <div class="rows">
+                <div class="row"><div><p class="lb">Alex's iPhone</p></div><p class="ds">Keychain [VERSION] · same network</p><div class="ct"><button type="button" class="btn pri" onClick="{{ pair.toWaiting }}">Pair with this phone</button></div></div>
+                <div class="row"><div><p class="lb">Pixel test phone</p></div><p class="ds">Keychain [VERSION] · same network · synthetic</p><div class="ct"><button type="button" class="btn" onClick="{{ pair.toWaiting }}">Pair with this phone</button></div></div>
+              </div>
+              <div class="fbar"><span class="msg">Phone not listed? Check both devices are on the same Wi-Fi.</span><button type="button" class="btn" onClick="{{ pair.toIdle }}">Cancel</button></div>
+            </sc-if>
+            <sc-if value="{{ pair.waiting }}" hint-placeholder-val="{{ false }}">
+              <div style="display:flex;gap:24px;align-items:flex-start;padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">
+                <svg class="qr" role="img" aria-label="Synthetic QR placeholder" viewBox="0 0 21 21" shape-rendering="crispEdges"><path fill="#202020" d="M0 0h7v7H0zM14 0h7v7h-7zM0 14h7v7H0z"/><path fill="#fff" d="M1 1h5v5H1zM15 1h5v5h-5zM1 15h5v5H1z"/><path fill="#202020" d="M2 2h3v3H2zM16 2h3v3h-3zM2 16h3v3H2zM9 1h1v2H9zM11 3h2v1h-2zM8 5h2v2H8zM10 8h3v1h-3zM8 10h1v3H8zM12 11h2v2h-2zM15 9h2v1h-2zM18 10h2v2h-2zM14 14h3v1h-3zM16 16h2v3h-2zM19 15h1v2h-1zM10 15h2v2h-2zM12 18h2v2h-2zM9 19h1v1H9zM3 9h2v1H3zM0 11h2v1H0zM5 12h1v2H5z"/></svg>
+                <div>
+                  <p style="font-weight:600">Scan with Keychain on Alex's iPhone</p>
+                  <p class="muted small" style="margin-top:4px">Then check that both screens show the same verification code: <span class="mono">[VERIFICATION CODE]</span>. Approve on the phone to finish.</p>
+                  <p class="st s-busy" style="margin-top:10px">Waiting for the phone · expires in 4:52</p>
+                  <div class="acts" style="margin-top:12px"><button type="button" class="btn" onClick="{{ pair.toIdle }}">Cancel pairing</button><button type="button" class="lnk" onClick="{{ pair.toError }}">Simulate failure</button><button type="button" class="lnk" onClick="{{ pair.toPaired }}">Simulate approval</button></div>
+                </div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ pair.error }}" hint-placeholder-val="{{ false }}">
+              <div class="note bad" role="alert"><b>Pairing didn't finish.</b> The phone stopped responding before approval. Nothing was saved and no key left this computer.<div class="acts"><button type="button" class="btn pri" onClick="{{ pair.toPicker }}">Try again</button><button type="button" class="btn" onClick="{{ pair.toIdle }}">Cancel</button></div></div>
+            </sc-if>
+          </div>
+          <div class="grp">
+            <h3>Paired phones</h3>
+            <sc-if value="{{ pair.hasPaired }}" hint-placeholder-val="{{ false }}">
+              <div class="rows"><div class="row"><div><p class="lb">Alex's iPhone</p><span class="st s-ok" style="font-size:13px;margin-top:4px">Paired</span></div><p class="ds">Holds Keychain · Alex's phone <span class="mono">e5f6a7b8</span> · paired [DATE] · last seen [DATE]</p><div class="ct"><button type="button" class="btn">Unpair…</button><span class="hint">Opens a review before removing</span></div></div></div>
+            </sc-if>
+            <sc-if value="{{ pair.noPaired }}" hint-placeholder-val="{{ true }}"><p class="muted small" style="padding:12px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)">No phones paired with this Vault yet.</p></sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- ======== CONNECTIONS (shared health) ======== -->
+      <sc-if value="{{ sec.conn }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Health</h3>
+            <p class="intro">Three separate connections. Being signed in doesn't prove this Cube is connected or its node is synced.</p>
+            <div class="rows">
+              <sc-for list="{{ health }}" as="h" hint-placeholder-count="3">
+                <div class="row"><div><p class="lb">{{ h.name }}</p><p class="cap">{{ h.scope }}</p></div><div class="ds"><p class="st {{ h.cls }}">{{ h.text }}</p><p style="margin-top:4px">{{ h.desc }}</p></div><div class="ct"><sc-if value="{{ h.hasAction }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn {{ h.btnCls }}" onClick="{{ h.pick }}">{{ h.action }}</button><span class="hint">{{ h.hint }}</span></sc-if></div></div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ sec.connVault }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Node backend</h3>
+            <div class="rows"><div class="row"><div><p class="lb">Backend</p><span class="sc">This Vault</span></div><p class="ds">Electrum server [SERVER] · TLS. Switching backends never happens automatically.</p><div class="ct"><button type="button" class="btn">Change backend…</button><span class="hint">Opens the backend review</span></div></div></div>
+            <button type="button" class="dsc {{ open.nx.cls }}" aria-expanded="{{ open.nx.on }}" onClick="{{ open.nx.tog }}" style="margin-top:12px"><svg class="chev" aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg>Expert · node resources, logs and paths<span class="cap">{{ open.nx.hint }}</span></button>
+            <sc-if value="{{ open.nx.on }}" hint-placeholder-val="{{ false }}">
+              <div class="dbody"><div class="rows">
+                <div class="row"><div><p class="lb">Resource preset</p></div><p class="ds">Applies to a managed local node. Pruning below the current height is irreversible and needs a restart.</p><div class="ct"><div class="seg" aria-label="Resource preset"><button type="button" aria-pressed="false">Light</button><button type="button" aria-pressed="true">Default</button><button type="button" aria-pressed="false">Custom</button></div></div></div>
+                <div class="row"><div><p class="lb">Logs</p></div><p class="ds">Sanitized: no keys, descriptors or addresses.</p><div class="ct"><button type="button" class="btn">Open sanitized logs</button></div></div>
+                <div class="row wide"><p class="lb">Paths and versions</p><p class="mono muted">data: ~/…/Coincube/[NETWORK]/data/[WALLET ID]<br>socket: [TMPDIR]/cc[HASH].sock<br>coincubed [VERSION]</p></div>
+              </div></div>
+            </sc-if>
+          </div>
+          <div class="grp">
+            <h3>Maintenance</h3>
+            <p class="intro">Consequential. Read the requirements and consequences before starting.</p>
+            <div class="rows"><div class="row"><div><p class="lb">Rescan blockchain</p></div><div class="ds"><p><b class="muted">Requires:</b> a connected, synced node and a start date or block height no later than the Vault's first use.</p><p style="margin-top:6px"><b class="muted">Consequences:</b> balances and history may be incomplete until it finishes; it can take hours; progress is shown and it can be cancelled where the backend supports it.</p><p style="margin-top:6px">Rescanning never repairs sign-in or Cube connection problems.</p></div><div class="ct"><button type="button" class="btn" disabled="{{ offline }}">Review rescan…</button><span class="hint">{{ rescanHint }}</span></div></div></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ sec.connSpark }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <button type="button" class="dsc {{ open.bx.cls }}" aria-expanded="{{ open.bx.on }}" onClick="{{ open.bx.tog }}"><svg class="chev" aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg>Bridge diagnostics<span class="cap">{{ open.bx.hint }}</span></button>
+            <sc-if value="{{ open.bx.on }}" hint-placeholder-val="{{ false }}">
+              <div class="dbody"><div class="rows">
+                <div class="row wide"><p class="lb">Process</p><p class="mono muted">coincube-spark-bridge · PID [PID] · [VERSION]</p></div>
+                <div class="row wide"><p class="lb">Transport</p><p class="muted">JSON-RPC over stdio · last response [TIME] ago</p></div>
+                <div class="row"><p class="lb">Last error</p><p class="muted">None · errors are shown sanitized</p><div class="ct"><button type="button" class="btn">Copy sanitized diagnostics</button></div></div>
+              </div></div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ sec.connAccount }}" hint-placeholder-val="{{ false }}">
+        <p class="cap" style="margin-top:12px">Node resources, logs and Maintenance are per Vault. <button type="button" class="lnk" onClick="{{ go.setVaultConn }}">Open Vault › Connections</button></p>
+      </sc-if>
+
+      <!-- ======== SPARK (full) ======== -->
+      <sc-if value="{{ sec.sparkFull }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>Stable Balance</h3>
+            <p class="intro">A device preference. It does not travel with the seed and is never switched on for you.</p>
+            <div class="note"><b>This wallet holds USDB but Stable Balance is off on this device · Review</b><br>This wallet was restored here. Its USDB balance stays as it is; nothing converts until you review. No peg is guaranteed.<div class="acts"><button type="button" class="btn pri">Review Stable Balance</button></div></div>
+            <div class="rows"><div class="row"><div><p class="lb">On this device</p><span class="sc">This device</span></div><p class="ds">Off. Enabling it opens a review that explains conversion and its consequences first.</p><div class="ct"><span class="st s-off">Off</span><button type="button" class="btn">Review Stable Balance</button><span class="hint">Opens the focused review flow</span></div></div></div>
+          </div>
+          <div class="grp">
+            <h3>Lightning Address</h3>
+            <div class="rows">
+              <div class="row wide"><p class="lb">Requires</p><p class="ds"><span class="st {{ ln.acctCls }}">Account · {{ ln.acct }}</span> · <span class="st {{ ln.svcCls }}">This Cube's service · {{ ln.svc }}</span></p></div>
+              <sc-if value="{{ ln.existing }}" hint-placeholder-val="{{ true }}"><div class="row"><div><p class="lb">Your address</p></div><p class="mono" style="font-size:14px">alex@ln.example.test</p><div class="ct"><button type="button" class="btn">Copy address</button><button type="button" class="btn">Change…</button></div></div></sc-if>
+              <sc-if value="{{ ln.claim }}" hint-placeholder-val="{{ false }}"><div class="row"><div><label class="lb" for="lnu">Claim an address</label></div><div class="ds"><div style="display:flex;align-items:center;gap:6px"><input id="lnu" class="in" value="alex"><span class="mono">@ln.example.test</span></div><p style="margin-top:6px">3–32 characters: lowercase letters, numbers, dots, dashes.</p></div><div class="ct"><button type="button" class="btn pri" onClick="{{ ln.check }}">Check availability</button></div></div></sc-if>
+              <sc-if value="{{ ln.checking }}" hint-placeholder-val="{{ false }}"><div class="row"><div><p class="lb">Claim an address</p></div><p class="ds"><span class="st s-busy">Checking alex@ln.example.test…</span></p><div class="ct"><button type="button" class="btn" disabled="true">Claim</button></div></div></sc-if>
+              <sc-if value="{{ ln.signedOut }}" hint-placeholder-val="{{ false }}"><div class="row"><div><p class="lb">Your address</p></div><p class="ds">Sign in to Connect to claim or manage a Lightning Address. Payments to an existing address resume after sign-in.</p><div class="ct"><button type="button" class="btn pri">Sign in</button></div></div></sc-if>
+              <sc-if value="{{ ln.disconnected }}" hint-placeholder-val="{{ false }}"><div class="row"><div><p class="lb">Your address</p></div><p class="ds">This Cube's service connection needs to reconnect before the address can be checked.</p><div class="ct"><button type="button" class="btn pri" onClick="{{ go.setAccountConn }}">Open Connections</button></div></div></sc-if>
+              <sc-if value="{{ ln.error }}" hint-placeholder-val="{{ false }}"><div class="row"><div><p class="lb">Your address</p></div><p class="ds"><span class="st s-bad">Couldn't load your Lightning Address.</span> The service returned an error. Your address, if any, is unchanged.</p><div class="ct"><button type="button" class="btn">Retry</button></div></div></sc-if>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Bridge health</h3>
+            <div class="rows"><div class="row"><div><p class="lb">Spark bridge</p></div><p class="ds"><span class="st s-ok">Running · responding</span></p><div class="ct"><button type="button" class="btn" onClick="{{ go.setSparkConn }}">Open Connections</button><span class="hint">Diagnostics are disclosed there</span></div></div></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ sec.sparkNone }}" hint-placeholder-val="{{ false }}">
+        <div class="empty"><h2>Spark isn't available on Testnet4</h2><p class="muted">Spark is supported on Bitcoin mainnet and Regtest only. This Cube's network was set at creation; Spark settings don't apply here.</p><div class="acts" style="margin-top:12px"><button type="button" class="btn" onClick="{{ go.setCubeDisplay }}">Review Cube identity</button></div></div>
+      </sc-if>
+
+      <!-- ======== SPARK (This device part) ======== -->
+      <sc-if value="{{ sec.sparkDevice }}" hint-placeholder-val="{{ false }}">
+        <div class="sect"><div class="grp">
+          <h3>Spark preferences on this device</h3>
+          <p class="intro">These stay on This Mac. Other devices that open the same Cube keep their own choice.</p>
+          <div class="rows"><div class="row"><div><p class="lb">Stable Balance</p><span class="sc">This device</span></div><p class="ds">Off on this device. {{ sparkName }} holds USDB; review before choosing.</p><div class="ct"><button type="button" class="btn" onClick="{{ go.setSpark }}">Review in Spark · {{ sparkShort }}</button></div></div></div>
+        </div></div>
+      </sc-if>
+
+      <!-- ======== VAULT NONE ======== -->
+      <sc-if value="{{ sec.vaultNone }}" hint-placeholder-val="{{ false }}">
+        <div class="empty"><h2>No Vault in this Cube</h2><p class="muted">Vault settings don't apply · see available wallets. Seed protection for Spark and Liquid is in Cube › Backup &amp; protection.</p><div class="acts" style="margin-top:12px"><button type="button" class="btn" onClick="{{ go.overview }}">See available wallets</button><button type="button" class="btn" onClick="{{ go.setBackup }}">Open Backup &amp; protection</button></div></div>
+      </sc-if>
+
+      <!-- ======== ACCOUNT & PLAN ======== -->
+      <sc-if value="{{ sec.account }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}">
+            <div class="empty"><h2>Signed out of Connect</h2><p class="muted">Sign in to see your plan, billing and contacts. Your Cubes stay usable; Connect services such as Recovery Kit and Lightning Address pause.</p><div class="acts" style="margin-top:12px"><button type="button" class="btn pri">Sign in</button></div></div>
+          </sc-if>
+          <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
+            <div class="grp">
+              <h3>Identity</h3>
+              <div class="rows"><div class="row"><div><p class="lb">Connect account</p></div><p class="ds"><span style="color:var(--ink)">alex@example.test</span> · <span class="st s-ok">Signed in</span></p><div class="ct"><button type="button" class="btn">Change email…</button></div></div></div>
+            </div>
+            <div class="grp">
+              <h3>Plan and billing</h3>
+              <div class="rows">
+                <div class="row"><div><p class="lb">Current plan</p></div><div class="ds"><p style="color:var(--ink)">[PLAN NAME]</p><p><span class="st s-ok">Billing status: verified</span> · paid upfront through [RENEWAL DATE]</p></div><div class="ct"><button type="button" class="btn">Compare plans</button></div></div>
+              </div>
+              <p class="cap" style="margin-top:16px;padding-bottom:6px">Billing history · synthetic</p>
+              <div class="tl">
+                <div class="tr th" style="grid-template-columns:110px minmax(0,1fr) 110px 120px 70px"><span>Date</span><span>Item</span><span>Amount</span><span>Status</span><span>Receipt</span></div>
+                <sc-for list="{{ billing }}" as="b" hint-placeholder-count="3"><div class="tr" style="grid-template-columns:110px minmax(0,1fr) 110px 120px 70px"><span>{{ b.date }}</span><span>{{ b.item }}</span><span>{{ b.amt }}</span><span class="st {{ b.cls }}">{{ b.status }}</span><span><button type="button" class="lnk">View</button></span></div></sc-for>
+              </div>
+              <p class="cap" style="margin-top:10px">Referral · <button type="button" class="lnk">Share a referral code</button></p>
+            </div>
+            <div class="grp">
+              <h3>Contacts</h3>
+              <p class="intro">People you trust with recovery alerts or Vault invitations. Roles are verified by Connect.</p>
+              <div class="rows">
+                <sc-for list="{{ contacts }}" as="c" hint-placeholder-count="2"><div class="row"><div><p class="lb">{{ c.name }}</p></div><p class="ds">{{ c.email }} · {{ c.role }}</p><div class="ct"><button type="button" class="btn">Edit…</button></div></div></sc-for>
+              </div>
+              <div class="fbar" style="justify-content:flex-start"><button type="button" class="btn">Add contact</button></div>
+            </div>
+            <div class="grp">
+              <div class="rows"><div class="row"><div><p class="lb">Sign out</p></div><p class="ds">Signs out of Connect on this device. Open Cubes stay open; Connect services pause.</p><div class="ct"><button type="button" class="btn">Sign out…</button></div></div></div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <!-- ======== DEVICES & SECURITY ======== -->
+      <sc-if value="{{ sec.devices }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><div class="empty"><h2>Sign in to review devices</h2><p class="muted">Device and login records belong to your Connect account.</p><div class="acts" style="margin-top:12px"><button type="button" class="btn pri">Sign in</button></div></div></sc-if>
+          <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
+            <div class="grp">
+              <h3>Devices</h3>
+              <div class="tl">
+                <div class="tr th" style="grid-template-columns:minmax(0,1fr) 120px 160px 110px"><span>Device</span><span>Platform</span><span>Last activity</span><span>Action</span></div>
+                <sc-for list="{{ devices }}" as="d" hint-placeholder-count="3">
+                  <div class="tr" style="grid-template-columns:minmax(0,1fr) 120px 160px 110px;align-items:center"><b>{{ d.name }}</b><span>{{ d.plat }}</span><span>{{ d.last }}</span><span><sc-if value="{{ d.removable }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ d.pick }}" aria-expanded="{{ d.reviewing }}">Remove</button></sc-if><sc-if value="{{ d.current }}" hint-placeholder-val="{{ false }}"><span class="cap">This device</span></sc-if></span></div>
+                  <sc-if value="{{ d.reviewing }}" hint-placeholder-val="{{ false }}"><div class="rv" style="margin:8px 0"><b>Remove {{ d.name }}?</b><p style="margin-top:4px">Removing signs this device out of your Connect account on next contact; what else it revokes is subject to source validation.</p><div class="acts" style="margin-top:10px"><button type="button" class="btn pri">Remove {{ d.name }}</button><button type="button" class="btn" onClick="{{ cancelRemove }}">Cancel</button></div></div></sc-if>
+                </sc-for>
+              </div>
+            </div>
+            <div class="grp">
+              <h3>Recent logins</h3>
+              <div class="tl">
+                <div class="tr th" style="grid-template-columns:140px minmax(0,1fr) 220px"><span>Result</span><span>Device</span><span>When</span></div>
+                <sc-for list="{{ logins }}" as="l" hint-placeholder-count="3"><div class="tr" style="grid-template-columns:140px minmax(0,1fr) 220px"><span class="st {{ l.cls }}">{{ l.result }}</span><span>{{ l.dev }}</span><span>{{ l.when }}</span></div></sc-for>
+              </div>
+              <div class="fbar" style="justify-content:flex-start"><button type="button" class="btn">View all login activity</button></div>
+            </div>
+            <div class="grp">
+              <div class="rows"><div class="row"><div><p class="lb">Duress</p><span class="st s-off" style="font-size:13px;margin-top:4px">Not available</span></div><p class="ds">Not available for this account.</p><div class="ct"><span class="hint">No controls until the feature is enabled</span></div></div></div>
+            </div>
+          </sc-if>
+        </div>
+      </sc-if>
+
+      <!-- ======== ABOUT & APP PREFERENCES ======== -->
+      <sc-if value="{{ sec.about }}" hint-placeholder-val="{{ false }}">
+        <div class="sect">
+          <div class="grp">
+            <h3>About Tenshu</h3>
+            <div class="rows">
+              <div class="row wide"><p class="lb">Version</p><p>COINCUBE | Tenshu [VERSION] · build [COMMIT] · <span class="st s-ok">signed release, provenance verified</span></p></div>
+              <div class="row"><div><p class="lb">Download Stats</p></div><p class="ds">Public download figures for Tenshu releases. Product reference only.</p><div class="ct"><button type="button" class="btn">View Download Stats</button></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>App preferences</h3>
+            <p class="intro">Installation-wide: these apply to every Cube on This Mac.</p>
+            <div class="rows">
+              <div class="row"><div><p class="lb" id="th-l">Theme</p><span class="sc">Installation-wide</span></div><p class="ds">Applies immediately.</p><div class="ct"><div class="seg" aria-labelledby="th-l"><button type="button" aria-pressed="{{ themeDark }}" onClick="{{ setDark }}">Dark</button><button type="button" aria-pressed="{{ themeLight }}" onClick="{{ setLight }}">Light</button></div></div></div>
+              <div class="row"><div><p class="lb">Developer mode</p><span class="sc">Installation-wide</span></div><p class="ds">Shows developer diagnostics. Not needed for Expert tools or everyday tasks.</p><div class="ct"><button type="button" class="tog" aria-pressed="{{ devP }}" onClick="{{ togDev }}"><span class="kn"></span>{{ devText }}</button></div></div>
+              <div class="row"><div><p class="lb">BTCB2 beta</p><span class="sc">Installation-wide · account-gated</span></div><p class="ds">Lets this installation show and create Bitcoin Blake2b Cubes when your account has access. It is not a network switch and never changes an existing Cube's network.</p><div class="ct"><button type="button" class="tog" aria-pressed="{{ b2P }}" onClick="{{ togB2 }}" disabled="{{ signedOut }}"><span class="kn"></span>{{ b2Text }}</button><sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="hint">Sign in to check access</span></sc-if></div></div>
+            </div>
+          </div>
+          <div class="grp">
+            <button type="button" class="dsc {{ open.ax.cls }}" aria-expanded="{{ open.ax.on }}" onClick="{{ open.ax.tog }}"><svg class="chev" aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg>Diagnostics and repair<span class="cap">{{ open.ax.hint }}</span></button>
+            <sc-if value="{{ open.ax.on }}" hint-placeholder-val="{{ false }}">
+              <div class="dbody"><div class="rows">
+                <div class="row wide"><p class="lb">Components</p><p class="mono muted">coincubed [VERSION] · coincube-spark-bridge [VERSION]</p></div>
+                <div class="row"><div><p class="lb">Logs</p></div><p class="ds">Sanitized before display or export.</p><div class="ct"><button type="button" class="btn">Open sanitized logs</button></div></div>
+                <div class="row"><div><p class="lb">Repair device registration</p></div><p class="ds">Re-registers This Mac with Connect. Use it only when Connections reports a registration error. Account sign-in and Cube sessions are separate and unaffected.</p><div class="ct"><button type="button" class="btn">Repair device registration…</button><span class="hint">Opens a review before contacting the service</span></div></div>
+              </div></div>
+            </sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"page":{"editor":"enum","options":["overview","activity","backup","wallet-spark","wallet-vault","wallet-liquid","settings"],"default":"settings","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){
+    super(p);
+    this.state={nav:null,sel:null,menu:false,expert:false,open:{},form:null,base:null,saved:false,aliases:null,aliasSaved:null,pair:null,ln:null,remove:null,strict:true,dev:false,b2:false,themeO:null,vaultAlias:null,expertTool:'Coin control'};
+  }
+  renderVals(){
+    const P=this.props, S=this.state, self=this;
+    const rs=P.reviewState||'normal';
+    const propPage=P.page||'settings';
+    const page=(S.nav&&S.nav.for===propPage)?S.nav.page:propPage;
+    const loading=rs==='loading', signedOut=rs==='signedOut', disc=rs==='cubeDisconnected', offline=rs==='offlineNode';
+    const noVault=rs==='noVault', imported=rs==='importedVault', testnet=rs==='testnetSparkUnavailable', longN=rs==='longNames', saveFail=rs==='saveFailure';
+    const hasVault=!noVault, hasSpark=!testnet;
+    const cubeName=testnet?'Lab':(longN?'A very long Cube name that keeps going to test wrapping behaviour':'Everyday');
+    const defAlias=testnet?'Lab vault':(longN?'Family savings for the grandchildren, the house fund and everything after':'Family savings');
+    const vaultAlias=S.vaultAlias&&S.vaultAlias.for===rs?S.vaultAlias.v:defAlias;
+    const cube={name:cubeName,net:testnet?'Bitcoin':'Bitcoin mainnet',netFull:testnet?'Bitcoin Testnet4':'Bitcoin mainnet',test:testnet};
+    const sparkName='Spark · Daily spending', sparkShort='Daily spending';
+
+    // theme
+    const themeProp=P.theme||'dark';
+    const theme=(S.themeO&&S.themeO.for===themeProp)?S.themeO.v:themeProp;
+
+    // settings selection keyed to review state
+    const defSel={normal:['cube','display'],loading:['cube','display'],signedOut:['account','account'],cubeDisconnected:['account','connections'],offlineNode:['vault','connections'],noVault:['vault','wallet'],importedVault:['vault','pair'],testnetSparkUnavailable:['spark','spark'],longNames:['vault','wallet'],saveFailure:['cube','display']}[rs];
+    const baseTabs={cube:'display',device:'about',account:'account',vault:'wallet',spark:'spark'};
+    const sel=(S.sel&&S.sel.for===rs)?S.sel:{for:rs,scope:defSel[0],tabs:Object.assign({},baseTabs,{[defSel[0]]:defSel[1]})};
+    const navTo=(pg)=>()=>self.setState({nav:{for:propPage,page:pg},menu:false});
+    const setTo=(scope,tab)=>()=>{const t=Object.assign({},sel.tabs);if(tab)t[scope]=tab;self.setState({nav:{for:propPage,page:'settings'},sel:{for:rs,scope:scope,tabs:t},menu:false});};
+
+    const SC={
+      cube:{label:'Cube · '+(longN?'A very long Cube name…':cubeName),title:'Cube · '+cubeName,line:'Applies to this Cube on '+cube.netFull+'. Rows marked This device stay on this computer.',tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['data','Data & exports']]},
+      device:{label:'This device',title:'This device',line:'Applies to this installation of Tenshu on This Mac, for every Cube.',tabs:[['about','About & app preferences'],['spark','Spark']]},
+      account:{label:'Connect account',title:'Connect account',line:signedOut?'Your Connect account is signed out on this device.':'Applies to alex@example.test across all Cubes and devices.',tabs:[['account','Account & plan'],['devices','Devices & security'],['connections','Connections']]},
+      vault:{label:noVault?'Vault · none':'Vault · '+(longN?'Family savings for…':vaultAlias),title:noVault?'Vault · none in this Cube':'Vault · '+vaultAlias,line:noVault?'This Cube has no Vault.':'Applies to this Vault on '+cube.netFull+' only.',tabs:[['wallet','Wallet & signers'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
+      spark:{label:testnet?'Spark · not on Testnet4':'Spark · '+sparkShort,title:testnet?'Spark · unavailable':sparkName,line:testnet?'Spark is not available on this Cube’s network.':'Applies to this Spark wallet. Stable Balance is a device preference.',tabs:[['spark','Spark'],['connections','Connections']]}
+    };
+    const scope=sel.scope, tab=sel.tabs[scope], cs=SC[scope];
+    const scopes=['cube','device','account','vault','spark'].map(k=>({label:SC[k].label,pressed:k===scope?'true':'false',pick:setTo(k)}));
+    const tabs=cs.tabs.map(t=>({label:t[1],cur:t[0]===tab?'true':'false',cls:t[0]===tab?'on kf':'',pick:setTo(scope,t[0])}));
+
+    const isSet=page==='settings', on=(sc,tb)=>isSet&&!loading&&scope===sc&&tab===tb;
+    const sec={
+      display:on('cube','display'),
+      backup:(page==='backup')||on('cube','backup'),
+      payments:on('cube','payments'),
+      dataCube:on('cube','data'),
+      about:on('device','about'),
+      sparkDevice:on('device','spark'),
+      account:on('account','account'),
+      devices:on('account','devices'),
+      connAccount:on('account','connections'),
+      wallet:on('vault','wallet')&&hasVault,
+      pair:on('vault','pair')&&hasVault,
+      connVault:on('vault','connections')&&hasVault,
+      dataVault:on('vault','data')&&hasVault,
+      vaultNone:isSet&&!loading&&scope==='vault'&&noVault,
+      sparkFull:on('spark','spark')&&hasSpark,
+      connSpark:on('spark','connections')&&hasSpark,
+      sparkNone:isSet&&!loading&&scope==='spark'&&!hasSpark
+    };
+    sec.conn=sec.connAccount||sec.connVault||sec.connSpark;
+
+    const pg={overview:page==='overview',activity:page==='activity',backup:page==='backup',spark:page==='wallet-spark',vault:page==='wallet-vault',liquid:page==='wallet-liquid',settings:isSet,expert:page==='expert'};
+
+    // header chips
+    const acct=loading?{cls:'s-busy',text:'Checking…',signIn:false}:signedOut?{cls:'s-unk',text:'Signed out',signIn:true}:{cls:'s-ok',text:'alex@example.test · Signed in',signIn:false};
+    const conn=loading?{cls:'s-busy',text:'Checking…'}:signedOut?{cls:'s-unk',text:'Not checked while signed out'}:disc?{cls:'s-warn',text:'Reconnect required'}:{cls:'s-ok',text:'Connected'};
+
+    // nav
+    const ni=(label,pg2,extra)=>Object.assign({label:label,cur:page===pg2?'page':'false',cls:page===pg2?'on':'',pick:navTo(pg2)},extra||{});
+    const navPrimary=[ni('Overview','overview'),ni('Activity','activity'),ni('Backup & protection','backup')];
+    const navWallets=[];
+    navWallets.push(ni(sparkName,'wallet-spark',{sub:testnet?'Not available on Testnet4':'Stable Balance · review',subCls:testnet?'':'w'}));
+    if(hasVault) navWallets.push(ni('Vault · '+vaultAlias,'wallet-vault',{sub:offline?'Node offline':(imported?'Imported · no local keys':'2-of-3 · synthetic'),subCls:offline?'w':''}));
+    if(!testnet) navWallets.push(ni('Liquid · Travel','wallet-liquid',{sub:'Liquid network',subCls:''}));
+    const tools=['Coin control','PSBT proposals','Descriptors & keys','Node resources','Maintenance'];
+    const navExpert=tools.map(t=>({label:t,cur:(page==='expert'&&S.expertTool===t)?'page':'false',cls:(page==='expert'&&S.expertTool===t)?'on':'',hasSub:noVault,sub:'Needs a Vault',pick:()=>self.setState({nav:{for:propPage,page:'expert'},expertTool:t})}));
+    const settingsOn=isSet&&scope!=='account', accountOn=isSet&&scope==='account';
+    const navSettings={cls:settingsOn?'on':'',cur:settingsOn?'page':'false',pick:setTo('cube')};
+    const navAccount={cls:accountOn?'on':'',cur:accountOn?'page':'false',pick:setTo('account'),sub:signedOut?'Signed out':(loading?'Checking…':'alex@example.test')};
+
+    // attention row
+    let attn={show:true,cls:'s-warn',text:'Backup not confirmed',hasMore:false,pick:navTo('backup')};
+    if(loading) attn={show:true,cls:'s-busy',text:'Checking protection…',hasMore:false,pick:navTo('backup')};
+    if(disc) attn={show:true,cls:'s-warn',text:'Cube service: reconnect required',hasMore:true,pick:setTo('account','connections')};
+    if(offline) attn={show:true,cls:'s-bad',text:'Vault node offline',hasMore:true,pick:setTo('vault','connections')};
+    if(testnet) attn={show:true,cls:'s-unk',text:'Backup status unknown',hasMore:false,pick:navTo('backup')};
+
+    const openTabs=[{name:'Everyday',net:'Bitcoin mainnet',state:testnet?'Open':'Current'},{name:'Lab',net:'Bitcoin · Testnet4',state:testnet?'Current':'Open'}].map(t=>Object.assign(t,{cur:t.state==='Current'?'page':'false',cls:t.state==='Current'?'on':''}));
+
+    // overview wallets
+    const wallets=[];
+    if(hasSpark) wallets.push({name:sparkName,short:'Spark',kind:'Spark · Lightning',net:'Bitcoin mainnet',test:false,amt:'0.01240000 BTC',amtNote:'Plus 25.00 USDB',usable:true,open:navTo('wallet-spark')});
+    if(hasVault) wallets.push({name:'Vault · '+vaultAlias,short:'Vault',kind:imported?'Vault · imported, no local keys':'Vault · 2-of-3 synthetic policy',net:testnet?'Bitcoin':'Bitcoin mainnet',test:testnet,amt:testnet?'1.20000000 tBTC':'0.85000000 BTC',amtNote:offline?'Node offline · may be out of date':'Confirmed',usable:true,open:navTo('wallet-vault')});
+    if(!testnet) wallets.push({name:'Liquid · Travel',short:'Liquid',kind:'Liquid wallet',net:'Liquid network',test:false,amt:'0.05000000 L-BTC',amtNote:'Confirmed',usable:true,open:navTo('wallet-liquid')});
+    const activity=[
+      {date:'[DATE]',wallet:sparkName,desc:'Lightning payment received',status:'Complete',cls:'s-ok',amt:'+0.00050000 BTC'},
+      {date:'[DATE]',wallet:'Vault · '+vaultAlias,desc:'Outgoing · 2 of 3 approved',status:'Confirmed',cls:'s-ok',amt:'−0.02000000 BTC'},
+      {date:'[DATE]',wallet:'Vault · '+vaultAlias,desc:'PSBT proposal awaiting 1 signature',status:'Pending',cls:'s-busy',amt:'−0.01000000 BTC'},
+      {date:'[DATE]',wallet:'Liquid · Travel',desc:'Received',status:'Confirmed',cls:'s-ok',amt:'+0.05000000 L-BTC'},
+      {date:'[DATE]',wallet:sparkName,desc:'Lightning payment failed',status:'Failed · not sent',cls:'s-bad',amt:'0.00020000 BTC'}
+    ];
+
+    // display form
+    const defaults={unit:'BTC',primary:'Bitcoin',fiat:true,currency:'USD',source:'A',badges:true,name:cubeName};
+    const base=(S.base&&S.base.for===rs)?S.base.v:defaults;
+    const initial=saveFail?Object.assign({},base,{currency:'EUR',source:'B'}):base;
+    const f=(S.form&&S.form.for===rs)?S.form.v:initial;
+    const dirty=JSON.stringify(f)!==JSON.stringify(base);
+    const setF=(patch)=>self.setState({form:{for:rs,v:Object.assign({},f,patch)},saved:false});
+    const form={
+      btc:f.unit==='BTC'?'true':'false',sats:f.unit==='Sats'?'true':'false',
+      pBtc:f.primary==='Bitcoin'?'true':'false',pFiat:f.primary==='Fiat'?'true':'false',
+      fiat:f.fiat?'true':'false',fiatText:f.fiat?'On':'Off',badges:f.badges?'true':'false',badgesText:f.badges?'On':'Off',
+      currency:f.currency,source:f.source,name:f.name,
+      setBtc:()=>setF({unit:'BTC'}),setSats:()=>setF({unit:'Sats'}),setPBtc:()=>setF({primary:'Bitcoin'}),setPFiat:()=>setF({primary:'Fiat'}),
+      togFiat:()=>setF({fiat:!f.fiat}),togBadges:()=>setF({badges:!f.badges}),
+      setCurrency:(e)=>setF({currency:e.target.value}),setSource:(e)=>setF({source:e.target.value}),setName:(e)=>setF({name:e.target.value}),
+      error:saveFail&&dirty,errCls:(saveFail&&dirty)?'in err':'in',clean:!dirty,
+      saveLabel:saveFail&&dirty?'Try again':'Save changes',
+      msg:saveFail&&dirty?'Not saved · edits kept':(dirty?'Unsaved changes':(S.saved?'Saved':'No unsaved changes')),
+      discard:()=>self.setState({form:{for:rs,v:base}}),
+      save:()=>{ if(saveFail) return; self.setState({base:{for:rs,v:f},form:{for:rs,v:f},saved:true}); }
+    };
+    const avatar={ready:!loading&&!signedOut&&!disc,loading:loading,error:signedOut||disc,errText:signedOut?'Avatar service needs Connect sign-in.':'Avatar service unavailable until this Cube reconnects.',noRegen:signedOut||disc||loading};
+
+    // backup
+    const bk=testnet?{leadCls:'',cls:'s-unk',status:'Backup status unknown',title:'We can’t confirm this Cube’s backup',detail:'No record shows the seed phrase was confirmed on this device. Confirm it to be sure.',next:'Confirm seed phrase backup',nextHint:'Opens the authenticated confirmation flow'}
+      :{leadCls:'',cls:'s-warn',status:'Backup not confirmed',title:'Confirm your seed phrase',detail:'The seed phrase was shown when this Cube was created but never confirmed. The Recovery Kit is not set up. Until one is confirmed, losing this computer could mean losing the Cube.',next:'Confirm seed phrase backup',nextHint:'Opens the authenticated confirmation flow'};
+    bk.seed=testnet?'Unknown':'Not confirmed'; bk.seedCls=testnet?'s-unk':'s-warn';
+    bk.kit=signedOut?'Sign in required':(disc?'Reconnect required':'Not set up'); bk.kitCls=(signedOut||disc)?'s-unk':'s-off';
+    bk.kitDesc=noVault?'not applicable · no Vault':'none yet · no kit';
+    bk.kitBlocked=signedOut||disc||loading; bk.kitAction='Set up Recovery Kit';
+    bk.kitHint=signedOut?'Sign in to Connect first':(disc?'Reconnect this Cube in Connections first':'Opens the Recovery Kit flow');
+    bk.rpText=noVault?'No Vault in this Cube · the recovery path doesn’t apply.':'Time-locked spending, separate from backup. After 180 days without spending, 1-of-2 recovery keys can spend (synthetic policy).';
+    const aProp=P.alertsState||'auto';
+    const aS=aProp!=='auto'?aProp:(signedOut?'signedOut':((loading||disc)?'unknown':'verified'));
+    const alerts={
+      verified:{cls:'s-ok',status:'Eligible · verified',text:'Connect can alert your recovery contacts when a supported recovery path opens. Eligibility verified for this Vault.',hasAction:true,action:'Manage alerts',hint:'Opens alert recipients'},
+      unknown:{cls:'s-unk',status:'Eligibility unknown',text:disc?'Can’t check eligibility: this Cube’s service connection needs to reconnect. No plan change is implied.':'Checking eligibility… No plan change is implied while this is unknown.',hasAction:disc,action:'Open Connections',hint:''},
+      signedOut:{cls:'s-unk',status:'Signed out',text:'Sign in to Connect to check whether recovery alerts are available for this Vault.',hasAction:true,action:'Sign in',hint:''},
+      denied:{cls:'s-off',status:'Not included',text:'Recovery alerts aren’t included for this account. Verified by Connect.',hasAction:true,action:'Compare plans',hint:'Opens Account & plan'}
+    }[aS];
+    if(noVault) Object.assign(alerts,{cls:'s-off',status:'Not applicable',text:'Recovery alerts need a Vault with a recovery path.',hasAction:false,hint:''});
+
+    // signers
+    const defSigners=imported?[
+      {alias:'External signer A',fp:'a1b2c3d4',kind:'Imported key · no local copy',owner:'Signing happens on the external device',held:'External'},
+      {alias:'External signer B',fp:'e5f6a7b8',kind:'Imported key · no local copy',owner:'Signing happens on the external device',held:'External'},
+      {alias:'Hardware · Ledger-style device',fp:'c9d0e1f2',kind:'Hardware key',owner:'Held on the hardware device',held:'Hardware'}
+    ]:[
+      {alias:'This device',fp:'a1b2c3d4',kind:'Local key · in this Cube',owner:'Signs on this computer',held:'This Cube'},
+      {alias:longN?'Keychain · Alex’s phone that sits in the kitchen drawer most days':'Keychain · Alex’s phone',fp:'e5f6a7b8',kind:'Keychain key · phone',owner:'Signs on the paired phone',held:'Phone'},
+      {alias:'Hardware · Ledger-style device',fp:'c9d0e1f2',kind:'Hardware key',owner:'Held on the hardware device',held:'Hardware'}
+    ];
+    const savedA=(S.aliasSaved&&S.aliasSaved.for===rs)?S.aliasSaved.v:defSigners.map(s=>s.alias);
+    const curA=(S.aliases&&S.aliases.for===rs)?S.aliases.v:savedA;
+    const aliasDirty=JSON.stringify(curA)!==JSON.stringify(savedA);
+    const signers=defSigners.map((s,i)=>Object.assign({},s,{n:i+1,id:'sg'+i,alias:curA[i],set:(e)=>{const a=curA.slice();a[i]=e.target.value;self.setState({aliases:{for:rs,v:a}});}}));
+
+    // pair
+    const pairProp=P.pairStep||'idle';
+    const step=(S.pair&&S.pair.for===pairProp)?S.pair.step:pairProp;
+    const sp=(s)=>()=>self.setState({pair:{for:pairProp,step:s}});
+    const pairDisabled=imported;
+    const pair={disabled:pairDisabled,idle:!pairDisabled&&(step==='idle'||step==='paired'),picker:!pairDisabled&&step==='picker',waiting:!pairDisabled&&step==='waiting',error:!pairDisabled&&step==='error',hasPaired:!pairDisabled&&step==='paired',noPaired:pairDisabled||step!=='paired',
+      toIdle:sp('idle'),toPicker:sp('picker'),toWaiting:sp('waiting'),toError:sp('error'),toPaired:sp('paired')};
+    const pairKeys=imported?[
+      {alias:'External signer A',fp:'a1b2c3d4',reason:'Not eligible · no local copy of this key',checked:false,disabled:true},
+      {alias:'External signer B',fp:'e5f6a7b8',reason:'Not eligible · no local copy of this key',checked:false,disabled:true},
+      {alias:'Hardware · Ledger-style device',fp:'c9d0e1f2',reason:'Not eligible · hardware keys stay on the device',checked:false,disabled:true}
+    ]:[
+      {alias:curA[1],fp:'e5f6a7b8',reason:'Eligible · Keychain key for this Vault',checked:true,disabled:false},
+      {alias:'This device',fp:'a1b2c3d4',reason:'Not eligible · this key signs on this computer',checked:false,disabled:true},
+      {alias:'Hardware · Ledger-style device',fp:'c9d0e1f2',reason:'Not eligible · hardware keys stay on the device',checked:false,disabled:true}
+    ];
+
+    // connections health
+    const h1=loading?{cls:'s-busy',text:'Checking…',desc:'',hasAction:false}
+      :signedOut?{cls:'s-unk',text:'Signed out',desc:'Connect services pause until you sign in. Cubes stay usable.',hasAction:true,action:'Sign in',btnCls:'pri',hint:''}
+      :{cls:'s-ok',text:'Signed in as alex@example.test',desc:'Proves your account only. It doesn’t prove this Cube is connected or entitled.',hasAction:false};
+    const h2=signedOut?{cls:'s-unk',text:'Not checked · sign in first',desc:'This Cube’s session is checked after account sign-in.',hasAction:false}
+      :disc?{cls:'s-warn',text:'Reconnect required',desc:'This Cube’s service session expired. Reconnecting re-authenticates this Cube only; it never rescans or switches backends.',hasAction:true,action:'Reconnect',btnCls:'pri',hint:'Re-authenticates this Cube’s session'}
+      :{cls:'s-ok',text:'Connected · registered',desc:'Last contact [TIME].',hasAction:false};
+    const h3v=noVault?{cls:'s-off',text:'No Vault · no node backend',desc:'',hasAction:false}
+      :offline?{cls:'s-bad',text:'Offline',desc:'Can’t reach Electrum server [SERVER]. Last synced at block [HEIGHT], [TIME] ago. Balances may be out of date.',hasAction:true,action:'Retry connection',btnCls:'pri',hint:'Retries the same backend'}
+      :{cls:'s-ok',text:'Synced',desc:'Electrum · [SERVER] · block [HEIGHT] · checked [TIME] ago.',hasAction:false};
+    const h3b={cls:'s-ok',text:'Running · responding',desc:'Spark SDK bridge for '+sparkName+'.',hasAction:false};
+    const health=[Object.assign({name:'Account authentication',scope:'Connect account'},h1),Object.assign({name:'This Cube’s service session',scope:'Cube · '+cubeName},h2)];
+    if(scope==='spark') health.push(Object.assign({name:'Spark bridge',scope:sparkName},h3b));
+    else health.push(Object.assign({name:'Node backend & sync',scope:noVault?'No Vault':'Vault · '+vaultAlias},h3v,scope==='account'&&!noVault?{hasAction:true,action:'Open Vault › Connections',btnCls:'',hint:'',pick:setTo('vault','connections')}:{}));
+    health.forEach(h=>{if(!h.pick)h.pick=()=>{};if(!h.action)h.action='';if(!h.hint)h.hint='';if(!h.btnCls)h.btnCls='';});
+
+    // lightning
+    const lnProp=P.lnState||'existing';
+    let lnS=(S.ln&&S.ln.for===lnProp)?S.ln.v:lnProp;
+    if(signedOut) lnS='signed-out'; else if(disc) lnS='disconnected';
+    const ln={existing:lnS==='existing',claim:lnS==='claim',checking:lnS==='checking',signedOut:lnS==='signed-out',disconnected:lnS==='disconnected',error:lnS==='error',
+      acct:signedOut?'signed out':'signed in',acctCls:signedOut?'s-unk':'s-ok',svc:signedOut?'not checked':(disc?'reconnect required':'ready'),svcCls:signedOut?'s-unk':(disc?'s-warn':'s-ok'),
+      check:()=>self.setState({ln:{for:lnProp,v:'checking'}})};
+
+    const tg=(k,label)=>{const o=!!S.open[k];return {on:o,cls:o?'open':'',hint:o?'Hide':'Show',tog:()=>{const n=Object.assign({},S.open);n[k]=!o;self.setState({open:n});}};};
+
+    const devices=[{name:'This Mac (current)',plat:'macOS',last:'Active now',current:true},{name:'Windows laptop',plat:'Windows',last:'[DATE]',current:false},{name:'Linux desktop',plat:'Linux',last:'[DATE]',current:false}]
+      .map(d=>Object.assign(d,{removable:!d.current,reviewing:S.remove===d.name,pick:()=>self.setState({remove:S.remove===d.name?null:d.name})}));
+
+    return {
+      themeClass:theme==='light'?'light':'',
+      motionClass:P.reducedMotion?'reduced':'',
+      menuOpen:S.menu, toggleMenu:()=>self.setState({menu:!S.menu}),
+      cube:cube, acct:acct, conn:conn, openTabs:openTabs,
+      navPrimary:navPrimary, navWallets:navWallets, navExpert:navExpert, navSettings:navSettings, navAccount:navAccount,
+      expertOpen:S.expert, expertCls:S.expert?'open':'', toggleExpert:()=>self.setState({expert:!S.expert}), expertTool:S.expertTool,
+      attn:attn, pg:pg, sec:sec, isLoading:isSet&&loading,
+      scopeTitle:cs.title, scopeLine:cs.line, scopes:scopes, tabs:tabs,
+      hasVault:hasVault, noVault:noVault, hasSpark:hasSpark, noSpark:!hasSpark, offline:offline, imported:imported, signedOut:signedOut, signedIn:!signedOut,
+      vaultAlias:vaultAlias, vaultAliasInput:vaultAlias, setVaultAlias:(e)=>self.setState({vaultAlias:{for:rs,v:e.target.value}}),
+      sparkName:sparkName, sparkShort:sparkShort,
+      wallets:wallets, activity:activity, form:form, avatar:avatar, bk:bk, alerts:alerts,
+      signers:signers, aliasClean:!aliasDirty, aliasMsg:aliasDirty?'Unsaved name changes':'Names saved',
+      aliasDiscard:()=>self.setState({aliases:{for:rs,v:savedA}}), aliasSave:()=>self.setState({aliasSaved:{for:rs,v:curA}}),
+      pair:pair, pairKeys:pairKeys, noop:()=>{},
+      health:health, ln:ln, rescanHint:offline?'Requires a connected node':'Opens the rescan review',
+      open:{wx:tg('wx'),nx:tg('nx'),bx:tg('bx'),ax:tg('ax')},
+      strictP:S.strict?'true':'false', strictText:S.strict?'On':'Off', togStrict:()=>self.setState({strict:!S.strict}),
+      devP:S.dev?'true':'false', devText:S.dev?'On':'Off', togDev:()=>self.setState({dev:!S.dev}),
+      b2P:S.b2?'true':'false', b2Text:S.b2?'On':'Off', togB2:()=>self.setState({b2:!S.b2}),
+      themeDark:theme==='dark'?'true':'false', themeLight:theme==='light'?'true':'false',
+      setDark:()=>self.setState({themeO:{for:themeProp,v:'dark'}}), setLight:()=>self.setState({themeO:{for:themeProp,v:'light'}}),
+      billing:[{date:'[DATE]',item:'[PLAN NAME] · upfront',amt:'[AMOUNT]',status:'Paid',cls:'s-ok'},{date:'[DATE]',item:'[PLAN NAME] · upfront',amt:'[AMOUNT]',status:'Paid',cls:'s-ok'},{date:'[DATE]',item:'[PLAN NAME] · upfront',amt:'[AMOUNT]',status:'Refunded',cls:'s-off'}],
+      contacts:[{name:'Jordan (synthetic)',email:'jordan@example.test',role:'Recovery contact · verified'},{name:'Sam (synthetic)',email:'sam@example.test',role:'Invitation pending'}],
+      devices:devices, cancelRemove:()=>self.setState({remove:null}),
+      logins:[{result:'Successful',cls:'s-ok',dev:'This Mac (current)',when:'[DATE] [TIME] [TZ]'},{result:'Failed',cls:'s-bad',dev:'Unrecognised device · wrong code',when:'[DATE] [TIME] [TZ]'},{result:'Successful',cls:'s-ok',dev:'Windows laptop',when:'[DATE] [TIME] [TZ]'}],
+      go:{overview:navTo('overview'),backup:navTo('backup'),vault:navTo('wallet-vault'),
+        setSpark:setTo('spark','spark'),setSparkConn:setTo('spark','connections'),setVault:setTo('vault','wallet'),setWallet:setTo('vault','wallet'),setPair:setTo('vault','pair'),
+        setVaultConn:setTo('vault','connections'),setVaultData:setTo('vault','data'),setAccountConn:setTo('account','connections'),
+        setBackup:setTo('cube','backup'),setAbout:setTo('device','about'),setCubeDisplay:setTo('cube','display')}
+    };
+  }
+}
+</script>
+</body>
+</html>

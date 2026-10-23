@@ -1,0 +1,567 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Account gaps</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu fieldset{border:0;margin:0;padding:0;min-width:0}
+.tenshu a{color:var(--acc-ink)}
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+@keyframes spin{to{transform:rotate(360deg)}}
+.spin{animation:spin 1.2s linear infinite}
+/* in-Cube top bar (V2 shell) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap;color:var(--ink)}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.sfoot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto;display:flex;flex-direction:column}
+.pg{flex:1;width:100%;max-width:920px;padding:24px 48px 32px}
+.crumbs{display:flex;align-items:center;gap:12px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.route{margin-left:auto;font-size:12px;color:var(--muted)}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.pfoot{padding:0 0 14px;text-align:center}
+.scopes{display:flex;flex-wrap:wrap;gap:6px;margin-top:18px}
+.scope{display:inline-flex;align-items:center;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:15px;font-size:13px;text-decoration:none}
+.tenshu a.scope{color:var(--ink)}
+.scope.on{background:var(--selected);border-color:var(--accent);font-weight:600}
+.tabs{display:flex;gap:4px;border-bottom:1px solid var(--line);margin-top:16px}
+.tab{padding:10px 12px;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px;text-decoration:none}
+.tenshu a.tab{color:var(--muted)}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.tenshu a.tab.on{color:var(--ink)}
+.sec{margin-top:24px}
+.sec>h2{font-size:18px;font-weight:600;display:flex;align-items:center;gap:10px}
+.sec .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:66ch}
+/* controls */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn.danger{border-color:var(--bad);color:var(--bad)}
+.btn[disabled]{cursor:not-allowed;opacity:.55}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:600;cursor:pointer;border-radius:4px;font-size:13px}
+.inp{height:40px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.err{display:flex;align-items:flex-start;gap:6px;font-size:13px;color:var(--bad);font-weight:500}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;padding:2px;flex-wrap:wrap}
+.seg button{height:32px;padding:0 12px;border:0;border-radius:6px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.seg button:disabled{cursor:not-allowed;opacity:.6}
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:16px;max-width:440px}
+.fld label{font-weight:600;font-size:13px}
+.chk{display:flex;align-items:flex-start;gap:10px;margin-top:18px;max-width:600px;font-size:14px;cursor:pointer}
+.chk input{margin:3px 0 0;width:16px;height:16px;accent-color:var(--accent);flex:none}
+.acts{display:flex;align-items:center;gap:10px;margin-top:20px;flex-wrap:wrap}
+.acts .sp{flex:1}
+.dl{margin-top:14px;border-top:1px solid var(--line)}
+.dl>div{display:grid;grid-template-columns:180px minmax(0,1fr);column-gap:16px;padding:11px 0;border-bottom:1px solid var(--line);align-items:center}
+.dl dt{color:var(--muted)}
+.note{display:flex;align-items:flex-start;gap:8px;margin-top:12px;font-size:13px;color:var(--muted);max-width:68ch}
+.note .ic{margin-top:1px}
+.banner{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:12px 14px;border:1px solid var(--line);border-radius:10px}
+.banner.w{border-color:var(--warn)}
+.banner.b{border-color:var(--bad)}
+.banner .ic{margin-top:1px}
+.banner .tx{flex:1;font-size:14px}
+.banner .tx span{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+.pillv{display:inline-flex;align-items:center;height:22px;padding:0 9px;border-radius:11px;border:1px solid var(--line);font-size:12px;font-weight:500}
+/* one bounded form region per flow step */
+.form{margin-top:16px;border:1px solid var(--line);border-radius:12px;background:var(--panel);padding:22px 24px}
+.form h3{font-size:17px;font-weight:600}
+.form .lede{color:var(--muted);font-size:13px;margin-top:4px;max-width:62ch}
+.modes{margin-top:14px;border-top:1px solid var(--line)}
+.mode{display:grid;grid-template-columns:22px minmax(0,1fr) auto;column-gap:12px;align-items:center;width:100%;min-height:60px;padding:8px 10px;border:0;border-bottom:1px solid var(--line);background:none;text-align:left;cursor:pointer;color:var(--ink)}
+.mode:hover{background:var(--hover)}
+.mode:disabled{cursor:not-allowed}
+.mode:disabled:hover{background:none}
+.mode:disabled .nm{color:var(--muted)}
+.mode .nm{font-weight:600}
+.mode .sub{display:block;font-size:13px;color:var(--muted)}
+.mode .ic{color:var(--muted)}
+.mode .go{color:var(--acc-ink)}
+.tg{display:flex;align-items:center;gap:12px;min-height:48px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-top:14px}
+.tg .lb{flex:1;font-weight:600}
+.sw{width:40px;height:22px;border-radius:11px;border:1px solid var(--line);background:var(--bg);position:relative;cursor:pointer;padding:0;flex:none}
+.sw::after{content:"";position:absolute;top:2px;left:2px;width:16px;height:16px;border-radius:50%;background:var(--muted)}
+.sw[aria-pressed="true"]{background:var(--accent);border-color:var(--accent)}
+.sw[aria-pressed="true"]::after{left:20px;background:var(--on-accent)}
+.sub3{font-size:14px;font-weight:600;margin-top:20px}
+.who li{padding:9px 0;border-bottom:1px solid var(--line);font-size:14px}
+.who li:first-child{border-top:1px solid var(--line);margin-top:8px}
+.escrow{margin-top:10px;font-size:13px;max-width:68ch}
+/* avatar */
+.traits{margin-top:12px;border-top:1px solid var(--line)}
+.trait{display:grid;grid-template-columns:140px minmax(0,1fr);column-gap:16px;align-items:center;min-height:50px;border-bottom:1px solid var(--line)}
+.trait .lb{font-size:13px;font-weight:600}
+.ava{display:flex;gap:24px;align-items:flex-start;margin-top:16px}
+.ava .pic{width:220px;height:220px;flex:none;border:1px solid var(--line);border-radius:12px;background:var(--bg);display:grid;place-items:center}
+.ava .pic svg{width:150px;height:150px;color:var(--ink);opacity:.85}
+.vars{display:flex;gap:8px;margin-top:10px}
+.var{width:56px;height:56px;border:1px solid var(--line);border-radius:8px;background:var(--bg);display:grid;place-items:center;cursor:pointer;padding:0}
+.var svg{width:36px;height:36px;color:var(--muted)}
+.var[aria-pressed="true"]{border-color:var(--accent);box-shadow:inset 0 0 0 1px var(--accent)}
+.gen{display:flex;flex-direction:column;align-items:center;gap:10px;padding:40px 0;text-align:center;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-top:16px}
+.gen .ic{width:32px;height:32px;color:var(--acc-ink)}
+.gen b{font-size:16px;color:var(--acc-ink)}
+.gen p{color:var(--muted);font-size:13px}
+.gate{margin-top:16px;padding:18px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.gate b{display:block;font-weight:600;font-size:15px}
+.gate p{margin:4px 0 12px;color:var(--muted);font-size:13px;max-width:60ch}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip" title="{{ acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">{{ acctSr }}</span><span class="st {{ acctTone }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ acctIcon }}"/></svg>{{ acctWord }}</span></div>
+      <div class="chip" title="{{ svcTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st {{ svcTone }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ svcIcon }}"/></svg>{{ svcWord }}</span></div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9zM9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9zM9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock Everyday and open the Launcher?</p><a class="btn pri sm" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="btn sm" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M2.5 2.5h5v5h-5zM10.5 2.5h5v5h-5zM2.5 10.5h5v5h-5zM10.5 10.5h5v5h-5z"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni {{ navBackup.cls }}" aria-current="{{ navBackup.cur }}" href="P-GapsAccount.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4zM6.5 9l1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Advanced.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <div class="sfoot">
+        <a class="ni {{ navSet.cls }}" aria-current="{{ navSet.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5M9 4a5 5 0 1 0 0 10a5 5 0 1 0 0-10M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <div class="crumbs"><a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Overview</a><span class="route">{{ route }}</span></div>
+        <h1 class="ph">Settings · Cube · Everyday</h1>
+        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
+        <div class="scopes" role="group" aria-label="Settings scope">
+          <a class="scope on" aria-current="page" href="P-GapsAccount.dc.html">Cube · Everyday</a>
+          <a class="scope" href="P-Overview.dc.html">This device</a>
+          <a class="scope" href="P-Connect.dc.html">Connect account</a>
+          <a class="scope" href="P-Overview.dc.html">Vault · Family savings</a>
+          <a class="scope" href="P-Overview.dc.html">Spark · Daily spending</a>
+        </div>
+        <nav class="tabs" aria-label="Sections in Cube · Everyday">
+          <sc-for list="{{ tabs }}" as="t" hint-placeholder-count="4">
+            <a class="tab {{ t.cls }}" aria-current="{{ t.cur }}" href="{{ t.href }}">{{ t.label }}</a>
+          </sc-for>
+        </nav>
+
+        <!-- ================= #40 CUBE RECOVERY KIT: PROTECTION MODE ================= -->
+        <sc-if value="{{ v.kit }}" hint-placeholder-val="{{ true }}">
+          <section class="sec" aria-labelledby="kit-h">
+            <h2 id="kit-h">Cube Recovery Kit</h2>
+            <dl class="dl">
+              <div><dt>Protected by:</dt><dd>{{ kit.protectedBy }}</dd></div>
+              <div><dt>Includes:</dt><dd>Master Seed Phrase · Wallet Descriptor</dd></div>
+            </dl>
+
+            <div class="form" role="group" aria-labelledby="km-h">
+              <!-- mode picker -->
+              <sc-if value="{{ kit.picker }}" hint-placeholder-val="{{ true }}">
+                <h3 id="km-h">Choose how to protect your Recovery Kit</h3>
+                <p class="lede">A password you type, your phone's approval, or both.</p>
+                <sc-if value="{{ kit.hasBacked }}" hint-placeholder-val="{{ false }}"><p class="note" style="align-items:center">Already backed up: <span class="pillv">Password</span></p></sc-if>
+                <div class="modes">
+                  <sc-for list="{{ kit.modes }}" as="m" hint-placeholder-count="3">
+                    <button type="button" class="mode {{ m.focus }}" disabled="{{ m.off }}" onClick="{{ m.pick }}">
+                      <svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ m.icon }}"/></svg>
+                      <span><span class="nm">{{ m.label }}</span><span class="sub">{{ m.sub }}</span></span>
+                      <svg class="ic s go" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg>
+                    </button>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ kit.showPhone }}" hint-placeholder-val="{{ true }}">
+                  <p class="note {{ kit.phoneTone }}" role="status"><svg class="ic s {{ kit.phoneSpin }}" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ kit.phoneIcon }}"/></svg><span>{{ kit.phoneText }} <sc-if value="{{ kit.canRecheck }}" hint-placeholder-val="{{ false }}"><button type="button" class="lbtn" onClick="{{ kit.recheck }}">Check again</button></sc-if></span></p>
+                </sc-if>
+                <div class="acts"><span class="sp"></span><a class="btn" href="P-Overview.dc.html">Cancel</a></div>
+              </sc-if>
+
+              <!-- password -->
+              <sc-if value="{{ kit.password }}" hint-placeholder-val="{{ false }}">
+                <h3 id="km-h">Recovery password</h3>
+                <p class="lede">Separate from your Cube PIN. Write it down somewhere safe. COINCUBE cannot recover it for you.</p>
+                <div class="fld"><label for="kp-1">Recovery password</label><input id="kp-1" class="inp" type="password" placeholder="Choose a password" value="************"><p class="cap">At least 12 characters · Strength: Strong</p></div>
+                <div class="fld"><label for="kp-2">Confirm recovery password</label><input id="kp-2" class="inp" type="password" placeholder="Re-enter password" value="{{ kit.confirmVal }}" aria-invalid="{{ kit.mismatchA }}" aria-describedby="{{ kit.mismatchDesc }}">
+                  <sc-if value="{{ kit.mismatch }}" hint-placeholder-val="{{ false }}"><p class="err" id="kp-err"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.75v4M9 12.25v.01"/></svg>Passwords don't match.</p></sc-if>
+                </div>
+                <label class="chk"><input type="checkbox" checked="{{ kit.ack }}" onChange="{{ kit.toggleAck }}"><span>I've written this password down somewhere I can find it</span></label>
+                <div class="acts"><button type="button" class="btn" onClick="{{ kit.toPicker }}">Cancel</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ kit.blocked }}" onClick="{{ kit.upload }}">Back up Recovery Kit</button></div>
+              </sc-if>
+
+              <!-- progress -->
+              <sc-if value="{{ kit.busy }}" hint-placeholder-val="{{ false }}">
+                <div class="gen" role="status" style="margin-top:0;border-top:0">
+                  <svg class="ic spin" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 1-6.5 6.5"/></svg>
+                  <b id="km-h">{{ kit.busyTitle }}</b>
+                  <p>{{ kit.busyText }}</p>
+                </div>
+              </sc-if>
+            </div>
+          </section>
+        </sc-if>
+
+        <!-- ================= #40 VAULT RECOVERY ALERTS + KEYHOLDER SCOPE ================= -->
+        <sc-if value="{{ v.alerts }}" hint-placeholder-val="{{ false }}">
+          <section class="sec" aria-labelledby="ra-h">
+            <h2 id="ra-h">Vault Recovery Alerts</h2>
+            <p class="lede">Let COINCUBE watch the chain and alert your keyholders when a recovery path for this Vault opens.</p>
+
+            <sc-if value="{{ ra.noVault }}" hint-placeholder-val="{{ false }}">
+              <div class="gate"><b>No Vault registered</b><p>Create a Vault and register it with Connect to enable recovery alerts.</p><a class="btn" href="P-Create.dc.html">Create Vault</a></div>
+            </sc-if>
+            <sc-if value="{{ ra.planGate }}" hint-placeholder-val="{{ false }}">
+              <div class="gate"><b>Not on your current plan</b><p>Recovery alerts aren't available on your current plan. Upgrade your Connect plan to alert your keyholders when this Vault's recovery window opens.</p><a class="btn pri" href="P-Connect.dc.html">View plans</a></div>
+            </sc-if>
+
+            <sc-if value="{{ ra.main }}" hint-placeholder-val="{{ true }}">
+              <div class="tg"><span class="lb" id="ra-t">Recovery alerts</span><span class="{{ ra.stateTone }}" style="font-size:13px;font-weight:500">{{ ra.stateWord }}</span><button type="button" class="sw" aria-labelledby="ra-t" aria-pressed="{{ ra.onA }}" onClick="{{ ra.toggle }}"></button></div>
+              <sc-if value="{{ ra.on }}" hint-placeholder-val="{{ true }}"><p class="note"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 8v4M9 5.75v.01"/></svg>When on, COINCUBE learns only the block height at which this Vault's recovery window opens and that this desktop checked in — never your addresses or balances.</p></sc-if>
+              <sc-if value="{{ ra.offWarn }}" hint-placeholder-val="{{ false }}"><div class="banner w" role="status"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01"/></svg><p class="tx">Your keyholders will NOT be alerted when this Vault's recovery window opens. Turn on Recovery alerts to fix this.</p></div></sc-if>
+              <sc-if value="{{ ra.confirmOff }}" hint-placeholder-val="{{ false }}">
+                <div class="banner b" role="alertdialog" aria-labelledby="ra-off"><svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01"/></svg><div class="tx"><p id="ra-off">Turn off recovery alerts? COINCUBE will stop watching for this Vault's recovery window. This also deletes the encrypted recovery kit currently stored for your keyholders — they'll no longer be able to recover this Vault.</p><div class="acts" style="margin-top:12px"><button type="button" class="btn danger sm" onClick="{{ ra.doOff }}">Turn off</button><button type="button" class="btn sm demo-focus" onClick="{{ ra.cancelOff }}">Cancel</button></div></div></div>
+              </sc-if>
+
+              <p class="sub3">Keyholders who'd be notified</p>
+              <sc-if value="{{ ra.hasWho }}" hint-placeholder-val="{{ true }}">
+                <ul class="who"><sc-for list="{{ ra.who }}" as="w" hint-placeholder-count="2"><li>{{ w }}</li></sc-for></ul>
+                <p class="note">1 member of this Vault has no email on file, so COINCUBE can't alert them.</p>
+              </sc-if>
+              <sc-if value="{{ ra.noWho }}" hint-placeholder-val="{{ false }}"><p class="note">No one would be alerted for this Vault. Alert recipients are this Vault's keyholders and beneficiaries; its keyholders are fixed when the Vault is built, so they can't be added to an existing Vault.</p></sc-if>
+
+              <p class="sub3" id="ra-scope">What keyholders can recover</p>
+              <sc-if value="{{ ra.estate }}" hint-placeholder-val="{{ false }}">
+                <div class="banner"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 8h8v7.5H5zM6.75 8V6a2.25 2.25 0 0 1 4.5 0v2"/></svg><p class="tx">An encrypted recovery kit for your keyholders is part of the Estate plan.<span>Recovery alerts above still work on your current plan.</span></p><a class="btn sm" href="P-Connect.dc.html">View plans</a></div>
+              </sc-if>
+              <div style="margin-top:10px"><span class="seg" role="group" aria-labelledby="ra-scope">
+                <sc-for list="{{ ra.tiers }}" as="t" hint-placeholder-count="3"><button type="button" aria-pressed="{{ t.on }}" disabled="{{ t.off }}" onClick="{{ t.pick }}">{{ t.label }}</button></sc-for>
+              </span></div>
+              <p class="escrow" role="status">{{ ra.escrow }}</p>
+              <p class="cap" style="margin-top:6px">Choosing Vault only or Full Cube also turns Recovery alerts on.</p>
+              <sc-if value="{{ ra.pin }}" hint-placeholder-val="{{ false }}">
+                <div class="form" role="group" aria-labelledby="ra-pin-l">
+                  <p id="ra-pin-l" style="font-weight:600">Enter your PIN to include this Cube's seed in the encrypted recovery kit.</p>
+                  <div class="fld"><label class="srl" for="ra-pin">PIN</label><input id="ra-pin" class="inp demo-focus" type="password" inputmode="numeric" placeholder="PIN" value="" style="width:200px;letter-spacing:.25em"></div>
+                  <div class="acts"><button type="button" class="btn pri" onClick="{{ ra.pinOk }}">Confirm</button><button type="button" class="btn" onClick="{{ ra.pinCancel }}">Cancel</button></div>
+                </div>
+              </sc-if>
+            </sc-if>
+          </section>
+        </sc-if>
+
+        <!-- ================= #42 AVATAR ================= -->
+        <sc-if value="{{ v.avatar }}" hint-placeholder-val="{{ false }}">
+          <section class="sec" aria-labelledby="av-h">
+            <h2 id="av-h">Avatar</h2>
+
+            <sc-if value="{{ av.signedOut }}" hint-placeholder-val="{{ false }}">
+              <div class="gate"><b>Sign in to Connect</b><p>Sign in to your Connect account to set up an Avatar.</p><a class="btn pri" href="P-SignIn.dc.html">Sign In</a></div>
+            </sc-if>
+            <sc-if value="{{ av.lnGate }}" hint-placeholder-val="{{ false }}">
+              <div class="gate"><b>Claim a Lightning Address first</b><p>Your Avatar is bound to your Lightning Address. Claim one to set up an Avatar.</p><a class="btn pri" href="P-Overview.dc.html">Claim Lightning Address</a></div>
+            </sc-if>
+            <sc-if value="{{ av.loading }}" hint-placeholder-val="{{ false }}"><p class="note" role="status"><svg class="ic s spin" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 1-6.5 6.5"/></svg>Loading avatar data…</p></sc-if>
+            <sc-if value="{{ av.error }}" hint-placeholder-val="{{ false }}">
+              <div class="banner b" role="alert"><svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.75v4M9 12.25v.01"/></svg><div class="tx"><b>Error</b><span>{{ av.errText }}</span><div class="acts" style="margin-top:12px"><button type="button" class="btn pri sm" onClick="{{ av.retry }}">{{ av.retryLabel }}</button></div></div></div>
+            </sc-if>
+
+            <sc-if value="{{ av.questionnaire }}" hint-placeholder-val="{{ true }}">
+              <p class="sub3">Choose Your Traits</p>
+              <p class="lede">Your choices plus your Lightning address make your avatar unique.</p>
+              <div class="traits">
+                <sc-for list="{{ av.traits }}" as="t" hint-placeholder-count="7">
+                  <div class="trait"><span class="lb" id="{{ t.id }}">{{ t.label }}</span><span class="seg" role="group" aria-labelledby="{{ t.id }}"><sc-for list="{{ t.opts }}" as="o" hint-placeholder-count="3"><button type="button" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for></span></div>
+                </sc-for>
+              </div>
+              <div class="acts"><button type="button" class="btn pri" disabled="{{ av.noLn }}" onClick="{{ av.generate }}">{{ av.genLabel }}</button><span class="cap">{{ av.lnLine }}</span></div>
+            </sc-if>
+
+            <sc-if value="{{ av.generating }}" hint-placeholder-val="{{ false }}">
+              <div class="gen" role="status"><svg class="ic spin" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5a6.5 6.5 0 1 1-6.5 6.5"/></svg><b>Forging your identity…</b><p>Generating your sumi-e avatar. This may take up to 30 seconds.</p></div>
+            </sc-if>
+
+            <sc-if value="{{ av.ready }}" hint-placeholder-val="{{ false }}">
+              <div class="ava">
+                <div class="pic" role="img" aria-label="Avatar preview, synthetic placeholder"><svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="5" stroke-linecap="round" aria-hidden="true"><path d="{{ av.enso }}"/></svg></div>
+                <div>
+                  <p style="font-weight:600">[username]@coincube.io</p>
+                  <p class="{{ av.quotaTone }}" style="margin-top:4px;font-size:13px">{{ av.quota }}</p>
+                  <p class="sub3" id="av-var" style="margin-top:16px">Variants</p>
+                  <div class="vars" role="group" aria-labelledby="av-var">
+                    <sc-for list="{{ av.variants }}" as="x" hint-placeholder-count="3"><button type="button" class="var" aria-pressed="{{ x.on }}" aria-label="{{ x.aria }}" onClick="{{ x.pick }}"><svg viewBox="0 0 100 100" fill="none" stroke="currentColor" stroke-width="7" stroke-linecap="round" aria-hidden="true"><path d="{{ x.enso }}"/></svg></button></sc-for>
+                  </div>
+                  <div class="acts">
+                    <button type="button" class="btn pri" disabled="{{ av.out }}" onClick="{{ av.generate }}">{{ av.regenLabel }}</button>
+                    <button type="button" class="btn">Download PNG</button>
+                  </div>
+                </div>
+              </div>
+            </sc-if>
+          </section>
+        </sc-if>
+      </div>
+      <p class="cap pfoot">{{ foot }}</p>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["kitMode","alerts","avatar"],"default":"kitMode","section":"Review"},"state":{"editor":"enum","options":["auto","kitPhoneChecking","kitPhoneAbsent","kitPhoneFound","kitUpdate","kitOwnerOff","kitPassword","kitPasswordMismatch","kitEncrypting","kitSealing","alertsOn","alertsFullCubePin","alertsOff","alertsTurnOff","alertsNoKeyholders","alertsTierUnknown","alertsEstateGate","alertsPlanGate","alertsNoVault","avQuestionnaire","avLnGate","avSignedOut","avGenerating","avReady","avUnlimited","avQuotaOut","avLoading","avError","avRegistrationError"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { k: null, hide: false, lockAsk: false };
+  }
+  renderVals() {
+    const P = this.props, self = this;
+    const SCR = {
+      kitMode: ['kitPhoneFound', 'kitPhoneChecking', 'kitPhoneAbsent', 'kitUpdate', 'kitOwnerOff', 'kitPassword', 'kitPasswordMismatch', 'kitEncrypting', 'kitSealing'],
+      alerts: ['alertsOn', 'alertsFullCubePin', 'alertsOff', 'alertsTurnOff', 'alertsNoKeyholders', 'alertsTierUnknown', 'alertsEstateGate', 'alertsPlanGate', 'alertsNoVault'],
+      avatar: ['avQuestionnaire', 'avLnGate', 'avSignedOut', 'avGenerating', 'avReady', 'avUnlimited', 'avQuotaOut', 'avLoading', 'avError', 'avRegistrationError']
+    };
+    const scr = SCR[P.screen] ? P.screen : 'kitMode';
+    const lvSt = SCR[scr].indexOf(P.state) >= 0 ? P.state : SCR[scr][0];
+    const key = scr + '|' + lvSt;
+    const TIER0 = { alertsOff: 'off', alertsNoKeyholders: 'vault', alertsTierUnknown: 'unknown', alertsEstateGate: 'off', alertsFullCubePin: 'vault' };
+    const init = { key, st: lvSt, ack: lvSt === 'kitPasswordMismatch' ? false : true,
+      alertsOn: lvSt !== 'alertsOff', tier: TIER0[lvSt] || 'vault', pin: lvSt === 'alertsFullCubePin', confirmOff: lvSt === 'alertsTurnOff',
+      tr: { gender: 'Woman', archetype: 'Ronin', age: 'Mature', demeanor: 'Calm', armor: 'Standard', accent: 'Seal', laser: 'Off' }, variant: 0, used: 0 };
+    const S = (this.state.k && this.state.k.key === key) ? this.state.k : init;
+    const set = (patch) => self.setState({ k: Object.assign({}, S, patch) });
+    const st = S.st;
+    const I = {
+      ok: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6.25 9.25l1.9 1.9 3.6-3.9',
+      warn: 'M9 2.5 16 15H2zM9 7.5v3M9 12.75v.01',
+      out: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M6 9h6',
+      info: 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 8v4M9 5.75v.01',
+      spin: 'M9 2.5a6.5 6.5 0 1 1-6.5 6.5',
+      key: 'M6 7.5a3.5 3.5 0 1 1 3 3.46L7.5 12.5H6V14H4.5v1.5H2.5v-2l4.04-4.04A3.5 3.5 0 0 1 6 7.5z',
+      phone: 'M6 2.5h6a.75.75 0 0 1 .75.75v11.5a.75.75 0 0 1-.75.75H6a.75.75 0 0 1-.75-.75V3.25A.75.75 0 0 1 6 2.5zM8.25 13.5h1.5',
+      both: 'M3 6.5a2.5 2.5 0 1 1 2.2 2.48L4 10.2H3v1H2v1H1v-1.4l2.2-2.2A2.5 2.5 0 0 1 3 6.5zM10.5 3h5a.6.6 0 0 1 .6.6v10.8a.6.6 0 0 1-.6.6h-5a.6.6 0 0 1-.6-.6V3.6a.6.6 0 0 1 .6-.6zM12.4 13h1.2'
+    };
+
+    // ---------- #40 kit mode ----------
+    const phone = st === 'kitPhoneChecking' ? 'checking' : st === 'kitPhoneAbsent' ? 'absent' : 'present';
+    const ownerOff = st === 'kitOwnerOff';
+    const phoneReady = phone === 'present';
+    const MODES = [
+      ['password', 'Use a recovery password', 'Type it to restore. COINCUBE cannot recover it.', I.key, false],
+      ['phone', 'Use my phone', 'Approve on your Keychain. No password to remember.', I.phone, true],
+      ['both', 'Use both', 'Either one restores.', I.both, true]
+    ].filter((m) => !(ownerOff && m[4]));
+    const PH = {
+      checking: ['Checking for your phone key…', 'unk', I.spin, 'spin'],
+      present: ['Phone key found. Choose “Use my phone” or “Use both” — you\'ll restore by approving on your Keychain.', 'ok', I.ok, ''],
+      absent: ['No phone key yet. Create a recovery key in your Keychain app — signed in to this same Connect account — to enable phone recovery. You\'ll need this phone (or its recovery phrase) to restore.', 'warn', I.warn, '']
+    }[phone];
+    const kitView = st === 'kitPassword' || st === 'kitPasswordMismatch' ? 'password' : st === 'kitEncrypting' || st === 'kitSealing' ? 'busy' : 'picker';
+    const mismatch = st === 'kitPasswordMismatch';
+    const kit = {
+      picker: kitView === 'picker', password: kitView === 'password', busy: kitView === 'busy',
+      protectedBy: st === 'kitUpdate' ? 'Password' : st === 'kitSealing' ? 'Keychain (sealing…)' : st === 'kitEncrypting' ? 'Password (uploading…)' : 'Not backed up yet',
+      hasBacked: st === 'kitUpdate',
+      modes: MODES.map((m, i) => ({ label: m[1], sub: m[4] && !phoneReady ? 'Needs a phone key in your Keychain app.' : m[2], icon: m[3], off: m[4] && !phoneReady, focus: i === 0 ? 'demo-focus' : '',
+        pick: () => { if (m[0] === 'password') set({ st: 'kitPassword' }); else if (phoneReady) set({ st: 'kitSealing' }); } })),
+      showPhone: !ownerOff, phoneText: PH[0], phoneTone: PH[1], phoneIcon: PH[2], phoneSpin: PH[3],
+      canRecheck: phone !== 'checking', recheck: () => set({ st: 'kitPhoneChecking' }),
+      confirmVal: mismatch ? '*********' : '************', mismatch, mismatchA: String(mismatch), mismatchDesc: mismatch ? 'kp-err' : '',
+      ack: !!S.ack, toggleAck: () => set({ ack: !S.ack }), blocked: !S.ack || mismatch,
+      toPicker: () => set({ st: 'kitPhoneFound' }), upload: () => { if (S.ack && !mismatch) set({ st: 'kitEncrypting' }); },
+      busyTitle: st === 'kitSealing' ? 'Sealing to your phone…' : 'Encrypting and uploading…',
+      busyText: st === 'kitSealing' ? 'Encrypting your recovery material to your Keychain key and uploading.' : 'This takes a moment by design: slow encryption resists guessing.'
+    };
+
+    // ---------- #40 recovery alerts ----------
+    const ESCROW = {
+      unknown: "A recovery kit is stored, but this device can't tell which kind (this server doesn't report it). Reselect Vault only or Full Cube to confirm or change it, or Nothing to remove it.",
+      off: "Nothing — alerts only: your keyholders are told when the recovery window opens, but no encrypted recovery kit is stored, so they can't recover this Vault themselves.",
+      vault: "Vault only: an encrypted copy of this Vault's descriptor is sealed to each keyholder's own key — only they can open it, never COINCUBE. When the recovery window opens, a keyholder recovers the watch-only Vault and sweeps the funds. The seed is never escrowed.",
+      full: "Full Cube: seals this Cube's seed AND descriptor to each keyholder's own key. A keyholder can restore the entire Cube — Liquid, Spark and Vault. COINCUBE can never read either; only the keyholder's key can. You'll re-confirm your PIN to include the seed."
+    };
+    const estate = st === 'alertsEstateGate';
+    const on = !!S.alertsOn;
+    const ra = {
+      noVault: st === 'alertsNoVault', planGate: st === 'alertsPlanGate', main: st !== 'alertsNoVault' && st !== 'alertsPlanGate',
+      on, onA: String(on), stateWord: on ? 'On' : 'Off', stateTone: on ? 'ok' : 'warn',
+      offWarn: !on, confirmOff: !!S.confirmOff,
+      toggle: () => { if (on) set({ confirmOff: true }); else set({ alertsOn: true }); },
+      doOff: () => set({ alertsOn: false, confirmOff: false, tier: 'off', pin: false }), cancelOff: () => set({ confirmOff: false }),
+      hasWho: st !== 'alertsNoKeyholders', noWho: st === 'alertsNoKeyholders',
+      who: ['sam@example.test', 'jordan@example.test — Beneficiary'],
+      estate,
+      tiers: [['off', 'Nothing'], ['vault', 'Vault only'], ['full', 'Full Cube']].map((t) => ({ label: t[1], on: String(S.tier === t[0] || (S.pin && t[0] === 'full')), off: estate,
+        pick: () => { if (estate) return; if (t[0] === 'full') set({ pin: true }); else set({ tier: t[0], pin: false, alertsOn: t[0] === 'off' ? on : true }); } })),
+      escrow: S.pin ? ESCROW.full : ESCROW[S.tier] || ESCROW.vault,
+      pin: !!S.pin, pinOk: () => set({ tier: 'full', pin: false, alertsOn: true }), pinCancel: () => set({ pin: false })
+    };
+
+    // ---------- #42 avatar ----------
+    const TRAITS = [
+      ['gender', 'Gender', ['Man', 'Woman']], ['archetype', 'Archetype', ['Ronin', 'Samurai', 'Shogun']], ['age', 'Age Feel', ['Young', 'Mature', 'Elder']],
+      ['demeanor', 'Demeanor', ['Calm', 'Fierce', 'Mysterious']], ['armor', 'Armor', ['Light', 'Standard', 'Heavy']], ['accent', 'Accent', ['Sun', 'Splatter', 'Seal', 'Calligraphy']],
+      ['laser', 'Laser Eyes', ['On', 'Off']]
+    ];
+    const ENSO = ['M78 30a34 34 0 1 0 6 26', 'M70 22a34 34 0 1 0 14 34', 'M82 40a34 34 0 1 0-8 38'];
+    const quotaMax = st === 'avQuotaOut' ? 0 : 3;
+    const left = Math.max(0, quotaMax - (S.used || 0));
+    const unlimited = st === 'avUnlimited';
+    const out = !unlimited && left === 0;
+    const isErr = st === 'avError' || st === 'avRegistrationError';
+    const showQ = st === 'avQuestionnaire' || st === 'avLnGate';
+    const av = {
+      signedOut: st === 'avSignedOut', lnGate: st === 'avLnGate', loading: st === 'avLoading',
+      error: isErr, errText: st === 'avRegistrationError' ? '[Connect registration error · synthetic]' : '[Avatar service error · synthetic]',
+      retryLabel: st === 'avRegistrationError' ? 'Retry Connection' : 'Try Again', retry: () => set({ st: 'avQuestionnaire' }),
+      questionnaire: showQ,
+      traits: TRAITS.map((t) => ({ id: 'tr-' + t[0], label: t[1], opts: t[2].map((o) => ({ label: o, on: String(S.tr[t[0]] === o), pick: () => set({ tr: Object.assign({}, S.tr, { [t[0]]: o }) }) })) })),
+      noLn: st === 'avLnGate', genLabel: st === 'avLnGate' ? 'Set Lightning Address First' : 'Generate Avatar',
+      lnLine: st === 'avLnGate' ? '' : 'Bound to [username]@coincube.io',
+      generate: () => {
+        if (st === 'avLnGate' || (st !== 'avQuestionnaire' && out)) return;
+        const used = st === 'avQuestionnaire' ? (S.used || 0) : (S.used || 0) + 1;
+        set({ st: 'avGenerating', used });
+        setTimeout(() => { const c = self.state.k; if (c && c.st === 'avGenerating') self.setState({ k: Object.assign({}, c, { st: 'avReady', variant: 0 }) }); }, 1500);
+      },
+      generating: st === 'avGenerating', ready: st === 'avReady' || unlimited || st === 'avQuotaOut',
+      enso: ENSO[S.variant || 0],
+      quota: unlimited ? 'Regenerations: Unlimited' : 'Regenerations remaining: ' + left, quotaTone: out ? 'warn' : 'muted', out,
+      regenLabel: out ? 'No Regenerations Remaining' : 'Regenerate Avatar',
+      variants: ENSO.map((e, i) => ({ enso: e, on: String((S.variant || 0) === i), aria: 'Variant ' + (i + 1), pick: () => set({ variant: i }) }))
+    };
+
+    // ---------- shell ----------
+    const TABS = [['display', 'Display & appearance'], ['backup', 'Backup & protection'], ['payments', 'Payment checks'], ['data', 'Data & exports']];
+    const curTab = scr === 'avatar' ? 'display' : 'backup';
+    const tabs = TABS.map((t) => ({ label: t[1], cls: t[0] === curTab ? 'on' : '', cur: t[0] === curTab ? 'page' : 'false', href: t[0] === curTab ? 'V6-Gaps-Account.dc.html' : 'P-Settings.dc.html' }));
+    const ROUTE = {
+      kitMode: 'App: Cube › Settings › Recovery › Cube Recovery Kit',
+      alerts: 'App: Cube › Settings › Recovery › Vault Recovery Alerts',
+      avatar: 'App: Cube › Settings › Avatar (Connect panel)'
+    };
+    const FOOT = {
+      kitMode: 'Prototype V6 · phone options need a registered phone key and the owner-keychain recovery switch (on by default) · password strength is synthetic',
+      alerts: 'Prototype V6 · synthetic keyholders · alerts are about the Vault recovery path, not the Recovery Kit backup · Vault only / Full Cube need the Estate plan',
+      avatar: 'Prototype V6 · avatar art is a placeholder · needs Connect sign-in and a claimed Lightning Address · quota from the Connect plan'
+    };
+    const signedOut = st === 'avSignedOut';
+    const hide = !!this.state.hide;
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      lockIdle: !self.state.lockAsk, lockAsk: !!self.state.lockAsk, askLock: () => self.setState({ lockAsk: true }), cancelLock: () => self.setState({ lockAsk: false }),
+      hideP: String(hide), shown: !hide, hidden: hide, toggleHide: () => self.setState({ hide: !hide }),
+      acctWord: signedOut ? 'Signed out' : 'Signed in', acctTone: signedOut ? 'unk' : 'ok', acctIcon: signedOut ? I.out : I.ok,
+      acctTitle: signedOut ? 'Connect account · Signed out' : 'alex@example.test · Signed in', acctSr: signedOut ? 'Connect account:' : 'Connect account alex@example.test:',
+      svcWord: signedOut ? 'Reconnect required' : 'Connected', svcTone: signedOut ? 'warn' : 'ok', svcIcon: signedOut ? I.warn : I.ok, svcTitle: signedOut ? 'Cube service · Reconnect required' : 'Cube service · Connected',
+      navBackup: { cls: scr === 'avatar' ? '' : 'on', cur: scr === 'avatar' ? 'false' : 'page' },
+      navSet: { cls: scr === 'avatar' ? 'on' : '', cur: scr === 'avatar' ? 'page' : 'false' },
+      route: ROUTE[scr], tabs,
+      v: { kit: scr === 'kitMode', alerts: scr === 'alerts', avatar: scr === 'avatar' },
+      kit, ra, av,
+      foot: FOOT[scr]
+    };
+  }
+}
+</script>
+</body>
+</html>

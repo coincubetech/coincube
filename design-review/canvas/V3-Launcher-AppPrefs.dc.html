@@ -1,0 +1,515 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 Launcher · App preferences</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens copied from V3-Launcher-Spin; the floor here is static (no transitions) */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--skel:#2c2d2b;font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--skel:#ece7de}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar (as V3-Launcher-Spin) + universal toggles */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;white-space:nowrap}
+.tbtn:hover{border-color:var(--line)}
+a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
+.tbtn svg{width:16px;height:16px}
+.tbtn.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.tbtn.ico{width:32px;padding:0;justify-content:center}
+.tbtn.ico[aria-pressed="true"]{background:var(--selected);border-color:var(--accent)}
+/* Connect entry: "Connect · who" plus a small state word */
+.tbtn .dot{color:var(--muted)}
+.tbtn .stw{font-size:12px;font-weight:400;color:var(--muted)}
+
+/* static, dimmed Launcher floor behind the Connect layer */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.backdrop{position:absolute;inset:0;opacity:.4;pointer-events:none;display:flex;flex-direction:column}
+.bfield{flex:1;position:relative}
+.floor{position:absolute;left:0;right:0;bottom:0;top:30%;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.brow{position:absolute;left:0;right:0;top:84px;display:flex;justify-content:center;gap:40px}
+.cb{width:232px;height:344px;display:flex;flex-direction:column;align-items:center;padding-top:8px;box-sizing:border-box;--s:152px}
+.scene{position:relative;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(8px)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.cube.btc{--edge:var(--edge-btc)}.cube.b2b{--edge:var(--edge-b2b)}.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:6px;transform:rotate(45deg)}
+/* Bitcoin network mark: the supplied logo. Test network = 60% logo inside a dashed ring, plus the text tag */
+.bmk{display:inline-flex;align-items:center;justify-content:center;flex:none;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.bmk img{display:block;width:100%;height:100%;border-radius:50%}
+.bmk.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.bmk.tn img{opacity:.6}
+.ftag{font-size:14px;font-weight:600;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.wi{width:38px;height:38px}
+.pad{width:54px;height:54px}
+.bnm{margin-top:auto;padding-bottom:10px;font-weight:600}
+.bbar{height:64px;flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+
+/* the App preferences layer: same 1040px surface as Connect */
+.sheet{position:absolute;left:200px;top:28px;width:1040px;bottom:28px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);overflow:hidden;z-index:4}
+.light .sheet{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
+.shead{flex:none;display:flex;align-items:center;gap:16px;padding:18px 24px 18px 28px;border-bottom:1px solid var(--line)}
+.shead h1{margin:0;font-size:24px;font-weight:600;line-height:1.25}
+.shead p{margin:2px 0 0;font-size:13px;color:var(--muted)}
+.btn.close{gap:6px;padding:0 12px 0 10px}
+.sbody{flex:1;min-height:0;display:flex}
+.nav{width:232px;flex:none;box-sizing:border-box;padding:16px 12px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+/* the 6px gap is wider than the ring (2px + 2px offset), and the focused/selected row paints above its neighbours */
+.ni{position:relative;z-index:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;border:0;border-radius:8px;background:none;cursor:pointer;font-size:14px;text-align:left}
+.ni[aria-current="page"]{z-index:1}
+.ni:focus-visible,.ni.demo-focus{z-index:2}
+.ni svg{width:18px;height:18px;color:var(--muted)}
+.ni:hover{background:var(--selected)}
+.ni[aria-current="page"]{background:var(--selected);font-weight:600}
+.ni[aria-current="page"] svg{color:var(--accent)}
+.navnote{margin:auto 12px 0;font-size:12px;color:var(--muted);line-height:1.4}
+.content{flex:1;min-width:0;overflow-y:auto;padding:28px 40px 40px}
+.sec{max-width:700px}
+.sec h2{margin:0 0 16px;font-size:20px;font-weight:600;line-height:1.3}
+.rows{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) auto 92px;align-items:center;column-gap:24px;min-height:64px;padding:14px 0;border-bottom:1px solid var(--line);box-sizing:border-box}
+.row .lbl{font-weight:500;display:block}
+.row .dsc{display:block;font-size:13px;color:var(--muted);margin-top:2px}
+.row .sys{display:block;font-size:12px;color:var(--muted);margin-top:6px}
+.row .ctl{display:flex;align-items:center;gap:8px;justify-self:end}
+.scope{justify-self:end;display:inline-flex;align-items:center;gap:4px;height:20px;padding:0 6px;border:1px solid var(--line);border-radius:4px;font-size:12px;color:var(--muted);white-space:nowrap}
+.scope svg{width:12px;height:12px}
+.row.sub{grid-template-columns:minmax(0,1fr) auto 92px;min-height:48px;padding:10px 0 10px 20px;font-size:13px}
+.review{grid-column:1 / -1;margin:12px 0 2px;padding:14px 16px;border-radius:8px;background:var(--selected)}
+.review b{display:block;font-weight:600}
+.review ul{margin:6px 0 12px;padding-left:18px;font-size:13px}
+.review li{margin:2px 0}
+.acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.note{grid-column:1 / -1;margin:8px 0 0;font-size:12px;color:var(--muted)}
+.stt{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.stt svg{width:16px;height:16px}
+.tone-ok{color:var(--good)}.tone-muted{color:var(--muted)}
+.val{font-size:13px;white-space:nowrap}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12.5px}
+/* segmented radio group: real radios, visually hidden, label is the target */
+.seg{display:inline-flex;margin:0;padding:2px;border:1px solid var(--line);border-radius:8px;gap:2px;min-inline-size:0}
+.seg input{position:absolute;opacity:0;width:1px;height:1px;margin:0}
+.seg label{position:relative;display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:6px;border:1px solid transparent;cursor:pointer;font-size:13px;white-space:nowrap}
+.seg label svg{width:16px;height:16px}
+.seg label:hover{background:var(--selected)}
+.seg input:checked + label{background:var(--selected);border-color:var(--accent);font-weight:600}
+.seg input:focus-visible + label{outline:2px solid var(--focus);outline-offset:2px;z-index:1}
+/* switch: a real checkbox with role=switch */
+.sw{appearance:none;-webkit-appearance:none;flex:none;position:relative;width:40px;height:24px;margin:0;border-radius:12px;border:1px solid var(--muted);background:transparent;cursor:pointer;transition:background .15s}
+.sw::before{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:var(--muted);transition:transform .15s}
+.sw:checked{background:var(--accent);border-color:var(--accent)}
+.sw:checked::before{transform:translateX(16px);background:var(--on-accent)}
+.swst{font-size:13px;color:var(--muted);min-width:24px}
+.btn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
+.shead .btn{height:36px;font-size:14px}
+.linkbtn{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px;white-space:nowrap}
+.linkbtn svg{width:14px;height:14px}
+a.linkbtn:hover,.linkbtn:hover{color:var(--ink)}
+.disc{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:0;cursor:pointer;font-size:13px;color:var(--ink)}
+.disc svg{width:16px;height:16px;transition:transform .15s}
+.disc[aria-expanded="true"] svg{transform:rotate(90deg)}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+.coin-top{width:calc(var(--s) * .34);height:calc(var(--s) * .34)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="grow"></span>
+    <button type="button" class="tbtn ico" aria-label="Hide balances" aria-pressed="{{ hidePressed }}" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg>
+    </button>
+    <span class="vsep"></span>
+    <a class="tbtn" href="V3-Launcher-Connect.dc.html" aria-label="Connect, alex@example.test, signed in">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="dot">·</span><span>alex@example.test</span><span class="stw">Signed in</span>
+    </a>
+    <a class="tbtn on" href="V3-Launcher-AppPrefs.dc.html" aria-current="page">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage">
+    <div class="backdrop" aria-hidden="true">
+      <div class="bfield">
+        <div class="floor"></div>
+        <div class="brow">
+          <sc-for list="{{ floorCubes }}" as="c" hint-placeholder-count="4">
+            <div class="cb">
+              <div class="scene">
+                <div class="shadow"></div>
+                <div class="cube {{ c.edge }}">
+                  <div class="f t"><div class="tc">
+                    <sc-if value="{{ c.isB2b }}" hint-placeholder-val="{{ false }}"><img class="mk coin-top" src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></sc-if>
+                    <sc-if value="{{ c.notB2b }}" hint-placeholder-val="{{ true }}"><span class="bmk {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                    <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+                  </div></div>
+                  <div class="f l"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="{{ c.walletPath }}"></path></svg></div>
+                  <div class="f r"><svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg></div>
+                </div>
+              </div>
+              <span class="bnm">{{ c.name }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div class="bbar"><span class="btn">Create Cube</span><span class="btn">Import or restore a Cube</span></div>
+    </div>
+
+    <section class="sheet" aria-labelledby="ap-title">
+      <div class="shead">
+        <div class="grow">
+          <h1 id="ap-title">App preferences</h1>
+          <p>These settings apply to this device, not to any Cube or account.</p>
+        </div>
+        <a class="btn close" href="V3-Launcher-Spin.dc.html" aria-label="Close App preferences">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          <span>Close</span>
+        </a>
+      </div>
+      <div class="sbody">
+        <nav class="nav" aria-label="App preference sections">
+          <sc-for list="{{ sections }}" as="n" hint-placeholder-count="6">
+            <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.current }}" onClick="{{ n.pick }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ n.icon }}"></path></svg>
+              <span>{{ n.label }}</span>
+            </button>
+          </sc-for>
+          <p class="navnote">Cube settings stay inside each Cube. Account services are under Connect.</p>
+        </nav>
+
+        <div class="content">
+
+          <!-- APPEARANCE -->
+          <sc-if value="{{ showAppearance }}" hint-placeholder-val="{{ true }}">
+            <div class="sec">
+              <h2>Appearance</h2>
+              <ul class="rows">
+                <li class="row">
+                  <span><span class="lbl" id="ap-theme-l">Theme</span><span class="dsc" id="ap-theme-d">Colors for the Launcher and every Cube on this device.</span><span class="sys">System is currently: {{ osThemeLabel }}</span></span>
+                  <fieldset class="seg ctl" aria-labelledby="ap-theme-l" aria-describedby="ap-theme-d">
+                    <sc-for list="{{ themeOpts }}" as="o" hint-placeholder-count="3">
+                      <input type="radio" name="ap-theme" id="{{ o.id }}" value="{{ o.value }}" checked="{{ o.checked }}" onChange="{{ o.pick }}">
+                      <label for="{{ o.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ o.icon }}"></path></svg>{{ o.label }}</label>
+                    </sc-for>
+                  </fieldset>
+                  <span class="scope">This device</span>
+                </li>
+              </ul>
+            </div>
+          </sc-if>
+
+          <!-- LAUNCHER -->
+          <sc-if value="{{ showLauncher }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h2>Launcher</h2>
+              <ul class="rows">
+                <li class="row">
+                  <span><span class="lbl" id="ap-style-l">Launcher style</span><span class="dsc" id="ap-style-d">List is used automatically under reduced motion or when 3D rendering is unavailable.</span><span class="sys">{{ styleNow }}</span></span>
+                  <fieldset class="seg ctl" aria-labelledby="ap-style-l" aria-describedby="ap-style-d">
+                    <sc-for list="{{ styleOpts }}" as="o" hint-placeholder-count="2">
+                      <input type="radio" name="ap-style" id="{{ o.id }}" value="{{ o.value }}" checked="{{ o.checked }}" onChange="{{ o.pick }}">
+                      <label for="{{ o.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ o.icon }}"></path></svg>{{ o.label }}</label>
+                    </sc-for>
+                  </fieldset>
+                  <span class="scope">This device</span>
+                </li>
+                <li class="row">
+                  <label for="ap-testnets"><span class="lbl">Show test networks by default</span><span class="dsc" id="ap-testnets-d">The Launcher's starting filter only. It changes what the catalog shows, never a Cube's network.</span></label>
+                  <span class="ctl"><span class="swst" aria-hidden="true">{{ testNetsWord }}</span><input type="checkbox" role="switch" class="sw" id="ap-testnets" aria-describedby="ap-testnets-d" checked="{{ testNets }}" onChange="{{ toggleTestNets }}"></span>
+                  <span class="scope">This device</span>
+                </li>
+              </ul>
+            </div>
+          </sc-if>
+
+          <!-- BALANCES & MOTION -->
+          <sc-if value="{{ showBalances }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h2>Balances &amp; motion</h2>
+              <ul class="rows">
+                <li class="row">
+                  <label for="ap-hide"><span class="lbl">Hide balances</span><span class="dsc" id="ap-hide-d">Amounts show as •••••• in every Cube. The eye in the top bar flips the same setting.</span></label>
+                  <span class="ctl"><span class="swst" aria-hidden="true">{{ hideWord }}</span><input type="checkbox" role="switch" class="sw" id="ap-hide" aria-describedby="ap-hide-d" checked="{{ hide }}" onChange="{{ toggleHide }}"></span>
+                  <span class="scope">This device</span>
+                </li>
+                <li class="row">
+                  <span><span class="lbl" id="ap-motion-l">Motion</span><span class="dsc" id="ap-motion-d">Reduced removes the Cube turn and other movement. Security checks never wait for animation.</span><span class="sys">System is currently: {{ osMotionLabel }}</span></span>
+                  <fieldset class="seg ctl" aria-labelledby="ap-motion-l" aria-describedby="ap-motion-d">
+                    <sc-for list="{{ motionOpts }}" as="o" hint-placeholder-count="2">
+                      <input type="radio" name="ap-motion" id="{{ o.id }}" value="{{ o.value }}" checked="{{ o.checked }}" onChange="{{ o.pick }}">
+                      <label for="{{ o.id }}">{{ o.label }}</label>
+                    </sc-for>
+                  </fieldset>
+                  <span class="scope">This device</span>
+                </li>
+              </ul>
+            </div>
+          </sc-if>
+
+          <!-- DEVELOPER -->
+          <sc-if value="{{ showDeveloper }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h2>Developer</h2>
+              <ul class="rows">
+                <li class="row">
+                  <label for="ap-dev"><span class="lbl">Developer mode</span><span class="dsc" id="ap-dev-d">Show test networks in the Cubes network dropdown.</span></label>
+                  <span class="ctl"><span class="swst" aria-hidden="true">{{ devWord }}</span><input type="checkbox" role="switch" class="sw" id="ap-dev" aria-describedby="ap-dev-d" checked="{{ dev }}" onChange="{{ toggleDev }}"></span>
+                  <span class="scope">This device</span>
+                </li>
+                <li class="row">
+                  <span><span class="lbl">Bitcoin Blake2b beta</span><span class="dsc">Access to the Bitcoin Blake2b chain is granted per account. This is not a network switch.</span></span>
+                  <span class="ctl" style="flex-direction:column;align-items:flex-end;gap:2px">
+                    <span class="stt tone-muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ offPath }}"></path></svg>Not enabled for this account · managed through Connect</span>
+                    <a class="linkbtn" href="V3-Launcher-Connect.dc.html">Open Connect account</a>
+                  </span>
+                  <span class="scope">Account</span>
+                </li>
+              </ul>
+            </div>
+          </sc-if>
+
+          <!-- DIAGNOSTICS -->
+          <sc-if value="{{ showDiagnostics }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h2>Diagnostics</h2>
+              <ul class="rows">
+                <li class="row">
+                  <span><span class="lbl">Sanitized logs</span><span class="dsc">Logs are sanitized before they're written. Review a copy before you share it.</span></span>
+                  <span class="ctl">
+                    <button type="button" class="btn">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v10h-17z"></path></svg>
+                      <span>Open folder</span>
+                    </button>
+                    <button type="button" class="btn" onClick="{{ copySummary }}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M8.5 8.5h11v11h-11zM15.5 8.5v-4h-11v11h4"></path></svg>
+                      <span>Copy summary</span>
+                    </button>
+                  </span>
+                  <span class="scope">This device</span>
+                  <sc-if value="{{ copied }}" hint-placeholder-val="{{ false }}"><p class="note" role="status">Summary copied. It contains versions, platform and recent sanitized errors.</p></sc-if>
+                </li>
+                <li class="row">
+                  <span><span class="lbl">Repair device registration</span><span class="dsc">For when Connect no longer recognises this device.</span></span>
+                  <span class="ctl"><button type="button" class="btn" aria-expanded="{{ repairExpanded }}" aria-controls="ap-repair" onClick="{{ askRepair }}">Repair…</button></span>
+                  <span class="scope">This device</span>
+                  <sc-if value="{{ repairOpen }}" hint-placeholder-val="{{ false }}">
+                    <div class="review" id="ap-repair" role="group" aria-label="Review device registration repair">
+                      <b>Re-register this device with Connect?</b>
+                      <ul>
+                        <li>Re-registers this device with your Connect account.</li>
+                        <li>Requires signing in to Connect first.</li>
+                        <li>Does not change any Cube, wallet or key.</li>
+                      </ul>
+                      <div class="acts"><button type="button" class="btn primary" onClick="{{ doRepair }}">Sign in and repair</button><button type="button" class="btn" onClick="{{ cancelRepair }}">Cancel</button></div>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{ repairAsked }}" hint-placeholder-val="{{ false }}"><p class="note" role="status">Repair waits for Connect sign-in. Nothing has changed yet.</p></sc-if>
+                </li>
+                <li class="row">
+                  <span><span class="lbl">Stream status</span><span class="dsc">Live updates from Connect to this device. Separate from account sign-in and each Cube's registration.</span></span>
+                  <span class="ctl"><span class="stt tone-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ okPath }}"></path></svg>Connected</span></span>
+                  <span class="scope">This device</span>
+                </li>
+              </ul>
+            </div>
+          </sc-if>
+
+          <!-- ABOUT -->
+          <sc-if value="{{ showAbout }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h2>About</h2>
+              <ul class="rows">
+                <li class="row">
+                  <span><span class="lbl">Tenshu version</span><span class="dsc">Installed on this device</span></span>
+                  <span class="ctl val">[VERSION]</span>
+                  <span class="scope">This device</span>
+                </li>
+                <li class="row">
+                  <span><span class="lbl">Build provenance</span><span class="dsc">Which build this is, and whether it was reproduced</span></span>
+                  <span class="ctl val"><span class="mono">[BUILD ID]</span> · reproducible build: [status]</span>
+                  <span class="scope">This device</span>
+                </li>
+                <li class="row">
+                  <span><button type="button" class="disc" aria-expanded="{{ verExpanded }}" aria-controls="ap-components" onClick="{{ toggleVersions }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 7l5 5-5 5"></path></svg><span class="lbl">Component versions</span></button><span class="dsc">Wallet daemon and Spark bridge</span></span>
+                  <span class="ctl"></span>
+                  <span class="scope">This device</span>
+                </li>
+                <sc-if value="{{ versOpen }}" hint-placeholder-val="{{ false }}">
+                  <li class="row sub" id="ap-components"><span>Wallet daemon</span><span class="ctl val">[VERSION]</span><span class="scope">This device</span></li>
+                  <li class="row sub"><span>Spark bridge</span><span class="ctl val">[VERSION]</span><span class="scope">This device</span></li>
+                </sc-if>
+                <li class="row">
+                  <span><span class="lbl">Download Stats</span><span class="dsc">Public download counts for Tenshu releases</span></span>
+                  <span class="ctl"><button type="button" class="linkbtn">View Download Stats<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 7l5 5-5 5"></path></svg></button></span>
+                  <span class="scope">This device</span>
+                </li>
+                <li class="row">
+                  <span><span class="lbl">Open-source licenses</span><span class="dsc">Licenses for the software Tenshu is built on</span></span>
+                  <span class="ctl"><button type="button" class="linkbtn">View licenses<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M10 7l5 5-5 5"></path></svg></button></span>
+                  <span class="scope">This device</span>
+                </li>
+              </ul>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div class="foot">Concept prototype V3 · synthetic data · App preferences is a layer over the Launcher; settings here apply to this device only</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["Appearance","Launcher","Balances &amp; motion","Developer","Diagnostics","About"],"default":"Appearance","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { lv: null };
+  }
+  renderVals() {
+    const P = this.props;
+    const L = { section: P.section ?? 'Appearance', os: P.theme ?? 'dark', osReduced: !!P.reducedMotion, hide: !!P.hideBalances };
+    const key = [L.section, L.os, L.osReduced, L.hide].join('|');
+    // a lever change resets live state to the lever values; otherwise live state wins
+    const s = this.state.lv !== key
+      ? { section: L.section, hide: L.hide, appearance: 'system', style: 'cubes', testNets: false, motion: 'system', dev: false, review: null, copied: false, repairAsked: false, vers: false }
+      : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
+
+    const CIRC = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18';
+    const I = {
+      ok: CIRC + 'M8 12.3l2.8 2.8L16.2 9.6',
+      off: CIRC + 'M8.5 12h7',
+      eye: 'M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6',
+      sun: 'M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4',
+      moon: 'M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z',
+      monitor: 'M3.5 5h17v11h-17zM9 20h6M12 16v4',
+      half: CIRC + 'M12 3v18',
+      cube: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9',
+      list: 'M9 6.5h11M9 12h11M9 17.5h11M4.5 6.5h.5M4.5 12h.5M4.5 17.5h.5',
+      code: 'M8.5 7.5L4 12l4.5 4.5M15.5 7.5L20 12l-4.5 4.5M13.5 5l-3 14',
+      pulse: 'M3 12h4l2.5-6 5 12 2.5-6h4',
+      info: CIRC + 'M12 11v5.5M12 7.8v.4',
+      vault: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z',
+      bolt: 'M13 3L5 13.5h6L10 21l8-10.5h-6z'
+    };
+
+    // the theme lever acts as the OS setting; System follows it
+    const effTheme = s.appearance === 'system' ? L.os : s.appearance;
+    const reduced = s.motion === 'reduced' || (s.motion === 'system' && L.osReduced);
+
+    const SECS = [
+      ['Appearance', I.half], ['Launcher', I.cube], ['Balances & motion', I.eye],
+      ['Developer', I.code], ['Diagnostics', I.pulse], ['About', I.info]
+    ];
+    const sec = SECS.some((x) => x[0] === s.section) ? s.section : 'Appearance';
+    const sections = SECS.map(([label, icon]) => ({
+      label, icon,
+      current: sec === label ? 'page' : 'false',
+      // the active section shows its keyboard-focus ring in this review state
+      cls: sec === label ? 'demo-focus' : '',
+      pick: () => go({ section: label })
+    }));
+
+    const radios = (name, cur, opts, field) => opts.map(([value, label, icon]) => ({
+      id: 'ap-' + name + '-' + value, value, label, icon: icon || '',
+      checked: cur === value,
+      pick: () => go({ [field]: value })
+    }));
+
+    const floorCubes = [
+      { name: 'Everyday', edge: 'btc', coinCls: '', tag: '', walletPath: I.vault },
+      { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b', walletPath: I.vault },
+      { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4', walletPath: I.vault },
+      { name: 'Archive', edge: 'btc', coinCls: '', tag: '', walletPath: I.bolt }
+    ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
+
+    const listForced = reduced;
+    const styleNow = listForced
+      ? 'Showing List now: reduced motion is on.'
+      : (s.style === 'list' ? 'Showing List.' : 'Showing Cubes.');
+
+    return {
+      themeClass: effTheme === 'light' ? 'light' : '',
+      motionClass: reduced ? 'reduced' : '',
+      okPath: I.ok, offPath: I.off,
+      floorCubes, sections,
+      // hide balances: one device-wide state shared by the top-bar eye and the switch
+      hide: !!s.hide,
+      hideWord: s.hide ? 'On' : 'Off',
+      hidePressed: String(!!s.hide),
+      hideTitle: s.hide ? 'Balances hidden on this device' : 'Hide balances on this device',
+      eyePath: s.hide ? I.eye + 'M4 4l16 16' : I.eye,
+      toggleHide: () => go({ hide: !s.hide }),
+      showAppearance: sec === 'Appearance',
+      osThemeLabel: L.os === 'light' ? 'Light' : 'Dark',
+      themeOpts: radios('theme', s.appearance, [['system', 'System', I.monitor], ['light', 'Light', I.sun], ['dark', 'Dark', I.moon]], 'appearance'),
+      showLauncher: sec === 'Launcher',
+      styleOpts: radios('style', s.style, [['cubes', 'Cubes', I.cube], ['list', 'List', I.list]], 'style'),
+      styleNow,
+      testNets: !!s.testNets,
+      testNetsWord: s.testNets ? 'On' : 'Off',
+      toggleTestNets: () => go({ testNets: !s.testNets }),
+      showBalances: sec === 'Balances & motion',
+      osMotionLabel: L.osReduced ? 'Reduced motion' : 'Full motion',
+      motionOpts: radios('motion', s.motion, [['system', 'Follow system'], ['reduced', 'Reduced']], 'motion'),
+      showDeveloper: sec === 'Developer',
+      dev: !!s.dev,
+      devWord: s.dev ? 'On' : 'Off',
+      toggleDev: () => go({ dev: !s.dev }),
+      showDiagnostics: sec === 'Diagnostics',
+      copied: !!s.copied,
+      copySummary: () => go({ copied: true }),
+      repairOpen: s.review === 'repair',
+      repairExpanded: String(s.review === 'repair'),
+      askRepair: () => go({ review: s.review === 'repair' ? null : 'repair', repairAsked: false }),
+      cancelRepair: () => go({ review: null }),
+      doRepair: () => go({ review: null, repairAsked: true }),
+      repairAsked: !!s.repairAsked && s.review !== 'repair',
+      showAbout: sec === 'About',
+      versOpen: !!s.vers,
+      verExpanded: String(!!s.vers),
+      toggleVersions: () => go({ vers: !s.vers })
+    };
+  }
+}
+</script>
+</body>
+</html>

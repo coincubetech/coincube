@@ -1,0 +1,343 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 · Cube Overview</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-hi:#ff9a3d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--shadow:rgba(0,0,0,.45)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-hi:#e5761a;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--shadow:rgba(60,40,10,.18)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ul{margin:0}
+.tenshu a{color:var(--acc-ink)}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+/* top bar (V2) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line);position:relative;z-index:5}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.switch{display:flex;align-items:center;gap:10px;height:36px;max-width:460px;min-width:0;padding:0 10px 0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);cursor:pointer}
+.switch .nm{font-weight:600;white-space:nowrap}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.menu{position:absolute;top:50px;left:124px;width:340px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow);padding:6px;z-index:10}
+.menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink)}
+.tenshu a.mi{color:var(--ink)}
+.mi:hover{background:var(--hover)}.mi.on{background:var(--selected)}
+.mi .grow{flex:1;min-width:0}
+.menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.chip .k{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.ok{color:var(--good)}.warn{color:var(--warn)}
+/* shell (V2) */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;color:var(--ink);font-size:14px;line-height:1.3}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.attn{display:flex;align-items:center;gap:6px;width:calc(100% - 12px);margin:0 6px 8px;padding:9px 8px;white-space:nowrap;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;text-align:left;font-size:12.5px;line-height:1.3}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{padding:32px 48px 32px}
+/* overview layout */
+.lay.ledger{max-width:960px}
+.lay.split{display:grid;grid-template-columns:380px minmax(0,1fr);column-gap:48px;align-items:start}
+.lay.split .sum{position:sticky;top:0}
+.ttl{display:flex;align-items:center;gap:4px;min-height:32px}
+.ttl h1{font-size:20px;font-weight:600}
+.ttl h2{font-size:18px;font-weight:600}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.netl{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.ttl .netl{margin-left:auto}
+.big{font-size:44px;font-weight:600;line-height:1.15;margin-top:6px;letter-spacing:-.01em}
+.sats{font-size:14px;margin-top:2px}
+.sats b{font-weight:600}.sats .u{color:var(--muted)}
+.acts{display:flex;gap:8px;margin-top:16px}
+.out{height:36px;padding:0 18px;border-radius:18px;border:1px solid var(--acc-ink);background:transparent;color:var(--acc-ink);font-weight:600;cursor:pointer;display:inline-flex;align-items:center;gap:8px;white-space:nowrap}
+.out:hover{background:var(--hover)}
+.split .netl{display:flex;margin-top:20px}
+.wtl{margin-top:40px;margin-bottom:8px}
+.split .wtl{margin-top:32px;margin-bottom:4px}
+.wnav{list-style:none;padding:0}
+.tenshu a.wa{display:flex;align-items:center;gap:10px;min-height:40px;padding:0 10px;margin:0 -10px;border-radius:8px;color:var(--ink);text-decoration:none}
+.tenshu a.wa:hover{background:var(--hover)}
+.wa .ic{color:var(--muted)}
+.wa .f{margin-left:auto;color:var(--muted)}
+/* ledger rows */
+.L{display:grid;grid-template-columns:40px minmax(0,1fr) 150px 110px 184px;column-gap:16px;align-items:center}
+.split .L{grid-template-columns:40px minmax(0,1fr) 124px 84px 184px;column-gap:12px}
+.wh{border-top:1px solid var(--line);margin-top:16px;padding:16px 0 4px;scroll-margin-top:16px}
+.wh.first{margin-top:0}
+.wh .wi{justify-self:center;color:var(--muted)}
+.wh h3{font-size:16px;font-weight:600;line-height:1.3}
+.wh .wt{grid-column:3/5;text-align:right}
+.wt .f{font-size:20px;font-weight:600;line-height:1.3}
+.wt .s{font-size:13px;color:var(--muted)}
+.ar{min-height:56px}
+.ar .tk{font-weight:500;line-height:1.3}
+.ar .rl{font-size:13px;color:var(--muted);line-height:1.3}
+.ar .n{text-align:right;white-space:nowrap}
+.ar .n b{font-weight:600}.ar .n .u{color:var(--muted)}
+.ar .fx{text-align:right;color:var(--muted)}
+.zero b{font-weight:400;color:var(--muted)}
+.ac{display:flex;justify-content:flex-end;align-items:center;gap:8px}
+.send{height:36px;padding:0 18px;border-radius:18px;border:0;background:var(--accent);color:#1a1208;font-weight:600;cursor:pointer}
+.send:hover{background:var(--acc-hi)}
+.rg{height:36px;padding:0 12px;border:0;border-radius:18px;background:transparent;color:var(--ink);font-weight:500;cursor:pointer;display:inline-flex;align-items:center;gap:6px}
+.rg:hover{color:var(--acc-ink);background:var(--hover)}
+.ri{width:36px;height:36px;border-radius:50%;border:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;display:grid;place-items:center;position:relative}
+.ri:hover{color:var(--acc-ink);border-color:var(--acc-ink)}
+.ri .fl{position:absolute;top:calc(100% + 4px);left:50%;transform:translateX(-50%);font-size:12px;font-weight:500;line-height:16px;white-space:nowrap;padding:0 4px;border-radius:4px;background:var(--bg);color:var(--ink);visibility:hidden}
+.ri:focus-visible .fl,.ri.kf .fl{visibility:visible}
+.rt{height:36px;padding:0 6px;border:0;background:none;color:var(--acc-ink);font-weight:600;cursor:pointer;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:4px}
+.rt:hover{text-decoration-thickness:2px}
+.tenshu .kf{outline:2px solid var(--focus);outline-offset:2px}
+.wf{display:flex;align-items:baseline;flex-wrap:wrap;gap:4px 12px;padding:4px 0 8px 56px}
+.split .wf{padding-left:52px}
+.rlink{display:inline-flex;align-items:center;gap:6px;border:0;background:none;padding:4px 2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px}
+.rlink:hover{text-decoration:underline;text-underline-offset:4px}
+.wf .cap{font-size:13px}
+.synth{margin-top:28px;padding-top:12px;border-top:1px solid var(--line)}
+.coin{position:relative;display:block;flex:none}.coin>img{position:absolute;display:block}.coin>svg{position:absolute;left:0;top:0}.coin.c32{width:32px;height:32px}.coin.c32>img{left:0;top:0;width:32px;height:32px}.coin.c40{width:40px;height:40px}.coin.c40>img{left:1px;top:1px;width:34px;height:34px}.net>img,.netline>img,.idl>img,.netl>img{display:block;width:16px;height:16px;flex:none}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <span>alex@example.test</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
+      </div>
+      <div class="chip">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
+        <span class="k">Cube service</span>
+        <span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span>
+      </div>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOn }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <p class="ml">Open Cubes</p>
+        <button type="button" class="mi on" aria-current="page" onClick="{{ toggleMenu }}"><span class="grow"><b>Everyday</b><br><span class="net">Bitcoin mainnet</span></span><span class="cap">This tab</span></button>
+        <hr>
+        <a class="mi" href="V2-Launcher-3D.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b><br><span class="cap">Open Cubes stay open</span></span></a>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <button type="button" class="ni on" aria-current="page"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></button>
+        <button type="button" class="ni"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></button>
+        <button type="button" class="ni"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></button>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <button type="button" class="ni"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></button>
+        <button type="button" class="ni"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></button>
+        <button type="button" class="ni"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></button>
+      </div>
+      <button type="button" class="attn"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></button>
+      <div class="foot">
+        <button type="button" class="ni"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></button>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+      <div class="lay {{ variant }}">
+
+        <!-- SUMMARY: top block (ledger) or left column (split) -->
+        <div class="sum">
+          <div class="ttl">
+            <h1>Total Balance</h1>
+            <button type="button" class="eye" aria-pressed="{{ hide.totalP }}" aria-label="Hide total balance" onClick="{{ toggleTotal }}">
+              <sc-if value="{{ hide.totalShown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+              <sc-if value="{{ hide.total }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+            </button>
+            <sc-if value="{{ isLedger }}" hint-placeholder-val="{{ true }}"><span class="netl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></sc-if>
+          </div>
+          <p class="big">{{ total.fiat }}</p>
+          <p class="sats"><b>{{ total.sats }}</b> <span class="u">SATS</span></p>
+          <div class="acts"><button type="button" class="out"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M6 3v12M6 3 3.5 5.5M6 3l2.5 2.5M12 15V3M12 15l-2.5-2.5M12 15l2.5-2.5"/></svg>Transfer</button></div>
+
+          <sc-if value="{{ isSplit }}" hint-placeholder-val="{{ false }}">
+            <p class="netl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Network · Bitcoin mainnet</p>
+            <div class="ttl wtl">
+              <h2>Wallets</h2>
+              <button type="button" class="eye" aria-pressed="{{ hide.walletsP }}" aria-label="Hide wallet balances" onClick="{{ toggleWallets }}">
+                <sc-if value="{{ hide.walletsShown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+                <sc-if value="{{ hide.wallets }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+              </button>
+            </div>
+            <ul class="wnav" aria-label="Jump to wallet">
+              <sc-for list="{{ nav }}" as="n" hint-placeholder-count="3">
+                <li><a class="wa" href="{{ n.href }}">
+                  <sc-if value="{{ n.bolt }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                  <sc-if value="{{ n.drop }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+                  <sc-if value="{{ n.shield }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                  <span>{{ n.name }}</span><span class="f">{{ n.fiat }}</span>
+                </a></li>
+              </sc-for>
+            </ul>
+          </sc-if>
+        </div>
+
+        <!-- WALLET LEDGER (shared by both variants) -->
+        <div class="list">
+          <sc-if value="{{ isLedger }}" hint-placeholder-val="{{ true }}">
+            <div class="ttl wtl">
+              <h2>Wallets</h2>
+              <button type="button" class="eye" aria-pressed="{{ hide.walletsP }}" aria-label="Hide wallet balances" onClick="{{ toggleWallets }}">
+                <sc-if value="{{ hide.walletsShown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+                <sc-if value="{{ hide.wallets }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+              </button>
+            </div>
+          </sc-if>
+
+          <sc-for list="{{ rows }}" as="r" hint-placeholder-count="7">
+            <sc-if value="{{ r.head }}" hint-placeholder-val="{{ true }}">
+              <div class="L wh {{ r.cls }}" id="{{ r.id }}">
+                <span class="wi">
+                  <sc-if value="{{ r.bolt }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                  <sc-if value="{{ r.drop }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+                  <sc-if value="{{ r.shield }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                </span>
+                <h3>{{ r.name }}</h3>
+                <div class="wt"><p class="f">{{ r.fiat }}</p><p class="s">{{ r.sats }} SATS</p></div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ r.asset }}" hint-placeholder-val="{{ false }}">
+              <div class="L ar">
+                <sc-if value="{{ r.icSpark }}" hint-placeholder-val="{{ true }}"><span class="coin c40" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><circle cx="31" cy="31" r="8" fill="#111211" style="stroke:var(--bg)" stroke-width="2"/><path d="M31 27v8M27.5 29l7 4M27.5 33l7-4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></span></sc-if>
+                <sc-if value="{{ r.icLbtc }}" hint-placeholder-val="{{ false }}"><span class="coin c40" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><circle cx="31" cy="31" r="8" fill="#2a9d7f" style="stroke:var(--bg)" stroke-width="2"/><path transform="rotate(14 31 31)" d="M29.4 27.8h1.9a1.4 1.4 0 0 1 0 2.8h-1.9zM29.4 30.6h2.2a1.6 1.6 0 0 1 0 3.2h-2.2zM29.4 27.8v6" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></span></sc-if>
+                <sc-if value="{{ r.icUsdt }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><circle cx="18" cy="18" r="17" fill="#2a9d7f"/><g fill="none" stroke="#fff" stroke-linecap="round"><path d="M11 11h14M18 11v15" stroke-width="2.4"/><ellipse cx="18" cy="17" rx="7" ry="2.4" stroke-width="1.6"/></g><circle cx="31" cy="31" r="8" fill="#2a9d7f" style="stroke:var(--bg)" stroke-width="2"/><path transform="rotate(14 31 31)" d="M29.4 27.8h1.9a1.4 1.4 0 0 1 0 2.8h-1.9zM29.4 30.6h2.2a1.6 1.6 0 0 1 0 3.2h-2.2zM29.4 27.8v6" fill="none" stroke="#fff" stroke-width="1.3" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                <sc-if value="{{ r.icVault }}" hint-placeholder-val="{{ false }}"><span class="coin c40" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><svg width="40" height="40" viewBox="0 0 40 40" aria-hidden="true"><circle cx="31" cy="31" r="8" fill="#f3821d" style="stroke:var(--bg)" stroke-width="2"/><path d="M29.6 32.4l2.8-2.8M30.4 28.9l.7-.7a2 2 0 0 1 2.8 2.8l-.7.7M31.6 33.1l-.7.7a2 2 0 0 1-2.8-2.8l.7-.7" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round"/></svg></span></sc-if>
+                <div><p class="tk">{{ r.tick }}</p><p class="rl">{{ r.rail }}</p></div>
+                <span class="n {{ r.zcls }}"><b>{{ r.num }}</b> <span class="u">{{ r.unit }}</span></span>
+                <span class="fx">{{ r.fiat }}</span>
+                <div class="ac">
+                  <button type="button" class="send" aria-label="{{ r.sendLabel }}">Send</button>
+                  <sc-if value="{{ r.ghost }}" hint-placeholder-val="{{ true }}"><button type="button" class="rg {{ r.kf }}" aria-label="{{ r.recvLabel }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v8M5.75 7.25 9 10.5l3.25-3.25M3 11.5v2.25c0 .7.55 1.25 1.25 1.25h9.5c.7 0 1.25-.55 1.25-1.25V11.5"/></svg>Receive</button></sc-if>
+                  <sc-if value="{{ r.icon }}" hint-placeholder-val="{{ false }}"><button type="button" class="ri {{ r.kf }}" aria-label="{{ r.recvLabel }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5v8M5.75 7.25 9 10.5l3.25-3.25M3 11.5v2.25c0 .7.55 1.25 1.25 1.25h9.5c.7 0 1.25-.55 1.25-1.25V11.5"/></svg><span class="fl" aria-hidden="true">Receive</span></button></sc-if>
+                  <sc-if value="{{ r.text }}" hint-placeholder-val="{{ false }}"><button type="button" class="rt {{ r.kf }}" aria-label="{{ r.recvLabel }}">Receive</button></sc-if>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ r.foot }}" hint-placeholder-val="{{ false }}">
+              <div class="wf">
+                <button type="button" class="rlink">Recovery path<svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3.5 9h11M10 4.5 14.5 9 10 13.5"/></svg></button>
+                <span class="cap">Time-locked spending, separate from backup.</span>
+              </div>
+            </sc-if>
+          </sc-for>
+
+          <p class="cap synth">Synthetic balances for design review.</p>
+        </div>
+
+      </div>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"variant":{"editor":"enum","options":["ledger","split"],"default":"ledger","section":"Review"},"receiveStyle":{"editor":"enum","options":["ghost","icon","text"],"default":"ghost","section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={menu:false,hide:null};}
+  renderVals(){
+    // prototype-only: arriving here marks the open Cube as entered, so the Launcher returns in browse (see P-Launcher bounce rule)
+    try { const o = localStorage.getItem('tenshu.proto.open'); if (o) localStorage.setItem('tenshu.proto.seen', o); } catch (e) {}
+    const P=this.props,S=this.state,self=this;
+    const variant=P.variant==='split'?'split':'ledger';
+    const rcv=(P.receiveStyle==='icon'||P.receiveStyle==='text')?P.receiveStyle:'ghost';
+    const hb=!!P.hideBalances;
+    const hide=(S.hide&&S.hide.for===hb)?S.hide:{for:hb,total:hb,wallets:hb};
+    const D='••••••', hw=hide.wallets;
+    const m=(v,h)=>h?D:v;
+    const W=[
+      {id:'spark',name:'Spark · Daily spending',k:'bolt',fiat:'$20.74',sats:'25,053',assets:[
+        {ic:'spark',tick:'BTC',rail:'Spark',num:'25,053',unit:'SATS',fiat:'$20.74'}]},
+      {id:'liquid',name:'Liquid · Travel',k:'drop',fiat:'$20.95',sats:'25,307',assets:[
+        {ic:'lbtc',tick:'L-BTC',rail:'Liquid Network',num:'12,784',unit:'SATS',fiat:'$10.58',focus:true},
+        {ic:'usdt',tick:'USDt',rail:'Liquid Network',num:'10.37',unit:'USDt',fiat:''}]},
+      {id:'vault',name:'Vault · Family savings',k:'shield',fiat:'$0.00',sats:'0',foot:true,assets:[
+        {ic:'vault',tick:'BTC',rail:'Vault · 2-of-3 synthetic policy',num:'0',unit:'SATS',fiat:'$0.00',zero:true}]}
+    ];
+    const rows=[];
+    W.forEach((w,i)=>{
+      rows.push({head:true,asset:false,foot:false,id:w.id,cls:i===0?'first':'',name:w.name,
+        bolt:w.k==='bolt',drop:w.k==='drop',shield:w.k==='shield',fiat:m(w.fiat,hw),sats:m(w.sats,hw)});
+      w.assets.forEach(a=>rows.push({head:false,asset:true,foot:false,
+        icSpark:a.ic==='spark',icLbtc:a.ic==='lbtc',icUsdt:a.ic==='usdt',icVault:a.ic==='vault',
+        tick:a.tick,rail:a.rail,num:m(a.num,hw),unit:a.unit,fiat:hw?'':a.fiat,zcls:a.zero&&!hw?'zero':'',
+        ghost:rcv==='ghost',icon:rcv==='icon',text:rcv==='text',kf:a.focus?'kf':'',
+        sendLabel:'Send '+a.tick+' from '+w.name,recvLabel:'Receive '+a.tick+' to '+w.name}));
+      if(w.foot) rows.push({head:false,asset:false,foot:true});
+    });
+    return {
+      themeClass:(P.theme||'dark')==='light'?'light':'', motionClass:P.reducedMotion?'reduced':'',
+      variant:variant, isLedger:variant==='ledger', isSplit:variant==='split',
+      menuOn:S.menu, menuOpen:S.menu?'true':'false', toggleMenu:()=>self.setState({menu:!S.menu}),
+      hide:{total:hide.total,totalShown:!hide.total,totalP:hide.total?'true':'false',wallets:hw,walletsShown:!hw,walletsP:hw?'true':'false'},
+      toggleTotal:()=>self.setState({hide:{for:hb,total:!hide.total,wallets:hide.wallets}}),
+      toggleWallets:()=>self.setState({hide:{for:hb,total:hide.total,wallets:!hide.wallets}}),
+      total:{fiat:m('$41.70',hide.total),sats:m('50,360',hide.total)},
+      nav:W.map(w=>({href:'#'+w.id,name:w.name,fiat:m(w.fiat,hw),bolt:w.k==='bolt',drop:w.k==='drop',shield:w.k==='shield'})),
+      rows:rows
+    };
+  }
+}
+</script>
+</body>
+</html>

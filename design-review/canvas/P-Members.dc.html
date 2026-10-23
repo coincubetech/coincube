@@ -1,0 +1,359 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Cube members</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{border-color:var(--muted)}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu a{color:var(--acc-ink)}
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+/* top bar (single-Cube model) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap;color:var(--ink)}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.sfoot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto;position:relative}
+.pg{max-width:860px;padding:28px 48px 56px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:10px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.pfoot{position:absolute;left:0;right:0;bottom:12px;text-align:center}
+/* controls */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn[disabled]{cursor:not-allowed;opacity:.55}
+.inp{height:40px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.err{display:flex;align-items:center;gap:6px;font-size:13px;color:var(--bad);font-weight:500}
+/* page */
+.ttl{display:flex;align-items:flex-end;gap:12px}
+.ttl .grow{flex:1}
+.lead{margin-top:6px;color:var(--muted);font-size:14px}
+.grp{margin-top:32px}
+.grp h2{font-size:16px;font-weight:600}
+.grp .ds{font-size:13px;color:var(--muted);margin-top:4px}
+.inv{display:flex;gap:10px;align-items:center;margin-top:12px}
+.inv .inp{width:360px}
+.rows{margin-top:12px;border-top:1px solid var(--line)}
+.row{display:flex;align-items:center;gap:14px;min-height:60px;padding:10px 0;border-bottom:1px solid var(--line)}
+.row .main2{flex:1;min-width:0}
+.row .em{font-weight:500;overflow-wrap:anywhere}
+.row .sub{font-size:13px;color:var(--muted);display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.av{width:36px;height:36px;border-radius:50%;display:grid;place-items:center;background:var(--accent);color:var(--on-accent);font-weight:600;flex:none}
+.badge{display:inline-flex;align-items:center;gap:6px;font-size:13px;color:var(--muted)}
+.info{width:22px;height:22px;display:inline-grid;place-items:center;border:0;border-radius:50%;background:transparent;color:var(--muted);cursor:pointer;padding:0}
+.info:hover{background:var(--hover)}
+.tip{margin-top:6px;font-size:13px;color:var(--muted);max-width:56ch}
+.banner{display:flex;align-items:flex-start;gap:10px;margin-top:20px;padding:12px 14px;border:1px solid var(--bad);border-radius:8px}
+.banner .tx{flex:1}
+.banner b{display:block;color:var(--bad)}
+.banner p{margin-top:4px;font-size:13px}
+.banner .muted{color:var(--muted)}
+.empty{padding:28px 0;border-bottom:1px solid var(--line)}
+.empty b{display:block;font-weight:600}
+.empty p{margin:4px 0 0;font-size:13px;color:var(--muted)}
+.sk{height:12px;border-radius:6px;background:var(--line);opacity:.5}
+/* settings frame (gate off / hidden) */
+.scopes{display:flex;flex-wrap:wrap;gap:6px;margin-top:20px}
+.sb{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;background:transparent;cursor:pointer;font-size:13px;color:var(--ink)}
+.sb[aria-pressed="true"]{background:var(--selected);border-color:var(--accent);font-weight:600}
+.tabs{display:flex;flex-wrap:wrap;gap:4px;border-bottom:1px solid var(--line);margin-top:16px}
+.tab{padding:10px 12px;border:0;background:none;cursor:pointer;color:var(--muted);border-bottom:2px solid transparent;margin-bottom:-1px;font-size:14px}
+.tab.on{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.srow{display:grid;grid-template-columns:minmax(0,1fr) auto;column-gap:32px;align-items:center;min-height:56px;padding:12px 0;border-top:1px solid var(--line)}
+.srow:last-child{border-bottom:1px solid var(--line)}
+.srow .lb{font-weight:500}
+.srow .ds{font-size:13px;color:var(--muted)}
+.off{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);margin-left:8px;font-weight:500}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <a class="chip" href="P-Connect.dc.html" title="alex@example.test · Signed in"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a>
+      <div class="chip" title="{{ connTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
+        <sc-if value="{{ registered }}" hint-placeholder-val="{{ true }}"><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
+        <sc-if value="{{ registering }}" hint-placeholder-val="{{ false }}"><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg>Registering</span></sc-if>
+      </div>
+      <button type="button" class="eye" aria-pressed="false" aria-label="Hide balances"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock Everyday and open the Launcher?</p><a class="tbtn pri btn" href="P-Locking.dc.html" style="height:28px" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="tbtn" onClick="{{ cancelLock }}" style="height:28px">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Advanced.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="P-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <div class="sfoot">
+        <a class="ni on" aria-current="page" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+
+        <!-- ===== Gate off / hidden: the Settings section where Members would sit ===== -->
+        <sc-if value="{{ gateClosed }}" hint-placeholder-val="{{ false }}">
+          <h1 class="ph" style="margin-top:0">Settings</h1>
+          <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Vault · Family savings · Bitcoin mainnet</p>
+          <div class="scopes" role="group" aria-label="Settings scope">
+            <button type="button" class="sb" aria-pressed="false">Cube · Everyday</button>
+            <button type="button" class="sb" aria-pressed="false">This device</button>
+            <button type="button" class="sb" aria-pressed="true">Vault · Family savings</button>
+            <button type="button" class="sb" aria-pressed="false">Spark · Daily spending</button>
+          </div>
+          <nav class="tabs" aria-label="Sections in Vault · Family savings">
+            <button type="button" class="tab on" aria-current="page">Wallet &amp; signers</button>
+            <a class="tab" href="P-Signing.dc.html" style="text-decoration:none">Pair with Keychain</a>
+            <button type="button" class="tab">Connections</button>
+            <button type="button" class="tab">Data &amp; exports</button>
+          </nav>
+          <section class="grp" aria-labelledby="h-ph">
+            <h2 id="h-ph">Phone signing and members</h2>
+            <div class="rows" style="border-top:0">
+              <div class="srow"><div><p class="lb">Pair with Keychain</p><p class="ds">Same Wi-Fi. No Connect account needed.</p></div><a class="btn" href="P-Signing.dc.html">Open Pair with Keychain</a></div>
+              <sc-if value="{{ gateOff }}" hint-placeholder-val="{{ true }}">
+                <div class="srow"><div><p class="lb">Members<span class="off"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Not enabled</span></p><p class="ds">For eligible Connect Vaults only.</p></div><span></span></div>
+              </sc-if>
+            </div>
+          </section>
+        </sc-if>
+
+        <!-- ===== Members (flag on) ===== -->
+        <sc-if value="{{ gateOn }}" hint-placeholder-val="{{ true }}">
+          <a class="back" href="P-Settings.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Wallet &amp; signers</a>
+          <div class="ttl">
+            <div class="grow"><h1 class="ph">Members</h1><p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p></div>
+            <button type="button" class="btn" disabled="{{ refreshOff }}" onClick="{{ refresh }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M14.5 9a5.5 5.5 0 1 1-1.6-3.9M14.5 3.5v3h-3"/></svg>Refresh</button>
+          </div>
+          <p class="lead">People who can view this Cube and contribute signing keys.</p>
+
+          <sc-if value="{{ banner.net }}" hint-placeholder-val="{{ false }}">
+            <div class="banner" role="alert"><svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg><div class="tx"><p style="margin:0">Network unreachable</p></div><button type="button" class="info" aria-label="Dismiss" onClick="{{ dismiss }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 5l8 8M13 5l-8 8"/></svg></button></div>
+          </sc-if>
+          <sc-if value="{{ banner.conflict }}" hint-placeholder-val="{{ false }}">
+            <div class="banner" role="alert"><div class="tx"><b>Can't remove this member</b><p>Cannot remove member — keys are signing an active Vault</p><p class="muted">Wind down the Vault(s) first, then try again.</p></div><button type="button" class="btn sm" onClick="{{ dismiss }}">Dismiss</button></div>
+          </sc-if>
+
+          <sc-if value="{{ notReady }}" hint-placeholder-val="{{ false }}">
+            <div class="empty" style="border-top:1px solid var(--line);margin-top:24px"><b>Not ready — the cube is still registering.</b></div>
+          </sc-if>
+
+          <sc-if value="{{ ready }}" hint-placeholder-val="{{ true }}">
+            <section class="grp" aria-labelledby="h-inv">
+              <h2 id="h-inv">Add Member</h2>
+              <p class="ds" id="inv-h">Invite by email. Existing contacts are added immediately; new emails get an invite and join on accept.</p>
+              <div class="inv">
+                <label class="srl" for="inv-email">Email</label>
+                <input id="inv-email" class="inp" type="email" placeholder="email@example.test" value="{{ email }}" aria-invalid="{{ emailBadA }}" aria-describedby="inv-h inv-e" onInput="{{ onEmail }}">
+                <sc-if value="{{ idle }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn pri" onClick="{{ invite }}">Add Member</button></sc-if>
+                <sc-if value="{{ sending }}" hint-placeholder-val="{{ false }}"><span class="muted" role="status">Sending…</span></sc-if>
+              </div>
+              <sc-if value="{{ emailBad }}" hint-placeholder-val="{{ false }}"><p class="err" id="inv-e" role="alert" style="margin-top:8px">Please enter a valid email address</p></sc-if>
+            </section>
+
+            <sc-if value="{{ loading }}" hint-placeholder-val="{{ false }}">
+              <section class="grp" aria-busy="true"><p class="muted" role="status">Loading…</p><div class="rows"><div class="row"><div class="sk" style="width:36px;height:36px;border-radius:50%"></div><div class="main2"><div class="sk" style="width:220px"></div><div class="sk" style="width:120px;margin-top:8px"></div></div></div><div class="row"><div class="sk" style="width:36px;height:36px;border-radius:50%"></div><div class="main2"><div class="sk" style="width:180px"></div><div class="sk" style="width:110px;margin-top:8px"></div></div></div></div></section>
+            </sc-if>
+
+            <sc-if value="{{ hasInvites }}" hint-placeholder-val="{{ true }}">
+              <section class="grp" aria-labelledby="h-pi">
+                <h2 id="h-pi">Pending Invites</h2>
+                <ul class="rows">
+                  <sc-for list="{{ invites }}" as="i" hint-placeholder-count="3">
+                    <li class="row"><div class="main2"><p class="em">{{ i.email }}</p><p class="sub"><span class="st {{ i.tone }}">{{ i.status }}</span><span class="{{ i.expTone }}">{{ i.exp }}</span></p></div>
+                      <sc-if value="{{ i.canRevoke }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn sm" aria-label="{{ i.revokeLabel }}" onClick="{{ i.revoke }}">Revoke</button></sc-if></li>
+                  </sc-for>
+                </ul>
+              </section>
+            </sc-if>
+
+            <sc-if value="{{ hasMembers }}" hint-placeholder-val="{{ true }}">
+              <section class="grp" aria-labelledby="h-m">
+                <h2 id="h-m">Members</h2>
+                <ul class="rows">
+                  <sc-for list="{{ members }}" as="m" hint-placeholder-count="3">
+                    <li class="row" style="align-items:flex-start">
+                      <span class="av" aria-hidden="true">{{ m.initial }}</span>
+                      <div class="main2"><p class="em">{{ m.email }}</p>
+                        <sc-if value="{{ m.after }}" hint-placeholder-val="{{ false }}">
+                          <p class="badge">Joined after Vault <button type="button" class="info" aria-expanded="{{ m.tipOpen }}" aria-controls="{{ m.tipId }}" aria-label="What Joined after Vault means" onClick="{{ m.toggleTip }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg></button></p>
+                          <sc-if value="{{ m.showTip }}" hint-placeholder-val="{{ false }}"><p class="tip" id="{{ m.tipId }}">This member can attach keys but won't be in the current Vault's signing quorum. Their keys will be available when the Vault is rebuilt.</p></sc-if>
+                        </sc-if>
+                        <p class="sub">Joined {{ m.joined }}</p>
+                      </div>
+                      <button type="button" class="btn sm" aria-label="{{ m.removeLabel }}" onClick="{{ m.remove }}">Remove</button>
+                    </li>
+                  </sc-for>
+                </ul>
+              </section>
+            </sc-if>
+
+            <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+              <div class="empty" style="margin-top:28px;border-top:1px solid var(--line)"><b>No members yet</b><p>Add a contact by email to let them contribute a signing key to this Cube.</p></div>
+            </sc-if>
+          </sc-if>
+        </sc-if>
+      </div>
+      <p class="cap pfoot">{{ foot }}</p>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"state":{"editor":"enum","options":["ready","loading","empty","sending","invalidEmail","removeConflict","networkError","notRegistered"],"default":"ready","section":"Review"},"gate":{"editor":"enum","options":["on","off","hidden"],"default":"on","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={k:null,lockAsk:false};}
+  renderVals(){
+    const P=this.props,self=this;
+    const L={st:P.state||'ready',gate:P.gate||'on'};
+    const key=L.st+'|'+L.gate;
+    const empty=L.st==='empty';
+    const init={key:key,email:L.st==='invalidEmail'?'jordan@example':'',busy:L.st==='sending',emailErr:L.st==='invalidEmail',
+      banner:L.st==='removeConflict'?'conflict':(L.st==='networkError'?'net':''),loading:L.st==='loading',
+      tip:'',
+      invites:empty?[]:[
+        {id:'i1',email:'jordan@example.test',status:'pending',days:6},
+        {id:'i2',email:'sam@example.test',status:'pending',days:0},
+        {id:'i3',email:'riley@example.test',status:'expired',days:-1}],
+      members:empty?[]:[
+        {id:'m1',email:'casey@example.test',joined:'Sep 14, 2026',after:false},
+        {id:'m2',email:'morgan.with-a-long-household-address@family-office.example.test',joined:'Oct 18, 2026',after:true}]};
+    const S=(this.state.k&&this.state.k.key===key)?this.state.k:init;
+    const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
+    const val=(e)=>(e&&e.target)?e.target.value:'';
+    const valid=(s)=>/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s);
+    const TONE={pending:'warn',accepted:'ok',revoked:'unk',expired:'unk'};
+    const expText=(d)=>d<0?'Expired':(d===0?'Expires today':(d===1?'Expires in 1 day':'Expires in '+d+' days'));
+    const invites=S.invites.map((i)=>({email:i.email,status:i.status,tone:TONE[i.status]||'unk',exp:expText(i.days),expTone:i.days<0?'bad':'',
+      canRevoke:i.status==='pending',revokeLabel:'Revoke invite for '+i.email,
+      revoke:()=>set({invites:S.invites.filter((x)=>x.id!==i.id)})}));
+    const members=S.members.map((m)=>({email:m.email,initial:m.email.charAt(0).toUpperCase(),joined:m.joined,after:m.after,
+      tipId:'tip-'+m.id,tipOpen:S.tip===m.id?'true':'false',showTip:S.tip===m.id,toggleTip:()=>set({tip:S.tip===m.id?'':m.id}),
+      removeLabel:'Remove '+m.email,
+      remove:()=>{if(m.id==='m1'){set({banner:'conflict'});}else{set({members:S.members.filter((x)=>x.id!==m.id)});}}}));
+    const notReady=L.st==='notRegistered';
+    const ready=!notReady;
+    const invite=()=>{
+      if(!valid(S.email)){set({emailErr:true});return;}
+      set({busy:true,emailErr:false});
+      setTimeout(()=>{const c=self.state.k;if(c&&c.busy)self.setState({k:Object.assign({},c,{busy:false,email:'',invites:c.invites.concat([{id:'n'+c.invites.length,email:c.email,status:'pending',days:7}])})});},1200);
+    };
+    const gateOn=L.gate==='on';
+    const foot=gateOn
+      ?'Prototype · synthetic members and invites · behind CUBE_MEMBERS_UI_ENABLED (off by default) · the app shows no roles: every member can view and attach keys'
+      :(L.gate==='off'?'Prototype · flag off drawn as a gated row for review · in the app the Members entry is simply absent':'Prototype · flag off as the app ships it: no Members entry anywhere');
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      lockIdle:!self.state.lockAsk,lockAsk:!!self.state.lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
+      registered:!notReady,registering:notReady,connTitle:'Cube service · '+(notReady?'Registering':'Connected'),
+      gateOn:gateOn,gateClosed:!gateOn,gateOff:L.gate==='off',
+      ready:ready,notReady:notReady,refreshOff:S.loading,refresh:()=>{set({loading:true});setTimeout(()=>{const c=self.state.k;if(c&&c.loading)self.setState({k:Object.assign({},c,{loading:false})});},900);},
+      banner:{net:S.banner==='net',conflict:S.banner==='conflict'},dismiss:()=>set({banner:''}),
+      email:S.email,onEmail:(e)=>set({email:val(e),emailErr:false}),emailBad:S.emailErr,emailBadA:S.emailErr?'true':'false',
+      idle:!S.busy,sending:S.busy,invite:invite,loading:S.loading,
+      invites:invites,members:members,hasInvites:!S.loading&&invites.length>0,hasMembers:!S.loading&&members.length>0,
+      isEmpty:!S.loading&&members.length===0&&invites.length===0,
+      foot:foot
+    };
+  }
+}
+</script>
+</body>
+</html>

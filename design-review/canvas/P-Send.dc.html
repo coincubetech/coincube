@@ -1,0 +1,782 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 · Wallet Send</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--teal:#2a9d7f;--hover:rgba(245,240,232,.06);--shadow:rgba(0,0,0,.45)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--teal:#1f7a62;--hover:rgba(32,32,32,.05);--shadow:rgba(60,40,10,.18)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol{margin:0}
+.tenshu a{color:var(--acc-ink)}
+.vh{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+/* top bar (single-Cube model) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.chip .k{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni,.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.attn{display:flex;align-items:center;gap:6px;width:calc(100% - 12px);margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;text-align:left;font-size:12.5px;text-decoration:none}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{display:grid;grid-template-columns:minmax(0,680px) 240px;column-gap:40px;justify-content:center;padding:28px 40px 48px}
+.hd{grid-column:1 / -1;margin-bottom:20px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none;padding:2px 0;border-radius:4px}
+.ph{font-size:24px;font-weight:600;line-height:1.25;margin-top:8px}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+/* the one bounded form region */
+.form{border:1px solid var(--line);border-radius:16px;background:var(--panel);min-width:0}
+.fh{display:flex;align-items:center;gap:12px;padding:16px 24px;min-height:64px}
+.fh h2{font-size:17px;font-weight:600;flex:1}
+.fs{padding:20px 24px;border-top:1px solid var(--line)}
+.lbr{display:flex;align-items:center;gap:10px;min-height:28px;margin-bottom:8px}
+.lbr label,.lbr .lt{font-weight:600}
+.lbr .rt{margin-left:auto;display:flex;align-items:center;gap:8px}
+.inp{width:100%;height:44px;padding:0 14px;border:1px solid var(--line);border-radius:10px;background:var(--bg);font-size:15px;outline:none}
+.inp::placeholder{color:var(--muted)}
+.inp:focus,.inp.kf{border-color:var(--focus);box-shadow:0 0 0 1px var(--focus)}
+.inp.err{border-color:var(--bad)}
+.inp:disabled{color:var(--muted);cursor:not-allowed}
+.inp.mono{font-size:14px}
+.inw{position:relative}.inw .inp{padding-right:64px}
+.suf{position:absolute;right:14px;top:0;height:44px;display:flex;align-items:center;color:var(--muted);font-size:13px;font-weight:500;pointer-events:none}
+.sub{display:flex;justify-content:space-between;gap:12px;margin-top:8px;font-size:13px;color:var(--muted)}
+.msg{display:flex;align-items:flex-start;gap:6px;margin-top:8px;font-size:13px}
+.msg .ic{margin-top:1px}
+.tag{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 10px;border:1px solid currentColor;border-radius:12px;font-size:12px;font-weight:500;white-space:nowrap}
+.rail{display:inline-block;padding:1px 8px;border:1px solid var(--acc-ink);border-radius:10px;color:var(--acc-ink);font-size:11.5px;font-weight:500;letter-spacing:.04em}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:10px;padding:2px;gap:2px;background:var(--bg)}
+.seg button{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:0;border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--muted)}
+.seg button[aria-pressed="true"]{background:var(--selected);color:var(--ink);font-weight:600}
+.seg.sm button{height:26px;padding:0 10px;font-size:12px}
+.proto{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:12px}
+.proto .pl{font-size:12px;color:var(--muted);margin-right:4px}
+.pb{height:26px;padding:0 10px;border:1px dashed var(--line);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
+.tenshu .pb{color:var(--muted)}
+.pb:hover{background:var(--hover)}
+/* route blocks */
+.route{position:relative;display:grid;grid-template-columns:1fr 1fr;gap:40px}
+.route .arr{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);color:var(--muted)}
+.blk{padding:14px 16px;border:1px solid var(--line);border-radius:12px;background:var(--bg);min-width:0}
+.blk .asset{display:flex;align-items:center;gap:10px;margin-top:6px;font-size:18px;font-weight:600}
+.blk .am{margin-top:6px;font-size:14px;min-height:20px}
+.blk .rail{margin-top:8px}
+.coin{position:relative;display:block;flex:none;width:40px;height:40px}.coin>img{position:absolute;left:1px;top:1px;width:34px;height:34px}.coin>svg{position:absolute;left:0;top:0}
+/* stablecoin rail picker */
+.rails{display:grid;grid-template-columns:1fr 1fr;gap:8px}
+.rr{display:flex;align-items:center;gap:10px;min-height:52px;padding:6px 12px 6px 8px;border:1px solid var(--line);border-radius:10px;background:var(--bg);cursor:pointer;text-align:left}
+.rr[aria-pressed="true"]{border-color:var(--acc-ink);background:var(--selected)}
+.rr .coin{transform:scale(.8);transform-origin:left center;margin-right:-8px}
+.rr .nm{flex:1;min-width:0}.rr .nm b{font-weight:600}
+/* key-value rows */
+.kv{display:grid;grid-template-columns:160px minmax(0,1fr);column-gap:16px;padding:10px 0;border-bottom:1px solid var(--line);align-items:baseline}
+.kv:last-child{border-bottom:0}
+.kv .k{color:var(--muted)}
+.kv .v{text-align:right;overflow-wrap:anywhere}
+.kv .v .s{display:block;font-size:12px;color:var(--muted);margin-top:2px}
+.kv.strong .v,.kv.strong .k{font-weight:600;color:var(--ink)}
+.fs h3{font-size:14px;font-weight:600;margin-bottom:6px}
+.chk{display:flex;align-items:center;gap:10px;min-height:40px;border-bottom:1px solid var(--line)}
+.chk .t{flex:1}
+/* branta recipient identity */
+.idc{margin:12px 0 4px;max-width:440px;padding:14px;border:1px solid var(--line);border-radius:12px;background:var(--panel)}
+.idc .k{font-size:13px;color:var(--muted)}
+.idc .hd{display:flex;align-items:center;gap:10px;margin-top:8px;font-weight:500}
+.idc .logo{width:32px;height:32px;border-radius:8px;display:grid;place-items:center;background:var(--selected);color:var(--acc-ink);font-weight:700}
+.idc p.d{margin-top:8px;font-size:13px;color:var(--muted)}
+.mm{display:flex;align-items:flex-start;gap:12px;max-width:560px;padding:14px 16px;border:1px solid var(--bad);border-radius:10px}
+.mm b{font-weight:600}
+.note{font-size:12.5px;color:var(--muted);margin-top:10px;line-height:1.5}
+.alert{display:flex;align-items:flex-start;gap:12px}
+.alert .tx{flex:1}
+.alert b{display:block;font-weight:600}
+.alert p{font-size:13px;color:var(--muted);margin-top:2px}
+.ffoot{display:flex;align-items:center;gap:12px;padding:16px 24px;border-top:1px solid var(--line)}
+.ffoot .hint{flex:1;font-size:13px;color:var(--muted);display:flex;align-items:center;gap:8px}
+.pill{height:40px;padding:0 22px;border-radius:20px;font-weight:600;font-size:14px;cursor:pointer;display:inline-flex;align-items:center;gap:8px;text-decoration:none;white-space:nowrap}
+.pill.fill{background:var(--accent);border:1px solid var(--accent);color:#1a1208}
+.pill.out{background:transparent;border:1px solid var(--acc-ink)}
+.tenshu .pill.out{color:var(--acc-ink)}
+.pill:disabled{opacity:.45;cursor:not-allowed}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#1a1208}
+.btn:disabled{opacity:.45;cursor:not-allowed}
+.lnk{border:0;background:none;padding:2px 0;color:var(--acc-ink);font-weight:500;font-size:13px;cursor:pointer;border-radius:4px;text-decoration:none}
+.spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--acc-ink);border-radius:50%;animation:sp .8s linear infinite;flex:none}
+@keyframes sp{to{transform:rotate(360deg)}}
+/* vault recipients */
+.rec+.rec{margin-top:16px;padding-top:16px;border-top:1px solid var(--line)}
+.rg{display:grid;grid-template-columns:minmax(0,1fr) 200px;gap:12px}
+.rg .fl{font-size:12px;color:var(--muted);display:block;margin-bottom:4px}
+/* signers */
+.sg{display:grid;grid-template-columns:32px minmax(0,1fr) 150px auto;align-items:center;column-gap:12px;min-height:60px;border-bottom:1px solid var(--line)}
+.sg:last-child{border-bottom:0}
+.sg .av{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--hover);color:var(--muted)}
+.sg .acts{display:flex;gap:6px;justify-content:flex-end}
+/* done */
+.done{display:flex;gap:16px;align-items:flex-start}
+.done .badge{width:44px;height:44px;border-radius:50%;display:grid;place-items:center;border:1.5px solid var(--good);color:var(--good);flex:none}
+.done h2{font-size:20px;font-weight:600}
+.idrow{display:flex;align-items:center;gap:10px;margin-top:14px}
+/* aside */
+.aside{padding-top:4px}
+.steps{list-style:none;padding:0;display:flex;flex-direction:column;gap:2px}
+.steps li{display:flex;align-items:center;gap:10px;min-height:36px;color:var(--muted)}
+.steps .dot{width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:grid;place-items:center;font-size:12px;font-weight:600}
+.steps li.cur{color:var(--ink);font-weight:600}
+.steps li.cur .dot{background:var(--accent);border-color:var(--accent);color:#1a1208}
+.steps li.dn .dot{border-color:var(--good);color:var(--good)}
+.ab{margin-top:24px;padding-top:20px;border-top:1px solid var(--line)}
+.ab .bv{font-size:15px;font-weight:600;margin-top:6px}
+.ab .bv .u{color:var(--muted);font-weight:400}
+
+/* distill pass: visually hidden labels + Lock Cube confirmation row */
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.lockq p{margin:0}
+.tenshu .lkb{display:inline-flex;align-items:center;height:28px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font:inherit;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu .lkb:hover{background:var(--hover)}
+.tenshu .lkb.go{background:var(--accent);border-color:var(--accent);color:#1a1208;font-weight:600}
+.menu .lockq{flex-wrap:wrap;white-space:normal;padding:8px 10px}
+.menu .lockq p{flex:1 1 100%}
+.foot-note{font-size:12px;color:var(--muted)}
+
+/* prototype links */
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{background:var(--hover,var(--selected))}.tenshu a.ni,.tenshu a.row{color:var(--ink);text-decoration:none}.tenshu a.pill,.tenshu a.rlink,.tenshu a.attn{text-decoration:none}.tenshu span.mini{display:inline-flex;align-items:center}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <a class="chip" href="P-Connect.dc.html" title="alex@example.test · Signed in"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a>
+      <div class="chip" title="Cube service · Connected"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock Everyday and open the Launcher?</p><a class="lkb go" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="lkb" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni {{ nv.spark.cls }}" aria-current="{{ nv.spark.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni {{ nv.vault.cls }}" aria-current="{{ nv.vault.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni {{ nv.liquid.cls }}" aria-current="{{ nv.liquid.cur }}" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <a class="attn" href="P-Settings.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <div class="hd">
+          <a class="back" href="P-Overview.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>{{ w.name }}</a>
+          <h1 class="ph">Send</h1>
+          <p class="idl"><sc-if value="{{ w.btcNet }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if><sc-if value="{{ w.liqNet }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>{{ w.ctx }}</p>
+        </div>
+
+        <section class="form" aria-labelledby="form-h">
+          <div class="fh">
+            <h2 id="form-h">{{ stepTitle }}</h2>
+            <sc-if value="{{ ui.kindSeg }}" hint-placeholder-val="{{ true }}">
+              <div class="seg" role="group" aria-label="{{ ui.segLabel }}">
+                <sc-for list="{{ ui.segItems }}" as="o" hint-placeholder-count="2"><button type="button" aria-pressed="{{ o.p }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+              </div>
+            </sc-if>
+          </div>
+
+          <!-- ROUTE (compose + review, Spark and Liquid) -->
+          <sc-if value="{{ ui.route }}" hint-placeholder-val="{{ true }}">
+            <div class="fs">
+              <div class="route">
+                <sc-for list="{{ route }}" as="rt" hint-placeholder-count="2">
+                  <div class="blk">
+                    <p class="cap">{{ rt.cap }}</p>
+                    <p class="asset">
+                      <span class="coin" aria-hidden="true">
+                        <sc-if value="{{ rt.btc }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+                        <sc-if value="{{ rt.usdt }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2a9d7f"/><path d="M11.5 12h13M18 12v13M13 17.5c1.6.7 3.2 1 5 1s3.4-.3 5-1" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.usdc }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2775ca"/><path d="M21.5 13.5c-.8-1-2-1.5-3.5-1.5-2 0-3.5 1.1-3.5 2.8 0 4 7.2 2.2 7.2 6.3 0 1.8-1.6 2.9-3.7 2.9-1.6 0-3-.6-3.8-1.7M18 9.5v2.5M18 24v2.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.bSpark }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#111211" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 28v8M28.5 30l7 4M28.5 34l7-4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.bLn }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#f5c542" style="stroke:var(--bg)" stroke-width="2"/><path d="M33 27.5 29.6 32.6h2.8l-1 3.9 3.4-5.1H32z" fill="#1a1208"/></svg></sc-if>
+                        <sc-if value="{{ rt.bLiquid }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#2a9d7f" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8c1.6 2 2.7 3.5 2.7 4.8a2.7 2.7 0 0 1-5.4 0c0-1.3 1.1-2.8 2.7-4.8z" fill="#fff"/></svg></sc-if>
+                        <sc-if value="{{ rt.bChain }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#f3821d" style="stroke:var(--bg)" stroke-width="2"/><path d="M30.3 33.7l3.4-3.4M31.2 29.5l.8-.8a2.3 2.3 0 0 1 3.3 3.3l-.8.8M32.8 34.5l-.8.8a2.3 2.3 0 0 1-3.3-3.3l.8-.8" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.bEth }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.4 35.2 32 32 36.6 28.8 32z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.bTron }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M28.6 28.8h6.8L32 35.6z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.bBnb }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8l3.6 2.1v4.2L32 36.2l-3.6-2.1v-4.2z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rt.bSol }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M29.4 29.6h5.6M29 32h5.6M29.4 34.4h5.6" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                      </span>{{ rt.asset }}
+                    </p>
+                    <p class="am {{ rt.amCls }}">{{ rt.amt }}</p>
+                    <sc-if value="{{ rt.hasRail }}" hint-placeholder-val="{{ false }}"><span class="rail">{{ rt.rail }}</span></sc-if>
+                  </div>
+                </sc-for>
+                <svg class="ic arr" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 9h12M11 5l4 4-4 4"/></svg>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- ============ COMPOSE ============ -->
+          <sc-if value="{{ st.compose }}" hint-placeholder-val="{{ true }}">
+            <sc-if value="{{ ui.stablePick }}" hint-placeholder-val="{{ false }}">
+              <div class="fs">
+                <div class="lbr"><span class="lt" id="rail-l">Stablecoin and network</span></div>
+                <div class="rails" role="group" aria-labelledby="rail-l">
+                  <sc-for list="{{ rails }}" as="rr" hint-placeholder-count="7">
+                    <button type="button" class="rr" aria-pressed="{{ rr.p }}" onClick="{{ rr.pick }}">
+                      <span class="coin" aria-hidden="true">
+                        <sc-if value="{{ rr.btc }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+                        <sc-if value="{{ rr.usdt }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2a9d7f"/><path d="M11.5 12h13M18 12v13M13 17.5c1.6.7 3.2 1 5 1s3.4-.3 5-1" fill="none" stroke="#fff" stroke-width="2.4" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.usdc }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="18" cy="18" r="17" fill="#2775ca"/><path d="M21.5 13.5c-.8-1-2-1.5-3.5-1.5-2 0-3.5 1.1-3.5 2.8 0 4 7.2 2.2 7.2 6.3 0 1.8-1.6 2.9-3.7 2.9-1.6 0-3-.6-3.8-1.7M18 9.5v2.5M18 24v2.5" fill="none" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bSpark }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#111211" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 28v8M28.5 30l7 4M28.5 34l7-4" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bLn }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#f5c542" style="stroke:var(--bg)" stroke-width="2"/><path d="M33 27.5 29.6 32.6h2.8l-1 3.9 3.4-5.1H32z" fill="#1a1208"/></svg></sc-if>
+                        <sc-if value="{{ rr.bLiquid }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#2a9d7f" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8c1.6 2 2.7 3.5 2.7 4.8a2.7 2.7 0 0 1-5.4 0c0-1.3 1.1-2.8 2.7-4.8z" fill="#fff"/></svg></sc-if>
+                        <sc-if value="{{ rr.bChain }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#f3821d" style="stroke:var(--bg)" stroke-width="2"/><path d="M30.3 33.7l3.4-3.4M31.2 29.5l.8-.8a2.3 2.3 0 0 1 3.3 3.3l-.8.8M32.8 34.5l-.8.8a2.3 2.3 0 0 1-3.3-3.3l.8-.8" fill="none" stroke="#fff" stroke-width="1.5" stroke-linecap="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bEth }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.4 35.2 32 32 36.6 28.8 32z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bTron }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M28.6 28.8h6.8L32 35.6z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bBnb }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M32 27.8l3.6 2.1v4.2L32 36.2l-3.6-2.1v-4.2z" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                        <sc-if value="{{ rr.bSol }}" hint-placeholder-val="{{ false }}"><svg width="40" height="40" viewBox="0 0 40 40"><circle cx="32" cy="32" r="7.5" fill="#3d3f45" style="stroke:var(--bg)" stroke-width="2"/><path d="M29.4 29.6h5.6M29 32h5.6M29.4 34.4h5.6" fill="none" stroke="#fff" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if>
+                      </span>
+                      <span class="nm"><b>{{ rr.asset }}</b> <span class="muted">on {{ rr.net }}</span></span>
+                      <span class="rail">{{ rr.tag }}</span>
+                    </button>
+                  </sc-for>
+                </div>
+              </div>
+            </sc-if>
+            <sc-if value="{{ ui.single }}" hint-placeholder-val="{{ true }}">
+              <div class="fs">
+                <div class="lbr">
+                  <label for="dest">Destination</label>
+                  <span class="rt"><sc-if value="{{ det.has }}" hint-placeholder-val="{{ false }}"><span class="tag {{ det.tone }}"><sc-if value="{{ det.ok }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.5 3 3 6-6.5"/></svg></sc-if><sc-if value="{{ det.invalid }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 5 8 8M13 5l-8 8"/></svg></sc-if>{{ det.label }}</span></sc-if></span>
+                </div>
+                <input id="dest" class="inp mono {{ det.cls }}" type="text" autocomplete="off" spellcheck="false" placeholder="{{ cfg.ph }}" value="{{ dest }}" aria-invalid="{{ det.ariaInv }}" aria-describedby="dest-msg" onChange="{{ onDest }}">
+                <sc-if value="{{ det.invalid }}" hint-placeholder-val="{{ false }}"><p class="msg bad" id="dest-msg"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>{{ det.msg }}</p></sc-if>
+                <div class="proto" role="group" aria-label="Example destinations">
+                  <span class="pl">Example</span>
+                  <sc-for list="{{ examples }}" as="x" hint-placeholder-count="4"><button type="button" class="pb" onClick="{{ x.pick }}">{{ x.label }}</button></sc-for>
+                </div>
+                <div class="proto" role="group" aria-label="Branta result (prototype)">
+                  <span class="pl">Branta result</span>
+                  <sc-for list="{{ ridOpts }}" as="o" hint-placeholder-count="4"><button type="button" class="pb" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+                </div>
+              </div>
+              <div class="fs">
+                <div class="lbr">
+                  <label for="amt">Amount</label>
+                  <span class="rt"><sc-if value="{{ amt.switch }}" hint-placeholder-val="{{ true }}"><span class="seg sm" role="group" aria-label="Amount unit"><button type="button" aria-pressed="{{ amt.satsP }}" onClick="{{ amt.toSats }}">sats</button><button type="button" aria-pressed="{{ amt.btcP }}" onClick="{{ amt.toBtc }}">BTC</button></span></sc-if></span>
+                </div>
+                <div class="inw"><input id="amt" class="inp {{ amt.cls }}" type="text" inputmode="decimal" autocomplete="off" placeholder="{{ amt.ph }}" value="{{ amt.val }}" disabled="{{ amt.locked }}" aria-invalid="{{ amt.ariaInv }}" aria-describedby="amt-fx amt-msg" onChange="{{ onAmt }}"><span class="suf">{{ amt.unit }}</span></div>
+                <sc-if value="{{ amt.over }}" hint-placeholder-val="{{ false }}"><p class="msg bad" id="amt-msg"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>Amount is above your available balance.</p></sc-if>
+                <sc-if value="{{ amt.locked }}" hint-placeholder-val="{{ false }}"><p class="msg muted" id="amt-msg"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 8.25v4M9 5.75v.01"/></svg>This invoice sets its own amount.</p></sc-if>
+                <p class="sub"><span id="amt-fx">{{ amt.fiat }}</span><span>Available {{ amt.avail }}</span></p>
+                <sc-if value="{{ limits.show }}" hint-placeholder-val="{{ false }}"><p class="sub" aria-live="polite"><span>{{ limits.text }}</span></p></sc-if>
+                <sc-if value="{{ ui.feeAssetSeg }}" hint-placeholder-val="{{ false }}">
+                  <div class="lbr" style="margin-top:16px"><span class="lt" id="fa-l">Pay fees with</span><span class="rt"><span class="seg sm" role="group" aria-labelledby="fa-l"><sc-for list="{{ feeAssets }}" as="o" hint-placeholder-count="2"><button type="button" aria-pressed="{{ o.p }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for></span></span></div>
+                </sc-if>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ ui.vault }}" hint-placeholder-val="{{ false }}">
+              <div class="fs">
+                <div class="lbr"><span class="lt">Recipients</span><span class="rt"><span class="seg sm" role="group" aria-label="Amount unit"><button type="button" aria-pressed="{{ amt.satsP }}" onClick="{{ amt.toSats }}">sats</button><button type="button" aria-pressed="{{ amt.btcP }}" onClick="{{ amt.toBtc }}">BTC</button></span></span></div>
+                <sc-for list="{{ recs }}" as="r" hint-placeholder-count="1">
+                  <div class="rec">
+                    <div class="rg">
+                      <div><label class="fl" for="{{ r.aid }}">Address {{ r.n }}</label><input id="{{ r.aid }}" class="inp mono {{ r.acls }}" type="text" autocomplete="off" spellcheck="false" placeholder="Bitcoin address" value="{{ r.a }}" aria-invalid="{{ r.ariaInv }}" onChange="{{ r.onA }}"></div>
+                      <div><label class="fl" for="{{ r.vid }}">Amount {{ r.n }}</label><div class="inw"><input id="{{ r.vid }}" class="inp {{ r.vcls }}" type="text" inputmode="decimal" autocomplete="off" value="{{ r.v }}" onChange="{{ r.onV }}"><span class="suf">{{ amt.unit }}</span></div></div>
+                    </div>
+                    <p class="sub"><span>
+                      <sc-if value="{{ r.ok }}" hint-placeholder-val="{{ false }}"><span class="tag ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.5 3 3 6-6.5"/></svg>Bitcoin address</span></sc-if>
+                      <sc-if value="{{ r.bad }}" hint-placeholder-val="{{ false }}"><span class="bad">Not a Bitcoin mainnet address</span></sc-if>
+                      <sc-if value="{{ r.dup }}" hint-placeholder-val="{{ false }}"><span class="bad">Two payment addresses are the same</span></sc-if>
+                    </span><span>
+                      <sc-if value="{{ r.canRemove }}" hint-placeholder-val="{{ false }}"><button type="button" class="lnk" aria-label="Remove recipient {{ r.n }}" onClick="{{ r.remove }}">Remove</button></sc-if>
+                    </span></p>
+                  </div>
+                </sc-for>
+                <sc-if value="{{ amt.over }}" hint-placeholder-val="{{ false }}"><p class="msg bad"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>Total is above your available balance.</p></sc-if>
+                <p class="sub"><button type="button" class="btn" onClick="{{ addRec }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 4v10M4 9h10"/></svg>Add recipient</button><span>Available {{ amt.avail }}</span></p>
+                <div class="proto" role="group" aria-label="Example addresses">
+                  <span class="pl">Example</span>
+                  <sc-for list="{{ examples }}" as="x" hint-placeholder-count="3"><button type="button" class="pb" onClick="{{ x.pick }}">{{ x.label }}</button></sc-for>
+                </div>
+              </div>
+              <div class="fs">
+                <div class="lbr"><label for="fee">Fee Rate (sat/vB)</label><span class="rt"><span class="seg sm" role="group" aria-label="Fee speed"><sc-for list="{{ speeds }}" as="o" hint-placeholder-count="3"><button type="button" aria-pressed="{{ o.p }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for></span></span></div>
+                <div class="inw" style="max-width:240px"><input id="fee" class="inp" type="text" inputmode="numeric" autocomplete="off" value="{{ feeRate }}" onChange="{{ onFee }}"><span class="suf">sat/vB</span></div>
+                <p class="sub"><span>{{ feeEst }}</span></p>
+                <p class="sub" style="margin-top:14px"><span>Coins · chosen automatically</span><a class="lnk" href="P-Overview.dc.html">Choose coins (Advanced)</a></p>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ ui.failed }}" hint-placeholder-val="{{ false }}">
+              <div class="fs alert" role="alert">
+                <svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5v4M9 12.25v.01"/></svg>
+                <div class="tx"><b class="bad">Couldn't get a fee quote</b><p>{{ cfg.failMsg }} Nothing was sent.</p></div>
+                <button type="button" class="btn" onClick="{{ prepare }}">Try again</button>
+              </div>
+            </sc-if>
+
+            <div class="ffoot">
+              <p class="hint" aria-live="polite"><sc-if value="{{ busy }}" hint-placeholder-val="{{ false }}"><span class="spin" aria-hidden="true"></span></sc-if>{{ hint }}</p>
+              <button type="button" class="pill fill" disabled="{{ noPrepare }}" onClick="{{ prepare }}">Prepare</button>
+            </div>
+          </sc-if>
+
+          <!-- ============ REVIEW (Branta mismatch: replaces the review, no Confirm) ============ -->
+          <sc-if value="{{ st.tampered }}" hint-placeholder-val="{{ false }}">
+            <div class="fs">
+              <div class="mm" role="alert">
+                <svg class="ic bad" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>
+                <b class="bad">This payment request’s address does not match its verification data. Do not send.</b>
+              </div>
+            </div>
+            <div class="ffoot">
+              <p class="hint"></p>
+              <button type="button" class="pill fill" onClick="{{ replaceReq }}">Replace payment request</button>
+            </div>
+          </sc-if>
+
+          <!-- ============ REVIEW (quote) ============ -->
+          <sc-if value="{{ st.review }}" hint-placeholder-val="{{ false }}">
+            <div class="fs">
+              <sc-for list="{{ rowsTo }}" as="q" hint-placeholder-count="1">
+                <div class="kv {{ q.cls }}"><span class="k">{{ q.k }}</span><span class="v"><span class="{{ q.vcls }}">{{ q.v }}</span><sc-if value="{{ q.hasS }}" hint-placeholder-val="{{ false }}"><span class="s {{ q.scls }}">{{ q.s }}</span></sc-if></span></div>
+              </sc-for>
+              <sc-if value="{{ idCard }}" hint-placeholder-val="{{ false }}">
+                <div class="idc"><p class="k">Recipient identified</p><p class="hd"><span class="logo" aria-hidden="true">E</span>Example Coffee Co.</p><p class="d">Synthetic merchant description.</p><div style="margin-top:10px"><button type="button" class="btn">View with Branta</button></div></div>
+              </sc-if>
+              <sc-for list="{{ rowsRest }}" as="q" hint-placeholder-count="4">
+                <div class="kv {{ q.cls }}"><span class="k">{{ q.k }}</span><span class="v"><span class="{{ q.vcls }}">{{ q.v }}</span><sc-if value="{{ q.hasS }}" hint-placeholder-val="{{ false }}"><span class="s {{ q.scls }}">{{ q.s }}</span></sc-if></span></div>
+              </sc-for>
+            </div>
+            <sc-if value="{{ ui.vault }}" hint-placeholder-val="{{ false }}">
+              <div class="fs">
+                <div class="lbr"><label for="lbl">Label</label><span class="rt cap">Optional</span></div>
+                <input id="lbl" class="inp" type="text" autocomplete="off" placeholder="e.g. Rent, March" value="{{ label }}" onChange="{{ onLabel }}">
+              </div>
+            </sc-if>
+            <div class="fs">
+              <h3>Recipient checks</h3>
+              <sc-for list="{{ checks }}" as="c" hint-placeholder-count="3">
+                <div class="chk">
+                  <sc-if value="{{ c.ok }}" hint-placeholder-val="{{ true }}"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                  <sc-if value="{{ c.unk }}" hint-placeholder-val="{{ false }}"><svg class="ic s unk" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg></sc-if>
+                  <sc-if value="{{ c.bad }}" hint-placeholder-val="{{ false }}"><svg class="ic s bad" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.75 6.75 4.5 4.5M11.25 6.75l-4.5 4.5"/></svg></sc-if>
+                  <span class="t">{{ c.label }}</span><span class="st {{ c.tone }}">{{ c.val }}</span><sc-if value="{{ c.off }}" hint-placeholder-val="{{ false }}"><a class="lnk" href="P-Settings.dc.html">Turn on in Settings</a></sc-if>
+                </div>
+              </sc-for>
+              <p class="note"><b style="color:var(--ink);font-weight:600">Branta strict mode.</b> Strict mode does not share the plaintext destination or payment amount, but Branta can still observe lookup timing and your network connection.</p>
+            </div>
+            <sc-if value="{{ ui.feeWait }}" hint-placeholder-val="{{ false }}">
+              <div class="fs alert" role="alert">
+                <svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg>
+                <div class="tx"><b class="warn">Waiting fee acceptance</b><p>Swap fee changed to 340 SATS.</p></div>
+                <button type="button" class="btn pri" onClick="{{ acceptFee }}">Accept fee</button>
+              </div>
+            </sc-if>
+            <sc-if value="{{ ui.feeNA }}" hint-placeholder-val="{{ false }}">
+              <div class="fs"><p class="cap">Fee acceptance applies to Liquid swaps only.</p></div>
+            </sc-if>
+            <div class="ffoot">
+              <p class="hint">{{ quoteNote }}</p>
+              <button type="button" class="pill out" onClick="{{ backCompose }}">Back</button>
+              <button type="button" class="pill fill" disabled="{{ ui.feeWait }}" onClick="{{ confirm }}">{{ confirmLabel }}</button>
+            </div>
+          </sc-if>
+
+          <!-- ============ SIGN (Vault) ============ -->
+          <sc-if value="{{ st.sign }}" hint-placeholder-val="{{ false }}">
+            <div class="fs">
+              <div class="lbr"><span class="lt">2-of-3 synthetic policy</span><span class="rt st {{ sig.tone }}">{{ sig.count }} of 2 signatures</span></div>
+              <p class="cap">{{ sig.summary }}</p>
+              <p class="cap" style="margin-top:6px"><a class="lnk" href="P-Signing.dc.html">Signing details</a></p>
+            </div>
+            <div class="fs" style="padding-top:4px;padding-bottom:4px">
+              <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
+                <div class="sg">
+                  <span class="av"><sc-if value="{{ g.dev }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="3.5" width="13" height="9" rx="1.5"/><path d="M6 15.5h6"/></svg></sc-if><sc-if value="{{ g.phone }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="5" y="2" width="8" height="14" rx="1.75"/><path d="M8.25 13.5h1.5"/></svg></sc-if><sc-if value="{{ g.hw }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="3" y="6" width="10" height="6" rx="1.5"/><path d="M13 8h2.5v2H13"/></svg></sc-if></span>
+                  <span><span style="display:block;font-weight:500">{{ g.name }}</span><span class="mono muted">{{ g.fp }}</span></span>
+                  <span class="st {{ g.tone }}">
+                    <sc-if value="{{ g.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                    <sc-if value="{{ g.sWait }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if>
+                    <sc-if value="{{ g.sOff }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg></sc-if>
+                    {{ g.status }}</span>
+                  <span class="acts">
+                    <sc-if value="{{ g.hasAct }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn {{ g.actCls }}" onClick="{{ g.act }}">{{ g.actLabel }}</button></sc-if>
+                    <sc-if value="{{ g.hasSim }}" hint-placeholder-val="{{ false }}"><button type="button" class="pb" onClick="{{ g.sim }}">Simulate approval</button></sc-if>
+                  </span>
+                </div>
+              </sc-for>
+            </div>
+            <div class="ffoot">
+              <p class="hint">Broadcasting is final. It can’t be undone.</p>
+              <button type="button" class="pill out" onClick="{{ backReview }}">Back</button>
+              <button type="button" class="pill fill" disabled="{{ sig.notReady }}" onClick="{{ broadcast }}">Broadcast</button>
+            </div>
+          </sc-if>
+
+          <!-- ============ SENT ============ -->
+          <sc-if value="{{ st.sent }}" hint-placeholder-val="{{ false }}">
+            <div class="fs">
+              <div class="done">
+                <span class="badge" aria-hidden="true"><svg class="ic" viewBox="0 0 18 18"><path d="m4.5 9.5 3 3 6-6.5"/></svg></span>
+                <div style="flex:1;min-width:0">
+                  <p class="st warn"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg>{{ sent.status }}</p>
+                  <p style="margin-top:6px;font-size:15px">{{ sent.line }}</p>
+                  <p class="cap mono" style="margin-top:2px;overflow-wrap:anywhere">{{ sent.to }}</p>
+                  <div class="idrow"><span class="muted">{{ sent.idLabel }}</span><span class="mono">{{ sent.id }}</span><button type="button" class="btn" aria-label="Copy {{ sent.idLabel }}" onClick="{{ copy }}">{{ copyLabel }}</button></div>
+                </div>
+              </div>
+            </div>
+            <div class="ffoot">
+              <p class="hint"></p>
+              <button type="button" class="pill out" onClick="{{ again }}">Send another</button>
+              <a class="pill fill" href="P-Activity.dc.html">See in Activity</a>
+            </div>
+          </sc-if>
+        </section>
+
+        <aside class="aside" aria-label="Send progress">
+          <ol class="steps">
+            <sc-for list="{{ steps }}" as="s" hint-placeholder-count="3">
+              <li class="{{ s.cls }}" aria-current="{{ s.cur }}"><span class="dot" aria-hidden="true"><sc-if value="{{ s.done }}" hint-placeholder-val="{{ false }}"><svg class="ic s" viewBox="0 0 18 18"><path d="m4.5 9.5 3 3 6-6.5"/></svg></sc-if>{{ s.mark }}</span><span>{{ s.label }}</span><span class="vh">{{ s.sr }}</span></li>
+            </sc-for>
+          </ol>
+          <div class="ab">
+            <p class="cap">Available in {{ w.short }}</p>
+            <sc-for list="{{ bal }}" as="b" hint-placeholder-count="1">
+              <p class="bv">{{ b.num }} <span class="u">{{ b.unit }}</span></p><p class="cap">{{ b.fiat }}</p>
+            </sc-for>
+          </div>
+          <p class="cap" style="margin-top:24px">Prototype · synthetic data · fees, limits and stablecoin rails subject to SDK validation</p>
+        </aside>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"wallet":{"editor":"enum","options":["spark","liquid","vault"],"default":"spark","section":"Review"},"step":{"editor":"enum","options":["compose","prepared","sign","sent","error"],"default":"compose","section":"Review"},"errorKind":{"editor":"enum","options":["invalidDestination","overBalance","prepareFailed","feeAcceptance"],"default":"invalidDestination","section":"Review"},"recipientIdentity":{"editor":"enum","options":["notIdentified","identified","tampered","checksOff"],"default":"notIdentified","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};}
+  renderVals(){
+    const P=this.props,self=this;
+    const pw=P.wallet||'spark',pst=P.step||'compose',ek=P.errorKind||'invalidDestination',hb=!!P.hideBalances;
+    const key=[pw,pst,ek,hb].join('|');
+    const RATE=0.00082784,D='••••••';
+    const fmt=n=>Math.round(n).toLocaleString('en-US');
+    const fx=s=>'$'+(s*RATE).toFixed(2);
+    const EX={inv:'lnbc1p…synthetic…q8f',invAmt:'lnbc50u1p…synthetic…7xk',lnaddr:'alex.friend@ln.example.test',spark:'sp1q…synthetic…v9d',btc:'bc1q…synthetic…4kz',btc2:'bc1q…synthetic…9wp',liquid:'lq1q…synthetic…m2r',usdtx:'T9y…synthetic…r4u',bad:'hello-not-an-address'};
+    const BAL={spark:25053,liquid:12784,usdt:10.37,vault:250000};
+
+    const init=(w,step,e)=>{
+      const s={w:w,step:'compose',kind:'btc',asset:'lbtc',feeAsset:'lbtc',dest:'',amt:'',unit:'sats',recs:[{a:'',v:''}],feeMode:'normal',feeRate:'5',busy:false,failed:false,feeWait:false,sig:{dev:'ready',kc:'waiting',hw:'off'},label:'',copied:false,limits:'ready',rail:'usdt-tron'};
+      const fill=()=>{if(w==='vault')s.recs=[{a:EX.btc,v:'40000'}];else if(w==='liquid'){s.dest=EX.liquid;s.amt='5000';}else{s.dest=EX.lnaddr;s.amt='5000';}};
+      if(step==='prepared'||step==='sign'||step==='sent'){fill();s.step=(step==='sign'&&w!=='vault')?'prepared':step;}
+      if(step==='sign')s.sig={dev:'signed',kc:'waiting',hw:'off'};
+      if(step==='error'){
+        fill();
+        if(e==='invalidDestination'){if(w==='vault')s.recs[0].a=EX.bad;else s.dest=EX.bad;}
+        else if(e==='overBalance'){if(w==='vault')s.recs[0].v='400000';else s.amt=w==='liquid'?'20000':'90000';}
+        else if(e==='prepareFailed')s.failed=true;
+        else if(e==='feeAcceptance'){s.step='prepared';s.feeWait=true;if(w==='liquid'){s.dest=EX.btc;s.amt='10000';}}
+      }
+      return s;
+    };
+    const lockAsk=!!this.state.lockAsk;
+    const S=this.state.k===key?this.state:Object.assign(init(pw,pst,ek),{k:key,hide:hb});
+    const set=o=>self.setState(Object.assign({},S,o));
+    const later=(o,ms)=>setTimeout(()=>{if(self.state.k===key)self.setState(Object.assign({},self.state,o));},ms);
+    const w=S.w,isS=w==='spark',isL=w==='liquid',isV=w==='vault';
+    const usdt=isL&&S.asset==='usdt',stable=isS&&S.kind==='stable',hide=S.hide;
+    const rid=S.rid||P.recipientIdentity||'notIdentified',tamp=rid==='tampered'&&S.step==='prepared';
+    // prototype-only picker: lets the clickable prototype reach every Branta state without the lever panel
+    const ridOpts=[['notIdentified','Not identified'],['identified','Identified'],['tampered','Tampered'],['checksOff','Checks off']].map(([v,l])=>({label:l,on:rid===v?'true':'false',pick:()=>set({rid:v})}));
+
+    const CFG={
+      spark:{name:'Spark · Daily spending',short:'Spark',ctx:'Everyday · Bitcoin mainnet',btcNet:true,steps:['Details','Review','Sent'],failMsg:'The Spark bridge didn’t respond.'},
+      liquid:{name:'Liquid · Travel',short:'Liquid',ctx:'Everyday · Liquid network',btcNet:false,steps:['Details','Review','Sent'],failMsg:'The Liquid backend didn’t respond.'},
+      vault:{name:'Vault · Family savings',short:'Vault',ctx:'Everyday · Bitcoin mainnet',btcNet:true,steps:['Details','Review','Sign','Sent'],failMsg:''}
+    }[w];
+    const RAILS=[['usdt-eth','USDt','Ethereum','eth'],['usdt-tron','USDt','Tron','tron'],['usdt-bnb','USDt','Binance','bnb'],['usdt-sol','USDt','Solana','sol'],['usdt-liquid','USDt','Liquid','liquid'],['usdc-eth','USDC','Ethereum','eth'],['usdc-sol','USDC','Solana','sol']];
+    const NADDR={eth:'0x7a…synthetic…e41',tron:'T9y…synthetic…r4u',bnb:'0x3c…synthetic…b07',sol:'5Fz…synthetic…9pk',liquid:'lq1q…synthetic…u5t'};
+    const NB={eth:'bEth',tron:'bTron',bnb:'bBnb',sol:'bSol',liquid:'bLiquid'};
+    const RLa=RAILS.filter(r=>r[0]===S.rail)[0]||RAILS[1],rAsset=RLa[1],rNet=RLa[2],rKey=RLa[3];
+    EX.railEx=NADDR[rKey];
+    const railMatch=v=>rKey==='liquid'?/^lq1/i.test(v):(rKey==='eth'||rKey==='bnb')?/^0x/i.test(v):rKey==='tron'?/^T[A-Za-z0-9]/.test(v):(!/^0x/i.test(v)&&!/^lq1/i.test(v)&&v.indexOf('@')<0&&/^[1-9A-HJ-NP-Za-km-z]{3}/.test(v));
+    const ph=stable?'Recipient’s '+rAsset+' address on '+rNet:isS?'Lightning invoice, Lightning address, Spark address or Bitcoin address':usdt?'Liquid address':isL?'Lightning invoice or address, Liquid address or Bitcoin address':'Bitcoin address';
+    const allow=stable?['usdtx']:isS?['inv','lnaddr','spark','btc']:usdt?['liquid']:isL?['inv','lnaddr','liquid','btc']:['btc'];
+    const TAG={inv:'Lightning invoice',lnaddr:'Lightning address',spark:'Spark address',btc:isS?'Bitcoin address · on-chain':isL?'Bitcoin address · on-chain swap':'Bitcoin address',liquid:'Liquid address',usdtx:rAsset+' address · '+rNet};
+    const RAIL={inv:'LIGHTNING',lnaddr:'LIGHTNING',spark:'SPARK',btc:'ON-CHAIN',liquid:'LIQUID',usdtx:rNet.toUpperCase()};
+    const detect=v=>{const s=(v||'').trim(),l=s.toLowerCase();if(!s)return null;
+      if(/^lnbc\d/.test(l))return{k:'inv',amt:5000};if(l.indexOf('lnbc')===0)return{k:'inv'};
+      if(/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(s))return{k:'lnaddr'};if(l.indexOf('sp1')===0)return{k:'spark'};
+      if(l.indexOf('bc1')===0)return{k:'btc'};if(l.indexOf('lq1')===0)return{k:'liquid'};
+      if(/^T[A-Za-z0-9]/.test(s))return{k:'usdtx'};return{k:'bad'};};
+
+    // destination detection
+    const d=stable?(S.dest.trim()?{k:railMatch(S.dest.trim())?'usdtx':'bad'}:null):detect(S.dest),dOk=!!d&&allow.indexOf(d.k)>=0,dBad=!!d&&!dOk;
+    const badMsg=stable?'Not a '+rNet+' address for '+rAsset+'.':usdt?'USDt sends need a Liquid address.':isS?'Not a Lightning invoice, Lightning address, Spark address or Bitcoin address.':'Not a Lightning invoice or address, Liquid address or Bitcoin address.';
+    const det={has:!!d,ok:dOk,invalid:dBad,tone:dOk?'ok':'bad',cls:dBad?'err':(S.step==='compose'&&!S.dest?'kf':''),ariaInv:dBad?'true':'false',
+      label:!d?'':d.k==='bad'?'Not recognized':dOk?TAG[d.k]:TAG[d.k]+' · not supported',
+      msg:!d?'':d.k==='bad'?badMsg:'This wallet can’t pay a '+TAG[d.k]+'.'};
+    const swapKind=isL&&!usdt&&dOk&&d.k!=='liquid';
+
+    // amount (single) or recipients (vault)
+    const parse=t=>{t=String(t||'');if(usdt)return parseFloat(t)||0;if(S.unit==='btc')return Math.round((parseFloat(t)||0)*1e8);return parseInt(t.replace(/[^0-9]/g,''),10)||0;};
+    const locked=dOk&&!!d.amt;
+    const recs=S.recs.map(r=>({a:r.a,v:r.v,dd:detect(r.a),n:parse(r.v)}));
+    const amount=isV?recs.reduce((t,r)=>t+r.n,0):locked?d.amt:parse(S.amt);
+    const balNow=isV?BAL.vault:usdt?BAL.usdt:isL?BAL.liquid:BAL.spark;
+    const over=amount>balNow;
+    const toUnit=(sats)=>S.unit==='btc'?(sats/1e8).toFixed(8):String(sats);
+    const amtTxt=n=>usdt?n.toFixed(2)+' USDt':fmt(n)+' SATS';
+    const availTxt=hide?D:usdt?BAL.usdt.toFixed(2)+' USDt':fmt(balNow)+' SATS';
+    const conv=(u)=>{if(u===S.unit)return;if(isV){set({unit:u,recs:S.recs.map(r=>({a:r.a,v:r.v?(u==='btc'?(parse(r.v)/1e8).toFixed(8):String(parse(r.v))):''}))});return;}
+      set({unit:u,amt:S.amt?(u==='btc'?(parse(S.amt)/1e8).toFixed(8):String(parse(S.amt))):''});};
+    const amt={switch:!usdt,satsP:S.unit==='sats'?'true':'false',btcP:S.unit==='btc'?'true':'false',toSats:()=>conv('sats'),toBtc:()=>conv('btc'),
+      unit:usdt?'USDt':S.unit==='btc'?'BTC':'sats',locked:locked,over:over,cls:over?'err':'',ariaInv:over?'true':'false',
+      val:locked?toUnit(d.amt):S.amt,
+      ph:usdt?'USDt amount':isL?'Enter amount':S.unit==='btc'?'Amount in BTC (optional for invoices with amount)':'Amount in sats (optional for invoices with amount)',
+      fiat:usdt?'≈ $'+amount.toFixed(2):'≈ '+fx(amount),avail:availTxt};
+    const limits={show:swapKind,text:S.limits==='fetching'?'Fetching current swap limits…':'Send between [MIN] and [MAX] sats'};
+
+    // examples (prototype paste row)
+    const exList=isV?[['Bitcoin address','btc'],['Same address again','dup'],['Not valid','bad']]
+      :stable?[[rAsset+' on '+rNet,'railEx'],['Not valid','bad']]
+      :isS?[['Lightning invoice','inv'],['Invoice with amount','invAmt'],['Lightning address','lnaddr'],['Spark address','spark'],['Bitcoin address','btc'],['Not valid','bad']]
+      :usdt?[['Liquid address','liquid'],['Not valid','bad']]
+      :[['Lightning invoice','inv'],['Liquid address','liquid'],['Bitcoin address','btc'],['Not valid','bad']];
+    const examples=exList.map(x=>({label:x[0],pick:()=>{
+      if(isV){const r=S.recs.map(o=>({a:o.a,v:o.v}));
+        if(x[1]==='dup'){if(r.length<2)r.push({a:'',v:'10000'});r[r.length-1].a=r[0].a||EX.btc;if(!r[0].a)r[0].a=EX.btc;}
+        else r[r.length-1].a=EX[x[1]];
+        set({recs:r,failed:false});return;}
+      const v=EX[x[1]],dd=detect(v),sw=isL&&dd&&(dd.k==='inv'||dd.k==='btc');
+      set({dest:v,failed:false,limits:sw?'fetching':'ready'});if(sw)later({limits:'ready'},900);}}));
+
+    // vault rows
+    const seen={};recs.forEach(r=>{const a=r.a.trim();if(a)seen[a]=(seen[a]||0)+1;});
+    const recRows=recs.map((r,i)=>{const okA=!!r.dd&&r.dd.k==='btc',dup=okA&&i>0&&seen[r.a.trim()]>1;
+      return{n:i+1,a:r.a,v:r.v,aid:'ra'+i,vid:'rv'+i,ok:okA&&!dup,bad:!!r.dd&&!okA,dup:dup,acls:(r.dd&&!okA)||dup?'err':'',vcls:over?'err':'',ariaInv:(r.dd&&!okA)||dup?'true':'false',canRemove:recs.length>1,
+        onA:e=>{const x=S.recs.map(o=>({a:o.a,v:o.v}));x[i].a=e.target.value;set({recs:x});},
+        onV:e=>{const x=S.recs.map(o=>({a:o.a,v:o.v}));x[i].v=e.target.value;set({recs:x});},
+        remove:()=>set({recs:S.recs.filter((o,j)=>j!==i)})};});
+    const vaultValid=recRows.every(r=>r.ok&&parse(r.v)>0)&&!over&&(parseInt(S.feeRate,10)||0)>=1;
+    const RATES={slow:2,normal:5,fast:12},VB=110+31*recs.length;
+    const feeR=parseInt(S.feeRate,10)||0,vFee=feeR*VB;
+    const speeds=[['slow','Slow · 2'],['normal','Normal · 5'],['fast','Fast · 12']].map(o=>({label:o[1],p:S.feeMode===o[0]?'true':'false',pick:()=>set({feeMode:o[0],feeRate:String(RATES[o[0]])})}));
+
+    // prepare
+    const canPrepare=isV?vaultValid:(dOk&&amount>0&&!over);
+    const prepare=()=>{if(isV){set({step:'prepared',failed:false});return;}set({busy:true,failed:false});later({busy:false,step:'prepared'},900);};
+    let hint='Prepare gets a fee quote. Nothing is sent yet.';
+    if(S.busy)hint='Getting a fee quote…';
+    else if(isV)hint=vaultValid?'Builds an unsigned transaction to review.':'Each recipient needs an address and amount.';
+    else if(!canPrepare)hint=!d?'Paste a destination to begin.':dBad?'Fix the destination to continue.':over?'Lower the amount to continue.':'Enter an amount to continue.';
+
+    // quote rows
+    const k=dOk?d.k:'';
+    let fee=0,feeK='Network fee',feeV='',feeS='',arrival='',extra=[];
+    if(isS){if(k==='spark'){fee=0;feeS='Spark transfer';arrival='Instant';}
+      else if(k==='btc'){fee=420;arrival='About 1 hour';extra.push({k:'Fee Rate (sat/vB)',v:'4'});}
+      else if(k==='usdtx'){feeK='Conversion fee';feeV='[FEE] USDt';arrival='[N] minutes';}
+      else{fee=3;arrival='Usually seconds';}}
+    if(isL){const payU=usdt&&S.feeAsset==='usdt';
+      if(payU){feeK='Fees (USDt)';feeV='0.05 USDt';feeS='Paid in USDt';}else{feeK='Fees (L-BTC)';fee=k==='btc'?310:k==='liquid'?26:41;}
+      arrival=k==='liquid'?'About 2 minutes':k==='btc'?'About 1 hour after the swap':'Seconds after the swap';
+      if(k==='btc')extra.push({k:'Fee Rate (sat/vB)',v:'4'});
+      if(swapKind)extra.push({k:'Route',v:k==='btc'?'L-BTC → Bitcoin on-chain swap':'L-BTC → Lightning swap',s:'Swap ID shown after sending'});}
+    if(isV)fee=vFee;
+    if(!feeV)feeV=fmt(fee)+' SATS';
+    const totalTxt=usdt?(amount+(S.feeAsset==='usdt'?0.05:0)).toFixed(2)+' USDt'+(S.feeAsset==='usdt'?'':' + '+fmt(fee)+' SATS'):fmt(amount+fee)+' SATS';
+    const R=(o)=>Object.assign({cls:'',vcls:'',scls:'',hasS:!!o.s,s:''},o);
+    let rows;
+    if(isV){rows=recRows.map(r=>R({k:'Recipient '+r.n,v:fmt(parse(r.v))+' SATS',s:r.a,scls:'mono'}));
+      const change=BAL.vault-amount-vFee;
+      rows=rows.concat([R({k:'Fee',v:fmt(vFee)+' SATS',s:feeR+' sat/vB · '+VB+' vB'}),R({k:'Change',v:hide?D:fmt(change)+' SATS',s:'Back to this Vault'}),R({k:'Total you send',v:fmt(amount+vFee)+' SATS',s:fx(amount+vFee),cls:'strong'})]);}
+    else rows=[R({k:'To',v:S.dest,vcls:'mono',s:TAG[k]||''}),R({k:'Amount',v:amtTxt(amount),s:usdt?'':fx(amount)}),R({k:feeK,v:feeV,s:feeS})]
+      .concat(extra.map(R)).concat([R({k:'Arrival',v:arrival}),R({k:'Total you send',v:totalTxt,cls:'strong'})]);
+    const checks=[{ok:true,label:'Destination format',val:isV?'Bitcoin address':TAG[k]||'',tone:'ok'}];
+    if(k==='inv')checks.push({ok:true,label:'Invoice expiry',val:'Valid for [N] min',tone:'ok'});
+    if(k==='btc'||isV)checks.push({ok:true,label:'Network',val:'Bitcoin mainnet',tone:'ok'});
+    if(k==='usdtx')checks.push({ok:true,label:'Network',val:rNet,tone:'ok'});
+    if(k==='liquid')checks.push({ok:true,label:'Network',val:'Liquid',tone:'ok'});
+    const RID={notIdentified:{ok:false,unk:true,val:'Not identified',tone:'unk'},identified:{ok:true,val:'Verified · Example Coffee Co.',tone:'ok'},
+      checksOff:{ok:false,unk:true,off:true,val:'Checks off',tone:'unk'},tampered:{ok:false,bad:true,val:'Does not match',tone:'bad'}};
+    checks.push(Object.assign({label:'Recipient identity (Branta)'},RID[rid]||RID.notIdentified));
+    checks.forEach(c=>{c.unk=!!c.unk;c.bad=!!c.bad;c.off=!!c.off;});
+    const nTo=isV?recRows.length:1,rowsTo=rows.slice(0,nTo),rowsRest=rows.slice(nTo);
+
+    // route blocks
+    const rk=k||(stable?'usdtx':isS?'inv':'liquid');
+    const amtShown=amount>0?amtTxt(amount):'';
+    const coin=(asset,badge)=>({btc:asset!=='USDt'&&asset!=='USDC',usdt:asset==='USDt',usdc:asset==='USDC',bSpark:badge==='spark',bLn:badge==='ln',bLiquid:badge==='liquid',bChain:badge==='chain',bEth:badge==='eth',bTron:badge==='tron',bBnb:badge==='bnb',bSol:badge==='sol'});
+    const BADGE={inv:'ln',lnaddr:'ln',spark:'spark',btc:'chain',liquid:'liquid',usdtx:rKey};
+    const sendAsset=isS?'Bitcoin':usdt?'USDt':'L-BTC';
+    const recvAsset=stable?rAsset:rk==='usdtx'?rAsset:(isL&&rk==='liquid')?sendAsset:'Bitcoin';
+    const recvAmt=!dOk?'Add a destination':rk==='usdtx'?(amount>0?'≈ [N] '+rAsset:''):amtShown;
+    const route=[
+      Object.assign({cap:'You send',asset:sendAsset,rail:isS?'SPARK':'LIQUID',hasRail:dOk,amt:amtShown,amCls:''},coin(sendAsset,dOk?(isS?'spark':'liquid'):'')),
+      Object.assign({cap:'They receive',asset:recvAsset,rail:RAIL[rk],hasRail:dOk,amt:recvAmt,amCls:dOk?'':'muted'},coin(recvAsset,dOk?BADGE[rk]:''))
+    ];
+
+    const railItems=RAILS.map(r=>Object.assign({asset:r[1],net:r[2],tag:r[2].toUpperCase(),p:S.rail===r[0]?'true':'false',pick:()=>set({rail:r[0],dest:'',failed:false})},coin(r[1],r[3])));
+    // signing
+    const sg=S.sig,setSig=(o)=>set({sig:Object.assign({},sg,o)});
+    const count=['dev','kc','hw'].filter(x=>sg[x]==='signed').length;
+    const SG=[
+      {id:'dev',name:'This device',fp:'a1b2c3d4',dev:true},
+      {id:'kc',name:'Keychain · Alex’s phone',fp:'e5f6a7b8',phone:true},
+      {id:'hw',name:'Hardware · Ledger-style device',fp:'c9d0e1f2',hw:true}
+    ].map(g=>{const s=sg[g.id],done=s==='signed';
+      const st=done?'Signed':s==='waiting'?'Waiting for phone':s==='ready'?(g.id==='hw'?'Connected':'Ready to sign'):'Not connected';
+      let act=null,lbl='',cls='';
+      if(!done&&count<2){if(g.id==='dev'&&s==='ready'){lbl='Sign';cls='pri';act=()=>setSig({dev:'signed'});}
+        else if(g.id==='kc'){lbl='Resend to phone';act=()=>setSig({kc:'waiting'});}
+        else if(g.id==='hw'&&s==='off'){lbl='Connect';act=()=>setSig({hw:'ready'});}
+        else if(g.id==='hw'&&s==='ready'){lbl='Sign on device';act=()=>setSig({hw:'signed'});}}
+      return Object.assign(g,{dev:!!g.dev,phone:!!g.phone,hw:!!g.hw,status:st,tone:done?'ok':'unk',sOk:done,sWait:s==='waiting',sOff:!done&&s!=='waiting',
+        hasAct:!!act,act:act||(()=>{}),actLabel:lbl,actCls:cls,hasSim:g.id==='kc'&&s==='waiting'&&count<2,sim:()=>setSig({kc:'signed'})});});
+    const sig={count:count,tone:count>=2?'ok':'unk',notReady:count<2,summary:fmt(amount)+' SATS to '+recs.length+(recs.length>1?' recipients':' recipient')+' · fee '+fmt(vFee)+' SATS · any 2 signers'};
+
+    // sent
+    const sent=isV?{status:'Pending · 0 confirmations',line:'Transaction broadcast · '+fmt(amount)+' SATS',to:recs.map(r=>r.a).join(', '),idLabel:'Txid',id:'a1b2…synthetic…c3d4'}
+      :{status:swapKind?'Pending · swap in progress':'Pending · usually settles in seconds',line:'Payment sent · '+amtTxt(amount),to:S.dest,idLabel:swapKind?'Swap ID':k==='liquid'||k==='btc'?'Txid':'Payment hash',id:'a1b2…synthetic…c3d4'};
+
+    // steps + balances
+    const stepIdx={compose:0,prepared:1,sign:2,sent:CFG.steps.length-1}[S.step];
+    const steps=CFG.steps.map((l,i)=>({label:l,cls:i===stepIdx?'cur':i<stepIdx?'dn':'',cur:i===stepIdx?'step':'false',done:i<stepIdx,mark:i<stepIdx?'':String(i+1),sr:i<stepIdx?'done':i===stepIdx?'current':''}));
+    const bal=(isL?[{num:fmt(BAL.liquid),unit:'SATS L-BTC',fiat:fx(BAL.liquid)},{num:BAL.usdt.toFixed(2),unit:'USDt',fiat:'$10.37'}]:[{num:fmt(isV?BAL.vault:BAL.spark),unit:'SATS',fiat:fx(isV?BAL.vault:BAL.spark)}])
+      .map(b=>hide?{num:D,unit:'',fiat:''}:b);
+
+    const segItems=isS?[['btc','Bitcoin'],['stable','Stablecoin (cross-chain)']].map(o=>({label:o[1],p:S.kind===o[0]?'true':'false',pick:()=>set({kind:o[0],dest:'',failed:false})}))
+      :isL?[['lbtc','L-BTC'],['usdt','USDt']].map(o=>({label:o[1],p:S.asset===o[0]?'true':'false',pick:()=>set({asset:o[0],dest:'',amt:'',failed:false})})):[];
+    const nvi=x=>({cls:w===x?'on':'',cur:w===x?'page':'false',pick:()=>self.setState(Object.assign(init(x,'compose',ek),{k:key,hide:S.hide}))});
+    const titles={compose:'Payment details',prepared:isV?'Review transaction':'Review and confirm',sign:'Collect signatures',sent:isV?'Broadcast':'Sent'};
+
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      lockAsk:lockAsk,lockIdle:!lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,toggleHide:()=>set({hide:!hide}),
+      nv:{spark:nvi('spark'),vault:nvi('vault'),liquid:nvi('liquid')},
+      w:{name:CFG.name,short:CFG.short,ctx:CFG.ctx,btcNet:CFG.btcNet,liqNet:!CFG.btcNet},
+      cfg:{ph:ph,failMsg:CFG.failMsg},
+      stepTitle:titles[S.step],
+      st:{compose:S.step==='compose',prepared:S.step==='prepared',review:S.step==='prepared'&&!tamp,tampered:tamp,sign:S.step==='sign',sent:S.step==='sent'},
+      ui:{kindSeg:S.step==='compose'&&!isV,segLabel:isS?'Send kind':'Asset',segItems:segItems,
+        route:!isV&&!tamp&&(S.step==='compose'||S.step==='prepared'),stablePick:stable&&S.step==='compose',single:!isV,vault:isV,
+        feeAssetSeg:usdt,failed:S.failed&&!S.busy&&!isV,feeWait:S.feeWait&&isL,feeNA:S.feeWait&&!isL},
+      route:route,dest:S.dest,det:det,examples:examples,
+      onDest:e=>set({dest:e.target.value,failed:false}),onAmt:e=>set({amt:e.target.value}),
+      amt:amt,limits:limits,
+      feeAssets:[['lbtc','L-BTC'],['usdt','USDt']].map(o=>({label:o[1],p:S.feeAsset===o[0]?'true':'false',pick:()=>set({feeAsset:o[0]})})),
+      recs:recRows,addRec:()=>set({recs:S.recs.concat([{a:'',v:''}])}),
+      speeds:speeds,feeRate:S.feeRate,onFee:e=>set({feeRate:e.target.value,feeMode:''}),
+      feeEst:'≈ '+fmt(vFee)+' SATS for this transaction · '+fx(vFee),
+      busy:S.busy,hint:hint,noPrepare:!canPrepare||S.busy,prepare:prepare,
+      rows:rows,rowsTo:rowsTo,rowsRest:rowsRest,idCard:rid==='identified',checks:checks,ridOpts:ridOpts,label:S.label,onLabel:e=>set({label:e.target.value}),
+      quoteNote:isV?'Nothing is signed yet.':'Quote valid for 60s.',
+      confirmLabel:isV?'Continue to signing':'Confirm and send',
+      backCompose:()=>set({step:'compose',feeWait:false}),
+      acceptFee:()=>set({feeWait:false}),
+      replaceReq:()=>self.setState(Object.assign(init(w,'compose',ek),{k:key,hide:S.hide})),
+      confirm:()=>set(isV?{step:'sign',sig:{dev:'ready',kc:'waiting',hw:'off'}}:{step:'sent'}),
+      signers:SG,rails:railItems,sig:sig,backReview:()=>set({step:'prepared'}),broadcast:()=>set({step:'sent'}),
+      sent:sent,copyLabel:S.copied?'Copied':'Copy',copy:()=>set({copied:true}),
+      again:()=>self.setState(Object.assign(init(w,'compose',ek),{k:key,hide:S.hide})),
+      steps:steps,bal:bal
+    };
+  }
+}
+</script>
+</body>
+</html>

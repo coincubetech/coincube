@@ -1,0 +1,1053 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Create Cube</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+.tenshu{--on-accent:#201407;--accent-ink:#f3821d;--spend:#1f3a2a;--locked:#3a2420;font-variant-numeric:tabular-nums}
+.tenshu.light{--accent-ink:#8a4304;--spend:#dcefe2;--locked:#f6ddd6}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+
+/* Launcher-world top bar (V3-Launcher-Spin tokens). Filter chips are absent here: filters never pick a Cube's network. */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;white-space:nowrap}
+.tbtn:hover{border-color:var(--line)}
+a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
+.tbtn svg{width:16px;height:16px}
+.tbtn .dot{color:var(--muted)}
+.tbtn .stw{font-size:12px;color:var(--muted)}
+
+.stage{flex:1;min-height:0;display:flex;justify-content:center;padding:28px 24px;box-sizing:border-box;overflow:hidden}
+/* one bounded form region per step */
+.region{width:940px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;overflow:hidden}
+.rhead{flex:none;display:flex;align-items:center;gap:12px;padding:16px 28px;border-bottom:1px solid var(--line)}
+.rhead .ttl{font-size:13px;font-weight:600}
+.ident{display:inline-flex;align-items:center;gap:8px;font-size:13px;color:var(--muted)}
+.ident img{width:16px;height:16px;border-radius:50%}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;line-height:1;color:var(--ink)}
+.tb.b2b{border-color:#D4A62A}
+.tb.test{border-style:dashed}
+.steps{flex:none;display:flex;align-items:center;gap:6px;margin:0;padding:14px 28px;list-style:none;border-bottom:1px solid var(--line);font-size:13px;flex-wrap:wrap}
+.steps li{display:inline-flex;align-items:center;gap:6px;color:var(--muted)}
+.steps .n{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600;box-sizing:border-box}
+.steps li.cur{color:var(--ink);font-weight:600}
+.steps li.cur .n{border-color:var(--accent);background:var(--selected)}
+.steps li.done{color:var(--ink)}
+.steps li.done .n{border-color:var(--good)}
+.steps .rule{width:18px;height:1px;background:var(--line)}
+.banner{flex:none;display:flex;align-items:center;gap:8px;padding:8px 28px;border-bottom:1px solid var(--line);font-size:13px;background:var(--bg)}
+.body{flex:1;min-height:0;overflow-y:auto;padding:28px}
+.body h2{margin:0;font-size:22px;font-weight:600;line-height:1.3}
+.lead{margin:6px 0 0;font-size:14px;color:var(--muted);max-width:640px}
+.rfoot{flex:none;display:flex;align-items:center;gap:12px;padding:14px 28px;border-top:1px solid var(--line)}
+
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:38px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap;box-sizing:border-box}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn:disabled{opacity:.55;cursor:default}
+.btn:disabled:hover{border-color:var(--line)}
+.btn.primary:disabled:hover{background:var(--accent);border-color:var(--accent)}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+a.linkbtn:hover{color:var(--ink)}
+.acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:20px}
+
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:18px;max-width:420px}
+.fld>label,.fld .lbl{font-size:13px;font-weight:500}
+.inp{height:40px;box-sizing:border-box;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.pin{display:flex;gap:8px}
+.pin input{width:44px;height:48px;text-align:center;font-size:20px;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;background:var(--bg)}
+.pin input[aria-invalid="true"]{border-color:var(--bad)}
+.err,.okline,.warnline,.info{display:flex;align-items:flex-start;gap:6px;margin:0;font-size:13px}
+.err{color:var(--bad)}.okline{color:var(--good)}.warnline{color:var(--warn)}.info{color:var(--muted)}
+.err svg,.okline svg,.warnline svg,.info svg{width:16px;height:16px;margin-top:1px}
+.alert{display:flex;gap:10px;align-items:flex-start;margin:0 0 20px;padding:12px 14px;border:1px solid var(--bad);border-radius:8px;max-width:640px}
+.alert svg{width:18px;height:18px;color:var(--bad);margin-top:1px}
+.alert b{display:block;font-weight:600}
+.alert span{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+
+/* option rows: aligned rows divided by rules, not a card each */
+.opts{margin:20px 0 0;padding:0;border:0;max-width:680px}
+.opts legend{font-size:13px;font-weight:600;margin-bottom:8px;padding:0}
+.opt{display:flex;align-items:flex-start;gap:12px;padding:12px 8px;border-top:1px solid var(--line);cursor:pointer;position:relative}
+.opt:last-of-type{border-bottom:1px solid var(--line)}
+.opt.sel{background:var(--selected)}
+.opt.off{cursor:default}
+.opt.off .on{color:var(--muted)}
+.opt input{margin:3px 0 0;accent-color:var(--accent);width:16px;height:16px}
+.opt .on{font-weight:500;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.opt .sub{font-size:13px;color:var(--muted)}
+.opt .gate{font-size:13px;color:var(--muted);display:flex;gap:6px;align-items:center}
+.opt .gate svg{width:14px;height:14px}
+.opt img{width:18px;height:18px;border-radius:50%}
+.ring{display:inline-flex;width:18px;height:18px;border:1px dashed currentColor;border-radius:50%;box-sizing:border-box;padding:1.5px}
+.ring img{width:100%;height:100%;opacity:.6}
+.grouphead{margin:20px 0 6px;font-size:13px;font-weight:600}
+.gatebox{display:flex;align-items:center;gap:8px;padding:12px 8px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);font-size:13px;color:var(--muted);max-width:680px}
+.gatebox svg{width:16px;height:16px}
+
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
+.seg button{height:36px;padding:0 16px;border:0;background:none;cursor:pointer;font-size:14px}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--selected);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.row{display:flex;align-items:center;gap:16px;margin-top:18px;max-width:640px}
+.row .k{width:140px;flex:none;font-size:13px;font-weight:500}
+
+.chk{display:flex;align-items:flex-start;gap:10px;margin-top:18px;max-width:600px;font-size:14px;cursor:pointer}
+.chk input{margin:3px 0 0;width:16px;height:16px;accent-color:var(--accent);flex:none}
+.copy{margin:14px 0 0;max-width:600px;font-size:14px}
+.copy.m{color:var(--muted);font-size:13px}
+
+.words{display:grid;grid-template-columns:repeat(4,1fr);gap:8px 16px;margin-top:20px;max-width:640px;padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.word{display:flex;align-items:center;gap:8px;font-size:14px}
+.word .i{width:24px;text-align:right;color:var(--muted);font-size:12px}
+.word .w{font-family:'IBM Plex Mono',ui-monospace,monospace;letter-spacing:.1em}
+
+/* passkey system window, drawn as a neutral placeholder */
+.syswin{margin-top:20px;max-width:520px;border:1px solid var(--line);border-radius:10px;overflow:hidden;background:var(--bg)}
+.syswin .bar{height:28px;display:flex;align-items:center;gap:6px;padding:0 10px;border-bottom:1px solid var(--line)}
+.syswin .bar i{width:10px;height:10px;border-radius:50%;border:1px solid var(--line)}
+.syswin .in{padding:24px;display:flex;gap:16px;align-items:center}
+.syswin .in svg{width:40px;height:40px;color:var(--muted)}
+
+/* template intro: row diagram */
+.dia{margin-top:24px;max-width:760px}
+.dia .hd{display:flex;font-size:12px;color:var(--muted);padding-left:220px;margin-bottom:6px}
+.dia .hd span:last-child{margin-left:auto}
+.drow{display:flex;align-items:center;gap:12px;padding:8px 0;border-top:1px solid var(--line)}
+.drow:last-of-type{border-bottom:1px solid var(--line)}
+.drow .pl{width:208px;flex:none}
+.drow .pl .c{font-size:12px;color:var(--muted)}
+.drow .pl .b{font-weight:600}
+.bar2{flex:1;display:flex;height:32px;border-radius:6px;overflow:hidden;font-size:12px;font-weight:600;letter-spacing:.02em}
+.bar2 .lk{display:flex;align-items:center;justify-content:center;background:var(--locked);color:var(--bad);border-right:2px solid var(--panel);white-space:nowrap;overflow:hidden}
+.bar2 .sp{flex:1;display:flex;align-items:center;justify-content:center;background:var(--spend);color:var(--good);white-space:nowrap}
+.dia .fn{margin:8px 0 0;font-size:12px;color:var(--muted)}
+
+/* Set keys */
+.keys{display:flex;gap:24px;margin-top:20px;align-items:flex-start}
+.paths{flex:1;min-width:0}
+.path{padding:14px 0;border-top:1px solid var(--line)}
+.path:last-of-type{border-bottom:1px solid var(--line)}
+.path .ph{display:flex;align-items:center;gap:8px;font-size:13px;font-weight:600}
+.path .ph .th{margin-left:auto;font-weight:400;color:var(--muted)}
+.slot{display:flex;align-items:center;gap:10px;min-height:40px;padding:4px 0 4px 8px;font-size:14px}
+.slot .sl{width:150px;flex:none;color:var(--muted);font-size:13px}
+.slot .sv{flex:1;min-width:0;display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.slot.editing{background:var(--selected);border-radius:6px}
+.tl{display:flex;align-items:center;gap:8px;padding:4px 0 0 8px;font-size:13px;color:var(--muted)}
+.tl .inp{height:32px;width:96px}
+.picker{width:340px;flex:none;border:1px solid var(--line);border-radius:10px;padding:16px;box-sizing:border-box;background:var(--bg)}
+.picker h3{margin:0 0 4px;font-size:16px;font-weight:600}
+.src{display:flex;flex-direction:column;margin-top:10px}
+.srcb{display:flex;align-items:flex-start;gap:10px;text-align:left;padding:10px 8px;border:0;border-top:1px solid var(--line);background:none;cursor:pointer;position:relative}
+.srcb:last-child{border-bottom:1px solid var(--line)}
+.srcb[aria-pressed="true"]{background:var(--selected);z-index:1}
+.srcb:focus-visible{z-index:2}
+.srcb svg{width:18px;height:18px;color:var(--muted);margin-top:1px}
+.srcb .t{font-weight:500;font-size:14px}
+.srcb .d{font-size:12px;color:var(--muted)}
+.srcb:disabled{cursor:default}
+.srcb:disabled .t{color:var(--muted)}
+.sub2{margin:8px 0 0 28px;font-size:13px}
+.sub2 .h{font-weight:600;font-size:12px;color:var(--muted);margin-top:6px}
+.kr{display:flex;align-items:center;gap:8px;padding:6px 0}
+.kr .tag{font-size:12px;color:var(--muted)}
+
+/* node */
+.cardopt{max-width:680px;margin-top:20px;padding:16px 18px;border:1px solid var(--accent);border-radius:10px}
+.cardopt b{font-size:15px}
+.adv{margin-top:16px}
+.advrows{max-width:680px;margin-top:8px}
+.advrow{display:flex;align-items:center;gap:16px;padding:12px 8px;border-top:1px solid var(--line)}
+.advrow:last-child{border-bottom:1px solid var(--line)}
+.advrow .m{flex:1}
+.advrow .m b{display:block;font-weight:500}
+.advrow .m span{font-size:13px;color:var(--muted)}
+.prog{margin-top:20px;max-width:620px}
+.pline{display:flex;align-items:center;gap:10px;padding:10px 0;border-top:1px solid var(--line);font-size:14px}
+.pline:last-child{border-bottom:1px solid var(--line)}
+.pline svg{width:16px;height:16px}
+.meter{height:6px;border-radius:3px;background:var(--line);overflow:hidden;margin:4px 0 0}
+.meter i{display:block;height:100%;background:var(--accent)}
+
+/* done */
+.sum{list-style:none;margin:20px 0 0;padding:0;max-width:640px;border-top:1px solid var(--line)}
+.sum li{display:flex;gap:16px;padding:10px 0;border-bottom:1px solid var(--line);font-size:14px}
+.sum .k{width:150px;flex:none;color:var(--muted);font-size:13px}
+.stt{display:inline-flex;align-items:center;gap:6px}
+.stt svg{width:16px;height:16px}
+.tone-ok{color:var(--good)}.tone-warn{color:var(--warn)}.tone-muted{color:var(--muted)}
+
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="vsep"></span>
+    <a class="tbtn" href="V3-Launcher-Spin.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg>
+      <span>Back to Cube list</span>
+    </a>
+    <span class="grow"></span>
+    <a class="tbtn" href="V3-Launcher-Connect.dc.html" aria-label="Connect, alex@example.test, signed in" title="alex@example.test">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="dot">·</span><span>alex@example.test</span><span class="stw">Signed in</span>
+    </a>
+    <a class="tbtn" href="V3-Launcher-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage">
+    <section class="region" aria-labelledby="cc-h">
+      <div class="rhead">
+        <span class="ttl">Create Cube</span>
+        <span class="vsep"></span>
+        <span class="ident">
+          <span>{{ cubeName }}</span><span>·</span>
+          <sc-if value="{{ netIsB2b }}" hint-placeholder-val="{{ false }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></sc-if>
+          <sc-if value="{{ netNotB2b }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+          <span>{{ netName }}</span>
+          <sc-if value="{{ netHasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ netTagCls }}">{{ netTag }}</span></sc-if>
+        </span>
+      </div>
+
+      <ol class="steps" aria-label="Create Cube steps">
+        <sc-for list="{{ steps }}" as="s" hint-placeholder-count="8">
+          <li class="{{ s.cls }}" aria-current="{{ s.current }}"><span class="n">{{ s.n }}</span><span>{{ s.label }}</span></li>
+          <sc-if value="{{ s.hasRule }}" hint-placeholder-val="{{ true }}"><li aria-hidden="true"><span class="rule"></span></li></sc-if>
+        </sc-for>
+      </ol>
+
+      <!-- installer network_banner: every step on a test network carries the badge -->
+      <sc-if value="{{ showBanner }}" hint-placeholder-val="{{ false }}">
+        <div class="banner"><span class="tb test">{{ netTag }}</span><span>Test network</span></div>
+      </sc-if>
+
+      <div class="body" aria-live="polite">
+
+        <!-- ===== NETWORK ===== -->
+        <sc-if value="{{ stNetwork }}" hint-placeholder-val="{{ true }}">
+          <h2 id="cc-h">Network</h2>
+          <fieldset class="opts">
+            <legend class="sr">Network for the new Cube</legend>
+            <sc-for list="{{ liveNets }}" as="n" hint-placeholder-count="2">
+              <label class="opt {{ n.cls }}">
+                <input type="radio" name="cc-net" checked="{{ n.checked }}" disabled="{{ n.disabled }}" onChange="{{ n.pick }}">
+                <span>
+                  <span class="on">
+                    <sc-if value="{{ n.isB2b }}" hint-placeholder-val="{{ false }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></sc-if>
+                    <sc-if value="{{ n.notB2b }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+                    <span>{{ n.label }}</span>
+                    <sc-if value="{{ n.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb b2b">Blake2b</span></sc-if>
+                  </span>
+                  <sc-if value="{{ n.hasSub }}" hint-placeholder-val="{{ true }}"><span class="sub">{{ n.sub }}</span></sc-if>
+                  <sc-if value="{{ n.hasGate }}" hint-placeholder-val="{{ false }}"><span class="gate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>{{ n.gate }}</span></sc-if>
+                </span>
+              </label>
+            </sc-for>
+            <p class="grouphead">Test networks</p>
+            <sc-if value="{{ devOn }}" hint-placeholder-val="{{ false }}">
+              <sc-for list="{{ testNets }}" as="n" hint-placeholder-count="4">
+                <label class="opt {{ n.cls }}">
+                  <input type="radio" name="cc-net" checked="{{ n.checked }}" disabled="{{ n.disabled }}" onChange="{{ n.pick }}">
+                  <span>
+                    <span class="on">
+                      <span class="ring"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+                      <span>{{ n.label }}</span>
+                      <span class="tb test">{{ n.tag }}</span>
+                    </span>
+                    <sc-if value="{{ n.hasSub }}" hint-placeholder-val="{{ true }}"><span class="sub">{{ n.sub }}</span></sc-if>
+                    <sc-if value="{{ n.hasGate }}" hint-placeholder-val="{{ false }}"><span class="gate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>{{ n.gate }}</span></sc-if>
+                  </span>
+                </label>
+              </sc-for>
+            </sc-if>
+            <sc-if value="{{ devOff }}" hint-placeholder-val="{{ true }}">
+              <div class="gatebox"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg><span>Test networks appear when Developer mode is on.</span><a class="linkbtn" href="V3-Launcher-AppPrefs.dc.html">App preferences</a></div>
+            </sc-if>
+          </fieldset>
+          <sc-if value="{{ b2bFam }}" hint-placeholder-val="{{ false }}">
+            <p class="copy">Create a Bitcoin Blake2b Vault. Other wallet and recovery flows are unavailable.</p>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===== CUBE (name + unlock method, source order) ===== -->
+        <sc-if value="{{ stCubeStd }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Create a new Cube</h2>
+          <p class="lead">A Cube is your account which can contain a Spark wallet, a Liquid wallet, a Vault wallet and other features.</p>
+          <sc-if value="{{ errLimit }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Cube limit reached</b><span>Cube limit reached ([USED]/[LIMIT]) for the [PLAN NAME] plan. Upgrade your Connect account to create more Cubes.</span></div></div>
+          </sc-if>
+          <div class="row">
+            <span class="k" id="cc-unlock">Unlock method:</span>
+            <span class="seg" role="group" aria-labelledby="cc-unlock">
+              <button type="button" aria-pressed="{{ pkPressed }}" onClick="{{ pickPasskey }}">Passkey</button>
+              <button type="button" aria-pressed="{{ pinPressed }}" onClick="{{ pickPin }}">PIN</button>
+            </span>
+          </div>
+          <div class="fld">
+            <label for="cc-name">Cube Name</label>
+            <input id="cc-name" class="inp" type="text" value="{{ nameValue }}" aria-invalid="{{ nameInvalid }}" aria-describedby="{{ nameDesc }}">
+            <sc-if value="{{ errName }}" hint-placeholder-val="{{ false }}"><p class="err" id="cc-name-err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Please enter a name</p></sc-if>
+          </div>
+          <sc-if value="{{ isPin }}" hint-placeholder-val="{{ true }}">
+            <div class="fld">
+              <span class="lbl" id="cc-pin1">Enter PIN:</span>
+              <span class="pin" role="group" aria-labelledby="cc-pin1">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 1" value="1" aria-invalid="{{ pin1Invalid }}">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 2" value="1" aria-invalid="{{ pin1Invalid }}">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 3" value="{{ pin1d3 }}" aria-invalid="{{ pin1Invalid }}">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 4" value="{{ pin1d4 }}" aria-invalid="{{ pin1Invalid }}">
+              </span>
+              <sc-if value="{{ errPin1 }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Please enter all 4 PIN digits</p></sc-if>
+            </div>
+            <div class="fld">
+              <span class="lbl" id="cc-pin2">Confirm PIN:</span>
+              <span class="pin" role="group" aria-labelledby="cc-pin2">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 1" value="{{ pin2d1 }}" aria-invalid="{{ pin2Invalid }}">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 2" value="{{ pin2d2 }}" aria-invalid="{{ pin2Invalid }}">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 3" value="{{ pin2d3 }}" aria-invalid="{{ pin2Invalid }}">
+                <input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 4" value="{{ pin2d4 }}" aria-invalid="{{ pin2Invalid }}">
+              </span>
+              <sc-if value="{{ hasPin2Err }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>{{ pin2Err }}</p></sc-if>
+            </div>
+          </sc-if>
+          <sc-if value="{{ isPasskey }}" hint-placeholder-val="{{ false }}">
+            <p class="copy">Your Cube will be secured with a passkey. No PIN is needed — you'll use Touch ID to unlock it.</p>
+            <p class="copy m">Your backup is your Recovery Kit. Create one in Settings — it carries this Cube's master seed, encrypted with a recovery password only you know, so you can restore the Cube even without your passkey.</p>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===== CUBE · Bitcoin Blake2b: installer RestorePinSetup ===== -->
+        <sc-if value="{{ stCubeB2b }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Create a PIN to secure your Cube</h2>
+          <p class="lead">Bitcoin Blake2b supports a PIN-protected Vault using a local node or Connect</p>
+          <div class="fld">
+            <span class="lbl" id="cb-pin1">Enter a 4-digit PIN:</span>
+            <span class="pin" role="group" aria-labelledby="cb-pin1">
+              <input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 1" value="1"><input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 2" value="1"><input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 3" value="1"><input type="password" inputmode="numeric" maxlength="1" aria-label="PIN digit 4" value="1">
+            </span>
+          </div>
+          <div class="fld">
+            <span class="lbl" id="cb-pin2">Confirm PIN:</span>
+            <span class="pin" role="group" aria-labelledby="cb-pin2">
+              <input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 1" value="1" aria-invalid="{{ b2bPinInvalid }}"><input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 2" value="1" aria-invalid="{{ b2bPinInvalid }}"><input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 3" value="1" aria-invalid="{{ b2bPinInvalid }}"><input type="password" inputmode="numeric" maxlength="1" aria-label="Confirm PIN digit 4" value="{{ b2bLast }}" aria-invalid="{{ b2bPinInvalid }}">
+            </span>
+            <sc-if value="{{ errB2bPin }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>PINs do not match.</p></sc-if>
+          </div>
+        </sc-if>
+
+        <!-- ===== PASSKEY registration overlay ===== -->
+        <sc-if value="{{ stPasskey }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Passkey Registration</h2>
+          <p class="lead">Complete the passkey setup in the window below.</p>
+          <sc-if value="{{ errPasskey }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Failed to start passkey ceremony: [detail]</b><span>Nothing was created.</span></div></div>
+          </sc-if>
+          <div class="syswin" aria-label="System passkey window (drawn placeholder)">
+            <div class="bar"><i></i><i></i><i></i></div>
+            <div class="in">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4a6 6 0 0 0-6 6v2M18 12v-2a6 6 0 0 0-9-5.2M9 20c1.5-2 2-4.5 2-7.5a1 1 0 0 1 2 0c0 3.3-.6 6-2 8.5M15 19.5c.6-1.8 1-3.8 1-6"></path></svg>
+              <div><b>Authenticate with Touch ID to create your passkey.</b><div class="muted" style="font-size:13px">Look for the system prompt.</div></div>
+            </div>
+          </div>
+          <div class="acts">
+            <button type="button" class="btn primary" onClick="{{ next }}">Prototype: passkey created</button>
+            <button type="button" class="btn" onClick="{{ back }}">Cancel</button>
+          </div>
+        </sc-if>
+
+        <!-- ===== BACKUP · creation gate (nothing is written until a backup or an acknowledgement) ===== -->
+        <sc-if value="{{ bkChoose }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Back up this Cube</h2>
+          <p class="lead">Your recovery phrase is twelve words that rebuild this Cube on any computer.</p>
+          <sc-if value="{{ errNoAck }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>This Cube can't be created without a backup or an acknowledgement. Nothing was written.</b></div></div>
+          </sc-if>
+          <div class="acts" style="flex-direction:column;align-items:flex-start;gap:10px">
+            <button type="button" class="btn primary" style="width:320px" onClick="{{ toPhrase }}">Write down my recovery phrase</button>
+            <button type="button" class="btn" style="width:320px" onClick="{{ toKit }}">Save a Recovery Kit to Connect</button>
+          </div>
+          <div class="acts">
+            <button type="button" class="linkbtn" onClick="{{ toLater }}">I'll do this later</button>
+            <button type="button" class="linkbtn" onClick="{{ back }}">Cancel</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ bkPhrase }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Your Recovery Phrase</h2>
+          <p class="warnline" style="margin-top:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Do not share these words with anyone.</p>
+          <ol class="words" aria-label="Recovery phrase, 12 words (masked in this review)">
+            <sc-for list="{{ words }}" as="w" hint-placeholder-count="12"><li class="word"><span class="i">{{ w.i }}</span><span class="w">{{ w.t }}</span></li></sc-for>
+          </ol>
+          <div class="acts"><button type="button" class="btn primary" onClick="{{ toVerify }}">I've Written It Down</button><button type="button" class="linkbtn" onClick="{{ toLater }}">I'll do this later</button></div>
+        </sc-if>
+
+        <sc-if value="{{ bkVerify }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Verify Your Recovery Phrase</h2>
+          <div style="display:flex;gap:16px;flex-wrap:wrap">
+            <div class="fld" style="width:180px"><label for="vw3">Word 3</label><input id="vw3" class="inp mono" type="text" autocomplete="off" aria-invalid="{{ wordsInvalid }}"></div>
+            <div class="fld" style="width:180px"><label for="vw7">Word 7</label><input id="vw7" class="inp mono" type="text" autocomplete="off" aria-invalid="{{ wordsInvalid }}"></div>
+            <div class="fld" style="width:180px"><label for="vw11">Word 11</label><input id="vw11" class="inp mono" type="text" autocomplete="off" aria-invalid="{{ wordsInvalid }}"></div>
+          </div>
+          <sc-if value="{{ errWords }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert" style="margin-top:10px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>The words you entered don't match. Please try again.</p></sc-if>
+          <div class="acts"><button type="button" class="btn primary" onClick="{{ verifyWords }}">Verify</button><button type="button" class="btn" onClick="{{ toPhrase }}">Show the words again</button></div>
+        </sc-if>
+
+        <sc-if value="{{ bkKit }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Save a Recovery Kit to Connect</h2>
+          <sc-if value="{{ errKitAlert }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>{{ kitAlert }}</b></div></div>
+          </sc-if>
+          <div class="fld">
+            <label for="kp1">Recovery password</label>
+            <input id="kp1" class="inp" type="password" placeholder="Choose a password" value="••••••••••••••" aria-invalid="{{ kitPwInvalid }}">
+            <span class="info">Strength: [STRENGTH]</span>
+          </div>
+          <div class="fld">
+            <label for="kp2">Confirm recovery password</label>
+            <input id="kp2" class="inp" type="password" placeholder="Re-enter password" value="••••••••••••" aria-invalid="{{ kitPwInvalid }}">
+            <sc-if value="{{ errKitPw }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Passwords don't match.</p></sc-if>
+          </div>
+          <label class="chk"><input type="checkbox" checked="{{ kitAck }}" onChange="{{ toggleKitAck }}"><span>I've written this password down somewhere I can find it</span></label>
+          <div class="acts">
+            <button type="button" class="btn primary" disabled="{{ kitBlocked }}" onClick="{{ toSaving }}">Back up Recovery Kit</button>
+            <button type="button" class="btn" onClick="{{ toChoose }}">Back</button>
+            <button type="button" class="linkbtn" onClick="{{ toLater }}">I'll do this later</button>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ bkSaving }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Saving your Recovery Kit…</h2>
+          <p class="lead">Your Cube is created once this finishes.</p>
+          <div class="prog"><div class="meter" role="progressbar" aria-label="Saving Recovery Kit" aria-valuetext="In progress"><i style="width:60%"></i></div></div>
+          <div class="acts"><button type="button" class="btn primary" onClick="{{ next }}">Prototype: saved</button></div>
+        </sc-if>
+
+        <sc-if value="{{ bkLater }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Create this Cube without a backup?</h2>
+          <p class="copy m">{{ notBackupCopy }}</p>
+          <label class="chk"><input type="checkbox" checked="{{ ack }}" onChange="{{ toggleAck }}"><span>I understand that without a backup, losing this computer means losing the bitcoin in this Cube, and that nobody — including COINCUBE — can recover it.</span></label>
+          <div class="acts">
+            <button type="button" class="btn" onClick="{{ toChoose }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg><span>Back up now</span>
+            </button>
+            <button type="button" class="btn primary" disabled="{{ noAck }}" onClick="{{ next }}">Create without a backup</button>
+            <button type="button" class="linkbtn" onClick="{{ back }}">Cancel</button>
+          </div>
+        </sc-if>
+
+        <!-- Bitcoin Blake2b: installer BackupMnemonic -->
+        <sc-if value="{{ bkB2b }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Back Up Your Cube Master Seed</h2>
+          <p class="lead">Write these words down in order and keep them private. They recover this Cube; the PIN only unlocks this device.</p>
+          <ol class="words" aria-label="Master seed, 12 words (masked in this review)">
+            <sc-for list="{{ words }}" as="w" hint-placeholder-count="12"><li class="word"><span class="i">{{ w.i }}</span><span class="w">{{ w.t }}</span></li></sc-for>
+          </ol>
+          <label class="chk"><input type="checkbox" checked="{{ seedAck }}" onChange="{{ toggleSeedAck }}"><span>I have written down my seed words</span></label>
+        </sc-if>
+
+        <!-- ===== CONNECT registration (after the Cube is written) / Blake2b installer Connect step ===== -->
+        <sc-if value="{{ stRegister }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">COINCUBE | Connect</h2>
+          <sc-if value="{{ b2bFam }}" hint-placeholder-val="{{ false }}"><p class="lead">Connect authentication is required for Bitcoin Blake2b</p></sc-if>
+          <ul class="sum">
+            <li><span class="k">Account</span><span class="stt tone-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Signed in · alex@example.test</span></li>
+            <li><span class="k">This Cube</span><span class="stt {{ regTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ regIcon }}"></path></svg>{{ regText }}</span></li>
+          </ul>
+          <sc-if value="{{ errRegister }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Couldn't register this Cube with Connect: [server message]</b><span>Not yet synced to Connect. It will sync automatically in a moment.</span></div></div>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===== VAULT · template picker (optional for a new Bitcoin Cube) ===== -->
+        <sc-if value="{{ stVaultType }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Choose wallet type</h2>
+          <fieldset class="opts">
+            <legend class="sr">Vault template</legend>
+            <sc-for list="{{ templates }}" as="t" hint-placeholder-count="6">
+              <label class="opt {{ t.cls }}">
+                <input type="radio" name="cc-tpl" checked="{{ t.checked }}" onChange="{{ t.pick }}">
+                <span><span class="on">{{ t.name }}</span><span class="sub">{{ t.desc }}</span></span>
+              </label>
+            </sc-for>
+          </fieldset>
+          <sc-if value="{{ vaultOptional }}" hint-placeholder-val="{{ true }}">
+            <div class="acts"><button type="button" class="linkbtn" onClick="{{ skipVault }}">Not now · add a Vault later</button></div>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===== VAULT · template intro with the timelock drawn as rows ===== -->
+        <sc-if value="{{ stVaultIntro }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">{{ tplTitle }}</h2>
+          <p class="lead">{{ tplNeed }}</p>
+          <div class="dia" role="img" aria-label="{{ diaAria }}">
+            <div class="hd"><span>Receipt of funds</span><span>After some time* of wallet inactivity</span></div>
+            <sc-for list="{{ diaRows }}" as="r" hint-placeholder-count="3">
+              <div class="drow">
+                <div class="pl"><div class="c">{{ r.label }}</div><div class="b">{{ r.box }}</div></div>
+                <div class="bar2">
+                  <sc-if value="{{ r.locked }}" hint-placeholder-val="{{ true }}"><span class="lk" style="{{ r.lockStyle }}">CAN'T SPEND (TIMELOCKED)</span></sc-if>
+                  <span class="sp">CAN SPEND</span>
+                </div>
+              </div>
+            </sc-for>
+            <p class="fn">*The time range (timelock) for the activation of keys can be configured in the next step.</p>
+          </div>
+          <p class="copy m">Tip: a family member or friend can contribute a Keychain key remotely.</p>
+        </sc-if>
+
+        <!-- ===== VAULT · Set keys + Select key source ===== -->
+        <sc-if value="{{ stKeys }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Set keys</h2>
+          <sc-if value="{{ errKeys }}" hint-placeholder-val="{{ false }}">
+            <div class="alert" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>No two recovery options may become available at the very same date.</b></div></div>
+          </sc-if>
+          <div class="keys">
+            <div class="paths">
+              <sc-for list="{{ paths }}" as="p" hint-placeholder-count="2">
+                <div class="path">
+                  <div class="ph"><span>{{ p.title }}</span><span class="th">{{ p.threshold }}</span></div>
+                  <sc-for list="{{ p.slots }}" as="k" hint-placeholder-count="2">
+                    <div class="slot {{ k.cls }}">
+                      <span class="sl">{{ k.label }}</span>
+                      <span class="sv">
+                        <sc-if value="{{ k.isSet }}" hint-placeholder-val="{{ true }}"><span>{{ k.alias }}</span><span class="mono muted">{{ k.fp }}</span></sc-if>
+                        <sc-if value="{{ k.notSet }}" hint-placeholder-val="{{ false }}"><span class="muted">Not set</span></sc-if>
+                        <sc-if value="{{ k.hasErr }}" hint-placeholder-val="{{ false }}"><span class="err" role="alert">Key already used</span></sc-if>
+                      </span>
+                      <button type="button" class="btn sm" aria-label="{{ k.aria }}" onClick="{{ k.edit }}">{{ k.action }}</button>
+                    </div>
+                  </sc-for>
+                  <sc-if value="{{ p.hasLock }}" hint-placeholder-val="{{ false }}">
+                    <div class="tl"><label for="{{ p.lockId }}">Keys can move the funds after inactivity of:</label><input id="{{ p.lockId }}" class="inp mono" type="text" inputmode="numeric" placeholder="ex: 1000" value="{{ p.blocks }}"><span>blocks {{ p.approx }}</span></div>
+                  </sc-if>
+                </div>
+              </sc-for>
+              <div class="acts">
+                <sc-if value="{{ isCustom }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn sm">Add recovery option</button><button type="button" class="btn sm">Add Safety Net</button></sc-if>
+                <button type="button" class="btn sm">Clear All</button>
+                <button type="button" class="linkbtn" aria-expanded="false">Advanced settings</button>
+                <span class="muted" style="font-size:13px">Descriptor type: {{ descType }}</span>
+              </div>
+            </div>
+
+            <sc-if value="{{ pickerOpen }}" hint-placeholder-val="{{ true }}">
+              <div class="picker" role="dialog" aria-labelledby="ks-h">
+                <h3 id="ks-h">Select key source</h3>
+                <div class="muted" style="font-size:13px">For {{ editingLabel }}</div>
+                <div class="src">
+                  <sc-for list="{{ sources }}" as="o" hint-placeholder-count="6">
+                    <button type="button" class="srcb {{ o.cls }}" aria-pressed="{{ o.pressed }}" disabled="{{ o.disabled }}" onClick="{{ o.pick }}">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ o.icon }}"></path></svg>
+                      <span><span class="t">{{ o.title }}</span><br><span class="d">{{ o.desc }}</span></span>
+                    </button>
+                  </sc-for>
+                </div>
+                <sc-if value="{{ showKeychain }}" hint-placeholder-val="{{ true }}">
+                  <div class="sub2">
+                    <div class="h">My Keychain Keys</div>
+                    <div class="kr"><span>Keychain · Alex's phone</span><span class="mono muted">b5c6d7e8</span><span class="tag">Already used in this Vault</span></div>
+                    <div class="h">Contact Keychain Keys</div>
+                    <div class="kr"><span>Contact · Sam</span><span class="mono muted">e3f4a5b6</span><button type="button" class="btn sm" aria-pressed="true">Selected</button></div>
+                  </div>
+                </sc-if>
+                <div class="fld" style="margin-top:14px">
+                  <label for="ks-alias">Key name (alias):</label>
+                  <input id="ks-alias" class="inp" type="text" placeholder="E.g. My Hardware Wallet" value="{{ aliasValue }}">
+                </div>
+                <div class="acts" style="margin-top:12px"><button type="button" class="btn primary sm" onClick="{{ applyKey }}">Apply</button><button type="button" class="btn sm" onClick="{{ closePicker }}">Cancel</button></div>
+              </div>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- ===== NODE / backend ===== -->
+        <sc-if value="{{ stBackend }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">{{ nodeTitle }}</h2>
+
+          <!-- Bitcoin: Connect first, node optional -->
+          <sc-if value="{{ bkConnectStd }}" hint-placeholder-val="{{ true }}">
+            <div class="cardopt">
+              <b>Start with COINCUBE | Connect</b>
+              <p class="copy m" style="margin-top:4px">Your Vault will use our hosted Esplora server immediately (backed by Bitcoin Knots). No setup required.</p>
+              <label class="chk"><input type="checkbox" checked="{{ installNode }}" onChange="{{ toggleInstall }}"><span>Also install a pruned Bitcoin node on my device</span></label>
+              <sc-if value="{{ installNode }}" hint-placeholder-val="{{ true }}"><p class="copy m">Once synced, your Vault will automatically switch to your local node.</p></sc-if>
+            </div>
+            <div class="adv">
+              <button type="button" class="linkbtn" aria-expanded="{{ advExpanded }}" onClick="{{ toggleAdv }}">{{ advLabel }}</button>
+              <sc-if value="{{ advOpen }}" hint-placeholder-val="{{ false }}">
+                <div class="advrows">
+                  <div class="advrow"><span class="m"><b>I already have a node</b><span>Select this option if you already have a Bitcoin node running locally or remotely. Tenshu will connect to it.</span></span><button type="button" class="btn sm" onClick="{{ toOwn }}">Select</button></div>
+                  <div class="advrow"><span class="m"><b>Install a node only</b><span>Tenshu installs a pruned node on your computer without COINCUBE | Connect as a fallback.</span></span><button type="button" class="btn sm" onClick="{{ toLocal }}">Select</button></div>
+                  <div class="advrow"><span class="m"><b>COINCUBE | Connect only</b><span>Use COINCUBE | Connect to access our Esplora. No local node required.</span></span><button type="button" class="btn sm" onClick="{{ connectOnly }}">Select</button></div>
+                </div>
+              </sc-if>
+            </div>
+          </sc-if>
+
+          <!-- Bitcoin Blake2b: Connect or an isolated local node -->
+          <sc-if value="{{ bkConnectB2b }}" hint-placeholder-val="{{ false }}">
+            <div class="cardopt">
+              <b>Use COINCUBE | Connect</b>
+              <p class="copy m" style="margin-top:4px">Use the hosted Bitcoin Blake2b node while a local node syncs, or use Connect alone.</p>
+              <label class="chk"><input type="checkbox" checked="{{ installNode }}" onChange="{{ toggleInstall }}"><span>Also install a pruned node on my device</span></label>
+            </div>
+            <div class="advrows" style="margin-top:16px">
+              <div class="advrow"><span class="m"><b>Install a local pruned node</b><span>Runs Bitcoin Knots for Bitcoin Blake2b separately. Must finish syncing before the Vault is created.</span></span><button type="button" class="btn sm" onClick="{{ toLocal }}">Use a local node</button></div>
+            </div>
+          </sc-if>
+
+          <!-- local node: software + resources -->
+          <sc-if value="{{ bkLocal }}" hint-placeholder-val="{{ false }}">
+            <div class="row" style="align-items:flex-start">
+              <span class="k">Node software</span>
+              <span>
+                <sc-if value="{{ notB2bFam }}" hint-placeholder-val="{{ true }}">
+                  <span class="seg" role="group" aria-label="Node software">
+                    <button type="button" aria-pressed="{{ knotsPressed }}" onClick="{{ pickKnots }}">Bitcoin Knots</button>
+                    <button type="button" aria-pressed="{{ corePressed }}" onClick="{{ pickCore }}">Bitcoin Core</button>
+                  </span>
+                </sc-if>
+                <p class="copy m" style="margin-top:8px">{{ flavorBlurb }}</p>
+              </span>
+            </div>
+            <div class="row"><span class="k">Preset</span><span class="seg" role="group" aria-label="Computer preset"><button type="button" aria-pressed="true">Regular computer</button><button type="button" aria-pressed="false">Small computer</button></span></div>
+            <div class="row" style="align-items:flex-start">
+              <span class="k">Node data to keep</span>
+              <span>
+                <span class="seg" role="group" aria-label="Node data to keep"><button type="button" aria-pressed="false">Minimal</button><button type="button" aria-pressed="false">Compact</button><button type="button" aria-pressed="true">Default</button></span>
+                <span style="display:flex;align-items:center;gap:8px;margin-top:8px;font-size:13px"><label for="cc-prune">Custom (MB):</label><input id="cc-prune" class="inp mono" style="width:110px;height:32px" type="text" inputmode="numeric"></span>
+                <span class="info" style="margin-top:6px">The chainstate (~14 GB) is always kept, so disk use is higher.</span>
+              </span>
+            </div>
+            <div class="row" style="align-items:flex-start">
+              <span class="k">Mempool memory cap</span>
+              <span>
+                <span class="seg" role="group" aria-label="Mempool memory cap"><button type="button" aria-pressed="false">Small (100 MB)</button><button type="button" aria-pressed="true">Default (300 MB)</button></span>
+                <span class="info" style="margin-top:6px">Leave blank for the default (300 MB).</span>
+              </span>
+            </div>
+            <p class="copy">Estimated total: about [N] GB of disk, and up to 300 MB of memory for the mempool.</p>
+          </sc-if>
+
+          <!-- local node: download and start -->
+          <sc-if value="{{ bkInstalling }}" hint-placeholder-val="{{ false }}">
+            <div class="prog">
+              <div class="pline" style="display:block">
+                <div style="display:flex;justify-content:space-between"><span>{{ dlText }}</span></div>
+                <div class="meter" role="progressbar" aria-label="Download" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ dlNow }}"><i style="{{ dlStyle }}"></i></div>
+              </div>
+              <div class="pline"><span class="stt tone-muted">{{ verifyLine }}</span></div>
+              <div class="pline"><span class="stt tone-muted">Installing bitcoind...</span></div>
+              <div class="pline"><span class="stt tone-muted">Starting...</span></div>
+            </div>
+            <sc-if value="{{ errDownload }}" hint-placeholder-val="{{ false }}">
+              <div class="alert" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg><div><b>Hashes do not match.</b><span>The download was not installed.</span></div></div>
+            </sc-if>
+          </sc-if>
+
+          <!-- own node -->
+          <sc-if value="{{ bkOwn }}" hint-placeholder-val="{{ false }}">
+            <sc-if value="{{ b2bFam }}" hint-placeholder-val="{{ false }}"><p class="info" style="margin-top:16px">Bitcoin Blake2b requires its isolated managed node</p></sc-if>
+            <sc-if value="{{ notB2bFam }}" hint-placeholder-val="{{ true }}">
+              <div class="row"><span class="k">Node type:</span>
+                <span class="seg" role="group" aria-label="Node type">
+                  <sc-for list="{{ nodeTypes }}" as="t" hint-placeholder-count="3"><button type="button" aria-pressed="{{ t.pressed }}" onClick="{{ t.pick }}">{{ t.label }}</button></sc-for>
+                </span>
+              </div>
+              <sc-if value="{{ ntCore }}" hint-placeholder-val="{{ true }}">
+                <div class="fld"><label for="on-addr">Address:</label><input id="on-addr" class="inp mono" type="text" value="[HOST]:[PORT]"></div>
+                <div class="row"><span class="k">RPC authentication:</span><span class="seg" role="group" aria-label="RPC authentication"><button type="button" aria-pressed="true">Cookie path</button><button type="button" aria-pressed="false">User</button><button type="button" aria-pressed="false">Password</button></span></div>
+                <div class="fld"><label for="on-cookie">Cookie path</label><input id="on-cookie" class="inp mono" type="text" value="[PATH]/.cookie"></div>
+              </sc-if>
+              <sc-if value="{{ ntElectrum }}" hint-placeholder-val="{{ false }}">
+                <div class="fld"><label for="on-el">Address:</label><input id="on-el" class="inp mono" type="text" value="ssl://[HOST]:[PORT]"><span class="info">Include the port; tcp:// or ssl:// is optional.</span></div>
+              </sc-if>
+              <sc-if value="{{ ntEsplora }}" hint-placeholder-val="{{ false }}">
+                <div class="fld"><label for="on-es">Esplora URL:</label><input id="on-es" class="inp mono" type="text" value="https://[HOST]"><span class="info">Starts with http:// or https://</span></div>
+              </sc-if>
+              <div class="acts">
+                <button type="button" class="btn" onClick="{{ checkConn }}">Check connection</button>
+                <sc-if value="{{ connOk }}" hint-placeholder-val="{{ false }}"><span class="okline" role="status"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Connection checked</span></sc-if>
+                <sc-if value="{{ errNode }}" hint-placeholder-val="{{ false }}"><span class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Connection failed: [detail]</span></sc-if>
+              </div>
+            </sc-if>
+          </sc-if>
+        </sc-if>
+
+        <!-- ===== Bitcoin Blake2b: wallet alias ===== -->
+        <sc-if value="{{ stAlias }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">Give your wallet an alias</h2>
+          <div class="fld"><label for="cc-alias">Wallet alias:</label><input id="cc-alias" class="inp" type="text" value="Blake savings"><span class="info">You can change it later in Settings.</span></div>
+        </sc-if>
+
+        <!-- ===== DONE ===== -->
+        <sc-if value="{{ stDone }}" hint-placeholder-val="{{ false }}">
+          <h2 id="cc-h">{{ doneTitle }}</h2>
+          <ul class="sum">
+            <sc-for list="{{ summary }}" as="r" hint-placeholder-count="6">
+              <li><span class="k">{{ r.k }}</span><span class="stt {{ r.tone }}">{{ r.v }}</span></li>
+            </sc-for>
+          </ul>
+          <div class="acts">
+            <a class="btn primary" href="V6-Cube-Opening.dc.html">Open the Cube</a>
+            <a class="btn" href="V3-Launcher-Spin.dc.html">Back to Cube list</a>
+          </div>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ showFoot }}" hint-placeholder-val="{{ true }}">
+        <div class="rfoot">
+          <sc-if value="{{ canBack }}" hint-placeholder-val="{{ false }}">
+            <button type="button" class="btn" onClick="{{ back }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg><span>Back</span></button>
+          </sc-if>
+          <span class="grow"></span>
+          <button type="button" class="btn primary demo-focus" disabled="{{ primaryDisabled }}" onClick="{{ footNext }}">{{ primaryLabel }}</button>
+        </div>
+      </sc-if>
+    </section>
+  </main>
+
+  <div class="foot">Prototype V6 · synthetic data · seed words masked · passkey choice shown only where passkey creation is available (macOS build flag) · levers: error jumps to the step it belongs to</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["network","cube","passkey","backup","register","vaultType","vaultIntro","keys","backend","alias","done"],"default":"network","section":"Review"},"network":{"editor":"enum","options":["bitcoin","blake2b","testnet4","signet","regtest","blake2bTestnet4"],"default":"bitcoin","section":"Review"},"developerMode":{"editor":"boolean","default":false,"section":"Review"},"blake2bAccess":{"editor":"enum","options":["notGranted","grantedBetaOff","grantedBetaOn"],"default":"grantedBetaOff","section":"Review"},"unlockMethod":{"editor":"enum","options":["pin","passkey"],"default":"pin","section":"Review"},"backupChoice":{"editor":"enum","options":["choose","phrase","verify","kit","saving","later"],"default":"choose","section":"Review"},"vaultTemplate":{"editor":"enum","options":["none","simple","expanding","multisigInheritance","multisigBackup","expandingBackup","custom"],"default":"simple","section":"Review"},"backend":{"editor":"enum","options":["connect","advanced","local","installing","own"],"default":"connect","section":"Review"},"error":{"editor":"enum","options":["none","name","pinIncomplete","pinConfirm","pinMismatch","limit","passkey","words","kitPassword","kitSignedOut","kitFailed","noBackupAck","register","keys","node","download"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { lv: null };
+  }
+  renderVals() {
+    const P = this.props;
+    const L = {
+      step: P.step ?? 'network', net: P.network ?? 'bitcoin', dev: !!P.developerMode, b2bAccess: P.blake2bAccess ?? 'grantedBetaOff',
+      unlock: P.unlockMethod ?? 'pin', bchoice: P.backupChoice ?? 'choose', tmpl: P.vaultTemplate ?? 'simple',
+      backend: P.backend ?? 'connect', err: P.error ?? 'none'
+    };
+    const key = [L.step, L.net, L.dev, L.b2bAccess, L.unlock, L.bchoice, L.tmpl, L.backend, L.err].join('|');
+
+    const NETS = {
+      bitcoin: { label: 'Bitcoin', b2b: false, test: false, tag: '' },
+      blake2b: { label: 'Bitcoin Blake2b', b2b: true, test: false, tag: 'Blake2b' },
+      testnet4: { label: 'Testnet4', b2b: false, test: true, tag: 'Testnet4' },
+      signet: { label: 'Signet', b2b: false, test: true, tag: 'Signet' },
+      regtest: { label: 'Regtest', b2b: false, test: true, tag: 'Regtest' },
+      blake2bTestnet4: { label: 'Bitcoin Blake2b Testnet4', b2b: true, test: true, tag: 'Blake2b Testnet4' }
+    };
+    // an error lever jumps to the step (and sub-state) it belongs to; errors that only exist on a Bitcoin-family Cube reset the network
+    const E = {
+      name: { step: 'cube' }, pinIncomplete: { step: 'cube', unlock: 'pin', std: true }, pinConfirm: { step: 'cube', unlock: 'pin', std: true },
+      pinMismatch: { step: 'cube', unlock: 'pin' }, limit: { step: 'cube', std: true }, passkey: { step: 'passkey', unlock: 'passkey', std: true },
+      words: { step: 'backup', bchoice: 'verify', std: true }, kitPassword: { step: 'backup', bchoice: 'kit', std: true },
+      kitSignedOut: { step: 'backup', bchoice: 'kit', std: true }, kitFailed: { step: 'backup', bchoice: 'kit', std: true },
+      noBackupAck: { step: 'backup', bchoice: 'choose', std: true }, register: { step: 'register' }, keys: { step: 'keys' },
+      node: { step: 'backend', backend: 'own', std: true }, download: { step: 'backend', backend: 'installing' }
+    };
+
+    const fromLevers = () => {
+      const x = { step: L.step, net: L.net, dev: L.dev, b2bAccess: L.b2bAccess, unlock: L.unlock, bchoice: L.bchoice, tmpl: L.tmpl, backend: L.backend, err: L.err,
+        ack: false, kitAck: true, seedAck: true, installNode: true, adv: L.backend === 'advanced', flavor: 'knots', nodeType: 'core', connOk: false, pickerOpen: true, src: 'keychain', applied: false };
+      const e = E[x.err];
+      if (e) {
+        x.step = e.step;
+        if (e.unlock) x.unlock = e.unlock;
+        if (e.bchoice) x.bchoice = e.bchoice;
+        if (e.backend) x.backend = e.backend;
+        if (e.std && NETS[x.net].b2b) x.net = 'bitcoin';
+        if (x.err === 'pinMismatch' && NETS[x.net].b2b) x.unlock = 'pin';
+      }
+      // a chosen network implies its gate is open
+      if (NETS[x.net].test) x.dev = true;
+      if (NETS[x.net].b2b) x.b2bAccess = 'grantedBetaOn';
+      if (NETS[x.net].b2b) x.unlock = 'pin';
+      if (x.step === 'passkey' && !NETS[x.net].b2b) x.unlock = 'passkey';
+      if (['vaultIntro', 'keys', 'backend'].indexOf(x.step) >= 0 && x.tmpl === 'none') x.tmpl = 'simple';
+      if (NETS[x.net].b2b && x.tmpl === 'none') x.tmpl = 'simple';
+      if (x.step === 'backend' && x.backend === 'advanced') x.adv = true;
+      return x;
+    };
+    const s = this.state.lv !== key ? fromLevers() : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
+
+    const N = NETS[s.net];
+    const b2b = N.b2b;
+    const pin = s.unlock !== 'passkey';
+    const err = s.err;
+
+    // step path, in source order for this network
+    const path = b2b
+      ? ['network', 'cube', 'vaultType', 'vaultIntro', 'keys', 'backup', 'register', 'backend', 'alias', 'done']
+      : ['network', 'cube'].concat(pin ? [] : ['passkey'], ['backup', 'register', 'vaultType'], s.tmpl === 'none' ? [] : ['vaultIntro', 'keys', 'backend'], ['done']);
+    let step = s.step;
+    if (path.indexOf(step) < 0) step = step === 'passkey' ? 'cube' : step === 'alias' ? 'done' : 'network';
+    const idx = path.indexOf(step);
+    const LBL = { network: 'Network', cube: b2b ? 'PIN' : 'Cube', passkey: 'Passkey', backup: b2b ? 'Seed' : 'Backup', register: 'Connect', vaultType: 'Vault', vaultIntro: 'Policy', keys: 'Keys', backend: 'Node', alias: 'Name', done: 'Done' };
+    const steps = path.map((k, i) => ({ n: String(i + 1), label: LBL[k], cls: i === idx ? 'cur' : i < idx ? 'done' : '', current: i === idx ? 'step' : 'false', hasRule: i < path.length - 1 }));
+    const to = (k, extra) => go(Object.assign({ step: k, err: 'none' }, extra || {}));
+    const next = () => { if (idx < path.length - 1) to(path[idx + 1]); };
+    const back = () => { if (idx > 0) to(path[idx - 1], path[idx - 1] === 'backup' ? { bchoice: 'choose' } : {}); };
+
+    const I = {
+      ok: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6',
+      warn: 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3',
+      sync: 'M4 12a8 8 0 0 1 13.7-5.7L20 8.5M20 4v4.5h-4.5M20 12a8 8 0 0 1-13.7 5.7L4 15.5M4 20v-4.5h4.5',
+      hw: 'M7 4h10v16H7zM10 17h4',
+      phone: 'M8 3h8a1 1 0 0 1 1 1v16a1 1 0 0 1-1 1H8a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1zM11 18h2',
+      cube: 'M12 3l8 4.5v9L12 21l-8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9',
+      grid: 'M4 4h16v16H4zM4 9.3h16M4 14.7h16M9.3 4v16M14.7 4v16',
+      file: 'M7 3h7l4 4v14H7zM14 3v4h4',
+      paste: 'M9 4h6v3H9zM7 5.5H5.5V21h13V5.5H17'
+    };
+
+    // ----- network step -----
+    const access = s.b2bAccess;
+    const b2bGate = access === 'notGranted' ? "Bitcoin Blake2b isn't enabled for this account." : access === 'grantedBetaOff' ? 'Turn on "Bitcoin Blake2b - Beta" in App preferences.' : '';
+    const SUB = {
+      bitcoin: 'Spark · Liquid · Vault',
+      blake2b: 'Bitcoin Blake2b supports Vault creation only',
+      testnet4: "Vault only. Spark and Liquid aren't available on Testnet4.",
+      signet: "Vault only. Spark and Liquid aren't available on Signet.",
+      regtest: "Spark · Vault. Liquid isn't available on Regtest.",
+      blake2bTestnet4: 'Bitcoin Blake2b supports Vault creation only'
+    };
+    const netRow = (id) => {
+      const n = NETS[id];
+      const gate = n.b2b ? b2bGate : '';
+      const sel = s.net === id;
+      return { label: n.label, isB2b: n.b2b && !n.test, notB2b: !(n.b2b && !n.test), hasTag: n.b2b && !n.test, tag: n.tag, sub: SUB[id], hasSub: !gate, gate, hasGate: !!gate,
+        checked: sel, disabled: !!gate, cls: (sel ? 'sel' : '') + (gate ? ' off' : ''), pick: () => go({ net: id, err: 'none', unlock: NETS[id].b2b ? 'pin' : s.unlock }) };
+    };
+    const liveNets = ['bitcoin', 'blake2b'].map(netRow);
+    const testNets = ['testnet4', 'signet', 'regtest', 'blake2bTestnet4'].map(netRow);
+
+    // ----- Cube name -----
+    const cubeName = idx >= path.indexOf(b2b ? 'alias' : 'cube') + (b2b ? 0 : 1) || step === 'done' ? (b2b ? 'Blake savings' : 'Travel fund') : 'New Cube';
+
+    // ----- backup -----
+    const words = Array.from({ length: 12 }, (_, i) => ({ i: (i + 1) + '.', t: '••••••' }));
+    const notBackupCopy = pin
+      ? "Copying the Coincube folder is not a backup. Part of this Cube's encryption key is stored in this computer's system keychain and never leaves it, so the folder will not open on another machine. Your Recovery Kit and written seed phrase are the only way to regain access to this Cube on another computer."
+      : "Copying the Coincube folder is not a backup. The folder doesn't hold your passkey — that lives in your Apple ID — so on its own it opens nothing. It will open on another Mac signed in to the same Apple ID once iCloud Keychain has synced your passkey there, which COINCUBE can't confirm for you, so treat the folder as sensitive rather than safe to pass around. Your Recovery Kit is the backup that works regardless: it carries this Cube's master seed, encrypted with a recovery password only you know.";
+    const kitAlerts = {
+      kitSignedOut: "You're signed out of Connect, so there's nowhere to save a Recovery Kit. Sign in and try again, or choose \"I'll do this later\".",
+      kitFailed: "Connect didn't store this Cube's encrypted seed. Nothing was written — please try again."
+    };
+    const onBackup = step === 'backup' && !b2b;
+
+    // ----- registration -----
+    const kitSaved = s.bchoice === 'kit' || s.bchoice === 'saving';
+    const reg = err === 'register' ? ['tone-warn', I.warn, 'Not yet synced to Connect'] : kitSaved && !b2b ? ['tone-ok', I.ok, 'Backed up to Connect — recovery kit ready'] : ['tone-ok', I.ok, 'Registered to Connect — no recovery kit'];
+
+    // ----- templates -----
+    const TPL = {
+      simple: { name: 'Simple inheritance', desc: 'Two keys required, one for yourself to spend and another for your heir.', title: 'Simple inheritance wallet', need: 'You need 2 keys: your Primary Key and an Inheritance Key for your heir.',
+        rows: [['Primary spending policy:', 'Primary Key', 0], ['Recovery spending policy:', 'Inheritance Key', 0.5]],
+        paths: [['Primary spending option:', '', ['Primary key']], ['Inheritance recovery option:', '', ['Inheritance key'], '25920', '(~180 days)']], signers: 2 },
+      expanding: { name: 'Expanding multisig', desc: 'Two keys required to spend, with an extra key as a backup.', title: 'Expanding multisig wallet', need: 'You need 3 keys: two Primary Keys and a Recovery Key.',
+        rows: [['Primary spending policy:', '2-of-2 multisig', 0], ['Recovery spending policy:', '2-of-3 multisig', 0.5]],
+        paths: [['Primary spending option:', 'Threshold: 2 of 2', ['Primary key #1', 'Primary key #2']], ['Recovery option #1:', 'Threshold: 2 of 3', ['Recovery key'], '25920', '(~180 days)']], signers: 3 },
+      multisigInheritance: { name: '2-of-3 multisig with inheritance', desc: 'Three keys, any two spend, plus an inheritance key for your heir.', title: '2-of-3 multisig with inheritance', need: 'You need 4 keys: three Primary Keys and an Inheritance Key.',
+        rows: [['Primary spending policy:', '2-of-3 multisig', 0], ['Recovery spending policy:', 'Inheritance Key', 0.5]],
+        paths: [['Primary spending option:', 'Threshold: 2 of 3', ['Primary key #1', 'Primary key #2', 'Primary key #3']], ['Inheritance recovery option:', '', ['Inheritance key'], '25920', '(~180 days)']], signers: 4 },
+      multisigBackup: { name: 'Multisig with inheritance & backup recovery', desc: 'A 2-of-3 spending policy with an inheritance path and a second backup recovery path.', title: 'Multisig with inheritance & backup recovery', need: 'You need 7 keys: three Primary, three Inheritance and one Recovery Key.',
+        rows: [['Primary spending policy:', '2-of-3 multisig', 0], ['Inheritance spending policy:', '2-of-3 multisig', 0.42], ['Second recovery policy:', 'Recovery Key', 0.7]],
+        paths: [['Primary spending option:', 'Threshold: 2 of 3', ['Primary key #1', 'Primary key #2', 'Primary key #3']], ['Inheritance recovery option:', 'Threshold: 2 of 3', ['Inheritance key #4', 'Inheritance key #5', 'Inheritance key #6'], '25920', '(~180 days)'], ['Second recovery option:', '', ['Recovery key'], '52560', '(~1 year)']], signers: 7 },
+      expandingBackup: { name: 'Expanding multisig with inheritance & backup recovery', desc: 'Like the above, but your primary keys also help recover via a 2-of-6 inheritance path, for more flexible recovery.', title: 'Expanding multisig with inheritance & backup recovery', need: 'You need 7 keys; your Primary Keys are reused in the inheritance path.',
+        rows: [['Primary spending policy:', '2-of-3 multisig', 0], ['Inheritance spending policy:', '2-of-6 multisig', 0.42], ['Second recovery policy:', 'Recovery Key', 0.7]],
+        paths: [['Primary spending option:', 'Threshold: 2 of 3', ['Primary key #1', 'Primary key #2', 'Primary key #3']], ['Inheritance recovery option:', 'Threshold: 2 of 6', ['Inheritance key #4', 'Inheritance key #5', 'Inheritance key #6'], '25920', '(~180 days)'], ['Second recovery option:', '', ['Recovery key'], '52560', '(~1 year)']], signers: 7 },
+      custom: { name: 'Build your own', desc: 'Create a custom setup that fits all your needs.', title: 'Build your own', need: 'Define your primary and recovery spending policies.',
+        rows: [['Primary spending policy:', 'Primary Keys', 0], ['Recovery spending policy:', 'Recovery Keys', 0.5]],
+        paths: [['Primary spending option:', '', ['Primary key']], ['Recovery option #1:', '', ['Recovery key'], '25920', '(~180 days)']], signers: 2 }
+    };
+    const tKey = TPL[s.tmpl] ? s.tmpl : 'simple';
+    const T = TPL[tKey];
+    const templates = Object.keys(TPL).map((k) => ({ name: TPL[k].name, desc: TPL[k].desc, checked: s.tmpl === k, cls: s.tmpl === k ? 'sel' : '', pick: () => go({ tmpl: k }) }));
+    const diaRows = T.rows.map((r) => ({ label: r[0], box: r[1], locked: r[2] > 0, lockStyle: 'width:' + Math.round(r[2] * 100) + '%' }));
+
+    // keys: synthetic aliases; the last slot of the first recovery path is being edited in the picker
+    const POOL = b2b
+      ? [['This device · Cube Key', 'a1b2c3d4'], ['Hardware · Ledger-style device', 'c9d0e1f2'], ['Hardware · Second device', 'd4e5f6a7'], ['Border Wallet', 'f8a9b0c1']]
+      : [['This device · Cube Key', 'a1b2c3d4'], ['Keychain · Alex\'s phone', 'b5c6d7e8'], ['Hardware · Ledger-style device', 'c9d0e1f2'], ['Hardware · Second device', 'd4e5f6a7']];
+    let n = 0;
+    const editIndexPath = 1;
+    const paths = T.paths.map((p, pi) => ({
+      title: p[0], threshold: p[1], hasLock: !!p[3], blocks: p[3] || '', approx: p[4] || '', lockId: 'tl-' + pi,
+      slots: p[2].map((label, ki) => {
+        const editing = pi === editIndexPath && ki === p[2].length - 1;
+        const set = !editing || s.applied;
+        const src = set ? (editing ? ['Contact · Sam', 'e3f4a5b6'] : POOL[n++ % POOL.length]) : null;
+        const dup = err === 'keys' && pi === 0 && ki === 0;
+        return { label, isSet: !!src, notSet: !src, alias: src ? src[0] : '', fp: src ? src[1] : '', hasErr: dup,
+          cls: editing && s.pickerOpen ? 'editing' : '', action: src ? 'Edit' : 'Set', aria: (src ? 'Edit ' : 'Set ') + label,
+          edit: () => go({ pickerOpen: true }) };
+      })
+    }));
+    const editingLabel = T.paths[editIndexPath][2][T.paths[editIndexPath][2].length - 1];
+    const SRC = [
+      ['hw', 'Hardware Device', 'Ledger Nano S/S+/X, Coldcard Mk3/Mk4/Q, Jade, BitBox02, Trezor, Specter-DIY.', I.hw, ''],
+      ['keychain', 'Keychain Keys', b2b ? 'This key source is not available for Bitcoin Blake2b yet' : 'Your phone, or a contact\'s phone via Connect.', I.phone, b2b ? 'off' : ''],
+      ['cube', 'Cube Key', 'Your Cube Key is already placed in this vault.', I.cube, 'off'],
+      ['border', 'Border Wallet', 'Pattern on a word grid.', I.grid, ''],
+      ['xpubFile', 'Import xpub File', 'Extended public key from a file.', I.file, ''],
+      ['xpub', 'Paste xpub', 'Paste an extended public key (xpub) to add it as a signer.', I.paste, '']
+    ];
+    const curSrc = b2b && s.src === 'keychain' ? 'hw' : s.src;
+    const sources = SRC.map((o) => ({ title: o[1], desc: o[2], icon: o[3], disabled: o[4] === 'off', pressed: String(curSrc === o[0]), cls: '', pick: () => go({ src: o[0] }) }));
+
+    // ----- node -----
+    const nodeTitle = s.backend === 'own' ? 'Set up connection to the Bitcoin node' : s.backend === 'local' || s.backend === 'installing' ? (b2b ? 'Bitcoin Knots for Bitcoin Blake2b' : 'Install a node locally') : 'Choose backend';
+    const flavorBlurb = b2b ? 'A pruned node, stored separately from your Bitcoin node. Vaults on this chain share it.'
+      : s.flavor === 'core' ? 'Bitcoin Core — the reference implementation, with its default relay policy.'
+      : 'Bitcoin Knots — stricter relay defaults; it limits oversized data-carrier ("spam") transactions. Standard sends are unaffected. Recommended.';
+    const flavorName = b2b ? 'Bitcoin Knots (Bitcoin Blake2b)' : s.flavor === 'core' ? 'Bitcoin Core' : 'Bitcoin Knots';
+    const dl = err === 'download' ? 100 : 42;
+    const NT = [['core', 'Bitcoin Core'], ['electrum', 'Electrum'], ['esplora', 'Esplora']];
+    const nodeTypes = NT.map((t) => ({ label: t[1], pressed: String(s.nodeType === t[0]), pick: () => go({ nodeType: t[0], connOk: false, err: 'none' }) }));
+
+    // ----- primary action of the region foot -----
+    const own = {
+      network: b2b ? 'Create Vault' : 'Continue',
+      cube: b2b ? 'Continue' : 'Create Cube',
+      register: 'Continue', vaultType: 'Continue', vaultIntro: 'Next', keys: 'Continue',
+      backend: s.backend === 'local' ? 'Download & start' : s.backend === 'installing' ? 'Continue' : s.backend === 'own' ? 'Continue' : 'Continue',
+      alias: 'Finalize installation', backup: 'Continue'
+    };
+    const primaryDisabled = (step === 'network' && !!(N.b2b && b2bGate))
+      || (step === 'backup' && b2b && !s.seedAck)
+      || (step === 'backend' && s.backend === 'installing' && err === 'download')
+      || (step === 'backend' && s.backend === 'own' && !b2b && !s.connOk)
+      || (step === 'backend' && s.backend === 'own' && b2b)
+      || (step === 'keys' && err === 'keys');
+    const footNext = () => {
+      if (step === 'backend' && s.backend === 'local') return go({ backend: 'installing', err: 'none' });
+      if (step === 'vaultType' && s.tmpl === 'none') return go({ tmpl: 'simple' });
+      next();
+    };
+    const showFoot = step !== 'done' && step !== 'passkey' && !onBackup;
+
+    // ----- done -----
+    const vaultOn = s.tmpl !== 'none';
+    const backupRow = b2b ? ['Backup', 'Master seed written down', 'tone-ok']
+      : s.bchoice === 'later' ? ['Backup', 'Backup not confirmed', 'tone-warn']
+      : kitSaved ? ['Backup', 'Recovery Kit saved to Connect', 'tone-ok'] : ['Backup', 'Backup confirmed', 'tone-ok'];
+    const nodeRow = !vaultOn ? null : s.backend === 'own' ? ['Node', 'Your own node', ''] : s.backend === 'local' || s.backend === 'installing' ? ['Node', flavorName + ' · syncing', 'tone-muted'] : ['Node', s.installNode ? 'COINCUBE | Connect · local node syncing' : 'COINCUBE | Connect', ''];
+    const summary = [
+      ['Network', N.label + (N.test ? ' · test network' : ''), ''],
+      ['Unlock', pin ? 'PIN' : 'Passkey', ''],
+      backupRow,
+      ['Connect', reg[2], err === 'register' ? 'tone-warn' : ''],
+      ['Vault', vaultOn ? T.name + ' · ' + T.signers + ' keys · synthetic policy' : 'No Vault configured', vaultOn ? '' : 'tone-muted']
+    ].concat(nodeRow ? [nodeRow] : []).map((r) => ({ k: r[0], v: r[1], tone: r[2] }));
+
+    return {
+      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      steps, cubeName,
+      netName: N.label, netIsB2b: b2b && !N.test, netNotB2b: !(b2b && !N.test), netHasTag: !!N.tag, b2bFam: b2b, notB2bFam: !b2b, netTag: N.tag, netTagCls: N.test ? 'test' : 'b2b',
+      showBanner: N.test,
+      // network
+      stNetwork: step === 'network', liveNets, testNets, devOn: !!s.dev, devOff: !s.dev,
+      // cube
+      stCubeStd: step === 'cube' && !b2b, stCubeB2b: step === 'cube' && b2b,
+      errLimit: err === 'limit',
+      pkPressed: String(!pin), pinPressed: String(pin),
+      pickPasskey: () => go({ unlock: 'passkey', err: 'none' }), pickPin: () => go({ unlock: 'pin', err: 'none' }),
+      isPin: pin, isPasskey: !pin,
+      nameValue: err === 'name' ? '' : 'Travel fund', errName: err === 'name', nameInvalid: String(err === 'name'), nameDesc: err === 'name' ? 'cc-name-err' : '',
+      pin1d3: err === 'pinIncomplete' ? '' : '1', pin1d4: err === 'pinIncomplete' ? '' : '1', errPin1: err === 'pinIncomplete', pin1Invalid: String(err === 'pinIncomplete'),
+      pin2d1: '1', pin2d2: err === 'pinConfirm' ? '' : '1', pin2d3: err === 'pinConfirm' ? '' : '1', pin2d4: err === 'pinConfirm' ? '' : err === 'pinMismatch' ? '2' : '1',
+      hasPin2Err: err === 'pinConfirm' || err === 'pinMismatch', pin2Err: err === 'pinConfirm' ? 'Please confirm all 4 PIN digits' : 'PIN codes do not match',
+      pin2Invalid: String(err === 'pinConfirm' || err === 'pinMismatch'),
+      errB2bPin: b2b && err === 'pinMismatch', b2bPinInvalid: String(b2b && err === 'pinMismatch'), b2bLast: b2b && err === 'pinMismatch' ? '2' : '1',
+      // passkey
+      stPasskey: step === 'passkey', errPasskey: err === 'passkey',
+      // backup
+      bkChoose: onBackup && s.bchoice === 'choose', bkPhrase: onBackup && s.bchoice === 'phrase', bkVerify: onBackup && s.bchoice === 'verify',
+      bkKit: onBackup && s.bchoice === 'kit', bkSaving: onBackup && s.bchoice === 'saving', bkLater: onBackup && s.bchoice === 'later',
+      bkB2b: step === 'backup' && b2b, words,
+      errNoAck: err === 'noBackupAck', errWords: err === 'words', wordsInvalid: String(err === 'words'),
+      errKitAlert: !!kitAlerts[err], kitAlert: kitAlerts[err] || '', errKitPw: err === 'kitPassword', kitPwInvalid: String(err === 'kitPassword'),
+      kitAck: !!s.kitAck, toggleKitAck: () => go({ kitAck: !s.kitAck }), kitBlocked: !s.kitAck || err === 'kitPassword' || err === 'kitSignedOut',
+      ack: !!s.ack, noAck: !s.ack, toggleAck: () => go({ ack: !s.ack }),
+      seedAck: !!s.seedAck, toggleSeedAck: () => go({ seedAck: !s.seedAck }),
+      notBackupCopy,
+      toPhrase: () => go({ bchoice: 'phrase', err: 'none' }), toVerify: () => go({ bchoice: 'verify', err: 'none' }),
+      // the app rejects a wrong or empty check; the prototype requires all three boxes before it moves on
+      verifyWords: () => { const ok = ['vw3', 'vw7', 'vw11'].every((id) => { const el = document.getElementById(id); return !!(el && el.value && el.value.trim()); }); if (ok) { next(); } else { go({ err: 'words' }); } },
+      toKit: () => go({ bchoice: 'kit', err: 'none' }), toSaving: () => go({ bchoice: 'saving', err: 'none' }),
+      toLater: () => go({ bchoice: 'later', err: 'none', ack: false }), toChoose: () => go({ bchoice: 'choose', err: 'none' }),
+      // register
+      stRegister: step === 'register', errRegister: err === 'register', regTone: reg[0], regIcon: reg[1], regText: reg[2],
+      // vault
+      stVaultType: step === 'vaultType', templates, vaultOptional: !b2b, skipVault: () => go({ tmpl: 'none', step: 'done', err: 'none' }),
+      stVaultIntro: step === 'vaultIntro', tplTitle: T.title, tplNeed: T.need, diaRows,
+      diaAria: T.rows.map((r) => r[1] + (r[2] > 0 ? ' can spend only after a period of wallet inactivity' : ' can always spend')).join('; '),
+      stKeys: step === 'keys', errKeys: err === 'keys', paths, isCustom: tKey === 'custom', descType: b2b ? 'P2WSH (Bitcoin Blake2b Vaults use P2WSH)' : 'Taproot',
+      pickerOpen: !!s.pickerOpen, editingLabel, sources, showKeychain: curSrc === 'keychain' && !b2b,
+      aliasValue: curSrc === 'keychain' ? "Sam's Keychain" : '',
+      applyKey: () => go({ pickerOpen: false, applied: true }), closePicker: () => go({ pickerOpen: false }),
+      // node
+      stBackend: step === 'backend', nodeTitle,
+      bkConnectStd: step === 'backend' && !b2b && (s.backend === 'connect' || s.backend === 'advanced'),
+      bkConnectB2b: step === 'backend' && b2b && (s.backend === 'connect' || s.backend === 'advanced'),
+      bkLocal: s.backend === 'local', bkInstalling: s.backend === 'installing', bkOwn: s.backend === 'own',
+      installNode: !!s.installNode, toggleInstall: () => go({ installNode: !s.installNode }),
+      advOpen: !!s.adv, advExpanded: String(!!s.adv), advLabel: s.adv ? '▾  Advanced options' : '▸  Advanced options', toggleAdv: () => go({ adv: !s.adv }),
+      toOwn: () => go({ backend: 'own', err: 'none', connOk: false }), toLocal: () => go({ backend: 'local', err: 'none' }), connectOnly: () => go({ backend: 'connect', installNode: false, adv: false }),
+      knotsPressed: String(s.flavor !== 'core'), corePressed: String(s.flavor === 'core'), pickKnots: () => go({ flavor: 'knots' }), pickCore: () => go({ flavor: 'core' }), flavorBlurb,
+      dlText: (err === 'download' ? 'Download complete · ' : 'Downloading ') + flavorName + ' [VERSION]... ' + dl.toFixed(2) + '%',
+      dlNow: String(dl), dlStyle: 'width:' + dl + '%',
+      verifyLine: err === 'download' ? 'Checking the release signature and hashes' : 'Then: signature and hash check against the pinned Knots signing key',
+      errDownload: err === 'download',
+      nodeTypes, ntCore: s.nodeType === 'core', ntElectrum: s.nodeType === 'electrum', ntEsplora: s.nodeType === 'esplora',
+      checkConn: () => go({ connOk: err !== 'node', err: err === 'node' ? 'node' : 'none' }), connOk: !!s.connOk && err !== 'node', errNode: err === 'node',
+      // alias + done
+      stAlias: step === 'alias', stDone: step === 'done',
+      doneTitle: (b2b ? 'Blake savings' : 'Travel fund') + ' created',
+      summary,
+      // foot
+      showFoot, canBack: idx > 0, back, next: () => next(), footNext,
+      primaryLabel: own[step] || 'Continue', primaryDisabled
+    };
+  }
+}
+</script>
+</body>
+</html>

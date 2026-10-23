@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Connect sign-in</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens as V3-Launcher-Connect; the floor is static */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--accent-ink:#f3821d;font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--accent-ink:#8a4304}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar (as V3-Launcher-Connect) */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;white-space:nowrap}
+.tbtn:hover{border-color:var(--line)}
+a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
+.tbtn svg{width:16px;height:16px}
+.tbtn.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.tbtn.ico{width:32px;padding:0;justify-content:center}
+.tbtn.ico[aria-pressed="true"]{background:var(--selected);border-color:var(--accent)}
+.tbtn .dot{color:var(--muted)}
+.tbtn .stw{font-size:12px;font-weight:400;color:var(--muted)}
+.tbtn.out .who{color:var(--accent-ink);font-weight:600}
+
+/* dimmed Launcher floor */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.backdrop{position:absolute;inset:0;opacity:.4;pointer-events:none;display:flex;flex-direction:column}
+.bfield{flex:1;position:relative}
+.floor{position:absolute;left:0;right:0;bottom:0;top:30%;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.brow{position:absolute;left:0;right:0;top:84px;display:flex;justify-content:center;gap:40px}
+.cb{width:232px;height:344px;display:flex;flex-direction:column;align-items:center;padding-top:8px;box-sizing:border-box;--s:152px}
+.scene{position:relative;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(8px)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.cube.btc{--edge:var(--edge-btc)}.cube.b2b{--edge:var(--edge-b2b)}.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:6px;transform:rotate(45deg)}
+.bmk{display:inline-flex;align-items:center;justify-content:center;flex:none;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.bmk img{display:block;width:100%;height:100%;border-radius:50%}
+.bmk.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.bmk.tn img{opacity:.6}
+.coin-top{width:calc(var(--s) * .34);height:calc(var(--s) * .34)}
+.ftag{font-size:14px;font-weight:600;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.wi{width:38px;height:38px}
+.pad{width:54px;height:54px}
+.bnm{margin-top:auto;padding-bottom:10px;font-weight:600}
+.bbar{height:64px;flex:none;display:flex;align-items:center;gap:8px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+.ghost{display:inline-flex;align-items:center;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);font-size:14px;font-weight:500}
+
+/* the Connect layer: one bounded form region over the floor */
+.sheet{position:absolute;left:50%;top:40px;width:600px;margin-left:-300px;bottom:40px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);overflow:hidden;z-index:4}
+.light .sheet{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
+.shead{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 20px 0 28px;border-bottom:1px solid var(--line)}
+.shead h1{margin:0;font-size:20px;font-weight:600}
+.btn.close{gap:6px;padding:0 12px 0 10px}
+.steps{display:flex;align-items:center;gap:8px;margin:0;padding:16px 28px;list-style:none;border-bottom:1px solid var(--line);font-size:13px}
+.steps li{display:inline-flex;align-items:center;gap:8px;color:var(--muted)}
+.steps li .n{display:inline-flex;align-items:center;justify-content:center;width:22px;height:22px;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.steps li.cur{color:var(--ink);font-weight:600}
+.steps li.cur .n{border-color:var(--accent);background:var(--selected)}
+.steps li.done .n{border-color:var(--good);color:var(--good)}
+.steps .rule{width:32px;height:1px;background:var(--line)}
+.body{flex:1;min-height:0;overflow-y:auto;padding:28px 28px 24px}
+.body h2{margin:0;font-size:24px;font-weight:600;line-height:1.25}
+.lead{margin:6px 0 0;font-size:14px;color:var(--muted)}
+.sentto{margin:6px 0 0;font-size:14px}
+.sentto b{font-weight:600;overflow-wrap:anywhere}
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:20px}
+.fld label{font-size:13px;font-weight:500}
+.fld .opt{font-weight:400;color:var(--muted)}
+.inp{height:44px;box-sizing:border-box;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:15px}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.inp.code{width:220px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:18px;letter-spacing:.3em}
+.acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:20px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:40px;padding:0 18px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap;box-sizing:border-box}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
+.btn.wide{width:100%}
+.btn:disabled{opacity:.6;cursor:default}
+.btn:disabled:hover{border-color:var(--line)}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+.alt{margin:16px 0 0;font-size:13px;color:var(--muted);text-align:center}
+.err,.okline,.warnline{display:flex;align-items:flex-start;gap:6px;margin:0;font-size:13px}
+.err{color:var(--bad)}.okline{color:var(--good)}.warnline{color:var(--warn)}
+.err svg,.okline svg,.warnline svg{width:16px;height:16px;margin-top:1px}
+.note{display:flex;gap:10px;align-items:flex-start;margin:0 0 20px;padding:12px 14px;border:1px solid var(--bad);border-radius:8px}
+.note svg{width:18px;height:18px;color:var(--bad);margin-top:1px}
+.note b{display:block;font-weight:600}
+.note span{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.provides{margin:20px 0 0;padding:0;list-style:none;display:flex;flex-direction:column;gap:6px;font-size:13px;color:var(--muted)}
+.provides li{display:flex;align-items:flex-start;gap:10px;line-height:1.4}
+.provides svg{flex:none;margin-top:1px}
+.provides svg{width:16px;height:16px}
+.ident{display:flex;align-items:center;gap:16px;margin-top:20px;padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.avatar{width:44px;height:44px;border-radius:50%;background:var(--selected);display:flex;align-items:center;justify-content:center;color:var(--accent)}
+.avatar svg{width:22px;height:22px}
+.ident .em{font-size:16px;font-weight:600;overflow-wrap:anywhere}
+.sfoot{flex:none;display:flex;align-items:center;gap:12px;padding:14px 28px;border-top:1px solid var(--line)}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="grow"></span>
+    <button type="button" class="tbtn ico" aria-label="Hide balances" aria-pressed="false" title="Hide balances on this device">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6"></path></svg>
+    </button>
+    <span class="vsep"></span>
+    <button type="button" class="tbtn on {{ acctCls }}" aria-current="page" aria-label="{{ acctAria }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="dot">·</span><span class="who">{{ acctWho }}</span>
+      <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ false }}"><span class="stw">Signed in</span></sc-if>
+    </button>
+    <a class="tbtn" href="P-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage">
+    <div class="backdrop" aria-hidden="true">
+      <div class="bfield">
+        <div class="floor"></div>
+        <div class="brow">
+          <sc-for list="{{ floorCubes }}" as="c" hint-placeholder-count="8">
+            <div class="cb">
+              <div class="scene">
+                <div class="shadow"></div>
+                <div class="cube {{ c.edge }}">
+                  <div class="f t"><div class="tc">
+                    <sc-if value="{{ c.isB2b }}" hint-placeholder-val="{{ false }}"><img class="coin-top" src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></sc-if>
+                    <sc-if value="{{ c.notB2b }}" hint-placeholder-val="{{ true }}"><span class="bmk {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                    <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+                  </div></div>
+                  <div class="f l"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg></div>
+                  <div class="f r"><svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg></div>
+                </div>
+              </div>
+              <span class="bnm">{{ c.name }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div class="bbar"><span class="ghost">Create Cube</span><span class="ghost">Import or restore a Cube</span></div>
+    </div>
+
+    <section class="sheet" aria-labelledby="si-title">
+      <div class="shead">
+        <h1 id="si-title">Connect</h1>
+        <span class="grow"></span>
+        <a class="btn close" href="P-Launcher.dc.html" aria-label="Close Connect">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          <span>Close</span>
+        </a>
+      </div>
+
+      <ol class="steps" aria-label="Sign-in steps">
+        <sc-for list="{{ steps }}" as="s" hint-placeholder-count="8">
+          <li class="{{ s.cls }}" aria-current="{{ s.current }}"><span class="n">{{ s.n }}</span><span>{{ s.label }}</span></li>
+          <sc-if value="{{ s.hasRule }}" hint-placeholder-val="{{ true }}"><li aria-hidden="true"><span class="rule"></span></li></sc-if>
+        </sc-for>
+      </ol>
+
+      <div class="body" aria-live="polite">
+        <!-- connection-level failure: login.rs shows it as a "Connection failed" notification above the step -->
+        <sc-if value="{{ hasConnErr }}" hint-placeholder-val="{{ false }}">
+          <div class="note" role="alert">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>
+            <div><b>Connection failed</b><span>{{ connDetail }}</span></div>
+          </div>
+        </sc-if>
+
+        <!-- step 1 · sign in: email -->
+        <sc-if value="{{ stEmailIn }}" hint-placeholder-val="{{ true }}">
+          <h2>Sign in to COINCUBE</h2>
+          <p class="lead">Create a free COINCUBE | Connect account to unlock:</p>
+          <ul class="provides" aria-label="What Connect provides">
+            <sc-for list="{{ provides }}" as="p" hint-placeholder-count="4">
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}</span></li>
+            </sc-for>
+          </ul>
+          <p class="lead">Enter your email address to receive a verification code.</p>
+          <div class="fld">
+            <label for="si-email">Email</label>
+            <input id="si-email" class="inp demo-focus" type="email" autocomplete="email" placeholder="you@example.test" value="{{ emailValue }}" onInput="{{ emailInput }}">
+          </div>
+          <div class="acts"><button type="button" class="btn primary wide" onClick="{{ sendToken }}">Continue</button></div>
+          <p class="alt"><button type="button" class="linkbtn" onClick="{{ toSignup }}">Don't have an account? Sign up</button></p>
+        </sc-if>
+
+        <!-- step 1 · sign up: email + optional promo/referral code on the same form (app/view/connect register_ux) -->
+        <sc-if value="{{ stEmailUp }}" hint-placeholder-val="{{ false }}">
+          <h2>Create an Account</h2>
+          <p class="lead">Create a COINCUBE | Connect account to access these features:</p>
+          <ul class="provides" aria-label="What Connect provides">
+            <sc-for list="{{ provides }}" as="p" hint-placeholder-count="8">
+              <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}</span></li>
+            </sc-for>
+          </ul>
+          <div class="fld">
+            <label for="su-email">Email</label>
+            <input id="su-email" class="inp demo-focus" type="email" autocomplete="email" placeholder="you@example.test" value="{{ emailValue }}" onInput="{{ emailInput }}">
+          </div>
+          <div class="fld">
+            <label for="su-promo">Promo or referral code <span class="opt">(optional)</span></label>
+            <input id="su-promo" class="inp" type="text" autocomplete="off" value="{{ promoValue }}" onInput="{{ promoInput }}">
+          </div>
+          <div class="acts"><button type="button" class="btn primary wide" onClick="{{ sendToken }}">Continue</button></div>
+          <p class="alt"><button type="button" class="linkbtn" onClick="{{ toSignin }}">Already have an account? Sign in</button></p>
+        </sc-if>
+
+        <!-- step 2 · token (same for both modes) -->
+        <sc-if value="{{ stToken }}" hint-placeholder-val="{{ false }}">
+          <h2>{{ tokenTitle }}</h2>
+          <p class="sentto">An authentication was sent to your email: <b>{{ emailValue }}</b></p>
+          <sc-if value="{{ isExpired }}" hint-placeholder-val="{{ false }}">
+            <p class="warnline" role="alert" style="margin-top:16px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M12 7.5v5.5M12 16.2v.3"></path></svg>Token is expired or is invalid</p>
+          </sc-if>
+          <div class="fld">
+            <label for="si-token">Token</label>
+            <input id="si-token" class="inp code" type="text" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="6-digit code" aria-invalid="{{ tokenInvalid }}" aria-describedby="{{ tokenDesc }}">
+            <sc-if value="{{ isInvalid }}" hint-placeholder-val="{{ false }}">
+              <p class="err" id="si-token-err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M9.5 9.5l5 5M14.5 9.5l-5 5"></path></svg>Token is not valid</p>
+            </sc-if>
+          </div>
+          <div class="acts">
+            <button type="button" class="btn primary" onClick="{{ verify }}">Verify</button>
+            <button type="button" class="btn" disabled="{{ resendDisabled }}" onClick="{{ resend }}">{{ resendLabel }}</button>
+          </div>
+        </sc-if>
+
+        <!-- step 3 · done -->
+        <sc-if value="{{ stDone }}" hint-placeholder-val="{{ false }}">
+          <h2>{{ doneTitle }}</h2>
+          <sc-if value="{{ codeApplied }}" hint-placeholder-val="{{ false }}">
+            <p class="okline" role="status" style="margin-top:8px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Code applied.</p>
+          </sc-if>
+          <div class="ident">
+            <span class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg></span>
+            <div><div class="em">{{ emailValue }}</div><div class="muted" style="font-size:13px">Signed in on this device</div></div>
+          </div>
+          <div class="acts">
+            <a class="btn primary" href="P-Connect.dc.html">Open Connect account</a>
+            <a class="btn" href="P-Launcher.dc.html">Back to Cubes</a>
+          </div>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ hasGoBack }}" hint-placeholder-val="{{ false }}">
+        <div class="sfoot">
+          <button type="button" class="btn" onClick="{{ goBack }}">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M15 6l-6 6 6 6"></path></svg>
+            <span>{{ backLabel }}</span>
+          </button>
+        </div>
+      </sc-if>
+    </section>
+  </main>
+
+  <div class="foot">Prototype V6 · synthetic data · email and one-time token only (no passkey sign-in to Connect) · entry: Launcher Connect entry or any in-Cube "Sign in"</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"mode":{"editor":"enum","options":["signin","signup"],"default":"signin","section":"Review"},"step":{"editor":"enum","options":["email","token","done"],"default":"email","section":"Review"},"error":{"editor":"enum","options":["none","invalid","expired","connection","unresponsive","mailFailed"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { lv: null };
+  }
+  renderVals() {
+    const P = this.props;
+    const L = { mode: P.mode ?? 'signin', step: P.step ?? 'email', err: P.error ?? 'none' };
+    const key = [L.mode, L.step, L.err].join('|');
+    // token errors only exist on the token step; connection errors can come from Continue (email) or Resend (token)
+    const tokenErr = L.err === 'invalid' || L.err === 'expired';
+    const lvStep = tokenErr ? 'token' : L.step;
+    const s = this.state.lv !== key
+      ? { mode: L.mode, step: lvStep, err: lvStep === 'done' ? 'none' : L.err, promo: L.mode === 'signup' && L.step === 'done' ? 'FRIENDS' : '', email: (this.state.email || 'alex@example.test'), cool: L.err === 'none' || L.err === 'invalid' }
+      : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
+
+    const signup = s.mode === 'signup';
+    const step = s.step;
+    const err = s.err;
+    const I = {
+      shield: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6zM8.8 12l2.2 2.2 4.2-4.4',
+      bell: 'M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15zM10 20.5h4',
+      bolt: 'M13 3L5 13.5h6L10 21l8-10.5h-6z',
+      device: 'M5 6h14v9H5zM3 18h18',
+      key: 'M14.5 3.5a6 6 0 1 0 2.1 11.6L20 18.5V21h2.5v-2.5H20V16l-1.5-1.5 1.1-1.1A6 6 0 0 0 14.5 3.5zM14.5 8.5a1.5 1.5 0 1 0 0 3a1.5 1.5 0 1 0 0-3',
+      users: 'M9 11a3.5 3.5 0 1 0 0-7a3.5 3.5 0 1 0 0 7zM2.5 20c.6-3.6 3.2-5.5 6.5-5.5s5.9 1.9 6.5 5.5M16 11a3 3 0 1 0 0-6M17.5 14.6c2.2.4 3.6 2 4 5.4',
+      lock: 'M7 11V8a5 5 0 0 1 10 0v3M5.5 11h13v9.5h-13zM12 14.5v3',
+      cart: 'M3 4h2.5l2 11h11l2-7.5H7M9.5 20a1 1 0 1 0 0-2a1 1 0 0 0 0 2zM17.5 20a1 1 0 1 0 0-2a1 1 0 0 0 0 2z'
+    };
+    // What Connect provides: the app's sign-in bullets and plan features (coincube-api plan.go, connect/mod.rs
+    // plan_tagline) plus the inheritance unlock Robert asked to call out (Estate: keyholder invitations, heir escrow)
+    const provides = [
+      { icon: I.shield, text: 'Encrypted Recovery Kit backup for each Cube \u2014 COINCUBE never sees your keys' },
+      { icon: I.users, text: 'Inheritance: invite family or friends to hold keys in the Keychain app, with time-locked recovery keys to recover funds' },
+      { icon: I.bell, text: 'Recovery alerts and emergency contacts for people you trust' },
+      { icon: I.bolt, text: 'Hosted Esplora server \u2014 use your Vault instantly while your node syncs' },
+      { icon: I.device, text: 'Sign Vault transactions from your phone with the companion Keychain app' },
+      { icon: I.key, text: 'Lightning Address and avatar for Spark wallets' },
+      { icon: I.lock, text: 'Duress mode and Connect-enforced spending policies (Pro and Estate)' },
+      { icon: I.cart, text: 'Buy/Sell and P2P marketplace access' }
+    ];
+
+    const ORDER = ['email', 'token', 'done'];
+    const LABELS = { email: 'Email', token: 'Token', done: 'Done' };
+    const idx = ORDER.indexOf(step);
+    const steps = ORDER.map((k, i) => ({
+      n: String(i + 1),
+      label: LABELS[k],
+      cls: i === idx ? 'cur' : i < idx ? 'done' : '',
+      current: i === idx ? 'step' : 'false',
+      hasRule: i < ORDER.length - 1
+    }));
+
+    const connErrs = { connection: '[Server message]', unresponsive: 'Remote servers are unresponsive', mailFailed: 'Unexpected error: [mail service message]' };
+    const hasConnErr = step !== 'done' && !!connErrs[err];
+
+    const floorCubes = [
+      { name: 'Everyday', edge: 'btc', coinCls: '', tag: '' },
+      { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b' },
+      { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4' },
+      { name: 'Archive', edge: 'btc', coinCls: '', tag: '' }
+    ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
+
+    const signedIn = step === 'done';
+    return {
+      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      signedIn,
+      acctCls: signedIn ? '' : 'out',
+      acctWho: signedIn ? (s.email || 'alex@example.test') : 'Sign in',
+      acctAria: signedIn ? 'Connect, alex@example.test, signed in' : 'Connect, sign in',
+      floorCubes, provides, steps,
+      hasConnErr, connDetail: connErrs[err] || '',
+      stEmailIn: step === 'email' && !signup,
+      stEmailUp: step === 'email' && signup,
+      stToken: step === 'token',
+      stDone: step === 'done',
+      tokenTitle: signup ? 'Create an Account' : 'Sign in to COINCUBE',
+      isInvalid: step === 'token' && err === 'invalid',
+      isExpired: step === 'token' && err === 'expired',
+      tokenInvalid: String(step === 'token' && err === 'invalid'),
+      tokenDesc: step === 'token' && err === 'invalid' ? 'si-token-err' : '',
+      resendDisabled: !!s.cool,
+      resendLabel: s.cool ? 'Resend token (30s)' : 'Resend token',
+      promoValue: s.promo,
+      promoInput: (e) => go({ promo: e && e.target ? e.target.value : s.promo }),
+      emailValue: s.email || 'alex@example.test',
+      emailInput: (e) => go({ email: e && e.target ? e.target.value : s.email }),
+      sendToken: () => go({ step: 'token', err: 'none', cool: true }),
+      resend: () => go({ err: 'none', cool: true }),
+      verify: () => go({ step: 'done', err: 'none' }),
+      toSignup: () => go({ mode: 'signup', step: 'email', err: 'none' }),
+      toSignin: () => go({ mode: 'signin', step: 'email', err: 'none', promo: '' }),
+      doneTitle: signup ? 'Account created' : 'Signed in',
+      codeApplied: signup && step === 'done' && !!s.promo,
+      // "Go back" (login.rs) leaves the token step; sign-up's own "Back" returns to sign-in
+      hasGoBack: step === 'token' || (step === 'email' && signup),
+      backLabel: step === 'token' ? 'Go back' : 'Back',
+      goBack: () => step === 'token' ? go({ step: 'email', err: 'none' }) : go({ mode: 'signin', step: 'email', err: 'none', promo: '' })
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,575 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 · Activity</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;color-scheme:dark}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);color-scheme:light}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu a{color:var(--acc-ink)}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ok{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}.unk{color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12.5px}
+/* top bar: single open Cube (from V3-Cube-Transfer) */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line);flex:none}
+.cid{display:flex;align-items:center;gap:6px;min-width:0;white-space:nowrap}
+.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img{display:block;width:16px;height:16px;flex:none;border-radius:50%}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.lockgrp{display:flex;align-items:center;gap:8px}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center;flex:none}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.chip .k{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+/* shell (V2) */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.attn{display:flex;align-items:center;gap:6px;margin:0 6px 8px;padding:9px 8px;border:1px solid var(--line);border-radius:8px;background:var(--panel);font-size:12.5px;line-height:1.3;text-decoration:none}
+.tenshu a.attn{color:var(--ink)}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:10px}
+/* activity page */
+.main{flex:1;min-width:0;display:flex;flex-direction:column}
+.phd{flex:none;display:flex;align-items:flex-end;gap:16px;padding:24px 24px 0}
+.phd h1{font-size:22px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.idl>img{width:16px;height:16px;display:block}
+.count{margin-left:auto;font-size:13px;color:var(--muted)}
+.pre{font-size:13px;color:var(--muted);padding:6px 24px 0}
+.filters{flex:none;display:flex;align-items:flex-end;gap:12px;padding:16px 24px;border-bottom:1px solid var(--line)}
+.f{display:flex;flex-direction:column;gap:4px}
+.f label{font-size:12px;font-weight:500;color:var(--muted)}
+.ctl{height:36px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:var(--bg);font-size:13.5px}
+.ctl:hover{border-color:var(--muted)}
+select.ctl{padding-right:6px;cursor:pointer}
+.f.w{width:180px}.f.d{width:140px}.f.s{width:140px}.f.r{width:168px}.f.q{flex:1;min-width:150px;max-width:280px}
+.f .ctl{width:100%}
+.fend{margin-left:auto;display:flex;align-items:center;gap:10px;height:36px;white-space:nowrap}
+.fcount{font-size:13px;font-weight:500}
+.lbtn{border:0;background:none;padding:4px 6px;color:var(--acc-ink);font-weight:600;cursor:pointer;border-radius:6px;font-size:13px}
+.lbtn:hover{background:var(--hover)}
+.lbtn[disabled]{color:var(--muted);font-weight:500;cursor:default;background:none}
+.ferr{font-size:12px;color:var(--bad);margin-top:2px}
+.split{flex:1;display:flex;min-height:0}
+.lst{flex:1;min-width:0;overflow:auto;padding:0 16px 24px}
+.cols,.row{display:grid;grid-template-columns:44px 112px minmax(0,1fr) 116px 68px 132px;column-gap:12px;align-items:center;padding:0 12px}
+.cols{height:36px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
+.cols .r,.row .r{text-align:right}
+.day{display:flex;align-items:center;gap:12px;padding:20px 12px 8px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
+.day .dn{color:var(--muted);font-weight:500}
+.row{width:100%;height:56px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;cursor:pointer;text-align:left;font-size:14px}
+.row:hover{background:var(--hover)}
+.row:focus-visible,.row.kf{outline:2px solid var(--focus);outline-offset:-2px;border-radius:6px}
+.row.sel{background:var(--selected)}
+.row .tm{font-size:13px;color:var(--muted)}
+.cell{display:flex;align-items:center;gap:8px;min-width:0}
+.cell .ic{color:var(--muted)}
+.ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.wn{font-size:13px}
+.amt{font-weight:600;white-space:nowrap}
+.amt .u{font-weight:400;color:var(--muted);font-size:12px;margin-left:3px}
+.amt.void{color:var(--muted);font-weight:500}
+.fx{font-size:13px;color:var(--muted);white-space:nowrap}
+.stc{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;white-space:nowrap}
+.empty{padding:64px 12px;text-align:center}
+.empty h2{font-size:16px;font-weight:600}
+.empty p{color:var(--muted);font-size:13px;margin-top:4px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.synth{margin-top:20px;text-align:center}
+/* detail panel: right side, not a modal */
+.det{width:420px;flex:none;overflow:auto;border-left:1px solid var(--line);background:var(--panel);padding:20px 24px 32px}
+.dh{display:flex;align-items:flex-start;gap:10px}
+.dh h2{flex:1;font-size:17px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.dh .ic{margin-top:3px}
+.xbtn{width:32px;height:32px;flex:none;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer;margin:-4px -8px 0 0}
+.xbtn:hover{background:var(--hover);color:var(--ink)}
+.dw{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:13px;color:var(--muted)}
+.big{font-size:28px;font-weight:600;line-height:1.2;margin-top:16px;white-space:nowrap}
+.big .u{font-size:15px;font-weight:500;color:var(--muted);margin-left:4px}
+.big.void{color:var(--muted)}
+.fxat{font-size:13px;color:var(--muted);margin-top:2px}
+.dst{display:flex;align-items:flex-start;gap:6px;margin-top:12px;font-size:13.5px;font-weight:500}
+.dst .ic{margin-top:1px}
+.dsec{margin-top:20px;border-top:1px solid var(--line)}
+.dl>div{display:grid;grid-template-columns:116px minmax(0,1fr);column-gap:12px;padding:10px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+.dl dt{color:var(--muted)}
+.dl dd{overflow-wrap:anywhere}
+.lblf{display:flex;flex-direction:column;gap:6px;padding:14px 0;border-bottom:1px solid var(--line)}
+.lblf label{font-weight:600;font-size:13.5px}
+.lblf .ctl{width:100%;height:36px}
+.lblf .ctl:focus{border-color:var(--focus)}
+.ids li{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;column-gap:8px;padding:10px 0;border-bottom:1px solid var(--line)}
+.ids .nm{display:block;font-size:12px;color:var(--muted)}
+.cpy{display:inline-flex;align-items:center;gap:5px;height:30px;padding:0 10px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:12.5px;font-weight:500}
+.cpy:hover{background:var(--hover)}
+.disc{display:flex;align-items:center;gap:8px;width:100%;min-height:44px;padding:0;border:0;border-bottom:1px solid var(--line);background:none;cursor:pointer;text-align:left;font-weight:600;font-size:14px}
+.disc .chev{margin-left:auto;color:var(--muted)}
+.disc[aria-expanded="true"] .chev{transform:rotate(180deg)}
+.dbody{padding-bottom:4px}
+.sg li{display:grid;grid-template-columns:18px minmax(0,1fr) auto;column-gap:10px;align-items:center;padding:10px 0;border-bottom:1px solid var(--line);font-size:13.5px}
+.sg .fp{display:block;color:var(--muted)}
+.sg .ss{font-size:13px;font-weight:500;text-align:right}
+.acts{display:flex;align-items:center;gap:10px;margin-top:16px}
+
+/* Spark history states (review lever sparkHistory) */
+@keyframes sp{to{transform:rotate(360deg)}}
+.spin{width:16px;height:16px;border:2px solid var(--line);border-top-color:var(--acc-ink);border-radius:50%;animation:sp .8s linear infinite;flex:none}
+.sload{display:flex;align-items:center;gap:10px;width:100%;min-height:56px;padding:0 12px;border-bottom:1px solid var(--line);font-size:14px;color:var(--muted)}
+.hbanner{display:flex;align-items:center;gap:10px;margin:12px 0 4px;padding:10px 12px;border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;background:var(--panel);font-size:14px}
+.hbanner p{flex:1;font-weight:500}
+.hbanner .btn{height:32px;padding:0 12px;font-size:13px}
+
+/* distill pass: visually hidden labels + Lock Cube confirmation row */
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.lockq p{margin:0}
+.tenshu .lkb{display:inline-flex;align-items:center;height:28px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font:inherit;font-size:13px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu .lkb:hover{background:var(--hover)}
+.tenshu .lkb.go{background:var(--accent);border-color:var(--accent);color:#1a1208;font-weight:600}
+.menu .lockq{flex-wrap:wrap;white-space:normal;padding:8px 10px}
+.menu .lockq p{flex:1 1 100%}
+.foot-note{font-size:12px;color:var(--muted)}
+
+/* prototype links */
+.tenshu a.chip{color:var(--ink);text-decoration:none}.tenshu a.chip:hover{background:var(--hover,var(--selected))}.tenshu a.ni,.tenshu a.row{color:var(--ink);text-decoration:none}.tenshu a.pill,.tenshu a.rlink,.tenshu a.attn{text-decoration:none}.tenshu span.mini{display:inline-flex;align-items:center}
+.proto{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin-top:12px}
+.proto .pl{font-size:12px;color:var(--muted);margin-right:4px}
+.pb{height:26px;padding:0 10px;border:1px dashed var(--line);border-radius:6px;background:transparent;color:var(--muted);font-size:12px;cursor:pointer}
+.pb[aria-pressed="true"]{color:var(--ink);border-style:solid}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <a class="chip" href="P-Connect.dc.html" title="alex@example.test · Signed in">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
+      </a>
+      <div class="chip" title="Cube service · Connected">
+        <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg>
+        <span class="srl">Cube service:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span>
+      </div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="P-Launcher.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock Everyday and open the Launcher?</p><a class="lkb go" href="P-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="lkb" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni on" aria-current="page" href="P-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="P-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <a class="attn" href="P-Settings.dc.html"><svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg><span class="warn" style="font-weight:500">Backup not confirmed</span><span class="go">Review</span></a>
+      <div class="foot">
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="phd">
+        <div>
+          <h1>Activity</h1>
+          <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet</p>
+        </div>
+        <p class="count" role="status">{{ countText }}</p>
+      </div>
+      <sc-if value="{{ preNote.show }}" hint-placeholder-val="{{ false }}"><p class="pre">{{ preNote.text }}</p></sc-if>
+
+      <form class="filters" aria-label="Filter activity" onSubmit="{{ noSubmit }}">
+        <div class="f w">
+          <label for="flt-wallet">Wallet</label>
+          <select id="flt-wallet" class="ctl" value="{{ f.wallet }}" onChange="{{ on.wallet }}"><option value="all">All wallets</option><option value="spark">Spark · Daily spending</option><option value="vault">Vault · Family savings</option><option value="liquid">Liquid · Travel</option></select>
+        </div>
+        <div class="f d">
+          <label for="flt-dir">Direction</label>
+          <select id="flt-dir" class="ctl" value="{{ f.dir }}" onChange="{{ on.dir }}"><option value="all">All</option><option value="in">Received</option><option value="out">Sent</option><option value="xfer">Transfers</option></select>
+        </div>
+        <div class="f s">
+          <label for="flt-status">Status</label>
+          <select id="flt-status" class="ctl" value="{{ f.status }}" onChange="{{ on.status }}"><option value="all">All</option><option value="pending">Pending</option><option value="confirmed">Confirmed</option><option value="failed">Failed</option></select>
+        </div>
+        <div class="f r">
+          <label for="flt-dates">Date range</label>
+          <input id="flt-dates" class="ctl" type="text" autocomplete="off" placeholder="Oct 15 – Oct 22" value="{{ f.dates }}" aria-invalid="{{ dateInvalid }}" aria-describedby="flt-dates-err" onInput="{{ on.dates }}">
+        </div>
+        <div class="f q">
+          <label for="flt-q">Search label or id</label>
+          <input id="flt-q" class="ctl" type="search" autocomplete="off" placeholder="Label, txid, payment hash, swap ID" value="{{ f.q }}" onInput="{{ on.q }}">
+        </div>
+        <div class="fend">
+          <span class="fcount">{{ activeText }}</span>
+          <button type="button" class="lbtn" disabled="{{ noFilters }}" onClick="{{ clear }}">Clear filters</button>
+          <span class="proto" role="group" aria-label="Spark history (prototype)" style="margin-top:0">
+            <span class="pl">Spark history</span>
+            <sc-for list="{{ shOpts }}" as="o" hint-placeholder-count="3"><button type="button" class="pb" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+          </span>
+        </div>
+      </form>
+      <sc-if value="{{ dateErr }}" hint-placeholder-val="{{ false }}"><p class="ferr" id="flt-dates-err" style="padding:6px 24px 0">Use October 2026 days, like “Oct 15 – Oct 22”.</p></sc-if>
+
+      <div class="split">
+        <div class="lst">
+          <sc-if value="{{ sparkFailed }}" hint-placeholder-val="{{ false }}">
+            <div class="hbanner" role="alert">
+              <svg class="ic s warn" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5 16 15H2z"/><path d="M9 7.5v3M9 12.75v.01"/></svg>
+              <p>Failed to load payment history</p>
+              <button type="button" class="btn" onClick="{{ retrySpark }}">Retry</button>
+            </div>
+          </sc-if>
+          <sc-if value="{{ hasRows }}" hint-placeholder-val="{{ true }}">
+            <div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span class="r">Fiat</span><span>Status</span></div>
+            <sc-if value="{{ sparkLoadRow }}" hint-placeholder-val="{{ false }}">
+              <div class="sload" role="status"><span class="spin" aria-hidden="true"></span><span>Loading payment history from the Spark bridge…</span></div>
+            </sc-if>
+            <sc-for list="{{ items }}" as="it" hint-placeholder-count="8">
+              <sc-if value="{{ it.isDay }}" hint-placeholder-val="{{ false }}">
+                <h2 class="day">{{ it.dayRel }}<span class="dn">{{ it.dayDate }}</span></h2>
+              </sc-if>
+              <sc-if value="{{ it.isRow }}" hint-placeholder-val="{{ true }}">
+                <button type="button" class="row {{ it.cls }}" aria-pressed="{{ it.pressed }}" aria-controls="act-detail" title="{{ it.text }}" onClick="{{ it.pick }}">
+                  <span class="tm">{{ it.time }}</span>
+                  <span class="cell">
+                    <sc-if value="{{ it.spark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                    <sc-if value="{{ it.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                    <sc-if value="{{ it.liquid }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+                    <span class="sr">{{ it.kind }} wallet</span><span class="wn ell">{{ it.wname }}</span>
+                  </span>
+                  <span class="cell">
+                    <sc-if value="{{ it.dIn }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7.5V13h5.5"/></svg></sc-if>
+                    <sc-if value="{{ it.dOut }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7.5 5H13v5.5"/></svg></sc-if>
+                    <sc-if value="{{ it.dX }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg></sc-if>
+                    <span class="sr">{{ it.dirWord }}:</span><span class="ell">{{ it.text }}</span>
+                  </span>
+                  <span class="amt r {{ it.amtCls }}">{{ it.amt }}<span class="u">{{ it.unit }}</span></span>
+                  <span class="fx r">{{ it.fiat }}</span>
+                  <span class="stc {{ it.stCls }}">
+                    <sc-if value="{{ it.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                    <sc-if value="{{ it.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
+                    <sc-if value="{{ it.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11.5 3.5l3 3-8 8h-3v-3z"/><path d="M10 5l3 3"/></svg></sc-if>
+                    <sc-if value="{{ it.sFail }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.75 6.75 4.5 4.5M11.25 6.75l-4.5 4.5"/></svg></sc-if>
+                    <span class="ell">{{ it.stx }}</span>
+                  </span>
+                </button>
+              </sc-if>
+            </sc-for>
+          </sc-if>
+          <sc-if value="{{ noRows }}" hint-placeholder-val="{{ false }}">
+            <div class="empty">
+              <h2>No activity matches these filters</h2>
+              <div class="acts" style="justify-content:center"><button type="button" class="btn" onClick="{{ clear }}">Clear filters</button></div>
+            </div>
+          </sc-if>
+          <p class="cap synth">Prototype · synthetic transactions, ids and rates</p>
+        </div>
+
+        <sc-if value="{{ hasDet }}" hint-placeholder-val="{{ true }}">
+          <aside class="det" id="act-detail" aria-labelledby="det-h">
+            <div class="dh">
+              <sc-if value="{{ d.dIn }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7.5V13h5.5"/></svg></sc-if>
+              <sc-if value="{{ d.dOut }}" hint-placeholder-val="{{ true }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7.5 5H13v5.5"/></svg></sc-if>
+              <sc-if value="{{ d.dX }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg></sc-if>
+              <h2 id="det-h"><span class="sr">{{ d.dirWord }}: </span>{{ d.title }}</h2>
+              <button type="button" class="xbtn" aria-label="Close details" onClick="{{ d.close }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 4.5 9 9M13.5 4.5l-9 9"/></svg></button>
+            </div>
+            <p class="dw">{{ d.wallet }} · Bitcoin mainnet</p>
+            <p class="big {{ d.amtCls }}">{{ d.amt }}<span class="u">{{ d.unit }}</span></p>
+            <p class="fxat">{{ d.fiatAt }}</p>
+            <p class="dst {{ d.stCls }}">
+              <sc-if value="{{ d.sOk }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+              <sc-if value="{{ d.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
+              <sc-if value="{{ d.sSig }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11.5 3.5l3 3-8 8h-3v-3z"/><path d="M10 5l3 3"/></svg></sc-if>
+              <sc-if value="{{ d.sFail }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.75 6.75 4.5 4.5M11.25 6.75l-4.5 4.5"/></svg></sc-if>
+              <span>{{ d.stLong }}</span>
+            </p>
+
+            <dl class="dl dsec">
+              <div><dt>Fee</dt><dd>{{ d.fee }}</dd></div>
+              <sc-if value="{{ d.hasConf }}" hint-placeholder-val="{{ true }}"><div><dt>Confirmations</dt><dd>{{ d.conf }}</dd></div></sc-if>
+              <div><dt>Date and time</dt><dd>{{ d.when }}</dd></div>
+              <div><dt>Wallet</dt><dd>{{ d.wallet }}</dd></div>
+              <div><dt>Rail</dt><dd>{{ d.rail }}</dd></div>
+              <div><dt>{{ d.peerK }}</dt><dd class="mono">{{ d.peer }}</dd></div>
+            </dl>
+
+            <div class="lblf">
+              <label for="det-label">Label</label>
+              <input id="det-label" class="ctl" type="text" autocomplete="off" placeholder="Add a note for this transaction" value="{{ d.label }}" onInput="{{ d.onLabel }}">
+            </div>
+
+            <ul class="ids" aria-label="Identifiers">
+              <sc-for list="{{ d.ids }}" as="x" hint-placeholder-count="2">
+                <li>
+                  <span class="ell"><span class="nm">{{ x.name }}</span><span class="mono">{{ x.val }}</span></span>
+                  <button type="button" class="cpy" aria-label="{{ x.aria }}" onClick="{{ x.copy }}">
+                    <sc-if value="{{ x.notCopied }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="6.5" y="6.5" width="8.5" height="8.5" rx="1.5"/><path d="M11.5 6.5V4.25c0-.7-.55-1.25-1.25-1.25h-6c-.7 0-1.25.55-1.25 1.25v6c0 .7.55 1.25 1.25 1.25H6.5"/></svg></sc-if>
+                    <sc-if value="{{ x.copied }}" hint-placeholder-val="{{ false }}"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.25 3 3 6-6.5"/></svg></sc-if>
+                    {{ x.btn }}
+                  </button>
+                </li>
+              </sc-for>
+            </ul>
+            <span class="sr" role="status">{{ d.copyMsg }}</span>
+
+            <div class="dsec" style="border-top:0">
+              <button type="button" class="disc" aria-expanded="{{ d.discOpen }}" aria-controls="det-disc" onClick="{{ d.toggleDisc }}">{{ d.discTitle }}<svg class="ic s chev" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 7 4.5 4.5L13.5 7"/></svg></button>
+              <sc-if value="{{ d.discShown }}" hint-placeholder-val="{{ true }}">
+                <div class="dbody" id="det-disc">
+                  <dl class="dl">
+                    <sc-for list="{{ d.discItems }}" as="k" hint-placeholder-count="3">
+                      <div><dt>{{ k.k }}</dt><dd>{{ k.v }}</dd></div>
+                    </sc-for>
+                  </dl>
+                  <sc-if value="{{ d.isPsbt }}" hint-placeholder-val="{{ true }}">
+                    <ul class="sg" aria-label="Signers, 2-of-3 synthetic policy">
+                      <sc-for list="{{ d.signers }}" as="g" hint-placeholder-count="3">
+                        <li>
+                          <sc-if value="{{ g.done }}" hint-placeholder-val="{{ true }}"><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                          <sc-if value="{{ g.wait }}" hint-placeholder-val="{{ false }}"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
+                          <sc-if value="{{ g.idle }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/></svg></sc-if>
+                          <span>{{ g.name }}<span class="fp mono">{{ g.fp }}</span></span>
+                          <span class="ss {{ g.cls }}">{{ g.st }}</span>
+                        </li>
+                      </sc-for>
+                    </ul>
+                    <div class="acts">
+                      <a class="btn pri" href="P-Send.dc.html">Continue signing</a>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-if>
+            </div>
+          </aside>
+        </sc-if>
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"presetWallet":{"editor":"enum","options":["all","spark","vault","liquid"],"default":"all","section":"Review"},"selectedRow":{"editor":"enum","options":["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14"],"default":"3","section":"Review"},"sparkHistory":{"editor":"enum","options":["ready","loading","failed"],"default":"ready","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={f:null,sel:null,hide:null,labels:{},disc:null,copied:null,sh:null};}
+  renderVals(){
+    const P=this.props,self=this,D='••••••';
+    const hb=!!P.hideBalances;
+    const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
+    const preset=P.presetWallet||'all';
+    const lockAsk=!!this.state.lockAsk;
+    const blank={for:preset,wallet:preset,dir:'all',status:'all',dates:'',q:''};
+    const F=(this.state.f&&this.state.f.for===preset)?this.state.f:blank;
+    const setF=(patch)=>self.setState({f:Object.assign({},F,patch)});
+    const selLever=parseInt(P.selectedRow==null?'3':P.selectedRow,10)||0;
+    const sel=(this.state.sel&&this.state.sel.for===selLever)?this.state.sel.v:selLever;
+    const pickSel=(v)=>self.setState({sel:{for:selLever,v:v},copied:null});
+    // Spark payment history: ready | loading | failed (Retry returns to ready)
+    const shLever=P.sparkHistory||'ready';
+    const sh=(this.state.sh&&this.state.sh.for===shLever)?this.state.sh.v:shLever;
+    const shOpts=[['ready','Ready'],['loading','Loading'],['failed','Failed']].map(([v,l])=>({label:l,on:sh===v?'true':'false',pick:()=>self.setState({sh:{for:shLever,v:v}})}));
+    const sparkReady=sh==='ready',sparkLoading=sh==='loading',sparkFailed=sh==='failed';
+
+    const WN={spark:['Spark','Daily spending'],vault:['Vault','Family savings'],liquid:['Liquid','Travel']};
+    const DAYS={22:['Today','Thu 22 Oct 2026','Thu'],21:['Yesterday','Wed 21 Oct 2026','Wed'],19:['Monday','Mon 19 Oct 2026','Mon'],15:['Last week','Thu 15 Oct 2026','Thu'],9:['Earlier','Fri 9 Oct 2026','Fri']};
+    const RATE='USD 82,800 per BTC';
+    const SIGNERS=[
+      {name:'This device',fp:'a1b2c3d4',st:'Signed',cls:'ok',done:true},
+      {name:"Keychain · Alex's phone",fp:'e5f6a7b8',st:'Waiting · request sent',cls:'warn',wait:true},
+      {name:'Hardware · Ledger-style device',fp:'c9d0e1f2',st:'Can sign instead',cls:'unk',idle:true}
+    ];
+    // 14 synthetic rows. st: pending | confirmed | failed; sig marks a Vault PSBT awaiting signatures
+    const ROWS=[
+      {id:1,d:22,t:'14:32',w:'spark',dir:'xfer',cp:'Transfer to Archive · Spark',lb:'',a:-10000,fx:8.28,fee:'3 SATS',st:'pending',stx:'Pending',sl:'Pending · settles on its own. Archive is locked again.',conf:'',rail:'Spark → Spark via Lightning · to another Cube',pk:'To',peer:'Archive › Spark · sp1…synthetic…7k2q',ids:[['Payment hash','9f3c…synthetic…e21a']],dt:'Lightning details',di:[['Route','Spark → Lightning → Spark'],['Invoice','lnbc100u1…synthetic…'],['Preimage','Shown once the payment settles']]},
+      {id:2,d:22,t:'11:05',w:'liquid',dir:'in',cp:'Bitcoin on-chain → L-BTC swap',lb:'',a:20000,fx:16.56,fee:'≈ 310 SATS (estimate)',st:'pending',stx:'Swap pending',sl:'Pending · waiting for the Bitcoin deposit to confirm',conf:'1 of 2 on the Bitcoin leg',rail:'Bitcoin on-chain → Liquid (L-BTC swap)',pk:'From',peer:'bc1q…synthetic…4m8d',ids:[['Swap ID','swp_7Hq2…synthetic…'],['Bitcoin txid','a1b2…synthetic…c3d4']],dt:'Swap details',di:[['Swap address','bc1q…synthetic…x9vz · for ONE deposit only'],['Bitcoin leg','Lockup seen · 1 of 2 confirmations'],['Liquid leg','Claim waits for the Bitcoin leg'],['Fee Rate (sat/vB)','4'],['Swap fee','≈ 250 SATS (estimate)']]},
+      {id:3,d:22,t:'09:18',w:'vault',dir:'out',cp:'To bc1q…synthetic…p0r7',lb:'Roof repair deposit',a:-150000,fx:124.20,fee:'1,410 SATS · 5 sat/vB',st:'pending',sig:true,stx:'1 of 2 signatures',sl:'Awaiting a second signature · 1 of 2 collected. Not broadcast.',conf:'Not broadcast yet',rail:'Bitcoin on-chain · Vault',pk:'To',peer:'bc1q…synthetic…p0r7',ids:[['PSBT ID','psbt_51c0…synthetic…'],['Txid (after broadcast)','b7e1…synthetic…0aa9']],dt:'PSBT and signers',di:[['Policy','2-of-3 synthetic policy'],['Inputs','2 coins'],['Created','Thu 22 Oct 2026, 09:18 on This device']]},
+      {id:4,d:21,t:'19:47',w:'spark',dir:'out',cp:'Lightning invoice · lnbc…synthetic…',lb:'Coffee',a:-4200,fx:3.48,fee:'2 SATS',st:'confirmed',stx:'Confirmed',sl:'Confirmed · payment settled',conf:'',rail:'Spark → Lightning',pk:'To',peer:'lnbc42u1…synthetic…',ids:[['Payment hash','4c8d…synthetic…77b0']],dt:'Lightning details',di:[['Description','Flat white'],['Routing fee','2 SATS'],['Preimage','e5f6…synthetic…1a2b']]},
+      {id:5,d:21,t:'16:10',w:'spark',dir:'out',cp:'Lightning address · sh•••@example.test',lb:'',a:-3000,fx:2.48,fee:'0 SATS · nothing was charged',st:'failed',stx:'Failed',sl:'Failed · no route to the destination. Nothing left this wallet.',conf:'',rail:'Spark → Lightning',pk:'To',peer:'sh•••@example.test',ids:[['Payment hash','0d1e…synthetic…f2a3']],dt:'Lightning details',di:[['Failure','No route found'],['Attempts','3 over 41 seconds'],['Next step','Retry later, or ask for another address']]},
+      {id:6,d:21,t:'12:02',w:'liquid',dir:'out',cp:'To lq1…synthetic…h6tn',lb:'Lunch split',a:-5,u:'USDt',fx:5.00,fee:'0.03 USDt · Paid in USDt',st:'confirmed',stx:'Confirmed',sl:'Confirmed',conf:'2 (Liquid)',rail:'Liquid · USDt',pk:'To',peer:'lq1…synthetic…h6tn',ids:[['Txid','c5d6…synthetic…8e9f']],dt:'Liquid details',di:[['Asset','USDt on Liquid'],['Fees (USDt)','0.03 · Paid in USDt'],['Block','Synthetic height']]},
+      {id:7,d:21,t:'08:30',w:'spark',dir:'in',cp:'From sp1…synthetic…3wqe',lb:'Refund',a:2500,fx:2.07,fee:'0 SATS',st:'confirmed',stx:'Confirmed',sl:'Confirmed · received instantly',conf:'',rail:'Spark',pk:'From',peer:'sp1…synthetic…3wqe',ids:[['Spark transfer ID','spk_2b9e…synthetic…']],dt:'Spark details',di:[['Transfer','Spark to Spark, no Lightning hop'],['Received to','Spark address of this wallet']]},
+      {id:8,d:19,t:'21:15',w:'liquid',dir:'in',cp:'From lq1…synthetic…z8ka',lb:'',a:12784,fx:10.58,fee:'Paid by sender',st:'confirmed',stx:'Confirmed',sl:'Confirmed',conf:'2 (Liquid)',rail:'Liquid · L-BTC',pk:'From',peer:'lq1…synthetic…z8ka',ids:[['Txid','d7e8…synthetic…9f0a']],dt:'Liquid details',di:[['Asset','L-BTC'],['Block','Synthetic height']]},
+      {id:9,d:19,t:'13:40',w:'spark',dir:'in',cp:'Lightning invoice paid',lb:'Freelance sketch',a:15000,fx:12.42,fee:'0 SATS',st:'confirmed',stx:'Confirmed',sl:'Confirmed · payment received',conf:'',rail:'Lightning → Spark',pk:'From',peer:'Lightning payer · not disclosed',ids:[['Payment hash','7a8b…synthetic…c9d0']],dt:'Lightning details',di:[['Invoice','lnbc150u1…synthetic…'],['Description','Sketch commission'],['Paid','Before the invoice expired']]},
+      {id:10,d:19,t:'10:05',w:'spark',dir:'xfer',cp:'Transfer from Liquid · Travel',lb:'',a:8000,fx:6.62,fee:'21 SATS · paid by Liquid · Travel',st:'confirmed',stx:'Confirmed',sl:'Confirmed',conf:'',rail:'Liquid → Spark via Lightning · this Cube',pk:'From',peer:'Liquid · Travel · this Cube',ids:[['Payment hash','1f2e…synthetic…3d4c'],['Swap ID','swp_3Kd9…synthetic…']],dt:'Lightning details',di:[['Route','Liquid → Lightning → Spark'],['Preimage','b4c5…synthetic…d6e7']]},
+      {id:11,d:15,t:'18:22',w:'vault',dir:'in',cp:'From bc1q…synthetic…8yhs',lb:'Salary set-aside',a:40000,fx:33.12,fee:'Paid by sender',st:'confirmed',stx:'Confirmed',sl:'Confirmed',conf:'1,024',rail:'Bitcoin on-chain · Vault',pk:'From',peer:'bc1q…synthetic…8yhs',ids:[['Txid','e9f0…synthetic…a1b2']],dt:'On-chain details',di:[['Block','Synthetic height'],['Received at','Vault address #12 · verified on hardware signer'],['Coins','1 coin']]},
+      {id:12,d:15,t:'09:00',w:'spark',dir:'out',cp:'Lightning address · ga•••@example.test',lb:'Donation',a:-1000,fx:0.83,fee:'1 SATS',st:'confirmed',stx:'Confirmed',sl:'Confirmed · payment settled',conf:'',rail:'Spark → Lightning',pk:'To',peer:'ga•••@example.test',ids:[['Payment hash','5e6f…synthetic…7a8b']],dt:'Lightning details',di:[['Description','Monthly donation'],['Routing fee','1 SAT']]},
+      {id:13,d:9,t:'17:45',w:'liquid',dir:'in',cp:'From lq1…synthetic…m2cv',lb:'',a:10.37,u:'USDt',fx:10.37,fee:'Paid by sender',st:'confirmed',stx:'Confirmed',sl:'Confirmed',conf:'2 (Liquid)',rail:'Liquid · USDt',pk:'From',peer:'lq1…synthetic…m2cv',ids:[['Txid','f1a2…synthetic…b3c4']],dt:'Liquid details',di:[['Asset','USDt on Liquid'],['Block','Synthetic height']]},
+      {id:14,d:9,t:'11:11',w:'spark',dir:'in',cp:'Bitcoin deposit · bc1p…synthetic…',lb:'',a:25000,fx:20.70,fee:'≈ 180 SATS claim fee (estimate)',st:'confirmed',stx:'Confirmed',sl:'Confirmed · claimed into Spark',conf:'6',rail:'Bitcoin on-chain → Spark deposit',pk:'From',peer:'bc1p…synthetic…r4ty',ids:[['Txid','0a9b…synthetic…8c7d']],dt:'On-chain details',di:[['Deposit address','bc1p…synthetic…r4ty'],['Claim','Claimed after 3 confirmations']]}
+    ];
+    const fmt=(n)=>String(n).replace(/\B(?=(\d{3})+(?!\d))/g,',');
+    const amtOf=(r)=>{const u=r.u||'SATS';const abs=Math.abs(r.a);const num=u==='USDt'?abs.toFixed(2):fmt(abs);return {txt:(r.a<0?'−':'+')+num,unit:u};};
+    const labels=this.state.labels||{};
+    const labelOf=(r)=>Object.prototype.hasOwnProperty.call(labels,r.id)?labels[r.id]:r.lb;
+    const textOf=(r)=>{const l=labelOf(r);return l&&l.trim()?l:r.cp;};
+    const DIRW={in:'Received',out:'Sent',xfer:'Transfer'};
+
+    // date range: days in October 2026, one day or a span
+    const nums=(F.dates.match(/\d{1,2}/g)||[]).map((n)=>parseInt(n,10)).filter((n)=>n>=1&&n<=31);
+    const range=nums.length?[Math.min.apply(null,nums),Math.max.apply(null,nums)]:null;
+    const dateErr=F.dates.trim()!==''&&!range;
+    const q=F.q.trim().toLowerCase();
+    const match=(r)=>{
+      if(F.wallet!=='all'&&r.w!==F.wallet)return false;
+      if(F.dir!=='all'&&r.dir!==F.dir)return false;
+      if(F.status!=='all'&&r.st!==F.status)return false;
+      if(range&&(r.d<range[0]||r.d>range[1]))return false;
+      if(q){const hay=[labelOf(r),r.cp].concat(r.ids.map((x)=>x[1])).join(' ').toLowerCase();if(hay.indexOf(q)<0)return false;}
+      return true;
+    };
+    const active=(F.wallet!=='all'?1:0)+(F.dir!=='all'?1:0)+(F.status!=='all'?1:0)+(range?1:0)+(q?1:0);
+    const avail=ROWS.filter((r)=>sparkReady||r.w!=='spark');
+    const shown=avail.filter(match);
+    const loadRow=sparkLoading&&(F.wallet==='all'||F.wallet==='spark');
+
+    const items=[];let lastDay=null;
+    shown.forEach((r)=>{
+      if(r.d!==lastDay){lastDay=r.d;items.push({isDay:true,isRow:false,dayRel:DAYS[r.d][0],dayDate:DAYS[r.d][1]});}
+      const a=amtOf(r),on=sel===r.id;
+      items.push({isDay:false,isRow:true,time:r.t,kind:WN[r.w][0],wname:WN[r.w][1],
+        spark:r.w==='spark',vault:r.w==='vault',liquid:r.w==='liquid',
+        dIn:r.dir==='in',dOut:r.dir==='out',dX:r.dir==='xfer',dirWord:DIRW[r.dir],text:textOf(r),
+        amt:hide?D:a.txt,unit:hide?'':a.unit,fiat:hide?D:'$'+r.fx.toFixed(2),
+        amtCls:r.st==='failed'?'void':'',
+        stx:r.stx,stCls:r.st==='failed'?'bad':(r.st==='pending'?'warn':'ok'),
+        sOk:r.st==='confirmed',sPend:r.st==='pending'&&!r.sig,sSig:!!r.sig,sFail:r.st==='failed',
+        cls:on?'sel kf':'',pressed:on?'true':'false',pick:()=>pickSel(on?0:r.id)});
+    });
+
+    // detail panel for the selected row (stays open even if a filter hides the row)
+    const R=avail.find((r)=>r.id===sel)||null;
+    let d={};
+    if(R){
+      const a=amtOf(R);
+      const discOpen=(this.state.disc&&this.state.disc.id===R.id)?this.state.disc.open:!!R.sig;
+      const cp=this.state.copied;
+      d={title:textOf(R),dirWord:DIRW[R.dir],dIn:R.dir==='in',dOut:R.dir==='out',dX:R.dir==='xfer',
+        wallet:WN[R.w][0]+' · '+WN[R.w][1],
+        amt:hide?D:a.txt,unit:hide?'':a.unit,amtCls:R.st==='failed'?'void':'',
+        fiatAt:hide?D:('$'+R.fx.toFixed(2)+' at the time'+((R.u==='USDt')?'':' · '+RATE)),
+        stLong:R.sl,stCls:R.st==='failed'?'bad':(R.st==='pending'?'warn':'ok'),
+        sOk:R.st==='confirmed',sPend:R.st==='pending'&&!R.sig,sSig:!!R.sig,sFail:R.st==='failed',
+        fee:hide?D:R.fee,hasConf:!!R.conf,conf:R.conf,
+        when:DAYS[R.d][1]+', '+R.t+' · UTC+01:00 (device time zone)',
+        rail:R.rail,peerK:R.pk==='To'?'Destination':'Counterparty',peer:R.peer,
+        label:labelOf(R),
+        onLabel:(e)=>{const v=(e&&e.target)?e.target.value:'';const nl=Object.assign({},self.state.labels||{});nl[R.id]=v;self.setState({labels:nl});},
+        ids:R.ids.map((x,i)=>{const key=R.id+':'+i,did=cp===key;return {name:x[0],val:x[1],aria:'Copy '+x[0],btn:did?'Copied':'Copy',copied:did,notCopied:!did,
+          copy:()=>{try{if(navigator.clipboard)navigator.clipboard.writeText(x[1]).catch(()=>{});}catch(err){}
+            self.setState({copied:key});setTimeout(()=>{if(self.state.copied===key)self.setState({copied:null});},1600);}};}),
+        copyMsg:(cp&&cp.indexOf(R.id+':')===0)?(R.ids[parseInt(cp.split(':')[1],10)][0]+' copied'):'',
+        discTitle:R.dt,discOpen:discOpen?'true':'false',discShown:discOpen,
+        toggleDisc:()=>self.setState({disc:{id:R.id,open:!discOpen}}),
+        discItems:R.di.map((x)=>({k:x[0],v:x[1]})),
+        isPsbt:!!R.sig,signers:SIGNERS.map((g)=>({name:g.name,fp:g.fp,st:g.st,cls:g.cls,done:!!g.done,wait:!!g.wait,idle:!!g.idle})),
+        close:()=>pickSel(0)};
+    }
+
+    const on={
+      wallet:(e)=>setF({wallet:e.target.value}),dir:(e)=>setF({dir:e.target.value}),
+      status:(e)=>setF({status:e.target.value}),dates:(e)=>setF({dates:e.target.value}),q:(e)=>setF({q:e.target.value})
+    };
+    const presetName=preset!=='all'?WN[preset][0]+' · '+WN[preset][1]:'';
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,
+      lockAsk:lockAsk,lockIdle:!lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
+      toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
+      f:F,on:on,noSubmit:(e)=>{if(e&&e.preventDefault)e.preventDefault();},
+      dateErr:dateErr,dateInvalid:dateErr?'true':'false',
+      activeText:active===0?'No filters':(active===1?'1 filter active':active+' filters active'),
+      noFilters:active===0,
+      clear:()=>setF({wallet:'all',dir:'all',status:'all',dates:'',q:''}),
+      countText:'Showing '+shown.length+' of '+avail.length,
+      preNote:{show:preset!=='all'&&F.wallet===preset,text:'From '+presetName+' › Recent activity'},
+      items:items,hasRows:shown.length>0||loadRow,noRows:shown.length===0&&!loadRow,
+      sparkLoadRow:loadRow,sparkFailed:sparkFailed,
+      shOpts:shOpts,retrySpark:()=>self.setState({sh:{for:shLever,v:'ready'}}),
+      hasDet:!!R,d:d
+    };
+  }
+}
+</script>
+</body>
+</html>

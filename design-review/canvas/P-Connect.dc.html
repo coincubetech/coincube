@@ -1,0 +1,623 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V3 Launcher · Connect</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens copied from V3-Launcher-Spin; the floor here is static (no transitions) */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--skel:#2c2d2b;font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--skel:#ece7de}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar (as V3-Launcher-Spin) + universal toggles */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;white-space:nowrap}
+.tbtn:hover{border-color:var(--line)}
+a.tbtn,a.tbtn:hover{color:var(--ink);text-decoration:none}
+.tbtn svg{width:16px;height:16px}
+.tbtn.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.tbtn.ico{width:32px;padding:0;justify-content:center}
+.tbtn.ico[aria-pressed="true"]{background:var(--selected);border-color:var(--accent)}
+/* Connect entry: "Connect · who" plus a small state word; signed out the "Sign in" text is primary-tinted */
+.tenshu{--accent-ink:#f3821d}.tenshu.light{--accent-ink:#8a4304}
+.tbtn .dot{color:var(--muted)}
+.tbtn .stw{font-size:12px;font-weight:400;color:var(--muted)}
+.tbtn.out .who{color:var(--accent-ink);font-weight:600}
+
+/* static, dimmed Launcher floor behind the Connect layer */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.backdrop{position:absolute;inset:0;opacity:.4;pointer-events:none;display:flex;flex-direction:column}
+.bfield{flex:1;position:relative}
+.floor{position:absolute;left:0;right:0;bottom:0;top:30%;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.brow{position:absolute;left:0;right:0;top:84px;display:flex;justify-content:center;gap:40px}
+.cb{width:232px;height:344px;display:flex;flex-direction:column;align-items:center;padding-top:8px;box-sizing:border-box;--s:152px}
+.scene{position:relative;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(8px)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.cube.btc{--edge:var(--edge-btc)}.cube.b2b{--edge:var(--edge-b2b)}.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:6px;transform:rotate(45deg)}
+/* Bitcoin network mark: the supplied logo. Test network = 60% logo inside a dashed ring, plus the text tag */
+.bmk{display:inline-flex;align-items:center;justify-content:center;flex:none;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.bmk img{display:block;width:100%;height:100%;border-radius:50%}
+.bmk.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.bmk.tn img{opacity:.6}
+.ftag{font-size:14px;font-weight:600;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.wi{width:38px;height:38px}
+.pad{width:54px;height:54px}
+.bnm{margin-top:auto;padding-bottom:10px;font-weight:600}
+.bbar{height:64px;flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+
+/* the Connect layer: one wide surface, section list left, content right */
+.sheet{position:absolute;left:200px;top:28px;width:1040px;bottom:28px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);overflow:hidden;z-index:4}
+.light .sheet{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
+.shead{height:72px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px 0 28px;border-bottom:1px solid var(--line)}
+.shead h1{margin:0;font-size:24px;font-weight:600}
+.btn.close{gap:6px;padding:0 12px 0 10px}
+.coin{width:16px;height:16px;flex:none;display:block}
+.coin-top{width:calc(var(--s) * .34);height:calc(var(--s) * .34)}
+.shead .who{font-size:14px;color:var(--muted)}
+.sbody{flex:1;min-height:0;display:flex}
+.nav{width:232px;flex:none;box-sizing:border-box;padding:16px 12px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+/* the 6px gap is wider than the ring (2px + 2px offset), and the focused/selected row paints above its neighbours */
+.ni{position:relative;z-index:0;display:flex;align-items:center;gap:10px;height:40px;padding:0 12px;border:0;border-radius:8px;background:none;cursor:pointer;font-size:14px;text-align:left}
+.ni[aria-current="page"]{z-index:1}
+.ni:focus-visible,.ni.demo-focus{z-index:2}
+.ni svg{width:18px;height:18px;color:var(--muted)}
+.ni:hover{background:var(--selected)}
+.ni[aria-current="page"]{background:var(--selected);font-weight:600}
+.ni[aria-current="page"] svg{color:var(--accent)}
+.navnote{margin:auto 12px 0;font-size:12px;color:var(--muted);line-height:1.4}
+.content{flex:1;min-width:0;overflow-y:auto;padding:28px 40px 40px}
+.sec{max-width:680px}
+.sec h3{margin:0;font-size:20px;font-weight:600;line-height:1.3}
+.lead{margin:4px 0 0;font-size:13px;color:var(--muted)}
+.grp{margin-top:32px}
+.grp h4{margin:0 0 8px;font-size:14px;font-weight:600}
+.list{list-style:none;margin:0;padding:0;border-top:1px solid var(--line)}
+.li{display:flex;align-items:center;gap:16px;min-height:52px;padding:10px 0;border-bottom:1px solid var(--line);box-sizing:border-box}
+.li .main{flex:1;min-width:0}
+.li .t{font-weight:500;display:flex;align-items:center;flex-wrap:wrap;gap:8px}
+.li .s{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.li .k{width:168px;flex:none;font-size:13px;color:var(--muted)}
+.li .when{font-size:13px;color:var(--muted);white-space:nowrap}
+.stt{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap}
+.stt svg{width:16px;height:16px}
+.tone-ok{color:var(--good)}.tone-warn{color:var(--warn)}.tone-bad{color:var(--bad)}.tone-muted{color:var(--muted)}
+.rtag{display:inline-flex;align-items:center;height:20px;padding:0 6px;border:1px solid var(--line);border-radius:4px;font-size:12px;font-weight:500;white-space:nowrap}
+.rtag.cur{border-color:var(--accent)}
+.ident{display:flex;align-items:center;gap:16px;margin-top:20px}
+.avatar{width:48px;height:48px;border-radius:50%;background:var(--selected);display:flex;align-items:center;justify-content:center;color:var(--accent)}
+.avatar svg{width:24px;height:24px}
+.ident .em{font-size:18px;font-weight:600;overflow-wrap:anywhere}
+.provides{margin:0;padding:0;list-style:none;display:flex;flex-direction:column;gap:8px}
+.provides li{display:flex;align-items:flex-start;gap:10px;line-height:1.4}
+.provides svg{flex:none;margin-top:1px}
+.provides svg{width:18px;height:18px;color:var(--muted)}
+.acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.conseq{margin:8px 0 0;font-size:13px;color:var(--muted)}
+.review{margin:8px 0;padding:14px 16px;border-radius:8px;background:var(--selected)}
+.review b{display:block;font-weight:600}
+.review p{margin:4px 0 12px;font-size:13px}
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn.ico{width:36px;padding:0;justify-content:center}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+a.linkbtn:hover{color:var(--ink)}
+.or{font-size:13px;color:var(--muted)}
+.provides.compact{margin-top:16px;gap:6px;font-size:13px}
+.skel{display:block;height:12px;border-radius:6px;background:var(--skel)}
+.empty{padding:28px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.empty b{display:block;font-weight:600}
+.empty p{margin:4px 0 12px;font-size:13px;color:var(--muted)}
+.gate{padding-top:4px}
+.gate p{margin:4px 0 16px;color:var(--muted);font-size:14px;max-width:520px}
+.tbl{width:100%;border-collapse:collapse;margin-top:20px;font-size:14px}
+.tbl th{text-align:left;font-size:12px;font-weight:500;color:var(--muted);padding:0 12px 8px 0;border-bottom:1px solid var(--line)}
+.tbl td{padding:12px 12px 12px 0;border-bottom:1px solid var(--line);vertical-align:middle}
+.tbl td.nm{font-weight:500}
+.net{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.net .bmk{width:16px;height:16px;color:var(--ink)}
+.net .bmk.tn{border-width:1px;padding:1.5px}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;line-height:1}
+.tb.b2b{border-color:#D4A62A}
+.tb.test{border-style:dashed}
+.fnote{margin:12px 0 0;font-size:12px;color:var(--muted)}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="grow"></span>
+    <button type="button" class="tbtn ico" aria-label="Hide balances" aria-pressed="{{ hidePressed }}" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg>
+    </button>
+    <span class="vsep"></span>
+    <button type="button" class="tbtn on {{ acctCls }}" aria-current="page" aria-label="{{ acctAria }}">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="dot">·</span><span class="who">{{ acctWho }}</span>
+      <sc-if value="{{ hasAcctState }}" hint-placeholder-val="{{ true }}"><span class="stw">{{ acctState }}</span></sc-if>
+    </button>
+    <a class="tbtn" href="P-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage">
+    <div class="backdrop" aria-hidden="true">
+      <div class="bfield">
+        <div class="floor"></div>
+        <div class="brow">
+          <sc-for list="{{ floorCubes }}" as="c" hint-placeholder-count="4">
+            <div class="cb">
+              <div class="scene">
+                <div class="shadow"></div>
+                <div class="cube {{ c.edge }}">
+                  <div class="f t"><div class="tc">
+                    <sc-if value="{{ c.isB2b }}" hint-placeholder-val="{{ false }}"><img class="mk coin-top" src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></sc-if>
+                    <sc-if value="{{ c.notB2b }}" hint-placeholder-val="{{ true }}"><span class="bmk {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                    <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+                  </div></div>
+                  <div class="f l"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="{{ c.walletPath }}"></path></svg></div>
+                  <div class="f r"><svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg></div>
+                </div>
+              </div>
+              <span class="bnm">{{ c.name }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div class="bbar"><span class="btn">Create Cube</span><span class="btn">Import or restore a Cube</span></div>
+    </div>
+
+    <section class="sheet" aria-labelledby="cx-title">
+      <div class="shead">
+        <h1 id="cx-title">{{ headTitle }}</h1>
+        <span class="who">{{ headWho }}</span>
+        <span class="grow"></span>
+        <a class="btn close" href="P-Launcher.dc.html" aria-label="Close Connect">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          <span>Close</span>
+        </a>
+      </div>
+      <div class="sbody">
+        <nav class="nav" aria-label="Connect sections">
+          <sc-for list="{{ sections }}" as="n" hint-placeholder-count="5">
+            <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.current }}" onClick="{{ n.pick }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ n.icon }}"></path></svg>
+              <span>{{ n.label }}</span>
+            </button>
+          </sc-for>
+          <p class="navnote">Account-wide. Each Cube's own service connection stays in that Cube's Settings › Connections.</p>
+        </nav>
+
+        <div class="content" aria-live="polite">
+          <!-- LOADING: every section -->
+          <sc-if value="{{ isLoading }}" hint-placeholder-val="{{ false }}">
+            <div class="sec" aria-busy="true">
+              <h3>{{ secLabel }}</h3>
+              <p class="lead">Loading your Connect account…</p>
+              <ul class="list" style="margin-top:24px">
+                <sc-for list="{{ skelRows }}" as="k" hint-placeholder-count="5">
+                  <li class="li"><span class="main"><span class="skel" style="{{ k.a }}"></span><span class="skel" style="{{ k.b }}"></span></span><span class="skel" style="width:72px"></span></li>
+                </sc-for>
+              </ul>
+            </div>
+          </sc-if>
+
+          <!-- ERROR: every section -->
+          <sc-if value="{{ isError }}" hint-placeholder-val="{{ false }}">
+            <div class="sec gate" role="alert">
+              <h3>Couldn't load {{ secLabel }}</h3>
+              <p>Connect didn't respond within [TIMEOUT]. You are still signed in on this device and your Cubes are unaffected.</p>
+              <div class="acts"><button type="button" class="btn primary" onClick="{{ retry }}">Retry</button><span class="or">Last attempt [TIME]</span></div>
+            </div>
+          </sc-if>
+
+          <!-- SIGNED OUT: gate for every section except Account -->
+          <sc-if value="{{ outGate }}" hint-placeholder-val="{{ false }}">
+            <div class="sec gate">
+              <h3>{{ secLabel }}</h3>
+              <p>Sign in to see this</p>
+              <a class="btn primary" href="P-SignIn.dc.html">Sign in</a>
+            </div>
+          </sc-if>
+
+          <!-- ACCOUNT · signed out: what Connect provides; Sign in and Create account both open the sign-in screen, which handles the mode -->
+          <sc-if value="{{ showAuth }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h3>Account</h3>
+              <ul class="provides compact" aria-label="What Connect provides">
+                <sc-for list="{{ provides }}" as="p" hint-placeholder-count="8">
+                  <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}</span></li>
+                </sc-for>
+              </ul>
+              <div class="acts" style="margin-top:24px"><a class="btn primary" href="P-SignIn.dc.html">Sign in</a><a class="btn" href="P-SignIn.dc.html">Create account</a></div>
+            </div>
+          </sc-if>
+
+          <!-- ACCOUNT · signed in -->
+          <sc-if value="{{ showAccount }}" hint-placeholder-val="{{ true }}">
+            <div class="sec">
+              <h3>Account</h3>
+              <div class="ident">
+                <span class="avatar"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg></span>
+                <div><div class="em">alex@example.test</div><div class="muted" style="font-size:13px">Signed in on this device</div></div>
+              </div>
+              <ul class="list" style="margin-top:24px">
+                <li class="li"><span class="k">Sign-in method</span><span class="main">Email · one-time code</span></li>
+                <li class="li"><span class="k">Signed in since</span><span class="main">[DATE]</span></li>
+              </ul>
+              <div class="grp">
+                <h4>What Connect provides</h4>
+                <ul class="provides">
+                  <sc-for list="{{ provides }}" as="p" hint-placeholder-count="8">
+                    <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg><span>{{ p.text }}</span></li>
+                  </sc-for>
+                </ul>
+              </div>
+              <div class="grp">
+                <sc-if value="{{ noSignOutReview }}" hint-placeholder-val="{{ true }}">
+                  <button type="button" class="btn" onClick="{{ askSignOut }}">Sign out…</button>
+                  <p class="conseq">Cubes stay on this device; Connect services pause until you sign in again.</p>
+                </sc-if>
+                <sc-if value="{{ signOutReview }}" hint-placeholder-val="{{ false }}">
+                  <div class="review" role="group" aria-label="Review sign out">
+                    <b>Sign out alex@example.test on this device?</b>
+                    <p>Cubes stay on this device; Connect services pause until you sign in again.</p>
+                    <div class="acts"><button type="button" class="btn primary" onClick="{{ signOut }}">Sign out</button><button type="button" class="btn" onClick="{{ cancelReview }}">Cancel</button></div>
+                  </div>
+                </sc-if>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- PLAN & BILLING -->
+          <sc-if value="{{ showPlan }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h3>Plan &amp; billing</h3>
+              <ul class="list" style="margin-top:20px">
+                <li class="li"><span class="k">Current plan</span><span class="main"><span class="t">[PLAN NAME]</span><span class="s">{{ planDateLine }}</span></span>
+                  <span class="stt tone-ok"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ okPath }}"></path></svg>Billing status: verified</span></li>
+              </ul>
+              <sc-if value="{{ planCancelled }}" hint-placeholder-val="{{ false }}"><p class="fnote">Your plan is cancelled. Connect services stay on until the access date.</p></sc-if>
+              <sc-if value="{{ noPlanReview }}" hint-placeholder-val="{{ true }}">
+                <div class="acts" style="margin-top:12px"><button type="button" class="btn sm" onClick="{{ askPlan }}">{{ planBtn }}</button><button type="button" class="linkbtn">Compare plans</button><button type="button" class="linkbtn">Referral</button></div>
+              </sc-if>
+              <sc-if value="{{ planReview }}" hint-placeholder-val="{{ false }}">
+                <div class="review" role="group" aria-label="Review plan change">
+                  <b>Plan changes open a review first</b>
+                  <p>You'll see the plan, amount and payment method before anything is charged.</p>
+                  <div class="acts"><button type="button" class="btn primary" onClick="{{ cancelReview }}">Continue to review</button><button type="button" class="btn" onClick="{{ cancelReview }}">Cancel</button></div>
+                </div>
+              </sc-if>
+              <div class="grp">
+                <h4>Features on this account</h4>
+                <ul class="list">
+                  <sc-for list="{{ entitlements }}" as="e" hint-placeholder-count="3">
+                    <li class="li"><span class="main"><span class="t">{{ e.name }}</span><sc-if value="{{ e.hasNote }}" hint-placeholder-val="{{ false }}"><span class="s">{{ e.note }}</span></sc-if></span>
+                      <span class="stt {{ e.tone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ e.icon }}"></path></svg>{{ e.text }}</span></li>
+                  </sc-for>
+                </ul>
+              </div>
+              <div class="grp">
+                <h4>Billing history</h4>
+                <ul class="list">
+                  <sc-for list="{{ billing }}" as="b" hint-placeholder-count="3">
+                    <li class="li"><span class="k">{{ b.date }}</span><span class="main">{{ b.item }}</span>
+                      <span class="stt {{ b.tone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ b.icon }}"></path></svg>{{ b.status }}</span></li>
+                  </sc-for>
+                </ul>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- CONTACTS -->
+          <sc-if value="{{ showContacts }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <div class="acts"><h3 class="grow">Contacts</h3><button type="button" class="btn">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg><span>Add contact</span></button></div>
+              <p class="lead">People you trust with recovery alerts or Vault invitations. Roles are verified by Connect.</p>
+              <sc-if value="{{ hasContacts }}" hint-placeholder-val="{{ true }}">
+                <ul class="list" style="margin-top:20px">
+                  <sc-for list="{{ contacts }}" as="c" hint-placeholder-count="3">
+                    <li class="li"><span class="main"><span class="t">{{ c.name }}</span><span class="s">{{ c.email }}</span></span>
+                      <span class="rtag">{{ c.role }}</span><button type="button" class="btn sm" aria-label="{{ c.editAria }}">Edit</button></li>
+                  </sc-for>
+                </ul>
+              </sc-if>
+              <sc-if value="{{ noContacts }}" hint-placeholder-val="{{ false }}">
+                <div class="empty" style="margin-top:20px"><b>No contacts yet</b><p>Add someone you trust. They can receive recovery alerts or Vault invitations once Connect verifies their role.</p></div>
+              </sc-if>
+              <p class="fnote"><button type="button" class="linkbtn" style="font-size:12px" onClick="{{ toggleEmpty }}">{{ emptyToggleLabel }}</button></p>
+            </div>
+          </sc-if>
+
+          <!-- DEVICES & SECURITY -->
+          <sc-if value="{{ showDevices }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <h3>Devices &amp; security</h3>
+              <div class="grp" style="margin-top:20px">
+                <h4>Verified Devices</h4>
+                <ul class="list">
+                  <sc-for list="{{ devices }}" as="d" hint-placeholder-count="3">
+                    <li class="li">
+                      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 6h14v9H5zM3 18h18"></path></svg>
+                      <span class="main"><span class="t">{{ d.name }}<sc-if value="{{ d.current }}" hint-placeholder-val="{{ false }}"><span class="rtag cur">Current</span></sc-if></span><span class="s">{{ d.meta }}</span></span>
+                      <sc-if value="{{ d.canRemove }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn sm" aria-expanded="{{ d.expanded }}" aria-label="{{ d.removeAria }}" onClick="{{ d.ask }}">Remove</button></sc-if>
+                    </li>
+                    <sc-if value="{{ d.reviewing }}" hint-placeholder-val="{{ false }}">
+                      <li class="review" aria-label="{{ d.reviewAria }}">
+                        <b>Remove {{ d.name }}?</b>
+                        <p>Removing signs this device out of your Connect account on next contact; what else it revokes is subject to source validation.</p>
+                        <div class="acts"><button type="button" class="btn primary" onClick="{{ d.confirm }}">Remove {{ d.name }}</button><button type="button" class="btn" onClick="{{ cancelReview }}">Cancel</button></div>
+                      </li>
+                    </sc-if>
+                  </sc-for>
+                </ul>
+                <sc-if value="{{ hasRemovedNote }}" hint-placeholder-val="{{ false }}"><p class="fnote" role="status">{{ removedNote }}</p></sc-if>
+              </div>
+              <div class="grp">
+                <div class="acts"><h4 class="grow" style="margin:0">Login Activity</h4><span class="or">{{ loginSummary }}</span></div>
+                <ul class="list" style="margin-top:8px">
+                  <sc-for list="{{ logins }}" as="l" hint-placeholder-count="3">
+                    <li class="li"><span class="stt {{ l.tone }}" style="width:120px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ l.icon }}"></path></svg>{{ l.result }}</span>
+                      <span class="main">{{ l.dev }}</span><span class="when">{{ l.when }}</span></li>
+                  </sc-for>
+                </ul>
+                <p class="fnote"><button type="button" class="linkbtn">View all login activity</button></p>
+              </div>
+              <div class="grp">
+                <ul class="list">
+                  <li class="li"><span class="main"><span class="t"><a href="P-Duress.dc.html" style="color:inherit;text-decoration-color:var(--accent);text-underline-offset:3px">Duress</a></span><span class="s">Not available for this account</span></span>
+                    <span class="stt tone-muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ offPath }}"></path></svg>Not available</span></li>
+                </ul>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- RECOVERY SERVICES -->
+          <sc-if value="{{ showRecovery }}" hint-placeholder-val="{{ false }}">
+            <div class="sec" style="max-width:none">
+              <h3>Recovery services</h3>
+              <p class="lead">Recovery Kit and recovery alerts per Cube. Changing either needs that Cube unlocked, so each row opens the Cube first.</p>
+              <table class="tbl">
+                <thead><tr><th scope="col">Cube</th><th scope="col">Network</th><th scope="col">Recovery Kit</th><th scope="col">Recovery alerts</th><th scope="col"><span class="sr">Action</span></th></tr></thead>
+                <tbody>
+                  <sc-for list="{{ recovery }}" as="r" hint-placeholder-count="4">
+                    <tr>
+                      <td class="nm">{{ r.name }}</td>
+                      <td><span class="net"><sc-if value="{{ r.isB2b }}" hint-placeholder-val="{{ false }}"><img class="coin" src="/_blob/c39785504daaef5633099a8ae196c784" alt="" width="16" height="16"></sc-if><sc-if value="{{ r.notB2b }}" hint-placeholder-val="{{ true }}"><span class="bmk {{ r.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if><span>{{ r.net }}</span><sc-if value="{{ r.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ r.edge }}">{{ r.tag }}</span></sc-if></span></td>
+                      <td><span class="stt {{ r.kTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ r.kIcon }}"></path></svg>{{ r.kit }}</span></td>
+                      <td><span class="stt {{ r.aTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ r.aIcon }}"></path></svg>{{ r.alerts }}</span></td>
+                      <td style="text-align:right;padding-right:0"><a class="linkbtn" href="P-Launcher.dc.html" aria-label="{{ r.openAria }}">Open Cube to manage</a></td>
+                    </tr>
+                  </sc-for>
+                </tbody>
+              </table>
+              <p class="fnote">Opening asks for the Cube's PIN or passkey, then lands on Backup &amp; protection › Recovery Kit.</p>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </section>
+  </main>
+  <div class="foot">Concept prototype V3 · synthetic data · Connect is a layer over the Launcher, not a route beneath it; theme is set in App preferences</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["Account","Plan &amp; billing","Contacts","Devices &amp; security","Recovery services"],"default":"Account","section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut","loading","error"],"default":"signedIn","section":"Review"},"planState":{"editor":"enum","options":["active","cancelled"],"default":"active","section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { lv: null };
+  }
+  renderVals() {
+    const P = this.props;
+    const L = { section: P.section ?? 'Account', theme: P.theme ?? 'dark', hide: !!P.hideBalances, acct: P.accountState ?? 'signedIn' };
+    const key = [L.section, L.theme, L.hide, L.acct].join('|');
+    // a lever change resets the live state to the lever values; otherwise live state (toggles, reviews) wins
+    const s = this.state.lv !== key
+      ? { section: L.section, theme: L.theme, hide: L.hide, acct: L.acct, review: null, removed: [], emptyContacts: false }
+      : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: key, review: null }, patch));
+
+    const CIRC = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18';
+    const I = {
+      ok: CIRC + 'M8 12.3l2.8 2.8L16.2 9.6',
+      warn: CIRC + 'M12 7.5v5.5M12 16.2v.3',
+      unk: CIRC + 'M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3',
+      off: CIRC + 'M8.5 12h7',
+      bad: CIRC + 'M9.5 9.5l5 5M14.5 9.5l-5 5',
+      person: 'M12 5a3.5 3.5 0 1 0 0 7a3.5 3.5 0 1 0 0-7M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5',
+      card: 'M3.5 6.5h17v11h-17zM3.5 10h17M7 14.5h4',
+      people: 'M9 5.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 19c.6-3 2.8-4.6 5.5-4.6s4.9 1.6 5.5 4.6M15.5 5.8a3 3 0 0 1 0 5.4M17 14.6c1.8.5 3 1.9 3.5 4.4',
+      device: 'M5 6h14v9H5zM3 18h18',
+      shieldOk: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6zM8.8 12l2.2 2.2 4.2-4.4',
+      bolt: 'M13 3L5 13.5h6L10 21l8-10.5h-6z',
+      bell: 'M6 16.5V11a6 6 0 0 1 12 0v5.5l1.5 1.5h-15zM10 20.5h4',
+      eye: 'M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6',
+      sun: 'M12 8a4 4 0 1 0 0 8a4 4 0 1 0 0-8M12 2.5v2M12 19.5v2M2.5 12h2M19.5 12h2M5.3 5.3l1.4 1.4M17.3 17.3l1.4 1.4M5.3 18.7l1.4-1.4M17.3 6.7l1.4-1.4',
+      moon: 'M19.5 14.5A8 8 0 0 1 9.5 4.5a8 8 0 1 0 10 10z',
+      vault: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z'
+    };
+    const T = { ok: 'tone-ok', warn: 'tone-warn', unk: 'tone-muted', off: 'tone-muted', bad: 'tone-bad' };
+
+    const dark = s.theme !== 'light';
+    const acct = s.acct;
+    const signedIn = acct === 'signedIn', signedOut = acct === 'signedOut';
+    const SECS = [
+      ['Account', I.person], ['Plan & billing', I.card], ['Contacts', I.people],
+      ['Devices & security', I.device], ['Recovery services', I.shieldOk]
+    ];
+    const sec = SECS.some((x) => x[0] === s.section) ? s.section : 'Account';
+    const sections = SECS.map(([label, icon]) => ({
+      label, icon,
+      current: sec === label ? 'page' : 'false',
+      // the active section shows its keyboard-focus ring in this review state
+      cls: sec === label ? 'demo-focus' : '',
+      pick: () => go({ section: label })
+    }));
+    const on = (name) => signedIn && sec === name;
+
+    // backdrop: the four fixture Cubes at rest (Launcher floor, static, 40%)
+    const floorCubes = [
+      { name: 'Everyday', edge: 'btc', coinCls: '', tag: '', walletPath: I.vault },
+      { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b', walletPath: I.vault },
+      { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4', walletPath: I.vault },
+      { name: 'Archive', edge: 'btc', coinCls: '', tag: '', walletPath: I.bolt }
+    ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
+
+    const provides = [
+      { icon: I.shieldOk, text: 'Encrypted Recovery Kit backup for each Cube \u2014 COINCUBE never sees your keys' },
+      { icon: I.people, text: 'Inheritance: invite family or friends to hold keys in the Keychain app, with time-locked recovery keys to recover funds' },
+      { icon: I.bell, text: 'Recovery alerts and emergency contacts for people you trust' },
+      { icon: I.bolt, text: 'Hosted Esplora server \u2014 use your Vault instantly while your node syncs' },
+      { icon: I.device, text: 'Sign Vault transactions from your phone with the companion Keychain app' },
+      { icon: I.bolt, text: 'Lightning Address and avatar for Spark wallets' },
+      { icon: I.warn, text: 'Duress mode and Connect-enforced spending policies (Pro and Estate)' },
+      { icon: I.card, text: 'Buy/Sell and P2P marketplace access' }
+    ];
+
+    const ent = (name, k, text, note) => ({ name, tone: T[k], icon: I[k], text, note: note || '', hasNote: !!note });
+    const entitlements = [
+      ent('Recovery Kit', 'ok', 'Verified'),
+      ent('Recovery alerts', 'unk', 'Unknown · checking', 'Plan options appear once this is verified.'),
+      ent('Bitcoin Blake2b beta', 'off', 'Not enabled for this account')
+    ];
+    const bill = (status, k) => ({ date: '[DATE]', item: '[PLAN NAME] · paid upfront', status, tone: T[k], icon: I[k] });
+    const billing = [bill('Paid', 'ok'), bill('Paid', 'ok'), bill('Refunded', 'off')];
+
+    const contacts = s.emptyContacts ? [] : [
+      { name: 'Jordan (synthetic)', email: 'jordan@example.test', role: 'Recovery contact · verified' },
+      { name: 'Sam (synthetic)', email: 'sam@example.test', role: 'Invitation pending' },
+      { name: 'Morgan (synthetic)', email: 'morgan.with-a-long-household-recovery-address@family-office.example.test', role: 'Vault member · verified' }
+    ].map((c) => Object.assign(c, { editAria: 'Edit ' + c.name }));
+
+    const removed = s.removed || [];
+    const devices = [
+      { id: 'mac', name: 'This Mac', plat: 'macOS', current: true },
+      { id: 'win', name: 'Windows laptop', plat: 'Windows', current: false },
+      { id: 'lin', name: 'Linux desktop', plat: 'Linux', current: false }
+    ].filter((d) => removed.indexOf(d.id) < 0).map((d) => {
+      const reviewing = s.review === 'dev:' + d.id;
+      return Object.assign(d, {
+        meta: d.plat + ' · Last activity [DATE]',
+        canRemove: !d.current, reviewing, expanded: String(reviewing),
+        removeAria: 'Remove ' + d.name, reviewAria: 'Review removing ' + d.name,
+        ask: () => go({ review: 'dev:' + d.id }),
+        confirm: () => go({ removed: removed.concat([d.id]) })
+      });
+    });
+    const NAMES = { win: 'Windows laptop', lin: 'Linux desktop' };
+    const removedNote = removed.map((id) => NAMES[id]).join(', ') + (removed.length === 1 ? ' was removed. It signs' : ' were removed. They sign') + ' out on next contact.';
+
+    const login = (k, result, dev) => ({ tone: T[k], icon: I[k], result, dev, when: '[DATE] [TIME] [TZ]' });
+    const logins = [login('ok', 'Successful', 'This Mac'), login('bad', 'Failed', 'Unrecognised device · wrong code'), login('ok', 'Successful', 'Windows laptop')];
+
+    const rec = (name, net, coinCls, tag, edge, kit, kk, alerts, ak) => ({
+      name, net, coinCls, tag, edge, hasTag: !!tag, isB2b: edge === 'b2b', notB2b: edge !== 'b2b',
+      kit, kTone: T[kk], kIcon: I[kk], alerts, aTone: T[ak], aIcon: I[ak],
+      openAria: 'Open ' + name + ' to manage recovery services'
+    });
+    const recovery = [
+      rec('Everyday', 'Bitcoin mainnet', '', '', 'btc', 'Not confirmed', 'warn', 'Eligible · verified', 'ok'),
+      rec('Blake workspace', 'Bitcoin', '', 'Blake2b', 'b2b', 'Not set up', 'off', 'Unknown', 'unk'),
+      rec('Lab', 'Bitcoin', 'tn', 'Testnet4', 'test', 'Unknown · locked', 'unk', 'Unknown', 'unk'),
+      rec('Archive', 'Bitcoin mainnet', '', '', 'btc', 'Confirmed [DATE]', 'ok', 'Not applicable · no Vault', 'off')
+    ];
+
+    const planCancelled = (P.planState ?? 'active') === 'cancelled';
+    const acctState = signedIn ? 'Signed in' : signedOut ? '' : acct === 'loading' ? 'Checking…' : 'Not reachable';
+    const EMAIL = 'alex@example.test';
+    return {
+      themeClass: dark ? '' : 'light',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      okPath: I.ok, offPath: I.off,
+      // Hide balances is the one top-bar toggle (device-wide); theme lives in App preferences and follows the lever here
+      hidePressed: String(!!s.hide),
+      hideTitle: s.hide ? 'Balances hidden on this device' : 'Hide balances on this device',
+      eyePath: s.hide ? I.eye + 'M4 4l16 16' : I.eye,
+      toggleHide: () => go({ hide: !s.hide }),
+      acctCls: signedOut ? 'out' : '',
+      acctWho: signedOut ? 'Sign in' : EMAIL,
+      hasAcctState: !signedOut,
+      acctState,
+      acctAria: signedOut ? 'Connect, sign in' : 'Connect, ' + EMAIL + ', ' + acctState.toLowerCase(),
+      headTitle: signedOut ? 'Connect' : 'Connect account',
+      headWho: signedOut ? '' : EMAIL,
+      floorCubes, sections, secLabel: sec,
+      isLoading: acct === 'loading',
+      isError: acct === 'error',
+      skelRows: [70, 52, 64, 44, 58].map((w) => ({ a: 'width:' + w + '%;margin-bottom:8px', b: 'width:' + (w - 20) + '%;opacity:.6' })),
+      retry: () => go({ acct: 'signedIn' }),
+      outGate: signedOut && sec !== 'Account',
+      // signed out: Account shows what Connect provides; Sign in / Create account link to the sign-in screen
+      showAuth: signedOut && sec === 'Account',
+      showAccount: on('Account'),
+      provides,
+      signOutReview: s.review === 'signout',
+      noSignOutReview: s.review !== 'signout',
+      askSignOut: () => go({ review: 'signout' }),
+      signOut: () => go({ acct: 'signedOut', section: 'Account' }),
+      cancelReview: () => go({}),
+      showPlan: on('Plan & billing'),
+      planReview: s.review === 'plan',
+      noPlanReview: s.review !== 'plan',
+      askPlan: () => go({ review: 'plan' }),
+      planCancelled,
+      planDateLine: planCancelled ? 'Access until [RENEWAL DATE]' : 'Renews [RENEWAL DATE]',
+      planBtn: planCancelled ? 'Resubscribe…' : 'Change plan…',
+      entitlements, billing,
+      showContacts: on('Contacts'),
+      contacts, hasContacts: contacts.length > 0, noContacts: contacts.length === 0,
+      toggleEmpty: () => go({ emptyContacts: !s.emptyContacts }),
+      emptyToggleLabel: s.emptyContacts ? 'Prototype: show contacts' : 'Prototype: show empty state',
+      showDevices: on('Devices & security'),
+      devices, hasRemovedNote: removed.length > 0, removedNote,
+      logins, loginSummary: '2 successful · 1 failed',
+      showRecovery: on('Recovery services'),
+      recovery
+    };
+  }
+}
+</script>
+</body>
+</html>

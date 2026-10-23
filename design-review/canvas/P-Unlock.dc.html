@@ -1,0 +1,320 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 Cube · Unlock</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+.tenshu{--on-accent:#201407;--accent-ink:#f3821d;font-variant-numeric:tabular-nums}
+.tenshu.light{--accent-ink:#8a4304}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu .sr{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important}
+.grow{flex:1}
+.muted{color:var(--muted)}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar: V3-Launcher-Spin chrome, quiet while a Cube is being unlocked */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;color:var(--muted)}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.ctx{font-size:14px;color:var(--muted);white-space:nowrap}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;color:var(--muted);text-decoration:none;white-space:nowrap}
+.tenshu a.tbtn{color:var(--muted)}
+.tbtn:hover{border-color:var(--line)}
+.tbtn svg{width:16px;height:16px}
+
+/* stage: the app's layout, back button top-left, content centred 100px below */
+.stage{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;align-items:center}
+.backrow{position:absolute;left:48px;top:40px}
+.col{margin-top:150px;width:560px;display:flex;flex-direction:column;align-items:center;text-align:center}
+.h1{margin:0;font-size:24px;font-weight:600;line-height:1.3}
+.netl{display:flex;align-items:center;gap:6px;margin-top:6px;font-size:14px;color:var(--muted)}
+.netl img{width:18px;height:18px;border-radius:50%;display:block}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid #d4a62a;font-size:12px;font-weight:500;color:var(--ink)}
+.pinrow{display:flex;align-items:center;gap:10px;margin-top:32px}
+.pinrow fieldset{display:flex;gap:15px;border:0;margin:0;padding:0}
+.dg{width:60px;height:64px;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;background:var(--panel);text-align:center;font-size:28px;font-weight:500}
+.dg:focus{border-color:var(--focus)}
+.dg[aria-invalid="true"]{border-color:var(--bad)}
+.eye{width:50px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:8px;background:none;cursor:pointer;color:var(--muted)}
+.eye:hover{border-color:var(--line)}
+.eye svg{width:20px;height:20px}
+.msg{display:flex;align-items:flex-start;gap:8px;margin:20px 0 0;max-width:520px;font-size:14px;color:var(--bad);text-align:left}
+.msg svg{width:18px;height:18px;margin-top:1px}
+.msg.neutral{color:var(--muted)}
+.acts{display:flex;align-items:center;gap:16px;margin-top:28px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:40px;padding:0 18px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{border-color:var(--muted)}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.w200{width:200px}
+.btn.w280{width:280px}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:14px}
+.tenshu a.linkbtn{color:var(--ink)}
+.dots{display:flex;gap:10px;margin-top:24px;height:10px;align-items:center}
+.dots i{display:block;width:8px;height:8px;border-radius:50%;background:var(--ink);opacity:.25;animation:pulse 1.5s ease-in-out infinite}
+.dots i:nth-child(2){animation-delay:.5s}
+.dots i:nth-child(3){animation-delay:1s}
+.tenshu.reduced .dots i:first-child{opacity:.9}
+@keyframes pulse{0%,100%{opacity:.25}33%{opacity:.95}}
+.lead{margin:20px 0 0;font-size:15px;color:var(--muted)}
+
+/* simulated system prompt: dashed outline so it never reads as Tenshu UI */
+.sys{position:absolute;left:50%;top:0;transform:translateX(-50%);width:360px;box-sizing:border-box;padding:20px 22px;border:1.5px dashed var(--muted);border-top:0;border-radius:0 0 12px 12px;background:var(--panel);text-align:center;box-shadow:0 18px 40px -16px rgba(0,0,0,.5)}
+.sys .tag{font-size:12px;color:var(--muted)}
+.sys .fp{width:44px;height:44px;margin:12px auto 6px;display:block;color:var(--bad)}
+.sys .t{font-weight:600}
+.sys .acts{justify-content:center;margin-top:16px}
+
+/* loading (identical for unlock and duress) */
+.load{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;padding-bottom:56px}
+.art{width:260px;height:260px;object-fit:contain;display:block}
+.quote{margin:24px 0 0;max-width:600px}
+.quote blockquote{margin:0;font-size:18px;line-height:1.5}
+.quote blockquote p{margin:0}
+.quote figcaption{margin-top:10px;font-size:13px;color:var(--muted)}
+.ltx{margin-top:14px;font-size:14px;color:var(--muted)}
+.proto{margin-top:20px;font-size:13px}
+
+.pfoot{position:absolute;left:0;right:0;bottom:16px;text-align:center;font-size:12px;color:var(--muted)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="vsep"></span>
+    <span class="ctx">{{ tabTitle }}</span>
+    <span class="grow"></span>
+    <a class="tbtn" href="P-Connect.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect · {{ who }}</span>
+    </a>
+    <a class="tbtn" href="P-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage" aria-busy="{{ busy }}">
+
+    <!-- LOADING: same screen for a correct PIN, a duress PIN and a passkey success -->
+    <sc-if value="{{ v.loading }}" hint-placeholder-val="{{ false }}">
+      <div class="load">
+        <h1 class="sr">Opening {{ cube.name }}</h1>
+        <img class="art" src="/_blob/6fc543aaeec8ba507b3f8509ad3ae2f9" alt="">
+        <figure class="quote">
+          <blockquote><p>Bitcoin is the hardest money ever invented: growth in its value cannot possibly increase its supply.</p></blockquote>
+          <figcaption>— Saifedean Ammous, The Bitcoin Standard, 2018</figcaption>
+        </figure>
+        <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+        <p class="ltx" role="status">Loading your Cube...</p>
+        <a class="linkbtn proto" href="P-Opening.dc.html">Continue</a>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ v.form }}" hint-placeholder-val="{{ true }}">
+      <div class="backrow">
+        <a class="btn" href="P-Launcher.dc.html">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.5 6l-6 6 6 6"></path></svg>
+          <span>Back</span>
+        </a>
+      </div>
+
+      <div class="col">
+        <h1 class="h1">{{ title }}</h1>
+        <p class="netl">
+          <sc-if value="{{ cube.btc }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+          <sc-if value="{{ cube.b2b }}" hint-placeholder-val="{{ false }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""><span class="tb">Blake2b</span></sc-if>
+          <span>{{ cube.net }}</span>
+        </p>
+
+        <!-- PIN -->
+        <sc-if value="{{ v.pin }}" hint-placeholder-val="{{ true }}">
+          <div class="pinrow">
+            <fieldset>
+              <legend class="sr">PIN, 4 digits</legend>
+              <sc-for list="{{ digits }}" as="d" hint-placeholder-count="4">
+                <input class="dg {{ d.cls }}" type="{{ pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="{{ d.label }}" aria-invalid="{{ invalid }}" aria-describedby="unlock-msg" value="{{ d.val }}" onChange="{{ d.set }}">
+              </sc-for>
+            </fieldset>
+            <button type="button" class="eye" aria-pressed="{{ showPressed }}" aria-label="Show PIN" onClick="{{ toggleShow }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg>
+            </button>
+          </div>
+          <sc-if value="{{ hasMsg }}" hint-placeholder-val="{{ false }}">
+            <p class="msg" id="unlock-msg" role="alert">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg>
+              <span>{{ msg }}</span>
+            </p>
+          </sc-if>
+          <div class="acts">
+            <button type="button" class="btn primary w200" disabled="{{ submitOff }}" onClick="{{ submit }}">Submit</button>
+            <sc-if value="{{ v.signIn }}" hint-placeholder-val="{{ false }}">
+              <a class="btn" href="P-SignIn.dc.html">Sign in to Connect</a>
+            </sc-if>
+          </div>
+        </sc-if>
+
+        <!-- PASSKEY -->
+        <sc-if value="{{ v.passkey }}" hint-placeholder-val="{{ false }}">
+          <sc-if value="{{ v.waiting }}" hint-placeholder-val="{{ false }}">
+            <p class="lead" role="status">Confirm with Touch ID to unlock this Cube.</p>
+            <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+          </sc-if>
+          <sc-if value="{{ v.idle }}" hint-placeholder-val="{{ true }}">
+            <sc-if value="{{ hasMsg }}" hint-placeholder-val="{{ false }}">
+              <p class="msg" id="unlock-msg" role="alert">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg>
+                <span>{{ msg }}</span>
+              </p>
+            </sc-if>
+            <div class="acts">
+              <button type="button" class="btn primary w280" onClick="{{ begin }}">Unlock with passkey</button>
+              <sc-if value="{{ v.kit }}" hint-placeholder-val="{{ false }}">
+                <a class="btn" href="P-Restore.dc.html">Restore from Recovery Kit</a>
+              </sc-if>
+            </div>
+          </sc-if>
+        </sc-if>
+      </div>
+
+      <sc-if value="{{ v.waiting }}" hint-placeholder-val="{{ false }}">
+        <section class="sys" aria-labelledby="sys-t">
+          <p class="tag">Simulated macOS prompt</p>
+          <svg class="fp" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M7.5 5.6A8 8 0 0 1 20 12v1.5M4 12a8 8 0 0 1 1.3-4.4M8 19.5a12 12 0 0 1-1-5.5 5 5 0 0 1 10 0v.5M12 14v1.5c0 2 .6 3.8 1.6 5.3M16.8 18.5c.1-.8.2-1.7.2-2.5"></path></svg>
+          <p class="t" id="sys-t">Touch ID</p>
+          <div class="acts">
+            <button type="button" class="btn" onClick="{{ sysCancel }}">Cancel</button>
+            <button type="button" class="btn primary" onClick="{{ sysOk }}">Approve</button>
+          </div>
+        </section>
+      </sc-if>
+    </sc-if>
+
+    <p class="pfoot">{{ foot }}</p>
+  </main>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"method":{"editor":"enum","options":["pin","passkey"],"default":"pin","section":"Review"},"state":{"editor":"enum","options":["ready","incomplete","wrong","lockout","failed","signedOut","waiting","cancelled","notFound","relocked","otherOs","loading","duress"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { lv: null }; }
+  renderVals() {
+    const P = this.props;
+    const theme = P.theme ?? 'dark';
+    const method = P.method === 'passkey' ? 'passkey' : 'pin';
+    const lever = P.state || 'ready';
+    // each method has its own states; a state the other method owns falls back to "ready"
+    const PIN = ['ready', 'incomplete', 'wrong', 'lockout', 'failed', 'signedOut', 'loading', 'duress'];
+    const PK = ['ready', 'waiting', 'cancelled', 'notFound', 'relocked', 'otherOs', 'loading'];
+    const own = method === 'pin' ? PIN : PK;
+    const st0 = own.indexOf(lever) >= 0 ? lever : 'ready';
+    const key = method + '|' + st0;
+    const filled = st0 === 'incomplete' ? ['4', '7', '', ''] : ['', '', '', ''];
+    const s = this.state.lv !== key ? { st: st0, d: filled, show: false } : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
+
+    // source: pin_entry.rs (PIN), services/unlock/throttle.rs (lockout), passkey_unlock.rs + services/passkey/mod.rs user_message (passkey)
+    const MSG = {
+      incomplete: 'Please enter all 4 digits',
+      wrong: 'Incorrect PIN. Please try again.',
+      lockout: 'Too many incorrect PINs. Try again in 30s.',
+      failed: 'PIN check failed to run: [synthetic error]',
+      signedOut: 'Sign in to Connect before unlocking this Bitcoin Blake2b Cube',
+      cancelled: "Touch ID was cancelled, so this Cube stayed locked. Your Cube and its funds are untouched — try again when you're ready.",
+      notFound: "This Mac couldn't find this Cube's passkey. Sign in to the Apple ID that created it (with iCloud Keychain on), or restore this Cube from your Recovery Kit and its recovery password. The Cube itself is fine.",
+      relocked: 'This Cube locked again before it finished opening. Unlock it with your passkey to try again.',
+      otherOs: 'This Cube is unlocked with a passkey, which COINCUBE currently supports on macOS only. Open it on your Mac, or restore it here from your Recovery Kit and its recovery password.'
+    };
+    const st = s.st;
+    const blake = method === 'pin' && st === 'signedOut';
+    const cube = blake
+      ? { name: 'Blake workspace', net: 'Bitcoin Blake2b mainnet', btc: false, b2b: true }
+      : { name: 'Everyday', net: 'Bitcoin mainnet', btc: true, b2b: false };
+    const loading = st === 'loading' || st === 'duress';
+    const msg = MSG[st] || '';
+
+    const digits = s.d.map((val, i) => ({
+      val,
+      label: 'PIN digit ' + (i + 1),
+      cls: (i === 0 && st === 'ready' && method === 'pin') ? 'demo-focus' : '',
+      set: (e) => {
+        const raw = e && e.target ? String(e.target.value) : '';
+        const v = raw.replace(/[^0-9]/g, '').slice(-1);
+        const next = s.d.slice(); next[i] = v;
+        // typing clears the error, as PinInput does
+        go({ d: next, st: (st === 'loading' || st === 'duress') ? st : 'ready' });
+      }
+    }));
+    const complete = s.d.every((x) => x !== '');
+
+    const EYE_OPEN = 'M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6';
+    const EYE_SHUT = 'M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16';
+
+    const FOOT = {
+      duress: 'Prototype · synthetic data · duress PIN: this screen and its timing match a normal unlock, then the Cube locks into duress mode',
+      loading: 'Prototype · synthetic data · Continue stands in for the wallet load; the app moves on by itself',
+      waiting: 'Prototype · synthetic data · the dashed prompt stands in for the macOS passkey sheet'
+    };
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      tabTitle: method === 'pin' ? 'Enter PIN' : 'Unlock with passkey',
+      who: blake ? 'Sign in' : 'alex@example.test',
+      busy: loading || st === 'waiting' ? 'true' : 'false',
+      cube,
+      title: method === 'pin' ? 'Enter PIN for ' + cube.name : 'Unlock ' + cube.name,
+      v: {
+        loading,
+        form: !loading,
+        pin: method === 'pin',
+        passkey: method === 'passkey',
+        waiting: method === 'passkey' && st === 'waiting',
+        idle: method === 'passkey' && st !== 'waiting',
+        signIn: blake,
+        kit: method === 'passkey' && (st === 'notFound' || st === 'otherOs')
+      },
+      digits,
+      pinType: s.show ? 'text' : 'password',
+      showPressed: s.show ? 'true' : 'false',
+      eyePath: s.show ? EYE_SHUT : EYE_OPEN,
+      toggleShow: () => go({ show: !s.show }),
+      invalid: (st === 'wrong' || st === 'incomplete') ? 'true' : 'false',
+      hasMsg: !!msg,
+      msg,
+      submitOff: !complete,
+      // the PIN is checked behind the loading screen; a wrong PIN returns here with the digits cleared
+      submit: () => { if (complete) go({ st: 'loading' }); },
+      begin: () => go({ st: 'waiting' }),
+      sysCancel: () => go({ st: 'cancelled' }),
+      sysOk: () => go({ st: 'loading' }),
+      foot: FOOT[st] || 'Prototype · synthetic data · copy quoted from the app; Back returns to the Launcher'
+    };
+  }
+}
+</script>
+</body>
+</html>

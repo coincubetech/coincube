@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Launcher · Isometric</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* isometric tokens: two neutral side greys, one lighter top, faint grid */
+.tenshu{--floor:#1a1b19;--grid:#242523;--face-t:#4a4b47;--face-l:#30312e;--face-r:#252623;--edge:#6a6b65;--on-accent:#201407}
+.tenshu.light{--floor:#f3f0ea;--grid:#e2dcd2;--face-t:#e4ded3;--face-l:#cdc6ba;--face-r:#b6afa2;--edge:#ffffff}
+
+.tenshu button{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+
+/* top bar */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;letter-spacing:.01em}
+.brand svg{width:18px;height:18px}
+.sep{width:1px;height:20px;background:var(--line)}
+.h1{margin:0;font-size:20px;font-weight:600}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 12px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px}
+.tbtn:hover{border-color:var(--line)}
+.tbtn svg{width:16px;height:16px;flex:none}
+
+/* filter bar */
+.fbar{height:52px;flex:none;display:flex;align-items:center;gap:12px;padding:0 24px;border-bottom:1px solid var(--line)}
+.chips{display:flex;align-items:center;gap:8px;border:0;margin:0;padding:0;min-width:0}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.chip{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:15px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px}
+.chip:hover{border-color:var(--muted)}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.chip svg{width:14px;height:14px;flex:none}
+.chipwrap{position:relative}
+.menu{position:absolute;top:36px;left:0;z-index:20;width:268px;padding:6px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 8px 24px rgba(0,0,0,.28)}
+.mi{display:flex;align-items:center;gap:8px;width:100%;height:32px;padding:0 10px;border:0;border-radius:5px;background:none;cursor:pointer;font-size:13px;text-align:left}
+.mi:hover{background:var(--selected)}
+.mi.on{font-weight:600}
+.mi .n{margin-left:auto;color:var(--muted);font-size:12px}
+.mi svg{width:14px;height:14px;flex:none}
+.mi .ck{width:14px;flex:none}
+.mnote{margin:6px 4px 2px;padding-top:8px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.count{font-size:13px;color:var(--muted)}
+.linkbtn{border:0;background:none;padding:2px 4px;color:var(--accent);text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:13px}
+.hintr{font-size:12px;color:var(--muted)}
+
+/* stage + flat isometric floor */
+.stage{flex:1;min-height:0;position:relative;overflow-x:hidden;overflow-y:auto}
+.stage-in{position:relative;min-height:100%;box-sizing:border-box}
+.floor{position:absolute;left:0;right:0;bottom:0;background:var(--floor);border-top:1px solid var(--grid)}
+.floor svg{position:absolute;inset:0;width:100%;height:100%;display:block}
+.floor path{stroke:var(--grid);stroke-width:1;fill:none}
+.rows{position:relative;z-index:1;display:flex;flex-direction:column;box-sizing:border-box;min-height:100%}
+.rows.below{justify-content:center;padding:150px 48px 24px}
+.rows.beside{justify-content:flex-start;gap:4px;padding:20px 40px 16px}
+.row{display:flex;justify-content:center;gap:8px}
+.rows.beside .row{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}
+
+/* cube object: button = svg glyph + flat label */
+.cb{position:relative;display:flex;border:0;background:none;padding:8px;border-radius:10px;cursor:pointer;text-align:left}
+.cb.below{flex-direction:column;align-items:center;width:212px;text-align:center}
+.cb.beside{flex-direction:row;align-items:flex-start;gap:10px;min-width:0;padding:6px}
+.cb.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+.glyph{display:block;flex:none;transition:transform .12s ease}
+.glyph svg{display:block;width:100%;height:100%;overflow:visible}
+.below .glyph{width:104px;height:108px;margin-bottom:6px}
+.beside .glyph{width:58px;height:60px}
+.iso-t{fill:var(--face-t)}
+.iso-l{fill:var(--face-l)}
+.iso-r{fill:var(--face-r)}
+.iso-hl{fill:none;stroke:var(--edge);stroke-width:1;stroke-linejoin:round}
+.iso-sel{fill:none;stroke:transparent;stroke-width:2.5;stroke-linejoin:round}
+.cb:hover .iso-t{fill:var(--edge)}
+.tenshu.light .cb:hover .iso-t{fill:#ece7de}
+.is-sel .glyph,.demo-focus .glyph,.cb:focus-visible .glyph{transform:translateY(-4px)}
+.is-sel .iso-sel{stroke:var(--accent)}
+
+/* flat label block */
+.lbl{display:flex;flex-direction:column;gap:3px;min-width:0}
+.below .lbl{align-items:center;width:100%}
+.nm{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-weight:600;font-size:14px;line-height:1.3;word-break:break-word}
+.net{display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:12px}
+.below .net{justify-content:center}
+.bmark{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:4px;border:1px solid var(--line);font-size:11px;font-weight:600;line-height:1}
+.tb{display:inline-flex;align-items:center;height:16px;padding:0 5px;border-radius:4px;border:1px solid var(--muted);font-size:11px;font-weight:500;line-height:1}
+.tb.test{border-style:dashed}
+.ln{display:flex;align-items:flex-start;gap:5px;font-size:12px;color:var(--muted)}
+.below .ln{justify-content:center}
+.ln svg{width:13px;height:13px;flex:none;margin-top:2px}
+.ln .st{font-weight:500}
+.cap{font-size:12px;color:var(--muted)}
+.state{display:flex;flex-direction:column;gap:3px}
+.below .state{align-items:center}
+.beside .state{flex-direction:row;flex-wrap:wrap;column-gap:10px;row-gap:2px}
+.tone-good{color:var(--good)}
+.tone-warn{color:var(--warn)}
+.tone-muted{color:var(--muted)}
+.tone-neutral{color:var(--ink)}
+.hint{display:inline-block;margin-top:4px;padding:2px 6px;border-radius:4px;background:var(--panel);border:1px solid var(--focus);font-size:12px}
+
+/* empty / no-match */
+.empty{position:absolute;left:0;right:0;top:46%;z-index:1;display:flex;flex-direction:column;align-items:center;gap:6px;text-align:center}
+.empty h2{margin:0;font-size:20px;font-weight:600}
+.empty p{margin:0;color:var(--muted);font-size:14px}
+.empty svg{width:56px;height:56px;margin-bottom:6px}
+
+/* bottom bar */
+.bottom{height:76px;flex:none;display:flex;align-items:center;gap:24px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+.dock{display:flex;align-items:center;gap:10px}
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:6px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink)}
+.btn svg{width:16px;height:16px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;color:var(--on-accent)}
+.btn:hover{border-color:var(--muted)}
+.docknote{font-size:12px;color:var(--muted);max-width:180px;line-height:1.35}
+.sel{display:flex;align-items:center;gap:16px;min-width:0}
+.seltext{display:flex;flex-direction:column;min-width:0;text-align:right}
+.selname{font-weight:600}
+.selmeta{font-size:12px;color:var(--muted)}
+.foot{height:26px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="sep"></span>
+    <h1 class="h1">All Cubes</h1>
+    <span class="grow"></span>
+    <button type="button" class="tbtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>alex@example.test</span><span class="muted">· Signed in</span>
+    </button>
+    <button type="button" class="tbtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </button>
+  </header>
+
+  <div class="fbar">
+    <fieldset class="chips"><legend class="sr">Show Cubes by network</legend>
+      <sc-for list="{{ chips }}" as="c" hint-placeholder-count="3">
+        <button type="button" class="chip {{ c.cls }}" aria-pressed="{{ c.pressed }}" onClick="{{ c.pick }}">
+          <sc-if value="{{ c.on }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></sc-if>
+          <span>{{ c.label }}</span>
+        </button>
+      </sc-for>
+      <span class="chipwrap">
+        <button type="button" class="chip {{ chainCls }}" aria-pressed="{{ chainPressed }}" aria-expanded="{{ chainExpanded }}" aria-haspopup="true" onClick="{{ toggleChain }}">
+          <sc-if value="{{ chainOn }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></sc-if>
+          <span>{{ chainLabel }}</span>
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg>
+        </button>
+        <sc-if value="{{ chainMenu }}" hint-placeholder-val="{{ false }}">
+          <div class="menu">
+            <sc-for list="{{ chainItems }}" as="m" hint-placeholder-count="6">
+              <button type="button" class="mi {{ m.cls }}" aria-pressed="{{ m.pressed }}" onClick="{{ m.pick }}">
+                <span class="ck"><sc-if value="{{ m.on }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></sc-if></span>
+                <span>{{ m.label }}</span>
+                <span class="n">{{ m.n }}</span>
+              </button>
+            </sc-for>
+            <p class="mnote">Filters only change what is shown. Each Cube keeps its own network.</p>
+          </div>
+        </sc-if>
+      </span>
+    </fieldset>
+    <span class="count" aria-live="polite">{{ countText }}</span>
+    <sc-if value="{{ filterActive }}" hint-placeholder-val="{{ false }}">
+      <button type="button" class="linkbtn" onClick="{{ clear }}">Clear filters</button>
+    </sc-if>
+    <span class="grow"></span>
+    <span class="hintr">Filters are remembered on this device</span>
+  </div>
+
+  <main class="stage" aria-label="Cubes on this device">
+    <div class="stage-in">
+      <div class="floor" style="{{ floorStyle }}" aria-hidden="true">
+        <svg preserveAspectRatio="none">
+          <defs>
+            <pattern id="tenshuIsoGrid" width="56" height="32.33" patternUnits="userSpaceOnUse">
+              <path d="M0 0L56 32.33M56 0L0 32.33"></path>
+            </pattern>
+          </defs>
+          <rect width="100%" height="100%" fill="url(#tenshuIsoGrid)"></rect>
+        </svg>
+      </div>
+
+      <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+        <div class="empty">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2" class="muted" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path></svg>
+          <h2>No Cubes yet.</h2>
+          <p>Create your first Cube or import one.</p>
+          <p>You choose the network when you create it.</p>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ noMatch }}" hint-placeholder-val="{{ false }}">
+        <div class="empty">
+          <h2>No Cubes match these filters.</h2>
+          <p>{{ hiddenText }} <button type="button" class="linkbtn" onClick="{{ clear }}">Clear filters</button></p>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ hasCubes }}" hint-placeholder-val="{{ true }}">
+        <div class="rows {{ rowsCls }}">
+          <sc-for list="{{ rows }}" as="row" hint-placeholder-count="1">
+            <div class="row">
+              <sc-for list="{{ row.items }}" as="item" hint-placeholder-count="4">
+                <button type="button" class="cb {{ item.cls }}" aria-pressed="{{ item.pressed }}" onClick="{{ item.pick }}">
+                  <span class="glyph" aria-hidden="true">
+                    <svg viewBox="0 0 100 104">
+                      <path class="iso-t" d="M50 6L90 29L50 52L10 29Z"></path>
+                      <path class="iso-l" d="M10 29L50 52L50 98L10 75Z"></path>
+                      <path class="iso-r" d="M50 52L90 29L90 75L50 98Z"></path>
+                      <path class="iso-hl" d="M10 29L50 52L90 29"></path>
+                      <path class="iso-sel" d="M50 6L90 29L90 75L50 98L10 75L10 29Z"></path>
+                    </svg>
+                  </span>
+                  <span class="lbl">
+                    <span class="nm" title="{{ item.name }}">{{ item.name }}</span>
+                    <span class="net">
+                      <span class="bmark" aria-hidden="true">₿</span>
+                      <sc-if value="{{ item.hasBlake }}" hint-placeholder-val="{{ false }}"><span class="tb">Blake2b</span></sc-if>
+                      <sc-if value="{{ item.hasTest }}" hint-placeholder-val="{{ false }}"><span class="tb test">{{ item.testBadge }}</span></sc-if>
+                      <span>{{ item.chainFull }}</span>
+                    </span>
+                    <span class="state">
+                      <span class="ln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="{{ item.lockPath }}"></path></svg><span>{{ item.lockText }}</span></span>
+                      <span class="ln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="{{ item.toneCls }}" aria-hidden="true"><path d="{{ item.protPath }}"></path></svg><span class="st {{ item.toneCls }}">{{ item.protText }}</span></span>
+                    </span>
+                    <span class="cap">{{ item.cap }}</span>
+                    <sc-if value="{{ item.showHint }}" hint-placeholder-val="{{ false }}"><span class="hint">Press Enter to open</span></sc-if>
+                  </span>
+                </button>
+              </sc-for>
+            </div>
+          </sc-for>
+        </div>
+      </sc-if>
+    </div>
+  </main>
+
+  <div class="bottom">
+    <div class="dock">
+      <button type="button" class="btn primary">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        <span>Create Cube</span>
+      </button>
+      <button type="button" class="btn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+        <span>Import or restore a Cube</span>
+      </button>
+      <span class="docknote">Creation asks for the network. Import checks the file and network first.</span>
+    </div>
+    <span class="grow"></span>
+    <sc-if value="{{ hasSel }}" hint-placeholder-val="{{ true }}">
+      <div class="sel">
+        <div class="seltext">
+          <span class="selname">{{ sel.name }}</span>
+          <span class="selmeta">{{ sel.chainFull }} · {{ sel.lockText }}</span>
+          <span class="selmeta">{{ sel.note }}</span>
+        </div>
+        <a class="btn primary" href="Journey.dc.html" aria-label="{{ sel.openLabel }}">Open</a>
+      </div>
+    </sc-if>
+    <sc-if value="{{ noSel }}" hint-placeholder-val="{{ false }}">
+      <span class="selmeta">Select a Cube to see how it opens. Tab moves through Cubes in catalog order.</span>
+    </sc-if>
+  </div>
+  <div class="foot">Concept prototype · synthetic data · SVG isometric stand-in for a native Iced canvas or pre-rendered fallback</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","20"],"default":"4","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    this.state = { filter: 'all', chainMenu: false, selected: 1 };
+  }
+  renderVals() {
+    const CH = {
+      btc: { menu: 'Bitcoin', full: 'Bitcoin mainnet', live: true, blake: false, test: '' },
+      b2b: { menu: 'Bitcoin Blake2b', full: 'Bitcoin Blake2b mainnet', live: true, blake: true, test: '' },
+      t4: { menu: 'Testnet4', full: 'Bitcoin Testnet4', live: false, blake: false, test: 'Testnet4' },
+      sig: { menu: 'Signet', full: 'Bitcoin Signet', live: false, blake: false, test: 'Signet' },
+      reg: { menu: 'Regtest', full: 'Bitcoin Regtest', live: false, blake: false, test: 'Regtest' },
+      b2t: { menu: 'Blake2b Testnet4', full: 'Bitcoin Blake2b Testnet4', live: false, blake: true, test: 'Testnet4' }
+    };
+    const ORDER = ['btc', 'b2b', 't4', 'sig', 'reg', 'b2t'];
+    const CIRC = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18';
+    const PROT = {
+      ok: { text: 'Backup confirmed', tone: 'tone-good', path: 'M5 12.5l4.5 4.5L19 7.5' },
+      warn: { text: 'Backup not confirmed', tone: 'tone-warn', path: 'M12 4L21 19H3Z M12 10v4 M12 16.5v.5' },
+      unk: { text: 'Backup status unknown', tone: 'tone-muted', path: CIRC + ' M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4 M12 16.5v.5' },
+      stale: { text: 'Backup stale', tone: 'tone-warn', path: CIRC + ' M12 7v5l3 2' },
+      imp: { text: 'Imported Vault · no local keys', tone: 'tone-neutral', path: CIRC + ' M12 11v5 M12 8v.5' }
+    };
+    const LOCKED = 'M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 7 0v3';
+    const OPEN = 'M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 6.8-1.2';
+    const NOSPARK = 'Vault only · Spark unavailable on this network';
+    const CUBES = [
+      [1, 'Everyday', 'btc', true, 'ok', 'Vault + Spark + Liquid'],
+      [2, 'Blake workspace', 'b2b', false, 'warn', 'Vault only'],
+      [3, 'Lab', 't4', false, 'unk', NOSPARK],
+      [4, 'Archive', 'btc', false, 'ok', 'No Vault configured · Spark only'],
+      [5, 'Household 2024', 'btc', false, 'ok', 'Vault + Spark'],
+      [6, 'Travel fund', 'btc', false, 'stale', 'Vault + Spark + Liquid'],
+      [7, 'Signet scratch', 'sig', false, 'unk', NOSPARK],
+      [8, 'Regtest bench', 'reg', false, 'unk', 'Vault + Spark'],
+      [9, 'Blake test', 'b2t', false, 'warn', 'Vault only'],
+      [10, 'Imported Vault (watch)', 'btc', false, 'imp', 'Watch-only Vault'],
+      [11, 'A very long Cube name that keeps going to test wrapping behaviour', 'btc', false, 'ok', 'Vault + Spark'],
+      [12, 'Team treasury', 'b2b', false, 'ok', 'Vault only'],
+      [13, 'Grandparents', 'btc', false, 'ok', 'Vault + Spark'],
+      [14, 'Donations', 'btc', false, 'warn', 'No Vault configured · Spark only'],
+      [15, 'Side project', 'btc', false, 'unk', 'Vault + Spark'],
+      [16, 'Cold archive 2', 'btc', false, 'ok', 'Vault only'],
+      [17, 'Lab 2', 't4', false, 'unk', NOSPARK],
+      [18, 'Lab 3', 'sig', false, 'unk', NOSPARK],
+      [19, 'Emergency', 'btc', false, 'ok', 'Vault + Spark + Liquid'],
+      [20, 'Shop till', 'btc', false, 'ok', 'No Vault configured · Spark only']
+    ];
+
+    const theme = this.props.theme ?? 'dark';
+    const count = parseInt(this.props.cubeCount ?? '4', 10) || 0;
+    const focusDemo = !!this.props.focusDemo;
+    const f = this.state.filter;
+    const set = (patch) => this.setState(patch);
+    const matches = (c) => f === 'all' ? true : f === 'live' ? CH[c.chain].live : f === 'test' ? !CH[c.chain].live : c.chain === f;
+
+    const all = CUBES.slice(0, count).map((r) => ({ id: r[0], name: r[1], chain: r[2], open: r[3], prot: r[4], cap: r[5] }));
+    const vis = all.filter(matches);
+    const hidden = all.length - vis.length;
+    const n = vis.length;
+
+    const chips = [['all', 'All networks'], ['live', 'Live chains'], ['test', 'Test networks']].map(([k, label]) => ({
+      label, on: f === k, cls: f === k ? 'on' : '', pressed: String(f === k),
+      pick: () => set({ filter: k, chainMenu: false })
+    }));
+    const chainOn = !!CH[f];
+    const chainItems = ORDER.map((k) => ({
+      label: CH[k].menu, n: String(all.filter((c) => c.chain === k).length),
+      on: f === k, cls: f === k ? 'on' : '', pressed: String(f === k),
+      pick: () => set({ filter: k, chainMenu: false })
+    }));
+
+    let countText;
+    if (count === 0) countText = 'No Cubes on this device';
+    else if (f === 'all') countText = 'Showing ' + n + (n === 1 ? ' Cube' : ' Cubes');
+    else countText = 'Showing ' + n + ' of ' + count + ' · ' + hidden + ' hidden by filters';
+
+    const selCube = vis.find((c) => c.id === this.state.selected) || null;
+
+    // Equal-size rows: one row up to 6, then a 5-column grid (no recession in the isometric view).
+    const beside = n > 6;
+    const cols = beside ? 5 : 6;
+    const rowsN = Math.ceil(n / cols);
+    const rows = [];
+    for (let r = 0; r < rowsN; r++) {
+      const items = vis.slice(r * cols, (r + 1) * cols).map((c, i) => {
+        const ch = CH[c.chain];
+        const p = PROT[c.prot];
+        const idx = r * cols + i;
+        const isSel = selCube && selCube.id === c.id;
+        const demo = focusDemo && idx === 1;
+        return {
+          name: c.name, chainFull: ch.full, hasBlake: ch.blake, hasTest: !!ch.test, testBadge: ch.test,
+          lockText: c.open ? 'Open' : 'Locked', lockPath: c.open ? OPEN : LOCKED,
+          protText: p.text, protPath: p.path, toneCls: p.tone, cap: c.cap,
+          pressed: String(!!isSel), showHint: demo,
+          cls: (beside ? 'beside' : 'below') + (isSel ? ' is-sel' : '') + (demo ? ' demo-focus' : ''),
+          pick: () => set({ selected: c.id, chainMenu: false })
+        };
+      });
+      rows.push({ items });
+    }
+
+    const sel = selCube ? {
+      name: selCube.name, chainFull: CH[selCube.chain].full,
+      lockText: selCube.open ? 'Open in a tab' : 'Locked',
+      note: selCube.open ? 'Already open in a tab. Open switches to it; nothing is locked or closed.' : 'Opens with your PIN or passkey; network checks run before the Cube opens.',
+      openLabel: 'Open ' + selCube.name
+    } : { name: '', chainFull: '', lockText: '', note: '', openLabel: 'Open' };
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: this.props.reducedMotion ? 'reduced' : '',
+      chips, chainItems, chainOn,
+      chainCls: chainOn ? 'on' : '', chainPressed: String(chainOn),
+      chainExpanded: String(!!this.state.chainMenu), chainMenu: !!this.state.chainMenu,
+      chainLabel: chainOn ? 'Chain: ' + CH[f].menu : 'Chain',
+      toggleChain: () => set({ chainMenu: !this.state.chainMenu }),
+      clear: () => set({ filter: 'all', chainMenu: false }),
+      filterActive: f !== 'all',
+      countText,
+      isEmpty: count === 0,
+      noMatch: count > 0 && n === 0,
+      hasCubes: n > 0,
+      hiddenText: hidden + ' hidden.',
+      rowsCls: beside ? 'beside' : 'below',
+      rows,
+      floorStyle: count === 0 || n === 0 ? 'top:38%' : beside ? 'top:0' : 'top:30%',
+      hasSel: !!selCube, noSel: !selCube && n > 0, sel
+    };
+  }
+}
+</script>
+</body>
+</html>
