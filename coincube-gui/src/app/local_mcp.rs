@@ -588,7 +588,7 @@ mod tests {
             assert_eq!(initialized["serverInfo"]["name"], "tenshu-mcp");
             stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap();
             let discovered = response(&mut stdin, &mut stdout, json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"})).await;
-            assert_eq!(discovered["tools"].as_array().unwrap().len(), 4);
+            assert_eq!(discovered["tools"].as_array().unwrap().len(), 5);
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
             let id = listed["structuredContent"]["wallets"][0]["wallet_id"].as_str().unwrap();

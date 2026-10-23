@@ -3,6 +3,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
+pub mod capabilities;
+pub use capabilities::{Capabilities, ReadCapability, ReadPermissions};
+
 #[cfg(feature = "adapter")]
 pub mod adapter;
 #[cfg(any(unix, windows))]
@@ -45,15 +48,15 @@ pub enum Request {
     Policy(WalletInput),
 }
 impl Request {
-    /// Return wallet scope and capability index: balance 0, history 1, policy 2.
+    /// Return wallet scope and its explicitly named read capability.
     ///
     /// Listing has no caller-selected wallet, but still requires a live grant.
-    pub fn scope(&self) -> Option<(&str, usize)> {
+    pub fn scope(&self) -> Option<(&str, ReadCapability)> {
         match self {
             Self::List(_) => None,
-            Self::Summary(v) => Some((&v.wallet_id, 0)),
-            Self::History(v) => Some((&v.wallet_id, 1)),
-            Self::Policy(v) => Some((&v.wallet_id, 2)),
+            Self::Summary(v) => Some((&v.wallet_id, ReadCapability::Balances)),
+            Self::History(v) => Some((&v.wallet_id, ReadCapability::ConfirmedHistory)),
+            Self::Policy(v) => Some((&v.wallet_id, ReadCapability::PolicySummary)),
         }
     }
     /// Validate wallet-ID byte length and the 1–50 history limit at runtime.

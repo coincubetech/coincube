@@ -8,7 +8,7 @@ use rmcp::{
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// Official-SDK STDIO handler forwarding only the four closed desktop reads.
+/// Official-SDK handler for public build metadata and four closed desktop reads.
 #[derive(Clone)]
 pub struct Adapter {
     /// Authenticated local endpoint supplied by trusted host configuration.
@@ -32,9 +32,13 @@ fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
                 .open_world(false),
         )
 }
-/// Advertise the closed four-tool surface without exposing wallet data or secrets.
+/// Advertise implemented tools without exposing wallet data or secrets.
 pub fn tools() -> Vec<Tool> {
     vec![
+        tool::<Empty, Capabilities>(
+            "tenshu_get_capabilities",
+            "Describe implemented build capabilities only. No installed-wallet inventory or live consent. Unsupported creation/proposals are reported honestly.",
+        ),
         tool::<Empty, WalletList>(
             "tenshu_list_wallets",
             "List only the Vault explicitly authorized in the current desktop session.",
@@ -55,6 +59,11 @@ pub fn tools() -> Vec<Tool> {
 }
 /// Decode typed arguments while withholding raw serialization error details.
 fn parse<T: serde::de::DeserializeOwned>(v: Value) -> Result<T, ErrorData> {
+    // Serde can accept positional arrays for structs, including [] for Empty.
+    // MCP arguments must match the advertised object schema at this boundary.
+    if !v.is_object() {
+        return Err(ErrorData::invalid_params("invalid_input", None));
+    }
     serde_json::from_value(v).map_err(|_| ErrorData::invalid_params("invalid_input", None))
 }
 impl Adapter {
@@ -62,6 +71,14 @@ impl Adapter {
     /// Protocol errors reject unknown/invalid calls; wallet errors are sanitized
     /// structured tool errors rather than raw daemon exceptions.
     pub async fn invoke(&self, name: &str, arguments: Value) -> Result<CallToolResult, ErrorData> {
+        // Like tools/list, this is public static metadata. It never touches the
+        // desktop, wallet service, session or grant, even when IPC is unavailable.
+        if name == "tenshu_get_capabilities" {
+            parse::<Empty>(arguments)?;
+            let value = serde_json::to_value(Capabilities::current())
+                .map_err(|_| ErrorData::internal_error("serialization_failed", None))?;
+            return Ok(CallToolResult::structured(value));
+        }
         let request = match name {
             "tenshu_list_wallets" => crate::Request::List(parse(arguments)?),
             "tenshu_get_wallet_summary" => crate::Request::Summary(parse(arguments)?),

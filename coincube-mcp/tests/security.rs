@@ -138,6 +138,48 @@ async fn capabilities_and_revocation_apply_to_existing_credentials() {
     );
     assert_eq!(reader.reads.load(Ordering::SeqCst), 1);
 }
+#[test]
+fn named_read_permissions_do_not_upgrade_legacy_grants() {
+    let requests = [
+        summary("fixture-wallet"),
+        Request::History(HistoryInput {
+            wallet_id: "fixture-wallet".into(),
+            limit: 1,
+        }),
+        Request::Policy(WalletInput {
+            wallet_id: "fixture-wallet".into(),
+        }),
+    ];
+    for bits in 0..8 {
+        let selected = [bits & 1 != 0, bits & 2 != 0, bits & 4 != 0];
+        let grant = Grant::new("fixture-wallet".into(), selected, Duration::from_secs(60));
+        for (index, request) in requests.iter().enumerate() {
+            assert_eq!(
+                grant.authorize(grant.credential(), request),
+                if selected[index] {
+                    Ok(())
+                } else {
+                    Err(Error::AccessDenied)
+                }
+            );
+        }
+        assert_eq!(
+            grant.authorize(grant.credential(), &summary("foreign")),
+            Err(Error::AccessDenied)
+        );
+        assert_eq!(
+            grant.authorize("invalid", &Request::List(Empty {})),
+            Err(Error::AccessDenied)
+        );
+        grant.revoke();
+        for request in &requests {
+            assert_eq!(
+                grant.authorize(grant.credential(), request),
+                Err(Error::AccessDenied)
+            );
+        }
+    }
+}
 #[tokio::test]
 async fn expired_and_cross_client_credentials_fail() {
     let reader = Arc::new(Fixture::default());
@@ -367,7 +409,7 @@ mod protocol {
         });
         let client = ().serve(client_io).await.unwrap();
         let listed = client.list_all_tools().await.unwrap();
-        assert_eq!(listed.len(), 4);
+        assert_eq!(listed.len(), 5);
         assert!(listed.iter().all(|t| t.output_schema.is_some()
             && t.annotations.as_ref().unwrap().read_only_hint == Some(true)));
         let result = client
@@ -401,6 +443,7 @@ mod protocol {
         assert_eq!(
             tools().iter().map(|t| t.name.as_ref()).collect::<Vec<_>>(),
             vec![
+                "tenshu_get_capabilities",
                 "tenshu_list_wallets",
                 "tenshu_get_wallet_summary",
                 "tenshu_get_transactions",
@@ -414,6 +457,8 @@ mod protocol {
             "unlock",
             "read_file",
             "execute",
+            "tenshu_prepare_wallet_proposal",
+            "tenshu_create_wallet",
         ] {
             assert!(adapter.invoke(name, serde_json::json!({})).await.is_err());
         }
@@ -443,6 +488,44 @@ mod protocol {
         assert!(text.contains("wallet_unavailable"));
         assert!(!text.contains("/not/"));
         assert!(!text.contains(&adapter.credential));
+    }
+}
+
+#[cfg(feature = "adapter")]
+#[tokio::test]
+async fn capability_discovery_is_static_without_desktop_access() {
+    let adapter = coincube_mcp::adapter::Adapter {
+        socket: "/not/an/endpoint".into(),
+        credential: "not-a-grant".into(),
+    };
+    let result = adapter
+        .invoke("tenshu_get_capabilities", serde_json::json!({}))
+        .await
+        .unwrap();
+    let json = serde_json::to_value(result).unwrap();
+    assert_eq!(
+        json["structuredContent"],
+        serde_json::json!({
+            "schema_version": 1, "wallet_family": "bitcoin_vault_embedded",
+            "reads_require_existing_vault": true, "wallet_data_requires_consent": true,
+            "max_confirmed_transactions": 50, "wallet_proposals": false,
+            "wallet_creation_via_mcp": false, "public_key_material": false, "secrets_or_signing": false
+        })
+    );
+    let text = json.to_string();
+    assert!(!text.contains(&adapter.credential));
+    assert!(!text.contains("/not/"));
+    for arguments in [
+        serde_json::json!({"wallet_id":"untrusted"}),
+        serde_json::json!({"network":"regtest"}),
+        serde_json::json!([]),
+    ] {
+        assert!(
+            adapter
+                .invoke("tenshu_get_capabilities", arguments)
+                .await
+                .is_err()
+        );
     }
 }
 
@@ -485,7 +568,7 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert_eq!(value["result"]["serverInfo"]["name"], "tenshu-mcp");
-    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"tenshu_list_wallets\",\"arguments\":{}}}\n").await.unwrap();
+    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/call\",\"params\":{\"name\":\"tenshu_get_capabilities\",\"arguments\":{}}}\n").await.unwrap();
     let response = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
         .await
         .unwrap()
@@ -493,6 +576,20 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
         .unwrap();
     let value: serde_json::Value = serde_json::from_str(&response).unwrap();
     assert_eq!(value["id"], 2);
+    assert_eq!(value["result"]["structuredContent"]["schema_version"], 1);
+    assert_eq!(
+        value["result"]["structuredContent"]["wallet_proposals"],
+        false
+    );
+    assert_eq!(server.grant.successful_calls.load(Ordering::Relaxed), 0);
+    stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"tenshu_list_wallets\",\"arguments\":{}}}\n").await.unwrap();
+    let response = tokio::time::timeout(Duration::from_secs(3), stdout.next_line())
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap();
+    let value: serde_json::Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(value["id"], 3);
     assert_eq!(
         value["result"]["structuredContent"]["wallets"][0]["wallet_id"],
         "fixture-wallet"
