@@ -7,7 +7,7 @@ use tracing::error;
 use tracing_subscriber::filter::LevelFilter;
 
 use coincube_core::miniscript::bitcoin;
-use coincube_ui::{component::text, font, image};
+use coincube_ui::{font, image};
 
 use coincube_gui::{
     app::settings::global::{GlobalSettings, WindowConfig},
@@ -129,7 +129,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         id: Some("Vault".to_string()),
         antialiasing: true,
         vsync: true,
-        default_text_size: text::P1_SIZE.into(),
+        default_text_size: 14u32.into(),
         default_font: coincube_ui::font::REGULAR,
         fonts: font::load(),
     };

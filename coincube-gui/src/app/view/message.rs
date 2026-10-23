@@ -143,6 +143,14 @@ pub enum Message {
     /// Copy text and show confirmation after the clipboard write is requested.
     CopyWithToast(String, String),
     Menu(Menu),
+    /// Show the Launcher while keeping this Cube's session in its App tab.
+    OpenLauncher,
+    /// Lock through the tab's secure lifecycle, then show the Launcher.
+    LockCubeToLauncher,
+    ToggleCubeSwitcher,
+    AskCubeLock,
+    CancelCubeLock,
+    ToggleVaultTools,
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
     /// Recovery Kit" mode. Branches off the same button the default

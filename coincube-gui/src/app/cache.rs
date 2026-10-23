@@ -279,6 +279,11 @@ pub struct Cache {
     >,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+    /// Transient shell disclosures. These belong to this open Cube and are
+    /// deliberately not persisted with wallet or device settings.
+    pub cube_switcher_open: bool,
+    pub cube_lock_confirmation: bool,
+    pub vault_tools_open: bool,
     /// BTC price in USD, always fetched regardless of the user's selected fiat
     /// currency. Used for converting USDt (which is pegged to USD) into sats.
     pub btc_usd_price: Option<f64>,
@@ -434,6 +439,9 @@ impl std::default::Default for Cache {
             entangled: std::collections::HashMap::new(),
             split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            cube_switcher_open: false,
+            cube_lock_confirmation: false,
+            vault_tools_open: false,
             btc_usd_price: None,
             show_direction_badges: true,
             lightning_address: None,

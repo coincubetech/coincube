@@ -511,6 +511,11 @@ pub enum Message {
     /// seed resident until the process exited, and there was no idle re-lock at
     /// all.
     LockCube,
+    /// Show the Launcher without discarding this App session. The pane owns
+    /// the tab switch, so this is bubbled up rather than handled here.
+    OpenLauncher,
+    /// Explicitly lock the Cube and return to the Launcher in this tab.
+    LockCubeToLauncher,
     /// Completion of an authenticated fork installer generation.
     ForkInstallCompleted(u64, installer::Message),
 }
@@ -1000,6 +1005,18 @@ impl Tab {
         };
 
         let result = match (&mut self.state, message) {
+            (State::App(app), Message::LockCubeToLauncher) => {
+                let datadir = app.datadir().clone();
+                let chain = app.cube_settings().network;
+                // Match the secure close path used by LockCube: revoke work
+                // tied to this session, wipe the cached signer/PIN, then
+                // drop App (and its wallet clients) before opening Home.
+                app.revoke_claim();
+                crate::app::session::close();
+                let (home, command) = Home::new_for_chain(datadir, Some(chain));
+                self.state = State::Home(home);
+                command.map(Message::Launch)
+            }
             (State::App(app), Message::LockCube) => {
                 // Order matters. Zeroize the session PIN first, then drop the
                 // `App`: dropping it takes the decrypted `MasterSigner` (which
@@ -2438,6 +2455,12 @@ impl Tab {
                     }
                     app::Message::View(app::view::Message::ToggleTheme) => {
                         Task::done(Message::ToggleTheme)
+                    }
+                    app::Message::View(app::view::Message::OpenLauncher) => {
+                        Task::done(Message::OpenLauncher)
+                    }
+                    app::Message::View(app::view::Message::LockCubeToLauncher) => {
+                        Task::done(Message::LockCubeToLauncher)
                     }
                     app::Message::View(app::view::Message::DuressLockRemote) => {
                         // Phase 7b: remote duress activation. Lock the running
@@ -4430,6 +4453,9 @@ pub fn create_app_with_remote_backend(
             background_node_install: Default::default(),
             connect_transport_key: None,
             cube_encryption_key: None,
+            cube_switcher_open: false,
+            cube_lock_confirmation: false,
+            vault_tools_open: false,
             network,
             fiat_chain: cube_settings.network,
             btcb2_price_request: None,

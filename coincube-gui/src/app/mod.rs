@@ -8824,6 +8824,24 @@ impl App {
                 }
                 return Task::none();
             }
+            Message::View(view::Message::ToggleCubeSwitcher) => {
+                self.cache.cube_switcher_open = !self.cache.cube_switcher_open;
+                self.cache.cube_lock_confirmation = false;
+                return Task::none();
+            }
+            Message::View(view::Message::AskCubeLock) => {
+                self.cache.cube_switcher_open = true;
+                self.cache.cube_lock_confirmation = true;
+                return Task::none();
+            }
+            Message::View(view::Message::CancelCubeLock) => {
+                self.cache.cube_lock_confirmation = false;
+                return Task::none();
+            }
+            Message::View(view::Message::ToggleVaultTools) => {
+                self.cache.vault_tools_open = !self.cache.vault_tools_open;
+                return Task::none();
+            }
             Message::View(view::Message::Menu(menu)) => {
                 // Always honor the navigation even when the current
                 // panel has no instance (e.g. the user landed on an
@@ -8842,6 +8860,19 @@ impl App {
                     .current_mut()
                     .map(|p| p.close())
                     .unwrap_or_else(Task::none);
+                self.cache.cube_switcher_open = false;
+                self.cache.cube_lock_confirmation = false;
+                if matches!(
+                    &menu,
+                    Menu::Vault(
+                        menu::VaultSubMenu::Coins(_)
+                            | menu::VaultSubMenu::PSBTs(_)
+                            | menu::VaultSubMenu::Recovery
+                            | menu::VaultSubMenu::Claim
+                    )
+                ) {
+                    self.cache.vault_tools_open = true;
+                }
                 return Task::batch([close_task, self.set_current_panel(menu)]);
             }
             msg @ Message::View(view::Message::ConnectAccount(_))

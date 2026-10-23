@@ -211,34 +211,8 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let has_vault = cache.has_vault;
-    let has_p2p = cache.has_p2p;
-    // Passkey Cubes used to be exempt from this banner, because there was no
-    // way for one to back its seed up. There is now (**I11**), so an
-    // un-backed-up passkey Cube gets the same nudge as any other — it is the
-    // Cube that most needs it.
-    let show_backup_warning = !cache.current_cube_backed_up && !cache.backup_warning_dismissed;
-    let nav_ctx = nav::NavContext {
-        has_vault,
-        has_imported_bitcoin: cache.has_imported_bitcoin,
-        has_p2p,
-        network: cache.chain(),
-        p2p_test_coordinator: cache.p2p_test_coordinator,
-        marketplace_flags: cache.marketplace_flags,
-        liquid_gate: cache.liquid_gate,
-        btcb2_server_enabled: cache.btcb2_server_enabled,
-        btcb2_already_claimed: cache.btcb2_already_claimed,
-        btcb2_claim_resume: cache.btcb2_claim_resume,
-        cube_name,
-        lightning_address,
-        avatar: avatar_handle,
-        theme_mode: cache.theme_mode,
-        connect_authenticated: cache.sidebar_connect_signed_in,
-        connect_stream_status: &cache.connect_stream_status,
-    };
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
-        .push_maybe(show_backup_warning.then(backup_warning_banner))
         .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
         .push(
             Container::new(
@@ -265,25 +239,87 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
         .width(Length::Fill)
         .into();
 
-    // Tertiary rail is overlaid on the content area at the left edge,
-    // y-aligned with the sidebar's rails row. The content layout stays
-    // 100% fixed — when the tertiary rail opens it "slides out" on top
-    // of the content's (usually empty) left padding without the content
-    // column itself shifting right.
-    let content_with_overlay: Element<'_, Message> = match nav::tertiary_rail(menu, &nav_ctx) {
-        Some(tert) => {
-            let overlay: Element<'_, Message> = Column::new()
-                .push(Space::new().height(Length::Fixed(nav::TERTIARY_TOP_OFFSET)))
-                .push(Row::new().push(tert).push(Space::new().width(Length::Fill)))
-                .into();
-            iced::widget::stack![content_column, overlay].into()
-        }
-        None => content_column,
+    dashboard_shell_with_info(
+        menu,
+        cache,
+        content_column,
+        cube_name,
+        avatar_handle,
+        lightning_address,
+    )
+}
+
+/// Use the same shell for panels with their own scroll handling, such as P2P
+/// chat. `body` owns its content and warnings; the shell owns all navigation.
+pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    body: T,
+) -> Element<'a, Message> {
+    dashboard_shell_with_info(
+        menu,
+        cache,
+        body.into(),
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+    )
+}
+
+fn dashboard_shell_with_info<'a>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content_column: Element<'a, Message>,
+    cube_name: &'a str,
+    avatar_handle: Option<&'a iced::widget::image::Handle>,
+    lightning_address: Option<&'a str>,
+) -> Element<'a, Message> {
+    // Passkey Cubes used to be exempt from this banner, because there was no
+    // way for one to back its seed up. There is now (**I11**), so an
+    // un-backed-up passkey Cube gets the same nudge as any other — it is the
+    // Cube that most needs it.
+    let show_backup_warning = !cache.current_cube_backed_up && !cache.backup_warning_dismissed;
+    let nav_ctx = nav::NavContext {
+        has_vault: cache.has_vault,
+        has_imported_bitcoin: cache.has_imported_bitcoin,
+        has_p2p: cache.has_p2p,
+        network: cache.chain(),
+        p2p_test_coordinator: cache.p2p_test_coordinator,
+        marketplace_flags: cache.marketplace_flags,
+        liquid_gate: cache.liquid_gate,
+        btcb2_server_enabled: cache.btcb2_server_enabled,
+        btcb2_already_claimed: cache.btcb2_already_claimed,
+        btcb2_claim_resume: cache.btcb2_claim_resume,
+        cube_name,
+        lightning_address,
+        avatar: avatar_handle,
+        theme_mode: cache.theme_mode,
+        connect_authenticated: cache.sidebar_connect_signed_in,
+        connect_email: cache.connect_email.as_deref(),
+        connect_stream_status: &cache.connect_stream_status,
     };
 
-    Row::new()
-        .push(nav::sidebar(menu, &nav_ctx))
-        .push(content_with_overlay)
+    let shell_state = nav::shell::ShellState {
+        switcher_open: cache.cube_switcher_open,
+        lock_confirmation: cache.cube_lock_confirmation,
+        tools_open: cache.vault_tools_open
+            || matches!(
+                menu,
+                Menu::Vault(
+                    crate::app::menu::VaultSubMenu::Coins(_)
+                        | crate::app::menu::VaultSubMenu::PSBTs(_)
+                        | crate::app::menu::VaultSubMenu::Recovery
+                        | crate::app::menu::VaultSubMenu::Claim
+                )
+            ),
+        backup_attention: show_backup_warning,
+    };
+    Column::new()
+        .push(nav::shell::top_bar(&nav_ctx))
+        .push(nav::split::ShellSplit::new(
+            nav::shell::sidebar(menu, &nav_ctx, shell_state),
+            content_column,
+        ))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -500,8 +536,8 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, &'a str)>>(
     };
 
     let centered = iced::widget::row![
-        // offset the toast past the two-rail nav sidebar
-        iced::widget::Space::new().width(nav::SIDEBAR_BASE_WIDTH),
+        // Offset notifications past the full-width Cube shell.
+        iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
         iced::widget::Column::from_iter(

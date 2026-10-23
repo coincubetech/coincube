@@ -10,6 +10,8 @@ pub enum ThemeMode {
 
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub struct Palette {
+    /// Approved Tenshu redesign tokens, shared by the shell and screen families.
+    pub shell: ShellPalette,
     pub general: General,
     pub text: Text,
     pub buttons: Buttons,
@@ -26,6 +28,70 @@ pub struct Palette {
     pub rule: iced::Color,
     pub pane_grid: PaneGrid,
     pub togglers: Togglers,
+}
+
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub struct ShellPalette {
+    pub background: iced::Color,
+    pub panel: iced::Color,
+    pub rail: iced::Color,
+    pub ink: iced::Color,
+    pub muted: iced::Color,
+    pub line: iced::Color,
+    pub accent: iced::Color,
+    pub accent_ink: iced::Color,
+    pub selected: iced::Color,
+    pub good: iced::Color,
+    pub warn: iced::Color,
+    pub bad: iced::Color,
+    pub focus: iced::Color,
+    pub teal: iced::Color,
+    pub hover: iced::Color,
+    pub shadow: iced::Color,
+}
+
+impl ShellPalette {
+    pub const fn dark() -> Self {
+        Self {
+            background: iced::color!(0x161716),
+            panel: iced::color!(0x202020),
+            rail: iced::color!(0x111211),
+            ink: iced::color!(0xf5f0e8),
+            muted: iced::color!(0xb9bbb5),
+            line: iced::color!(0x424242),
+            accent: iced::color!(0xf3821d),
+            accent_ink: iced::color!(0xf59a45),
+            selected: iced::color!(0x36291e),
+            good: iced::color!(0x8bdfab),
+            warn: iced::color!(0xf3b465),
+            bad: iced::color!(0xffad9b),
+            focus: iced::color!(0x8fc1ff),
+            teal: iced::color!(0x2a9d7f),
+            hover: iced::color!(0xf5f0e8, 0.06),
+            shadow: iced::color!(0x000000, 0.45),
+        }
+    }
+
+    pub const fn light() -> Self {
+        Self {
+            background: iced::color!(0xfaf9f6),
+            panel: iced::color!(0xffffff),
+            rail: iced::color!(0xede8e0),
+            ink: iced::color!(0x202020),
+            muted: iced::color!(0x575a54),
+            line: iced::color!(0xc4beb4),
+            accent: iced::color!(0xf3821d),
+            accent_ink: iced::color!(0xa14d00),
+            selected: iced::color!(0xf7e3cc),
+            good: iced::color!(0x23613b),
+            warn: iced::color!(0x77450b),
+            bad: iced::color!(0x8f2e1d),
+            focus: iced::color!(0x1d5fb8),
+            teal: iced::color!(0x1f7a62),
+            hover: iced::color!(0x202020, 0.05),
+            shadow: iced::color!(0x3c280a, 0.18),
+        }
+    }
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -214,17 +280,18 @@ pub struct Toggler {
 impl std::default::Default for Palette {
     fn default() -> Self {
         Self {
+            shell: ShellPalette::dark(),
             general: General {
-                background: color::LIGHT_BLACK,
-                foreground: color::BLACK,
+                background: ShellPalette::dark().background,
+                foreground: ShellPalette::dark().rail,
                 scrollable: color::GREY_7,
             },
             text: Text {
-                primary: color::WHITE,
-                secondary: color::GREY_2,
-                warning: color::ORANGE,
-                success: color::GREEN,
-                error: color::RED,
+                primary: ShellPalette::dark().ink,
+                secondary: ShellPalette::dark().muted,
+                warning: ShellPalette::dark().warn,
+                success: ShellPalette::dark().good,
+                error: ShellPalette::dark().bad,
             },
             buttons: Buttons {
                 // Primary: ORANGE on idle, DARK_ORANGE on hover/press.
@@ -659,7 +726,7 @@ impl std::default::Default for Palette {
                 border: color::TRANSPARENT.into(),
                 background: color::GREY_6,
             },
-            rule: color::GREY_1,
+            rule: ShellPalette::dark().line,
             pane_grid: PaneGrid {
                 background: color::BLACK,
                 highlight_border: color::ORANGE,
@@ -692,17 +759,18 @@ impl Palette {
 
     pub fn light() -> Self {
         Self {
+            shell: ShellPalette::light(),
             general: General {
-                background: color::LIGHT_BG,
-                foreground: color::WARM_PAPER,
+                background: ShellPalette::light().background,
+                foreground: ShellPalette::light().rail,
                 scrollable: color::LIGHT_BORDER,
             },
             text: Text {
-                primary: color::DARK_GRAY,
-                secondary: color::GREY_5,
-                warning: color::ORANGE,
-                success: color::DARK_GREEN,
-                error: color::DARK_RED,
+                primary: ShellPalette::light().ink,
+                secondary: ShellPalette::light().muted,
+                warning: ShellPalette::light().warn,
+                success: ShellPalette::light().good,
+                error: ShellPalette::light().bad,
             },
             buttons: Buttons {
                 primary: Button {
@@ -950,9 +1018,9 @@ impl Palette {
             },
             cards: Cards {
                 simple: ContainerPalette {
-                    background: color::LIGHT_CARD_BG,
+                    background: ShellPalette::light().panel,
                     text: None,
-                    border: Some(color::LIGHT_BORDER),
+                    border: Some(ShellPalette::light().line),
                 },
                 modal: ContainerPalette {
                     background: color::LIGHT_SURFACE,
@@ -1133,7 +1201,7 @@ impl Palette {
                 border: color::TRANSPARENT.into(),
                 background: color::LIGHT_CARD_BG,
             },
-            rule: color::LIGHT_BORDER,
+            rule: ShellPalette::light().line,
             pane_grid: PaneGrid {
                 background: color::LIGHT_BG,
                 highlight_border: color::ORANGE,
@@ -1189,9 +1257,9 @@ mod tests {
 
         assert_eq!(dark, Palette::default());
         assert_eq!(Palette::from_mode(ThemeMode::Dark), dark);
-        assert_eq!(dark.general.background, color::LIGHT_BLACK);
-        assert_eq!(dark.general.foreground, color::BLACK);
-        assert_eq!(dark.text.primary, color::WHITE);
+        assert_eq!(dark.general.background, dark.shell.background);
+        assert_eq!(dark.general.foreground, dark.shell.rail);
+        assert_eq!(dark.text.primary, dark.shell.ink);
         assert_eq!(dark.buttons.primary.active.background, color::ORANGE);
         assert_eq!(dark.buttons.primary.active.text, color::LIGHT_BLACK);
         assert_eq!(dark.buttons.primary.hovered.background, color::DARK_ORANGE);
@@ -1209,12 +1277,12 @@ mod tests {
 
         assert_eq!(Palette::from_mode(ThemeMode::Light), light);
         assert_ne!(light, Palette::dark());
-        assert_eq!(light.general.background, color::LIGHT_BG);
-        assert_eq!(light.general.foreground, color::WARM_PAPER);
-        assert_eq!(light.text.primary, color::DARK_GRAY);
-        assert_eq!(light.text.success, color::DARK_GREEN);
+        assert_eq!(light.general.background, light.shell.background);
+        assert_eq!(light.general.foreground, light.shell.rail);
+        assert_eq!(light.text.primary, light.shell.ink);
+        assert_eq!(light.text.success, light.shell.good);
         assert_eq!(light.buttons.menu.hovered.background, color::LIGHT_HOVER);
-        assert_eq!(light.cards.simple.background, color::LIGHT_CARD_BG);
+        assert_eq!(light.cards.simple.background, light.shell.panel);
         assert_eq!(light.notifications.debug.text, Some(color::DARK_GRAY));
         assert_eq!(
             light.sliders.rail_backgrounds,
