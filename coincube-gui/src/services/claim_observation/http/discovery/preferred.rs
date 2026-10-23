@@ -44,6 +44,7 @@ impl HttpObservationSource {
             return Err(invalid());
         }
         let source = self.discovery_search_snapshot();
+        let trace = source.ancestry_trace.as_ref().unwrap();
         let found = tokio::time::timeout(MAX_DISCOVERY_TIME, async {
             let search = |chain, candidates| {
                 let source = &source;
@@ -83,13 +84,19 @@ impl HttpObservationSource {
             Ok(Some((bitcoin, fork)))
         })
         .await
-        .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))??;
+        .map_err(|_| {
+            trace.deadline_if_active(ChainId::Bitcoin);
+            trace.deadline_if_active(ChainId::BitcoinBlake2b);
+            DiscoveryError::Observation(FailureKind::Deadline)
+        })??;
         let Some((bitcoin, fork)) = found else {
             return Ok(None);
         };
         // Final collection keeps the established 256-request ceiling without
         // resetting the shared search counters or response-byte allowance.
         source.budget.as_ref().unwrap().restrict_to_collection();
+        trace.stage(ChainId::Bitcoin, diagnostics::Stage::FinalCollection);
+        trace.stage(ChainId::BitcoinBlake2b, diagnostics::Stage::FinalCollection);
         let bitcoin_path = bitcoin
             .retained_path()
             .map_err(DiscoveryError::Structural)?;
@@ -148,6 +155,7 @@ impl HttpObservationSource {
             return Err(observation(FailureKind::Cancelled));
         }
         let snapshot = self.discovery_search_snapshot();
+        let trace = snapshot.ancestry_trace.as_ref().unwrap();
         let result = tokio::time::timeout(MAX_DISCOVERY_TIME, async {
             let mut local_limit = None;
             for candidate in candidates {
@@ -173,10 +181,21 @@ impl HttpObservationSource {
             }
         })
         .await
-        .map_err(|_| observation(FailureKind::Deadline))?;
+        .map_err(|_| {
+            trace.deadline_if_active(root_chain);
+            observation(FailureKind::Deadline)
+        })?;
         if !session_current(&snapshot.generation, snapshot.expected) {
             return Err(observation(FailureKind::Cancelled));
         }
+        trace.complete(
+            root_chain,
+            match &result {
+                Ok(Some(_)) => diagnostics::Outcome::PathFound,
+                Ok(None) => diagnostics::Outcome::NoQualifyingAncestry,
+                Err(_) => diagnostics::Outcome::SearchFailed,
+            },
+        );
         result
     }
 }
@@ -287,7 +306,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn claim_diagnostics_observe_both_sides_without_short_circuit_or_extra_budget() {
+    async fn claim_diagnostics_observe_both_sides_with_shared_two_read_budget() {
         use std::sync::Mutex;
         for (bitcoin_failure, fork_failure) in [(true, false), (false, true), (true, true)] {
             let server = MockServer::start();
@@ -300,9 +319,10 @@ mod tests {
             let mut source = source.with_funding_observer(Arc::new(move |chain, status| {
                 observed.lock().unwrap()[usize::from(chain == ChainId::BitcoinBlake2b)] = status;
             }));
-            // Two attempts share one finite request counter, including nested snapshots.
+            // Each attempted node makes one raw and one metadata request under
+            // a single shared counter, including nested snapshots.
             source.budget = Some(Arc::new(CollectionBudget {
-                requests: AtomicUsize::new(2),
+                requests: AtomicUsize::new(4),
                 bytes: AtomicUsize::new(MAX_RESPONSE_BYTES),
             }));
             let budget = source.budget.clone().unwrap();
@@ -320,6 +340,22 @@ mod tests {
                     "/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{id}/hex"
                 ));
                 then.status(429);
+            });
+            let bitcoin_metadata = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/bitcoin/mainnet/tx/{id}"));
+                then.status(200)
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .json_body(json!({"txid":id,"status":{"confirmed":false}}));
+            });
+            let fork_metadata = server.mock(|when, then| {
+                when.method(GET)
+                    .path(format!("/api/v1/esplora/bitcoin-blake2b/mainnet/tx/{id}"));
+                then.status(200)
+                    .header("x-cache", "BYPASS")
+                    .header("cache-control", "no-store")
+                    .json_body(json!({"txid":id,"status":{"confirmed":false}}));
             });
             // Legacy callers still return Bitcoin None before touching a failing fork.
             assert!(legacy_source
@@ -364,9 +400,11 @@ mod tests {
             );
             bitcoin_read.assert_hits(usize::from(bitcoin_failure));
             fork_read.assert_hits(usize::from(fork_failure));
+            bitcoin_metadata.assert_hits(usize::from(bitcoin_failure));
+            fork_metadata.assert_hits(usize::from(fork_failure));
             assert_eq!(
                 budget.requests.load(Ordering::Relaxed),
-                2 - usize::from(bitcoin_failure) - usize::from(fork_failure)
+                4 - 2 * usize::from(bitcoin_failure) - 2 * usize::from(fork_failure)
             );
         }
     }

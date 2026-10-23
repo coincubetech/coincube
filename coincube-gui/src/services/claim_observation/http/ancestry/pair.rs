@@ -234,7 +234,15 @@ impl HttpObservationSource {
             })
         })
         .await
-        .map_err(|_| FailureKind::Deadline)?
+        .map_err(|_| {
+            if let Some(trace) = &self.ancestry_trace {
+                trace.emit(
+                    root_chain,
+                    super::super::discovery::diagnostics::Outcome::CollectionDeadline30s,
+                );
+            }
+            FailureKind::Deadline
+        })?
     }
 }
 

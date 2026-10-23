@@ -998,7 +998,15 @@ fn funding_chain_diagnostics_do_not_hide_a_different_or_paired_timeout_refusal()
         p.funding_checking = true;
         let inline = funding_refusal_is_inline(refusal, &proofs);
         assert_eq!(inline, expected_inline);
-        drop(p.apply(ClaimEvent::FundingProofChecked(12, 7, 0, proofs, inline)));
+        drop(p.apply(ClaimEvent::FundingProofChecked(
+            12,
+            7,
+            0,
+            proofs,
+            inline,
+            vec![],
+            None,
+        )));
         let reason = funding_proof_refusal(refusal);
         drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Err(reason.into()))));
         assert_eq!(p.funding_proofs, proofs);
@@ -1011,6 +1019,7 @@ fn funding_chain_diagnostics_do_not_hide_a_different_or_paired_timeout_refusal()
 
 #[test]
 fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
+    use crate::services::claim_observation::http::{AncestryTimingOutcome, AncestryTimingStage};
     let (_sender, receiver) = watch::channel(7);
     let mut p = panel(SINGLE_WSH);
     p.generation = receiver;
@@ -1025,6 +1034,19 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         btcb2_minimum_sats: 3_000,
         bitcoin_rate_sat_vb: 2,
         btcb2_rate_sat_vb: 3,
+    };
+    let timing = AncestryTimingReport {
+        chain: ChainId::Bitcoin,
+        outcome: AncestryTimingOutcome::RequestDeadline5s,
+        stage: AncestryTimingStage::RawTransaction,
+        elapsed_ms: 5_001,
+        requests: 8,
+        charged_bytes: 3_000,
+        visited: 3,
+        pruned: 1,
+        roots: 0,
+        shared_roots: 0,
+        unsupported_roots: 0,
     };
     for revoke in [false, true] {
         p.stage = Stage::FundingDeposits(addresses.clone());
@@ -1045,9 +1067,17 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
             (12, 7, revocations + 1),
         ] {
             drop(p.apply(ClaimEvent::FundingProofChecked(
-                seq, generation, revocation, proofs, true,
+                seq,
+                generation,
+                revocation,
+                proofs,
+                true,
+                vec![timing],
+                Some("synthetic phase"),
             )));
             assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+            assert!(p.funding_outer_timeout.is_none());
+            assert!(p.funding_timing.is_empty());
         }
         drop(p.apply(ClaimEvent::FundingProofChecked(
             12,
@@ -1055,8 +1085,32 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
             revocations,
             proofs,
             true,
+            vec![timing],
+            Some("synthetic phase"),
         )));
         assert_eq!(p.funding_proofs, proofs);
+        assert_eq!(p.funding_timing, vec![timing]);
+        assert_eq!(p.funding_outer_timeout, Some("synthetic phase"));
+        p.funding_checking = false;
+        let report = p.verification_report().unwrap();
+        assert!(report.contains("Claim verification timing report v1"));
+        assert!(report.contains("request_deadline_5s at raw_transaction"));
+        assert!(report.contains("shared_requests=8"));
+        assert!(report.contains("overall_deposit_check_deadline_150s at synthetic phase"));
+        assert!(!report.contains("bitcoin-address"));
+        let copy = p.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::Claim(
+                view::ClaimMessage::CopyVerificationReport,
+            )),
+        );
+        use iced::futures::StreamExt;
+        let mut copied = iced_runtime::task::into_stream(copy).unwrap();
+        let action = iced::futures::executor::block_on(copied.next()).unwrap();
+        assert!(matches!(action, iced_runtime::Action::Output(Message::View(
+            view::Message::CopyWithToast(text, _))) if text == report));
+        p.funding_checking = true;
         assert!(p.funding_inline_error());
         assert!(p.funding_review().is_none());
         assert!(!p.can_sign_or_submit());
@@ -1089,6 +1143,9 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         }
         assert!(p.funding_task.is_none());
         assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+        assert!(p.funding_outer_timeout.is_none());
+        assert!(p.funding_timing.is_empty());
+        assert!(p.verification_report().is_none());
         assert!(!p.funding_inline_error());
         drop(p.apply(ClaimEvent::FundingProofChecked(
             12,
@@ -1096,8 +1153,12 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
             revocations,
             proofs,
             true,
+            vec![timing],
+            Some("synthetic phase"),
         )));
         assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+        assert!(p.funding_outer_timeout.is_none());
+        assert!(p.funding_timing.is_empty());
         assert!(!p.funding_checking);
         assert!(matches!(p.stage, Stage::Preconditions));
         drop(p.apply(ClaimEvent::FundingCheckProgress(
@@ -1114,7 +1175,6 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         )));
         assert!(p.funding_status.is_none());
         assert!(p.funding_error.is_none());
-        use iced::futures::StreamExt;
         let mut stream = iced_runtime::task::into_stream(task).unwrap();
         assert!(iced::futures::executor::block_on(stream.next()).is_none());
     }

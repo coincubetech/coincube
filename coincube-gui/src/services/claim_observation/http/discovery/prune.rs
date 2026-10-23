@@ -77,32 +77,63 @@ impl PruneContext {
         txid: Txid,
         policy: Policy,
     ) -> Result<(BlockRef, i64), FailureKind> {
-        let (transaction, stamp) = super::super::super::read(
+        self.confirmed_block_from_read(
+            source,
+            txid,
             source.transaction(self.chain, txid).await?,
+            policy,
+        )
+    }
+
+    fn confirmed_block_from_read(
+        &self,
+        source: &HttpObservationSource,
+        expected_txid: Txid,
+        transaction: FreshRead<TransactionObservation>,
+        policy: Policy,
+    ) -> Result<(BlockRef, i64), FailureKind> {
+        let (transaction, stamp) = super::super::super::read(
+            transaction,
             self.chain,
             source,
             policy,
             Stage::BitcoinInclusion,
         )
         .map_err(|error| error.kind)?;
-        let TransactionObservation::Confirmed { block, .. } = transaction else {
+        let TransactionObservation::Confirmed { txid, block } = transaction else {
             return Err(FailureKind::Changed);
         };
+        if txid != expected_txid {
+            return Err(FailureKind::Malformed);
+        }
         if self.tip.is_some_and(|tip| block.height > tip.height) {
             return Err(FailureKind::Changed);
         }
         Ok((block, stamp))
     }
 
+    #[cfg(test)]
     pub(super) async fn inspect(
         &mut self,
         source: &HttpObservationSource,
         txid: Txid,
         policy: Policy,
     ) -> Result<bool, FailureKind> {
+        let transaction = source.transaction(self.chain, txid).await?;
+        self.inspect_prefetched(source, txid, policy, transaction)
+            .await
+    }
+
+    pub(super) async fn inspect_prefetched(
+        &mut self,
+        source: &HttpObservationSource,
+        txid: Txid,
+        policy: Policy,
+        transaction: FreshRead<TransactionObservation>,
+    ) -> Result<bool, FailureKind> {
         // The caller has already fetched raw bytes under this txid; Search
         // checks their identity and every referenced output before advancing.
-        let (block, stamp) = self.confirmed_block(source, txid, policy).await?;
+        let (block, stamp) = self.confirmed_block_from_read(source, txid, transaction, policy)?;
         if block.height >= self.fork_height {
             return Ok(false);
         }
@@ -199,7 +230,50 @@ mod tests {
     use super::super::super::tests::{ancestry_fixture, source as make_source};
     use super::*;
     use httpmock::prelude::*;
+    use reqwest::header::HeaderValue;
     use serde_json::json;
+    use std::str::FromStr;
+
+    #[tokio::test]
+    async fn prefetched_metadata_must_match_the_requested_node_before_pruning() {
+        let server = MockServer::start();
+        let (source, _sender) = make_source(&server);
+        let (expected, _) = ancestry_fixture();
+        let other = Txid::from_str(&"99".repeat(32)).unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-cache", HeaderValue::from_static("BYPASS"));
+        headers.insert(CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        let metadata = FreshRead::from_response(
+            ChainId::Bitcoin,
+            TransactionObservation::Confirmed {
+                txid: other,
+                block: BlockRef {
+                    height: 961_600,
+                    hash: BlockHash::from_str(&"88".repeat(32)).unwrap(),
+                },
+            },
+            source.now(),
+            &headers,
+        )
+        .unwrap();
+        let mut pruning = PruneContext::new(&source, ChainId::Bitcoin).unwrap();
+        assert_eq!(
+            pruning
+                .inspect_prefetched(
+                    &source,
+                    expected,
+                    Policy {
+                        max_observation_age_seconds: 90,
+                        expiry_margin_seconds: 600,
+                    },
+                    metadata
+                )
+                .await,
+            Err(FailureKind::Malformed)
+        );
+        assert!(pruning.anchor.is_none());
+        assert!(pruning.frontier.is_empty());
+    }
 
     #[tokio::test]
     async fn frontier_recheck_rejects_reorg_cancelled_session_and_aged_bracket() {

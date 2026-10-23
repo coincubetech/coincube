@@ -2,6 +2,7 @@
 use super::*;
 mod binding;
 mod collect;
+pub(crate) mod diagnostics;
 mod funding;
 mod preferred;
 mod prune;
@@ -144,6 +145,8 @@ impl HttpObservationSource {
                     .clone()
                     .unwrap_or_else(|| Arc::new(CollectionBudget::new())),
             ),
+            ancestry_trace: self.ancestry_trace.clone(),
+            ancestry_timing_observer: self.ancestry_timing_observer.clone(),
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history: self.test_ancestry_history,
         }
@@ -154,6 +157,11 @@ impl HttpObservationSource {
         let mut snapshot = self.discovery_snapshot();
         if self.budget.is_none() {
             snapshot.budget = Some(Arc::new(CollectionBudget::for_discovery()));
+        }
+        if snapshot.ancestry_trace.is_none() {
+            snapshot.ancestry_trace = Some(Arc::new(diagnostics::Trace::new(
+                snapshot.ancestry_timing_observer.clone(),
+            )));
         }
         snapshot
     }
@@ -236,7 +244,12 @@ impl HttpObservationSource {
             snapshot.qualify_dependency(&dependency, policy, root_chain),
         )
         .await
-        .map_err(|_| DiscoveryError::Observation(FailureKind::Deadline))?
+        .map_err(|_| {
+            if let Some(trace) = &snapshot.ancestry_trace {
+                trace.emit(root_chain, diagnostics::Outcome::CollectionDeadline30s);
+            }
+            DiscoveryError::Observation(FailureKind::Deadline)
+        })?
         .map_err(DiscoveryError::Observation)?;
         if !session_current(&snapshot.generation, snapshot.expected) {
             return Err(DiscoveryError::Observation(FailureKind::Cancelled));
@@ -283,7 +296,9 @@ impl HttpObservationSource {
             return Err(DiscoveryError::Observation(FailureKind::InvalidPlan));
         }
         let mut search = Search::new(selected).map_err(DiscoveryError::Structural)?;
+        let standalone = self.ancestry_trace.is_none();
         let snapshot = self.discovery_search_snapshot();
+        let trace = snapshot.ancestry_trace.as_ref().unwrap();
         let observation = DiscoveryError::Observation;
         let result = tokio::time::timeout(MAX_DISCOVERY_TIME, async {
             let mut pruning =
@@ -291,36 +306,51 @@ impl HttpObservationSource {
             loop {
                 match search.step().map_err(DiscoveryError::Structural)? {
                     Step::Fetch { txid, max_bytes } => {
-                        let raw = snapshot
-                            .ancestry_transaction_search(root_chain, txid, max_bytes)
-                            .await
-                            .map_err(|(error, exceeded_graph_bytes)| {
-                                if exceeded_graph_bytes
-                                    && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES
-                                {
-                                    DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
-                                } else {
-                                    observation(error)
-                                }
-                            })?;
+                        trace.stage(root_chain, diagnostics::Stage::TransactionReads);
+                        // Both reads concern this same node and fit the existing
+                        // shared request/byte budget. Keep raw-read error
+                        // precedence and perform canonical pruning only after
+                        // both bounded reads have finished.
+                        let (raw, transaction) = tokio::join!(
+                            snapshot.ancestry_transaction_search(root_chain, txid, max_bytes),
+                            snapshot.transaction(root_chain, txid)
+                        );
+                        let raw = raw.map_err(|(error, exceeded_graph_bytes)| {
+                            if exceeded_graph_bytes
+                                && max_bytes < claim_ancestry::MAX_TRANSACTION_BYTES
+                            {
+                                DiscoveryError::Structural(claim_ancestry::Error::ByteLimit)
+                            } else {
+                                observation(error)
+                            }
+                        })?;
+                        let transaction = transaction.map_err(observation)?;
+                        trace.stage(root_chain, diagnostics::Stage::PreForkCheck);
                         let pre_fork = pruning
-                            .inspect(&snapshot, txid, policy)
+                            .inspect_prefetched(&snapshot, txid, policy, transaction)
                             .await
                             .map_err(observation)?;
                         search
                             .provide_with_pruning(raw, pre_fork)
                             .map_err(DiscoveryError::Structural)?;
+                        trace.visited(root_chain, pre_fork);
                     }
                     Step::Candidate(candidate) => {
+                        trace.stage(root_chain, diagnostics::Stage::RootQualification);
+                        trace.root(root_chain);
                         match snapshot
                             .qualify_dependency(&candidate.dependency, policy, root_chain)
                             .await
                         {
                             // Only positively disqualified roots allow another branch.
-                            Err(
-                                FailureKind::UnsupportedPoison
-                                | FailureKind::AncestryRootShared { .. },
-                            ) => continue,
+                            Err(FailureKind::UnsupportedPoison) => {
+                                trace.disqualified_root(root_chain, false);
+                                continue;
+                            }
+                            Err(FailureKind::AncestryRootShared { .. }) => {
+                                trace.disqualified_root(root_chain, true);
+                                continue;
+                            }
                             Err(error) => return Err(observation(error)),
                             Ok((pair, observed_at)) => {
                                 return Ok(Some(DiscoveredAncestry {
@@ -334,6 +364,7 @@ impl HttpObservationSource {
                         }
                     }
                     Step::Complete => {
+                        trace.stage(root_chain, diagnostics::Stage::FrontierRecheck);
                         pruning
                             .finish(&snapshot, policy)
                             .await
@@ -344,9 +375,22 @@ impl HttpObservationSource {
             }
         })
         .await
-        .map_err(|_| observation(FailureKind::Deadline))?;
+        .map_err(|_| {
+            trace.deadline_if_active(root_chain);
+            observation(FailureKind::Deadline)
+        })?;
         if !session_current(&snapshot.generation, snapshot.expected) {
             return Err(observation(FailureKind::Cancelled));
+        }
+        if standalone {
+            trace.complete(
+                root_chain,
+                match &result {
+                    Ok(Some(_)) => diagnostics::Outcome::PathFound,
+                    Ok(None) => diagnostics::Outcome::NoQualifyingAncestry,
+                    Err(_) => diagnostics::Outcome::SearchFailed,
+                },
+            );
         }
         result
     }
@@ -727,6 +771,60 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_node_reads_preserve_raw_error_precedence_and_shared_request_limit() {
+        let server = MockServer::start();
+        let (source, _sender) = make_source(&server);
+        let (txid, raw) = ancestry_fixture();
+        let base = "/api/v1/esplora/bitcoin/mainnet";
+        let raw_failure = server.mock(|when, then| {
+            when.method(GET).path(format!("{base}/tx/{txid}/hex"));
+            then.status(503);
+        });
+        let malformed_metadata = server.mock(|when, then| {
+            when.method(GET).path(format!("{base}/tx/{txid}"));
+            then.status(200)
+                .header("x-cache", "BYPASS")
+                .header("cache-control", "no-store")
+                .body("not JSON");
+        });
+        assert!(matches!(
+            source
+                .discover_ancestry(OutPoint::new(txid, 0), policy())
+                .await,
+            Err(DiscoveryError::Observation(FailureKind::Http(503)))
+        ));
+        raw_failure.assert_hits(1);
+        malformed_metadata.assert_hits(1);
+
+        let server = MockServer::start();
+        let (mut source, _sender) = make_source(&server);
+        let raw_read = server.mock(|when, then| {
+            when.method(GET).path(format!("{base}/tx/{txid}/hex"));
+            then.status(200).body(hex::encode(raw));
+        });
+        let metadata_read = server.mock(|when, then| {
+            when.method(GET).path(format!("{base}/tx/{txid}"));
+            then.status(200)
+                .header("x-cache", "BYPASS")
+                .header("cache-control", "no-store")
+                .json_body(json!({"txid":txid,"status":{"confirmed":false}}));
+        });
+        let budget = Arc::new(CollectionBudget {
+            requests: AtomicUsize::new(1),
+            bytes: AtomicUsize::new(10_000),
+        });
+        source.budget = Some(budget.clone());
+        assert!(matches!(
+            source
+                .discover_ancestry(OutPoint::new(txid, 0), policy())
+                .await,
+            Err(DiscoveryError::Observation(FailureKind::CollectionLimit))
+        ));
+        assert_eq!(budget.requests.load(Ordering::Relaxed), 0);
+        assert_eq!(raw_read.hits() + metadata_read.hits(), 1);
+    }
+
+    #[tokio::test]
     async fn nested_snapshots_share_budget_and_stop_before_an_extra_request() {
         let server = MockServer::start();
         let (source, _sender) = make_source(&server);
@@ -810,7 +908,9 @@ mod tests {
                 .await,
             Err(FailureKind::Malformed)
         );
-        mock.assert_hits(3);
+        // Discovery starts both bounded node reads, even when the raw side
+        // exceeds the remaining graph byte allowance.
+        mock.assert_hits(4);
         let server = MockServer::start();
         let (source, _sender) = make_source(&server);
         let mock = server.mock(|when, then| {

@@ -35,7 +35,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use crate::services::claim_observation::http::FundingProofStatus;
+use crate::services::claim_observation::http::{AncestryTimingReport, FundingProofStatus};
 use iced::{futures::SinkExt, Task};
 use tokio::sync::watch;
 
@@ -590,7 +590,15 @@ pub enum ClaimEvent {
     FundingChecked(u64, u64, u64, Result<ClaimDepositProgress, String>),
     FundingCheckProgress(u64, u64, u64, &'static str),
     /// Display diagnostics only; never consulted by signing or submission.
-    FundingProofChecked(u64, u64, u64, [FundingProofStatus; 2], bool),
+    FundingProofChecked(
+        u64,
+        u64,
+        u64,
+        [FundingProofStatus; 2],
+        bool,
+        Vec<AncestryTimingReport>,
+        Option<&'static str>,
+    ),
     DepositPoll,
     DepositStatusChecked(u64, u64, u64, DepositStatus),
     /// A read-only ancestry status is only a short-lived observation.
@@ -842,6 +850,8 @@ pub struct ClaimStep1Panel {
     prepared_pair: Option<Box<PreparedClaimPair>>,
     funding_checking: bool,
     funding_proofs: [FundingProofStatus; 2],
+    funding_timing: Vec<AncestryTimingReport>,
+    funding_outer_timeout: Option<&'static str>,
     funding_inline_error: bool,
     funding_task: Option<iced::task::Handle>,
     paired_signing_pending: bool,
@@ -906,6 +916,8 @@ impl ClaimStep1Panel {
             prepared_pair: None,
             funding_checking: false,
             funding_proofs: [FundingProofStatus::Pending; 2],
+            funding_timing: Vec::new(),
+            funding_outer_timeout: None,
             funding_inline_error: false,
             funding_task: None,
             paired_signing_pending: false,
@@ -1088,6 +1100,30 @@ impl ClaimStep1Panel {
         self.funding_proofs[usize::from(chain == ChainId::BitcoinBlake2b)]
     }
 
+    /// Safe, read-only timing text for the current completed deposit check.
+    /// This never contributes to Claim eligibility, signing or submission.
+    pub fn verification_report(&self) -> Option<String> {
+        if !matches!(self.stage, Stage::FundingDeposits(_))
+            || !self.backend_ready()
+            || self.funding_checking
+            || (self.funding_timing.is_empty() && self.funding_outer_timeout.is_none())
+        {
+            return None;
+        }
+        let mut text = format!(
+            "Claim verification timing report v1\nApp version: {}\nCurrent completed attempt (read-only)\n",
+            crate::VERSION.0
+        );
+        for report in &self.funding_timing {
+            text.push_str(&report.to_string());
+            text.push('\n');
+        }
+        if let Some(phase) = self.funding_outer_timeout {
+            text.push_str(&format!("overall_deposit_check_deadline_150s at {phase}\n"));
+        }
+        Some(text)
+    }
+
     /// Indicate whether retained diagnostics warrant the funding Retry control
     /// while no current matching paired review is available. This is a display
     /// affordance, not a finding that either deposit is safe or unsuitable.
@@ -1178,6 +1214,8 @@ impl ClaimStep1Panel {
             self.last_full_check = None;
             self.funding_review = None;
             self.funding_proofs = [FundingProofStatus::Pending; 2];
+            self.funding_timing.clear();
+            self.funding_outer_timeout = None;
             self.funding_inline_error = false;
             self.prepared_pair = None;
             self.funding_checking = false;
@@ -1929,6 +1967,8 @@ impl ClaimStep1Panel {
         self.funding_error = None;
         self.funding_review = None;
         self.funding_proofs = [FundingProofStatus::Pending; 2];
+        self.funding_timing.clear();
+        self.funding_outer_timeout = None;
         self.funding_inline_error = false;
         self.prepared_pair = None;
         let task = Task::stream(iced::stream::channel(
@@ -1941,7 +1981,33 @@ impl ClaimStep1Panel {
                     observed_proofs.lock().unwrap()
                         [usize::from(chain == ChainId::BitcoinBlake2b)] = status;
                 });
+                let timing = Arc::new(std::sync::Mutex::new((
+                    Vec::<AncestryTimingReport>::new(),
+                    [None::<AncestryTimingReport>; 2],
+                )));
+                let observed_timing = timing.clone();
+                let timing_observer = Arc::new(move |report: AncestryTimingReport| {
+                    let mut capture = observed_timing.lock().unwrap();
+                    if report.is_progress() {
+                        capture.1[usize::from(report.chain == ChainId::BitcoinBlake2b)] =
+                            Some(report);
+                    } else {
+                        // Retain the first specific deadline and recent
+                        // outcomes even when many candidates are examined.
+                        // Only the latest progress per chain is held.
+                        if capture.0.len() == 128 {
+                            let discard = capture
+                                .0
+                                .iter()
+                                .position(|prior| !prior.is_deadline())
+                                .unwrap_or(1);
+                            capture.0.remove(discard);
+                        }
+                        capture.0.push(report);
+                    }
+                });
                 let mut inline_error = false;
+                let mut outer_timeout = None;
                 let result = tokio::time::timeout(Duration::from_secs(150), async {
                 let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 use coincube_core::miniscript::bitcoin::hashes::sha256;
@@ -2046,7 +2112,8 @@ impl ClaimStep1Panel {
                     },
                 )
                 .map_err(|_| "The two-chain observation source is unavailable.".to_string())?
-                .with_funding_observer(observer);
+                .with_funding_observer(observer)
+                .with_ancestry_timing_observer(timing_observer);
                 phase = "Verifying both deposits’ chain-specific ancestry";
                 let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 let proof = saved
@@ -2240,11 +2307,23 @@ impl ClaimStep1Panel {
                     review,
                     prepared,
                 })
-            }).await.unwrap_or_else(|_| Err(format!("{phase} timed out. Your deposits remain in your Vaults. Retry verification when the wallets and indexer are available.")));
+            }).await.unwrap_or_else(|_| {
+                outer_timeout = Some(phase);
+                Err(format!("{phase} timed out. Your deposits remain in your Vaults. Retry verification when the wallets and indexer are available."))
+            });
                 if let Err(reason) = &result {
                     log::warn!("Claim deposit verification stopped at {phase}: {reason}");
                 }
                 let proof_status = *proofs.lock().unwrap();
+                let mut timing_reports = {
+                    let capture = timing.lock().unwrap();
+                    let mut reports = capture.0.clone();
+                    if outer_timeout.is_some() {
+                        reports.extend(capture.1.iter().flatten().copied());
+                    }
+                    reports
+                };
+                timing_reports.truncate(130);
                 let _ = output
                     .send(Message::Claim(ClaimEvent::FundingProofChecked(
                         seq,
@@ -2252,6 +2331,8 @@ impl ClaimStep1Panel {
                         revocations,
                         proof_status,
                         inline_error,
+                        timing_reports,
+                        outer_timeout,
                     )))
                     .await;
                 let _ = output
@@ -3549,6 +3630,8 @@ impl ClaimStep1Panel {
                 self.last_full_check = None;
                 self.funding_review = None;
                 self.funding_proofs = [FundingProofStatus::Pending; 2];
+                self.funding_timing.clear();
+                self.funding_outer_timeout = None;
                 self.funding_inline_error = false;
                 self.prepared_pair = None;
                 self.stage = Stage::Preconditions;
@@ -3807,7 +3890,15 @@ impl ClaimStep1Panel {
                 }
                 Task::none()
             }
-            ClaimEvent::FundingProofChecked(seq, generation, revocations, proofs, inline_error) => {
+            ClaimEvent::FundingProofChecked(
+                seq,
+                generation,
+                revocations,
+                proofs,
+                inline_error,
+                timing,
+                outer_timeout,
+            ) => {
                 if seq == self.check_seq
                     && self.funding_checking
                     && matches!(self.stage, Stage::FundingDeposits(_))
@@ -3815,6 +3906,8 @@ impl ClaimStep1Panel {
                     && self.backend_ready()
                 {
                     self.funding_proofs = proofs;
+                    self.funding_timing = timing;
+                    self.funding_outer_timeout = outer_timeout;
                     self.funding_inline_error = inline_error;
                 }
                 Task::none()
@@ -3833,6 +3926,8 @@ impl ClaimStep1Panel {
                     self.funding_status = None;
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
+                    self.funding_timing.clear();
+                    self.funding_outer_timeout = None;
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_error =
@@ -3843,6 +3938,8 @@ impl ClaimStep1Panel {
                 if proof_complete && !self.fork_pair_current() {
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
+                    self.funding_timing.clear();
+                    self.funding_outer_timeout = None;
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = None;
@@ -3908,6 +4005,8 @@ impl ClaimStep1Panel {
                 {
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
+                    self.funding_timing.clear();
+                    self.funding_outer_timeout = None;
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = Some(
@@ -3933,6 +4032,8 @@ impl ClaimStep1Panel {
                     Ok(addresses) => {
                         self.stage = Stage::FundingDeposits(addresses);
                         self.funding_proofs = [FundingProofStatus::Pending; 2];
+                        self.funding_timing.clear();
+                        self.funding_outer_timeout = None;
                         self.funding_inline_error = false;
                         self.deposit_status = None;
                         self.deposit_details_override = None;
@@ -4020,6 +4121,8 @@ impl ClaimStep1Panel {
                         self.deposit_poll_seq = self.deposit_poll_seq.wrapping_add(1);
                         self.funding_review = None;
                         self.funding_proofs = [FundingProofStatus::Pending; 2];
+                        self.funding_timing.clear();
+                        self.funding_outer_timeout = None;
                         self.funding_inline_error = false;
                         self.prepared_pair = None;
                         self.funding_status = Some(
@@ -4556,6 +4659,15 @@ impl State for ClaimStep1Panel {
                         Some(daemon) => self.check_funding(daemon),
                         None => node_unavailable(),
                     },
+                    view::ClaimMessage::CopyVerificationReport => self
+                        .verification_report()
+                        .map(|report| {
+                            Task::done(Message::View(view::Message::CopyWithToast(
+                                report,
+                                "Copied verification timing report".into(),
+                            )))
+                        })
+                        .unwrap_or_else(Task::none),
                     view::ClaimMessage::SignPair => match daemon {
                         Some(daemon) => self.request_paired_signing(daemon),
                         None => node_unavailable(),
