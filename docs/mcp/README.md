@@ -141,6 +141,9 @@ coins. This is coin availability, not proof that signatures or recovery conditio
 are satisfied. Snapshots can change between calls and during sync; do not interpret
 an unsynced zero as authoritative history. Transaction incoming/outgoing values
 reuse the existing UI's representation, not a newly computed net accounting balance.
+Incoming values include wallet-owned outputs, including change or self-transfers.
+Outgoing values are zero for incoming payments: another sender's change is never
+reported as Vault spending.
 Key counts count policy keys, not independently verified people/devices. Recovery
 conditions do not mean recovery can be performed now.
 

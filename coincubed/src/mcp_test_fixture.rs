@@ -43,10 +43,17 @@ pub fn wallet(
             },
             ..Default::default()
         }],
-        output: vec![bitcoin::TxOut {
-            value: bitcoin::Amount::from_sat(55_000),
-            script_pubkey: script,
-        }],
+        output: vec![
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(55_000),
+                script_pubkey: script,
+            },
+            // Unrelated sender change must never become outgoing wallet funds.
+            bitcoin::TxOut {
+                value: bitcoin::Amount::from_sat(945_000),
+                script_pubkey: bitcoin::ScriptBuf::new(),
+            },
+        ],
     };
     let outpoint = bitcoin::OutPoint {
         txid: transaction.compute_txid(),

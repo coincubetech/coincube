@@ -349,13 +349,7 @@ impl VaultReader {
                     transactions: transactions
                         .into_iter()
                         .take(usize::from(input.limit))
-                        .map(|tx| wire::Transaction {
-                            txid: tx.txid.to_string(),
-                            incoming_sats: tx.incoming_amount.to_sat(),
-                            outgoing_sats: tx.outgoing_amount.to_sat(),
-                            timestamp: tx.time,
-                            height: tx.height,
-                        })
+                        .map(project_transaction)
                         .collect(),
                 }))
             }
@@ -393,6 +387,23 @@ impl VaultReader {
     }
 }
 
+#[cfg(any(unix, windows))]
+fn project_transaction(tx: crate::daemon::model::HistoryTransaction) -> wire::Transaction {
+    wire::Transaction {
+        txid: tx.txid.to_string(),
+        incoming_sats: tx.incoming_amount.to_sat(),
+        // The model totals every non-wallet output even for a deposit. In that
+        // case those outputs belong to the sender, not this Vault's spending.
+        outgoing_sats: if tx.is_external() {
+            0
+        } else {
+            tx.outgoing_amount.to_sat()
+        },
+        timestamp: tx.time,
+        height: tx.height,
+    }
+}
+
 #[cfg(all(test, any(unix, windows)))]
 mod tests {
     use super::*;
@@ -401,6 +412,90 @@ mod tests {
         miniscript::descriptor::DescriptorPublicKey,
     };
     use std::str::FromStr;
+
+    #[test]
+    fn history_projection_attributes_only_wallet_spending() {
+        use crate::daemon::model::{Coin, HistoryTransaction};
+        use coincube_core::miniscript::bitcoin::{
+            absolute, bip32, hashes::Hash, transaction, Address, Amount, Network, OutPoint,
+            ScriptBuf, Transaction, TxIn, TxOut, WScriptHash,
+        };
+        let script = ScriptBuf::new_p2wsh(&WScriptHash::all_zeros());
+        let previous_output = OutPoint {
+            txid: coincube_core::miniscript::bitcoin::Txid::all_zeros(),
+            vout: 1,
+        };
+        let coin = Coin {
+            amount: Amount::from_sat(5_000_000_000),
+            outpoint: previous_output,
+            address: Address::from_script(&script, Network::Regtest).unwrap(),
+            block_height: Some(1),
+            derivation_index: bip32::ChildNumber::from(0),
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        };
+        // The first output belongs to the Vault; the second is sender change
+        // for incoming payments and the recipient payment for outgoing ones.
+        let transaction = Transaction {
+            version: transaction::Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![TxIn {
+                previous_output,
+                ..Default::default()
+            }],
+            output: vec![
+                TxOut {
+                    value: Amount::from_sat(1_000_000),
+                    script_pubkey: script.clone(),
+                },
+                TxOut {
+                    value: Amount::from_sat(4_998_999_844),
+                    script_pubkey: ScriptBuf::new_p2wsh(&WScriptHash::from_byte_array([1; 32])),
+                },
+            ],
+        };
+        let mut batch = transaction.clone();
+        batch.output.push(TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: batch.output[0].script_pubkey.clone(),
+        });
+        let batch_history = HistoryTransaction::new(
+            batch,
+            Some(103),
+            Some(1234),
+            vec![],
+            vec![0, 2],
+            Network::Regtest,
+        );
+        let projected_batch = project_transaction(batch_history);
+        assert_eq!(projected_batch.incoming_sats, 1_100_000);
+        assert_eq!(projected_batch.outgoing_sats, 0);
+        for (wallet_inputs, wallet_outputs, expected_incoming, expected_outgoing) in [
+            (vec![], vec![0], 1_000_000, 0),
+            (vec![], vec![0, 1], 4_999_999_844, 0),
+            (vec![coin.clone()], vec![0], 1_000_000, 4_998_999_844),
+            (vec![coin], vec![0, 1], 4_999_999_844, 0),
+        ] {
+            let history = HistoryTransaction::new(
+                transaction.clone(),
+                Some(103),
+                Some(1234),
+                wallet_inputs,
+                wallet_outputs,
+                Network::Regtest,
+            );
+            let projected = project_transaction(history);
+            assert_eq!(projected.txid, transaction.compute_txid().to_string());
+            assert_eq!(projected.incoming_sats, expected_incoming);
+            assert_eq!(projected.outgoing_sats, expected_outgoing);
+            assert_eq!(
+                (projected.height, projected.timestamp),
+                (Some(103), Some(1234))
+            );
+        }
+    }
 
     /// Create a disposable real SQLite wallet and matching GUI wallet wrapper.
     fn fixture() -> (
@@ -501,6 +596,7 @@ mod tests {
             assert_eq!(summary["structuredContent"]["confirmed_sats"], 55_000);
             let history = response(&mut stdin, &mut stdout, call(5, "tenshu_get_transactions", json!({"wallet_id":id,"limit":10}))).await;
             assert_eq!(history["structuredContent"]["transactions"][0]["incoming_sats"], 55_000);
+            assert_eq!(history["structuredContent"]["transactions"][0]["outgoing_sats"], 0);
             let policy = response(&mut stdin, &mut stdout, call(6, "tenshu_get_wallet_policy_summary", json!({"wallet_id":id}))).await;
             assert_eq!(policy["structuredContent"]["recovery"][0]["relative_delay_blocks"], 144);
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
@@ -600,6 +696,7 @@ mod tests {
             };
             assert_eq!(history.transactions.len(), 1);
             assert_eq!(history.transactions[0].incoming_sats, 55_000);
+            assert_eq!(history.transactions[0].outgoing_sats, 0);
             let policy = wire::ipc::call(&socket, &credential, wire::Request::Policy(input(id)))
                 .await
                 .unwrap();
