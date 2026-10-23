@@ -1,10 +1,11 @@
-//! Read-only, deliberately closed protocol. No wallet engine or signing types.
+//! Closed wallet reads and session-only topology drafts. No signing or wallet engine.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
 pub mod capabilities;
 pub use capabilities::{Capabilities, ReadCapability, ReadPermissions};
+pub mod proposal;
 
 #[cfg(feature = "adapter")]
 pub mod adapter;
@@ -46,6 +47,10 @@ pub enum Request {
     History(HistoryInput),
     /// Read deterministic policy structure without exposing keys or descriptors.
     Policy(WalletInput),
+    /// Prepare only a session-local topology draft; never install a wallet.
+    PrepareProposal(proposal::PrepareInput),
+    /// Read the current preparation grant's topology draft.
+    Proposal(proposal::ProposalInput),
 }
 impl Request {
     /// Return wallet scope and its explicitly named read capability.
@@ -57,6 +62,7 @@ impl Request {
             Self::Summary(v) => Some((&v.wallet_id, ReadCapability::Balances)),
             Self::History(v) => Some((&v.wallet_id, ReadCapability::ConfirmedHistory)),
             Self::Policy(v) => Some((&v.wallet_id, ReadCapability::PolicySummary)),
+            Self::PrepareProposal(_) | Self::Proposal(_) => None,
         }
     }
     /// Validate wallet-ID byte length and the 1–50 history limit at runtime.
@@ -64,6 +70,11 @@ impl Request {
         self.scope()
             .is_none_or(|(id, _)| !id.is_empty() && id.len() <= 64)
             && !matches!(self, Self::History(v) if v.limit == 0 || v.limit > 50)
+            && match self {
+                Self::PrepareProposal(v) => v.valid(),
+                Self::Proposal(v) => v.valid(),
+                _ => true,
+            }
     }
 }
 /// Minimal public metadata for a wallet explicitly included in the grant.
@@ -161,6 +172,8 @@ pub enum Response {
     History(History),
     /// Authorized-wallet deterministic policy summary.
     Policy(Policy),
+    /// Session-only topology proposal, not a descriptor or created wallet.
+    Proposal(proposal::Proposal),
 }
 /// Sanitized boundary errors that never carry raw daemon or credential details.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -171,6 +184,8 @@ pub enum Error {
     Unavailable,
     /// Arguments or a frame violate the closed request contract.
     InvalidInput,
+    /// This session already holds a different proposal; no second draft was made.
+    ProposalConflict,
 }
 impl Error {
     /// Return the stable machine-readable code exposed in MCP tool errors.
@@ -179,12 +194,15 @@ impl Error {
             Self::AccessDenied => "access_denied",
             Self::Unavailable => "wallet_unavailable",
             Self::InvalidInput => "invalid_input",
+            Self::ProposalConflict => "proposal_conflict",
         }
     }
 }
-/// The desktop supplies this implementation; credentials never reach the wallet service.
+/// The desktop supplies this closed service; credentials never reach it.
+/// The historical name includes read operations and bounded in-memory drafts,
+/// not wallet mutation. IPC authorization distinguishes these scopes explicitly.
 pub trait Reader: Send + Sync + 'static {
-    /// Project an already-authorized request through the existing wallet engine.
+    /// Handle an already-authorized typed read or session-only draft request.
     ///
     /// The IPC server checks the grant before and after this future completes;
     /// implementations return only the minimized response types above.

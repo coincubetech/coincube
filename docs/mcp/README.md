@@ -135,6 +135,23 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 | `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
 | `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed transactions; no pending history or pagination cursor. |
 | `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
+| `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Staged preparation service only; requires a separate proposal grant that the current GUI does not yet issue. Produces an in-memory topology draft, never keys, a validated descriptor or a wallet. |
+| `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
+
+The proposal service is a development prerequisite for the native setup flow.
+`wallet_proposals` remains false until native consent, key selection, actual
+descriptor validation and trusted creation review are integrated. No setting in
+the existing read-only AI access UI grants this authority. Direct MCP creation
+is prohibited; there is no approve/install/sign/broadcast tool.
+
+The initial proposal shape is deliberately limited to a 3-of-5 primary and one
+explicitly chosen recovery path (1–5 slots, valid threshold, positive block delay)
+for Bitcoin Regtest P2WSH. No recovery values are silently selected by Tenshu.
+No model input accepts keys, descriptors, paths, networks, labels or credentials.
+Only one draft per proposal grant is retained. An exact retry returns that draft;
+changed content or a second request returns `proposal_conflict`. Revocation clears
+access, and native setup must independently verify the live session before using
+a draft. A topology draft always reports `needs_keys` and `descriptor_validated:false`.
 
 Confirmed balance excludes coins with an ongoing spend and includes only confirmed
 UTXOs. Unconfirmed includes unspent change; the UI groups self-change differently.
@@ -150,7 +167,8 @@ Key counts count policy keys, not independently verified people/devices. Recover
 conditions do not mean recovery can be performed now.
 
 No seeds, private keys, passwords, credentials, descriptors, xpubs, addresses,
-scripts, labels, PSBTs, signing or mutating tools are exposed. Signing-session
+scripts, labels, PSBTs, signing or wallet-mutating tools are exposed. Preparation
+changes only bounded session memory and is annotated as state-changing. Signing-session
 status is deferred because the existing remote and LAN workflows do not share a
 single authoritative read API.
 

@@ -77,6 +77,7 @@ def check(binary):
                         "tenshu_get_capabilities", "tenshu_list_wallets",
                         "tenshu_get_wallet_summary", "tenshu_get_transactions",
                         "tenshu_get_wallet_policy_summary",
+                        "tenshu_prepare_wallet_proposal", "tenshu_get_wallet_proposal",
                     }
                     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
                         "name": "tenshu_get_capabilities", "arguments": {}}})

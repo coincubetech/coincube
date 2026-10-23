@@ -63,7 +63,8 @@ pub struct Capabilities {
     pub wallet_data_requires_consent: bool,
     /// Implemented, bounded confirmed-history request limit.
     pub max_confirmed_transactions: u8,
-    /// Build support for preparing a wallet proposal; not a permission grant.
+    /// End-to-end proposal workflow through native consent; not a grant.
+    /// False while only the underlying protocol/service is staged.
     pub wallet_proposals: bool,
     /// Whether an MCP call can create a wallet. Always false for this design.
     pub wallet_creation_via_mcp: bool,
