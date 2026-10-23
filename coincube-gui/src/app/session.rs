@@ -322,9 +322,8 @@ pub fn generation_for(cube_id: &str) -> Option<u64> {
         .map(|s| s.generation)
 }
 
-/// Serialize a native wallet creation admission with lock/close/reopen.
+/// Serialize native authorization persistence with lock/close/reopen.
 /// The callback must be short and synchronous and must not call session APIs.
-#[cfg(feature = "mcp-proposals")]
 pub(crate) fn admit_generation<T>(
     cube_id: &str,
     generation: u64,

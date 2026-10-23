@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
 
 pub mod capabilities;
+pub mod pairing;
 pub use capabilities::{Capabilities, ReadCapability, ReadPermissions};
 pub mod proposal;
 
@@ -20,7 +21,7 @@ pub struct Empty {}
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WalletInput {
-    /// Session-scoped identifier; never a descriptor, filesystem path or account name.
+    /// Client-scoped opaque identifier; never a descriptor, filesystem path or account name.
     #[schemars(length(min = 1, max = 64))]
     pub wallet_id: String,
 }
@@ -28,7 +29,7 @@ pub struct WalletInput {
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HistoryInput {
-    /// Session-scoped identifier obtained from the authorized wallet list.
+    /// Client-scoped opaque identifier obtained from the authorized wallet list.
     #[schemars(length(min = 1, max = 64))]
     pub wallet_id: String,
     /// Maximum confirmed transactions, 1 through 50.

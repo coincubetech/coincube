@@ -394,6 +394,7 @@ mod protocol {
     async fn sdk_initialization_discovery_serialization_and_disconnect() {
         let server = start(Arc::new(Fixture::default()), [true; 3]);
         let adapter = Adapter {
+            pairing: None,
             socket: server.socket.clone(),
             credential: server.grant.credential().into(),
         };
@@ -438,6 +439,7 @@ mod protocol {
     #[tokio::test]
     async fn tool_allowlist_strict_inputs_and_safe_errors() {
         let adapter = Adapter {
+            pairing: None,
             socket: "/not/a/wallet/socket".into(),
             credential: "x".repeat(64),
         };
@@ -497,6 +499,7 @@ mod protocol {
 #[tokio::test]
 async fn capability_discovery_is_static_without_desktop_access() {
     let adapter = coincube_mcp::adapter::Adapter {
+        pairing: None,
         socket: "/not/an/endpoint".into(),
         credential: "not-a-grant".into(),
     };
@@ -508,6 +511,7 @@ async fn capability_discovery_is_static_without_desktop_access() {
     let mut expected = serde_json::json!({
         "schema_version": 1, "wallet_family": "bitcoin_vault_embedded",
         "reads_require_existing_vault":true, "wallet_data_requires_consent":true,
+        "persistent_client_pairing":true,
         "max_confirmed_transactions":50, "wallet_proposals": cfg!(feature = "native-proposals"),
         "wallet_creation_via_mcp":false, "public_key_material":false, "secrets_or_signing":false
     });

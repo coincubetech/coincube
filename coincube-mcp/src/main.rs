@@ -15,12 +15,21 @@ async fn run() -> Result<(), ()> {
     if !cfg!(any(unix, windows)) {
         return Err(());
     }
-    let socket = std::env::var_os("TENSHU_MCP_SOCKET").ok_or(())?.into();
+    let pairing = std::env::var_os("TENSHU_MCP_PAIRING").map(std::path::PathBuf::from);
+    let socket = std::env::var_os("TENSHU_MCP_SOCKET").map(std::path::PathBuf::from);
+    if pairing.is_some() == socket.is_some() {
+        return Err(());
+    }
+    let socket = socket.unwrap_or_default();
     let credential = std::env::var("TENSHU_MCP_CREDENTIAL").map_err(|_| ())?;
     if credential.len() != 64 || !credential.bytes().all(|b| b.is_ascii_hexdigit()) {
         return Err(());
     }
-    let adapter = coincube_mcp::adapter::Adapter { socket, credential };
+    let adapter = coincube_mcp::adapter::Adapter {
+        socket,
+        credential,
+        pairing,
+    };
     let transport =
         AsyncRwTransport::<RoleServer, _, _>::new(tokio::io::stdin(), tokio::io::stdout())
             .with_max_line_length(8192);
