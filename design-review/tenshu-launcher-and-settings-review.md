@@ -668,3 +668,13 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Verified live in Chrome (v87):** Developer mode off → Launcher shows no chips with Bitcoin alone, "All networks" alone once Blake2b is on, and all three chips in Developer mode; the menu lists Bitcoin mainnet and, with the Blake2b toggle on, Bitcoin Blake2b mainnet; Create › Network shows the note under "Test networks". Brand click from App preferences and Create returns to the Launcher.
 
 **Prototype mechanics:** the flag is `tenshu.proto.dev` in localStorage, written by the Developer-mode toggle and read by the Launcher and Create at render; a filter left on Live/Test or a test network falls back to "All" when the flag is off.
+
+## Import Bitcoin wallet: full import with keys, no PSBT signing page (2026-10-23, canvas v91)
+
+**Decision (Robert):** importing a wallet is not watch-only. A descriptor carries no secrets, so after the descriptor the user supplies the wallet's keys (recovery words, a hardware device, or a Keychain phone) and the wallet becomes a normal wallet in the Cube: Send, Receive, Activity and Tools work on it with Tenshu signing. The "Sign" step with the unsigned-PSBT round trip (Save PSBT file › sign in the original wallet › Load signed PSBT › Broadcast) is removed.
+
+**What the app does today, for the record:** `app/state/imported_bitcoin.rs` imports public descriptors only ("Use your existing Bitcoin wallet in this Cube. Signing stays with your original wallet or hardware device.") and spends through the PSBT loop, and the Cube step in `home.rs` says the original wallet's signers remain necessary. The resulting Cube looks like any Cube with a Vault, so the limitation only shows at the point of spending. The redesign changes this behaviour; Codex should implement it, not preserve it.
+
+**Prototype (P-Restore, path "import"):** steps are Cube → Source → Keys → Review → Scan → Done. Keys lists each signer from the descriptor with its fingerprint and path, offers Recovery words / Hardware wallet / Keychain phone as the source, and "Review wallet" stays disabled until the key verifies against the fingerprint. Review shows "Keys: 1 of 1 provided · recovery words · verified against the fingerprint". Done summarises the wallet, where its keys live, and that the Recovery Kit now includes it, with "Open Cube". Copy that described a watch-only import was rewritten on the hub, the Cube step and the Source step. Importing a wallet is not Blake2b-specific; only the later Split tool is.
+
+**Verified live in Chrome (v90):** Launcher › Import or restore › Import Bitcoin wallet, through Cube (PIN), Source, Keys (verify), Review, Scan, Done.

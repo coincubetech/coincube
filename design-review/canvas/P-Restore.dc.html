@@ -360,7 +360,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <!-- ---------- IMPORT 2: source ---------- -->
               <sc-if value="{{ v.imp2 }}" hint-placeholder-val="{{ false }}">
                 <div class="form">
-                  <p class="lead" style="margin:0">Use your existing Bitcoin wallet in this Cube. Signing stays with your original wallet or hardware device.</p>
+                  <p class="lead" style="margin:0">Use your existing Bitcoin wallet in this Cube. The descriptor describes the wallet; you add its keys on the next step, and the wallet then works like any other wallet here.</p>
                   <div class="fld">
                     <span class="lbl" id="src-l">Source wallet</span>
                     <div class="seg" role="group" aria-labelledby="src-l">
@@ -398,7 +398,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                       <button type="button" class="btn" onClick="{{ readAccount }}">Read account</button>
                       <span class="cap" aria-live="polite">{{ hwStatus }}</span>
                     </div>
-                    <p class="cap">Read one standard Bitcoin mainnet singlesig account from a connected hardware wallet (BIP84, BIP49 or BIP44). The device stays responsible for signing; its seed is never copied into this Cube.</p>
+                    <p class="cap">Read one standard Bitcoin mainnet singlesig account from a connected hardware wallet (BIP84, BIP49 or BIP44). The device keeps its seed and signs for this wallet; the account is read, not copied.</p>
                   </sc-if>
 
                   <div class="fld">
@@ -431,14 +431,66 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                 <div class="acts"><button type="button" class="btn primary" onClick="{{ next }}">Review wallet</button></div>
               </sc-if>
 
-              <!-- ---------- IMPORT 3: review (verify before importing) ---------- -->
+              <!-- ---------- IMPORT 3: keys (the descriptor names the signers; the user supplies each key) ---------- -->
               <sc-if value="{{ v.imp3 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <div>
+                    <h3>Add the wallet's keys</h3>
+                    <p class="lead">The descriptor names 1 signer. Provide its key so this Cube can sign with the wallet. Each key is checked against its fingerprint before it is accepted.</p>
+                  </div>
+                  <div class="kv">
+                    <p><b>Key 1 of 1</b> · fingerprint <span class="mono">a1b2c3d4</span> · path <span class="mono">84'/0'/0'</span></p>
+                    <sc-if value="{{ v.keyOk }}" hint-placeholder-val="{{ false }}"><p class="okline" role="status"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><span>Verified · matches a1b2c3d4 · {{ keySrcLabel }}</span></p></sc-if>
+                    <sc-if value="{{ v.keyPending }}" hint-placeholder-val="{{ true }}"><p class="cap">Not provided yet</p></sc-if>
+                  </div>
+                  <div class="fld">
+                    <span class="lbl" id="key-l">Where is this key?</span>
+                    <div class="seg" role="group" aria-labelledby="key-l">
+                      <button type="button" aria-pressed="{{ keySrc.words }}" onClick="{{ pickKeyWords }}">Recovery words</button>
+                      <button type="button" aria-pressed="{{ keySrc.hw }}" onClick="{{ pickKeyHw }}">Hardware wallet</button>
+                      <button type="button" aria-pressed="{{ keySrc.kc }}" onClick="{{ pickKeyKc }}">Keychain phone</button>
+                    </div>
+                  </div>
+                  <sc-if value="{{ v.keyWords }}" hint-placeholder-val="{{ true }}">
+                    <div class="fld">
+                      <label for="key-words">Recovery words</label>
+                      <input id="key-words" class="inp wide mono" type="text" spellcheck="false" autocomplete="off" placeholder="12 or 24 words, separated by spaces">
+                      <p class="cap">Words are checked locally and stored inside this Cube, protected by its PIN, like any Vault key.</p>
+                    </div>
+                    <div class="fld">
+                      <label for="key-pass">Passphrase (if the wallet used one)</label>
+                      <input id="key-pass" class="inp" style="width:280px" type="password" autocomplete="off" placeholder="Optional">
+                    </div>
+                    <div class="vrow"><button type="button" class="btn" onClick="{{ verifyKey }}">Verify key</button></div>
+                  </sc-if>
+                  <sc-if value="{{ v.keyHw }}" hint-placeholder-val="{{ false }}">
+                    <fieldset class="radios">
+                      <legend>Connected device</legend>
+                      <label class="ro"><input type="radio" name="keydev" checked="{{ hwOn }}" onChange="{{ noop }}"><span>Ledger-style device · <span class="mono">a1b2c3d4</span></span></label>
+                    </fieldset>
+                    <p class="cap">The seed stays on the device. Tenshu asks the device to sign whenever this wallet spends.</p>
+                    <div class="vrow"><button type="button" class="btn" onClick="{{ verifyKey }}">Check device</button></div>
+                  </sc-if>
+                  <sc-if value="{{ v.keyKc }}" hint-placeholder-val="{{ false }}">
+                    <p class="cap">Pair the phone that holds this key. The phone signs for this wallet the way it signs for a Vault.</p>
+                    <div class="vrow"><button type="button" class="btn" onClick="{{ verifyKey }}">Pair phone</button><a class="linkbtn" href="P-Signing.dc.html">How pairing works</a></div>
+                  </sc-if>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn" onClick="{{ back }}">Back</button>
+                  <button type="button" class="btn primary" disabled="{{ keysNotReady }}" onClick="{{ next }}">Review wallet</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- IMPORT 4: review (verify before importing) ---------- -->
+              <sc-if value="{{ v.imp4 }}" hint-placeholder-val="{{ false }}">
                 <div class="form">
                   <h3>Review Bitcoin wallet</h3>
                   <div class="kv">
                     <p><b>Wallet details</b></p>
                     <p>Bitcoin mainnet · Native SegWit · 1 signer</p>
                     <p>Signer fingerprints: <span class="mono">a1b2c3d4</span></p>
+                    <p>Keys: 1 of 1 provided · {{ keySrcLabel }} · verified against the fingerprint</p>
                   </div>
                   <div class="fld">
                     <span class="lbl">First receive address</span>
@@ -449,7 +501,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                     <p>History starts: Beginning</p>
                     <p>Address search: 200 receive and 200 change addresses</p>
                   </div>
-                  <p class="cap">Your balance and transactions will appear after the scan finishes. Then update the Cube Recovery Kit to include this wallet.</p>
+                  <p class="cap">Your balance and transactions will appear after the scan finishes. The Cube Recovery Kit is updated to include this wallet and its keys.</p>
                   <div>
                     <button type="button" class="linkbtn" aria-expanded="{{ detailsOpen }}" onClick="{{ toggleDetails }}">{{ detailsLabel }}</button>
                     <sc-if value="{{ v.details }}" hint-placeholder-val="{{ false }}">
@@ -458,13 +510,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                   </div>
                 </div>
                 <div class="acts">
-                  <button type="button" class="btn" onClick="{{ back }}">Edit wallet</button>
+                  <button type="button" class="btn" onClick="{{ back }}">Back to keys</button>
                   <button type="button" class="btn primary" onClick="{{ next }}">Import and scan wallet</button>
                 </div>
               </sc-if>
 
-              <!-- ---------- IMPORT 4: scan ---------- -->
-              <sc-if value="{{ v.imp4 }}" hint-placeholder-val="{{ false }}">
+              <!-- ---------- IMPORT 5: scan ---------- -->
+              <sc-if value="{{ v.imp5 }}" hint-placeholder-val="{{ false }}">
                 <div class="form">
                   <h3>{{ scanHead }}</h3>
                   <sc-if value="{{ v.scanOk }}" hint-placeholder-val="{{ true }}">
@@ -482,27 +534,22 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                 </div>
               </sc-if>
 
-              <!-- ---------- IMPORT 5: unsigned PSBT round-trip ---------- -->
-              <sc-if value="{{ v.imp5 }}" hint-placeholder-val="{{ false }}">
+              <!-- ---------- IMPORT 6: done ---------- -->
+              <sc-if value="{{ v.imp6 }}" hint-placeholder-val="{{ false }}">
                 <div class="form">
                   <div>
-                    <h3>Draft ID: [synthetic]</h3>
-                    <p class="lead">Save or copy this PSBT for the original signing wallet. Load the signed file or paste its base64 below. For multisig, repeat with each signer.</p>
+                    <h3>{{ cubeName }} is ready</h3>
+                    <p class="lead">Imported wallet · Bitcoin mainnet · Native SegWit · 1 key verified. It works like any wallet in this Cube: Send, Receive, Activity and Tools, with Tenshu signing.</p>
                   </div>
+                  <div class="kv">
+                    <p>Balance and history: from the scan</p>
+                    <p>Keys: {{ keySrcLabel }}, protected by this Cube's PIN</p>
+                    <p>Recovery Kit: updated to include this wallet</p>
+                  </div>
+                  <p class="cap">Any pre-fork coins can be split later from Vault › Tools once Bitcoin Blake2b is turned on for this device.</p>
                 </div>
-                <ol class="loop">
-                  <li class="{{ loop.c1 }}"><span class="n">1</span><span class="main">Save PSBT file<br><span class="s">Unsigned, for the original wallet</span></span><button type="button" class="btn sm" onClick="{{ psbtSave }}">Save PSBT file</button><button type="button" class="btn sm">Copy PSBT</button></li>
-                  <li class="{{ loop.c2 }}"><span class="n">2</span><span class="main">Sign in the original wallet<br><span class="s">Outside Tenshu</span></span></li>
-                  <li class="{{ loop.c3 }}"><span class="n">3</span><span class="main">Load signed PSBT<br><span class="s">File, or paste below</span></span><button type="button" class="btn sm" disabled="{{ loop.loadOff }}" onClick="{{ psbtLoad }}">Load signed PSBT</button></li>
-                  <li class="{{ loop.c4 }}"><span class="n">4</span><span class="main">Broadcast<br><span class="s">{{ loop.ready }}</span></span><button type="button" class="btn sm primary" disabled="{{ loop.bcOff }}" onClick="{{ psbtBroadcast }}">Broadcast transaction</button></li>
-                </ol>
-                <div class="form">
-                  <div class="fld">
-                    <label for="paste">Paste signed PSBT (base64)</label>
-                    <div class="vrow"><input id="paste" class="inp mono" type="text" spellcheck="false" placeholder="Paste signed PSBT (base64)"><button type="button" class="btn" onClick="{{ psbtLoad }}">Import signatures</button></div>
-                  </div>
-                  <sc-if value="{{ loop.hasNotice }}" hint-placeholder-val="{{ false }}"><p class="okline" role="status"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg><span>{{ loop.notice }}</span></p></sc-if>
-                  <p class="cap">Sign with a connected device: Connect and unlock a hardware wallet to sign here.</p>
+                <div class="acts">
+                  <a class="btn primary" href="P-Opening.dc.html">Open Cube</a>
                 </div>
               </sc-if>
 
@@ -686,7 +733,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   <div class="foot">{{ foot }}</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"path":{"editor":"enum","options":["hub","import","kit","phone","heir","phrase"],"default":"hub","section":"Review"},"step":{"editor":"enum","options":["1","2","3","4","5"],"default":"1","section":"Review"},"error":{"editor":"enum","options":["none","invalid","mismatch","signedOut","unavailable","delayed","network","pin"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+<script type="text/x-dc" data-dc-script data-props='{"path":{"editor":"enum","options":["hub","import","kit","phone","heir","phrase"],"default":"hub","section":"Review"},"step":{"editor":"enum","options":["1","2","3","4","5","6"],"default":"1","section":"Review"},"error":{"editor":"enum","options":["none","invalid","mismatch","signedOut","unavailable","delayed","network","pin"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
   constructor(p) { super(p); this.state = { lv: null }; }
   renderVals() {
@@ -697,7 +744,7 @@ class Component extends DCLogic {
 
     // Step lists follow the app's order (home.rs, imported_bitcoin.rs, installer/mod.rs step sequences)
     const STEPS = {
-      import: ['Cube', 'Source', 'Review', 'Scan', 'Sign'],
+      import: ['Cube', 'Source', 'Keys', 'Review', 'Scan', 'Done'],
       kit: ['Sign in', 'Cube', 'Password', 'PIN', 'Finish'],
       phone: ['Approve', 'PIN', 'Finish'],
       heir: ['Vault', 'Approve', 'PIN', 'Finish'],
@@ -708,8 +755,8 @@ class Component extends DCLogic {
       import: {
         invalid: [2, 'Enter the wallet creation date in YYYY-MM-DD format.'],
         signedOut: [2, 'Sign in to Connect or choose another Bitcoin server.'],
-        network: [4, 'Could not synchronize this Bitcoin wallet. Check the Bitcoin server and your connection, then retry synchronization.'],
-        mismatch: [4, 'This Bitcoin server reported a different wallet or chain. Check the wallet setup and retry synchronization.'],
+        network: [5, 'Could not synchronize this Bitcoin wallet. Check the Bitcoin server and your connection, then retry synchronization.'],
+        mismatch: [5, 'This Bitcoin server reported a different wallet or chain. Check the wallet setup and retry synchronization.'],
         unavailable: [5, 'More signer signatures are needed before broadcast.'],
         pin: [1, 'PIN codes do not match']
       },
@@ -751,9 +798,9 @@ class Component extends DCLogic {
       ? Object.assign({
           path: L.path, step: startStep, err: leverErr ? L.err : 'none', show: false, choice: false,
           src: 'desc', scan: L.err === 'invalid' && L.path === 'import' ? 'date' : 'begin', date: L.err === 'invalid' ? '2024-13-40' : '', server: L.err === 'signedOut' && L.path === 'import' ? 'connect' : 'public',
-          purpose: 'bip84', hwRead: false, details: false,
+          purpose: 'bip84', hwRead: false, details: false, keySrc: 'words', keyOk: false,
           codeSent: L.path === 'kit' && startStep === 1 ? false : true, code: '', codeBad: false, pick: 'Household 2024',
-          kitPhase: 'entry', psbt: 0, node: 'connect', fin: 'idle', name: L.path === 'phrase' ? 'Travel fund' : 'Imported Vault (watch)',
+          kitPhase: 'entry', psbt: 0, node: 'connect', fin: 'idle', name: L.path === 'phrase' ? 'Travel fund' : 'Imported wallet',
           words: Array.from({ length: 12 }, () => '')
         }, pinPre)
       : this.state;
@@ -784,13 +831,13 @@ class Component extends DCLogic {
       phrase: { title: 'No entry point in this build.', text: 'The screen exists in the app, but nothing opens it. Drawn for review.' }
     };
     const PATHS = [
-      { id: 'import', label: 'Import Bitcoin wallet', title: 'Import Bitcoin wallet', line: 'Watch an existing wallet. Signing stays with it.', tag: 'Bitcoin only', icon: I.imp },
+      { id: 'import', label: 'Import Bitcoin wallet', title: 'Import Bitcoin wallet', line: 'Bring an existing wallet and its keys into a Cube.', tag: 'Bitcoin only', icon: I.imp },
       { id: 'kit', label: 'Recovery Kit', title: 'Restore from Cube Recovery Kit', line: 'Your Recovery Kit and its recovery password.', tag: 'Connect sign-in', icon: I.kit },
       { id: 'phone', label: 'Recover with phone', title: 'Recover with phone', line: "Approve on the phone that holds this Cube's backup.", tag: 'Connect sign-in', icon: I.phone },
       { id: 'heir', label: 'Recover a Vault', title: 'Recover a Vault', line: "Vaults you're a keyholder for.", tag: 'Off in this build', icon: I.heir, off: true },
       { id: 'phrase', label: 'Recovery phrase', title: 'Recover Wallet', line: 'A Liquid wallet from 12 words.', tag: 'No entry point', icon: I.phrase, off: true }
     ];
-    const openPath = (id, st) => go({ path: id, step: st || 1, err: 'none', choice: false, kitPhase: 'entry', fin: 'idle', psbt: 0, codeSent: id !== 'kit', p1: ['', '', '', ''], p2: ['', '', '', ''] });
+    const openPath = (id, st) => go({ path: id, step: st || 1, err: 'none', choice: false, kitPhase: 'entry', fin: 'idle', psbt: 0, keySrc: 'words', keyOk: false, codeSent: id !== 'kit', p1: ['', '', '', ''], p2: ['', '', '', ''] });
     const navItems = [{ id: 'hub', label: 'Overview', icon: I.hub }].concat(PATHS).map((p) => ({
       label: p.label, icon: p.icon,
       cur: path === p.id ? 'page' : 'false',
@@ -861,7 +908,7 @@ class Component extends DCLogic {
     const PSBT_NOTICE = ['', 'PSBT saved. Open it in the original signing wallet, then load the signed file here.', 'Signed PSBT loaded and verified.', 'Ready to broadcast · Final transaction ID: [synthetic]'];
     const ps = s.psbt;
 
-    const retryable = errHere && (path === 'import' ? step === 4 : (['network', 'mismatch', 'delayed', 'unavailable', 'invalid'].indexOf(s.err) >= 0 && !(path === 'kit' && s.err === 'invalid')));
+    const retryable = errHere && (path === 'import' ? step === 5 : (['network', 'mismatch', 'delayed', 'unavailable', 'invalid'].indexOf(s.err) >= 0 && !(path === 'kit' && s.err === 'invalid')));
     const RETRY_LABEL = { import: 'Retry synchronization', kit: 'Try again', phone: 'Try again', heir: 'Try again', phrase: 'Try again' };
 
     const FOOT = {
@@ -888,11 +935,12 @@ class Component extends DCLogic {
       v: {
         hub: path === 'hub', path: path !== 'hub', choice: s.choice,
         cubeStep,
-        imp2: is('import', 2), imp3: is('import', 3), imp4: is('import', 4), imp5: is('import', 5),
+        imp2: is('import', 2), imp3: is('import', 3), imp4: is('import', 4), imp5: is('import', 5), imp6: is('import', 6),
+        keyWords: s.keySrc === 'words', keyHw: s.keySrc === 'hw', keyKc: s.keySrc === 'kc', keyOk: !!s.keyOk, keyPending: !s.keyOk,
         srcDesc: s.src === 'desc', srcHw: s.src === 'hw', scanDate: s.scan === 'date',
         serverUrl: s.server === 'esplora' || s.server === 'electrum', serverCap: !!SERVER_CAP[s.server],
         details: s.details,
-        scanOk: !(errHere && path === 'import' && step === 4),
+        scanOk: !(errHere && path === 'import' && step === 5),
         kit1: is('kit', 1), codeSent: s.codeSent, codeBad: s.codeBad,
         kit2: is('kit', 2), kitList: !(errHere && s.err === 'unavailable'),
         kit3: is('kit', 3), kitEntry: s.kitPhase === 'entry' && !(errHere && (s.err === 'mismatch' || s.err === 'delayed' || s.err === 'network')), kitBusy: s.kitPhase === 'busy', kitReady: s.kitPhase === 'ready',
@@ -911,7 +959,7 @@ class Component extends DCLogic {
       // create step
       cubeHead: path === 'import' ? 'Create a Cube for your Bitcoin wallet' : 'Create a new Cube',
       cubeLead: path === 'import'
-        ? 'Create and back up your Cube first, then import the public descriptors for your existing Bitcoin wallet. Your original wallet signers remain necessary to spend.'
+        ? 'Create and back up your Cube first, then import your existing Bitcoin wallet: its descriptor, then its keys. The wallet then works like any other wallet in this Cube.'
         : 'Name the Cube and set its PIN, then enter the phrase.',
       cubeName: s.name,
       setName: (e) => go({ name: e && e.target ? String(e.target.value) : s.name }),
@@ -955,17 +1003,12 @@ class Component extends DCLogic {
       detailsOpen: s.details ? 'true' : 'false',
       detailsLabel: s.details ? 'Hide descriptor details' : 'Show descriptor details',
       toggleDetails: () => go({ details: !s.details }),
-      scanHead: errHere && path === 'import' && step === 4 ? 'Bitcoin history needs attention' : 'Scanning your Bitcoin wallet history',
-      loop: {
-        c1: ps >= 1 ? 'done' : '', c2: ps >= 2 ? 'done' : '', c3: ps >= 2 ? 'done' : '', c4: ps >= 4 ? 'done' : '',
-        loadOff: ps < 1,
-        bcOff: ps < 2 || (errHere && s.err === 'unavailable'),
-        ready: ps >= 2 ? 'Ready to broadcast' : 'After every needed signature',
-        hasNotice: ps >= 1 && ps <= 3, notice: PSBT_NOTICE[Math.min(ps, 3)] || ''
-      },
-      psbtSave: () => go({ psbt: Math.max(ps, 1) }),
-      psbtLoad: () => go({ psbt: 2 }),
-      psbtBroadcast: () => go({ psbt: 4 }),
+      scanHead: errHere && path === 'import' && step === 5 ? 'Bitcoin history needs attention' : 'Scanning your Bitcoin wallet history',
+      keySrc: { words: s.keySrc === 'words' ? 'true' : 'false', hw: s.keySrc === 'hw' ? 'true' : 'false', kc: s.keySrc === 'kc' ? 'true' : 'false' },
+      keySrcLabel: s.keySrc === 'words' ? 'recovery words' : s.keySrc === 'hw' ? 'hardware wallet' : 'Keychain phone',
+      pickKeyWords: () => go({ keySrc: 'words', keyOk: false }), pickKeyHw: () => go({ keySrc: 'hw', keyOk: false }), pickKeyKc: () => go({ keySrc: 'kc', keyOk: false }),
+      verifyKey: () => go({ keyOk: true }),
+      keysNotReady: !s.keyOk,
 
       // kit
       sendCode: () => go({ codeSent: true }),

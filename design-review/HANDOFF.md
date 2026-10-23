@@ -168,3 +168,15 @@ review doc section in parentheses.
   The former "Show test networks by default" preference is gone.
 - The "Tenshu" mark at the top left of every screen is a button that returns
   to the Launcher without locking the open Cube.
+- **Import Bitcoin wallet is a full import, not watch-only.** This is a
+  behaviour change from today's `app/state/imported_bitcoin.rs` and the
+  "Create a Cube for your Bitcoin wallet" step in `home.rs`, which import public
+  descriptors only and spend through "Save PSBT file / Load signed PSBT / Sign
+  with a connected device / Broadcast". In the redesign the user supplies the
+  wallet's keys after the descriptor (recovery words, a hardware device, or a
+  Keychain phone), each checked against its fingerprint, and the imported
+  wallet then behaves like any wallet in the Cube with Tenshu signing. The
+  PSBT round-trip page is gone; hardware-held keys sign through the normal Send
+  flow as a Vault key does. Steps: Cube → Source → Keys → Review → Scan → Done
+  (`P-Restore`, path "import"). Treat the current code as the thing to change,
+  not as a constraint.
