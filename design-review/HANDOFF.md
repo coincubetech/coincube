@@ -41,7 +41,7 @@ Implement none of these. They exist only so the prototype could be clicked throu
 | --- | --- | --- |
 | `localStorage` keys `tenshu.proto.open` and `tenshu.proto.seen` | Share "which Cube is open" across artboards | In-memory app state (`gui/tab.rs::State`, `app/session.rs`) |
 | `localStorage` key `tenshu.proto.b2b` | Share the Bitcoin Blake2b device toggle across artboards | A persisted per-device app setting (next to Developer mode in `app/view/settings/general.rs`); when off, nothing Blake2b is rendered anywhere |
-| `localStorage` key `tenshu.proto.dev` | Share the Developer-mode toggle across artboards | The existing Developer-mode device setting; when off, no test network is rendered anywhere (no Live/Test filter chips, no test networks in the Launcher menu or Cube list, none in Create) |
+| `localStorage` key `tenshu.proto.dev` | Share the Developer-mode toggle across artboards | The existing Developer-mode device setting; when off, no test network is rendered anywhere (no "Test networks" filter chip, no test networks in the Launcher menu or Cube list, none in Create) |
 | `P-Locking` / `V3-Locking` artboards | The runtime navigates on a link before the link's own handler runs | Lock Cube is one action: clear the session, return to the Launcher |
 | `P-Opening` mounting `P-Overview` after 900 ms via `dc-import` | No programmatic navigation in the runtime | Opening finishes → Overview, no timer |
 | Dashed "picker" buttons (`.pb`) and `data-props` levers | Reach lever-only states by clicking | Real state from the daemon / Connect |
@@ -162,8 +162,8 @@ review doc section in parentheses.
   the Launcher's network menu or Cube list, not in Create's network step, not in
   Transfer, Tools, Settings or Connect. Robert may later make this an account
   entitlement again; keep the gate in one place.
-- Developer mode gates test networks the same way: off means no Live/Test
-  filter chips on the Launcher, no test network in its menu or Cube list, and
+- Developer mode gates test networks the same way: off means no "Test networks"
+  filter chip on the Launcher (All and Live stay), no test network in its menu or Cube list, and
   Create's "Test networks" group shows only the pointer to App preferences.
   The former "Show test networks by default" preference is gone.
 - The "Tenshu" mark at the top left of every screen is a button that returns

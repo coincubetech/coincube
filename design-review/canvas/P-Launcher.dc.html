@@ -593,7 +593,8 @@ class Component extends DCLogic {
     const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances };
     const go = (patch) => this.setState(Object.assign({}, cur, { networkMenu: false, pin: null, showPin: false }, patch));
 
-    const chips = (DEV ? [['all', 'All networks'], ['live', 'Live networks'], ['test', 'Test networks']] : []).map(([k, label]) => ({
+    // Robert (2026-10-23): keep the chips, but hide the Test networks chip when Developer mode is off
+    const chips = [['all', 'All networks'], ['live', 'Live networks']].concat(DEV ? [['test', 'Test networks']] : []).map(([k, label]) => ({
       label, cls: f === k ? 'on' : '', pressed: String(f === k), pick: () => go({ filter: k })
     }));
     const networkOn = !!CH[f];
