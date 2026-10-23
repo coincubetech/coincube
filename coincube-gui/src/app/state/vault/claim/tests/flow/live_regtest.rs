@@ -703,29 +703,19 @@ async fn claim_gui_regtest_driver() {
         return;
     }
     if init["mode"].as_str() == Some("paired-wizard-deposits") {
-        // The fixture supplies a checked precondition so this test targets
-        // the real two-chain reservation and address-preparation transition.
-        // It does not manufacture a signer or submission authorization.
-        panel.pre.target = Some("fork-cube".into());
-        panel.pre.shape = None;
-        panel.pre.checked = Some(checked_ok(unix_now()));
-        panel.backend = BackendState::Ready;
+        // Reload probed the healthy Vault and prepared paired deposit
+        // addresses automatically. Keep the real entry transition under test;
+        // this binding is needed only for later two-chain verification.
         panel.bind_fork_daemon(Some(ClaimForkBinding::new(
             &fork_dyn,
             &fork_wallet,
             _sender.subscribe(),
         )));
-        assert!(panel.can_prepare_funding());
-        let task = panel.update(
-            Some(dyn_daemon.clone()),
-            &cache,
-            Message::View(view::Message::Claim(view::ClaimMessage::StartFunding)),
-        );
-        drive(&mut panel, &dyn_daemon, &cache, task).await;
         let Stage::FundingDeposits(addresses) = &panel.stage else {
             panic!(
-                "paired deposit preparation failed: {:?}",
-                panel.funding_error
+                "automatic paired deposit preparation failed: stage={:?}, funding_error={:?}",
+                std::mem::discriminant(&panel.stage),
+                panel.funding_error,
             );
         };
         assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
