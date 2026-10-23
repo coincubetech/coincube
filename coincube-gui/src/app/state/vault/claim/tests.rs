@@ -6490,11 +6490,32 @@ async fn funded_wizard_keeps_stages_visible_and_hides_addresses_until_expanded()
                     labels.0
                 );
             }
+            let details_control = if expanded {
+                "Hide deposit addresses"
+            } else {
+                "Deposit addresses"
+            };
+            assert!(labels.0.iter().any(|label| label == details_control));
+            for expected in ["Bitcoin · minimum", "Bitcoin Blake2b · minimum"] {
+                assert_eq!(
+                    labels.0.iter().any(|label| label.contains(expected)),
+                    expanded,
+                    "{expected}: {:?}",
+                    labels.0
+                );
+            }
             assert_eq!(
                 labels
                     .0
                     .iter()
                     .any(|label| label.contains("bc1q-example-bitcoin-deposit")),
+                expanded
+            );
+            assert_eq!(
+                labels
+                    .0
+                    .iter()
+                    .any(|label| label.contains("bc1q-example-btcb2-deposit")),
                 expanded
             );
         } else if scenario.starts_with("proof-") {

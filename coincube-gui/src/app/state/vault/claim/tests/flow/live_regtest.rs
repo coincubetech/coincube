@@ -718,19 +718,31 @@ async fn claim_gui_regtest_driver() {
                 panel.funding_error,
             );
         };
+        let addresses = addresses.clone();
         assert_ne!(addresses.bitcoin_deposit, addresses.btcb2_deposit);
         assert!(!panel.can_sign_or_submit());
+        if !panel.deposit_details_expanded() {
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Claim(
+                    view::ClaimMessage::ToggleDepositDetails,
+                )),
+            );
+            drive(&mut panel, &dyn_daemon, &cache, task).await;
+        }
+        assert!(panel.deposit_details_expanded());
         let deposit_labels = rendered_labels(&panel, &cache).await;
-        assert!(has_label(
-            &deposit_labels,
-            "Prepare Bitcoin and Bitcoin Blake2b deposits"
-        ));
+        assert!(
+            has_label(&deposit_labels, "1. Deposits"),
+            "deposit labels: {:?}",
+            deposit_labels
+        );
+        assert!(has_label(&deposit_labels, "Hide deposit addresses"));
         assert!(has_label(&deposit_labels, &addresses.bitcoin_deposit));
         assert!(has_label(&deposit_labels, &addresses.btcb2_deposit));
-        assert!(has_label(
-            &deposit_labels,
-            "Deposit status — updates automatically"
-        ));
+        assert!(has_label(&deposit_labels, "Bitcoin · minimum"));
+        assert!(has_label(&deposit_labels, "Bitcoin Blake2b · minimum"));
         assert!(!has_label(&deposit_labels, "Broadcast Transaction"));
         use coincube_core::miniscript::bitcoin::hashes::{sha256, Hash as _};
         let descriptor = require_vault_descriptor(&panel.wallet).unwrap().clone();
@@ -790,13 +802,29 @@ async fn claim_gui_regtest_driver() {
             "the production signer gate remains closed"
         );
         assert!(verified, "paired Claim funding preview was not verified");
+        if !panel.deposit_details_expanded() {
+            let task = panel.update(
+                Some(dyn_daemon.clone()),
+                &cache,
+                Message::View(view::Message::Claim(
+                    view::ClaimMessage::ToggleDepositDetails,
+                )),
+            );
+            drive(&mut panel, &dyn_daemon, &cache, task).await;
+        }
+        assert!(panel.deposit_details_expanded());
         let preview_labels = rendered_labels(&panel, &cache).await;
+        assert!(has_label(&preview_labels, &addresses.bitcoin_deposit));
+        assert!(has_label(&preview_labels, &addresses.btcb2_deposit));
+        assert!(has_label(&preview_labels, "Transaction details"));
         assert!(has_label(
             &preview_labels,
-            "Paired transaction preview — read only"
+            "Bitcoin-only deposit — replay protected"
         ));
-        assert!(has_label(&preview_labels, "Bitcoin-only funding coin"));
-        assert!(has_label(&preview_labels, "BTCB2-only funding coin"));
+        assert!(has_label(
+            &preview_labels,
+            "BTCB2-only deposit — replay protected"
+        ));
         assert!(has_label(&preview_labels, "Before fork"));
         assert!(!has_label(&preview_labels, "OP_RETURN"));
         let review = panel.funding_review().unwrap();
@@ -870,6 +898,22 @@ async fn claim_gui_regtest_driver() {
         drive(&mut panel, &dyn_daemon, &cache, task).await;
         assert!(panel.funding_review().is_some() && panel.prepared_pair.is_some());
         assert!(panel.funding_error.is_none());
+        let final_review = panel.funding_review().unwrap();
+        let shared_count = final_review.bitcoin.shared.len();
+        let expected_bitcoin_inputs: std::collections::BTreeSet<_> = final_review
+            .bitcoin
+            .shared
+            .iter()
+            .map(|row| row.outpoint)
+            .chain([final_review.bitcoin.funding.outpoint])
+            .collect();
+        let expected_btcb2_inputs: std::collections::BTreeSet<_> = final_review
+            .fork
+            .shared
+            .iter()
+            .map(|row| row.outpoint)
+            .chain([final_review.fork.funding.outpoint])
+            .collect();
         emit(json!({"event":"paired-deposits-checked-after-stale"}));
         let command = read(&mut input);
         if command["action"] == "quit" {
@@ -889,15 +933,37 @@ async fn claim_gui_regtest_driver() {
             }
             _ => panic!("paired signer admission failed: {:?}", panel.funding_error),
         };
+        assert_eq!(bitcoin_psbt.unsigned_tx.input.len(), shared_count + 1);
+        assert_eq!(fork_psbt.unsigned_tx.input.len(), shared_count + 1);
+        assert_eq!(
+            bitcoin_psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_bitcoin_inputs
+        );
+        assert_eq!(
+            fork_psbt
+                .unsigned_tx
+                .input
+                .iter()
+                .map(|input| input.previous_output)
+                .collect::<std::collections::BTreeSet<_>>(),
+            expected_btcb2_inputs
+        );
         let signing_labels = rendered_labels(&panel, &cache).await;
         assert!(has_label(
             &signing_labels,
-            "Sign both ordinary Claim transactions"
+            "Sign both transfers with this Vault"
         ));
         assert!(has_label(&signing_labels, "Bitcoin transaction"));
         assert!(has_label(&signing_labels, "Bitcoin Blake2b transaction"));
-        assert!(has_label(&signing_labels, "+ 1 Bitcoin-only coin"));
-        assert!(has_label(&signing_labels, "+ 1 BTCB2-only coin"));
+        assert!(has_label(
+            &signing_labels,
+            "one verified chain-specific deposit"
+        ));
         assert!(!has_label(&signing_labels, "OP_RETURN"));
         let signed_bitcoin = signer.sign_psbt(bitcoin_psbt.clone()).unwrap();
         let signed_fork = signer.sign_psbt(fork_psbt.clone()).unwrap();
