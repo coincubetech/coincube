@@ -788,10 +788,11 @@ impl Tab {
                     installer.expire_mcp_proposal();
                     if !installer.proposal_install_dispatched || installer.proposal_finished {
                         let root = installer.datadir.clone();
+                        let failure = installer.proposal_failure.clone();
                         installer.stop();
                         let (mut home, task) =
                             Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
-                        home.set_error("Proposal setup locked. Reopen the Cube and approve a new client to continue.");
+                        home.set_error(failure.unwrap_or_else(|| "Proposal setup locked. Reopen the Cube and approve a new client to continue.".into()));
                         self.state = State::Home(home);
                         return task.map(Message::Launch);
                     }
@@ -1031,8 +1032,13 @@ impl Tab {
                     return Task::none();
                 }
                 let root = installer.datadir.clone();
+                let failure = installer.proposal_failure.clone();
                 installer.stop();
-                let (home, task) = Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                let (mut home, task) =
+                    Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                if let Some(failure) = failure {
+                    home.set_error(failure);
+                }
                 self.state = State::Home(home);
                 task.map(Message::Launch)
             }
@@ -1433,6 +1439,13 @@ impl Tab {
             },
             (State::Installer(i), Message::Install(msg)) => {
                 #[cfg(feature = "mcp-proposals")]
+                if i.proposal_failure.is_some() && !matches!(msg, installer::Message::BackToApp(..))
+                {
+                    // No automatic retry or late callback may reopen setup
+                    // after a classified partial failure.
+                    return Task::none();
+                }
+                #[cfg(feature = "mcp-proposals")]
                 if i.context
                     .mcp_proposal
                     .as_ref()
@@ -1450,9 +1463,13 @@ impl Tab {
                         return Task::none();
                     }
                     let root = i.datadir.clone();
+                    let failure = i.proposal_failure.clone();
                     i.stop();
-                    let (home, task) =
+                    let (mut home, task) =
                         Home::new_for_chain(root, Some(crate::chain::ChainId::Regtest));
+                    if let Some(failure) = failure {
+                        home.set_error(failure);
+                    }
                     self.state = State::Home(home);
                     return task.map(Message::Launch);
                 }
@@ -1771,6 +1788,8 @@ impl Tab {
                         Ok(triple) => triple,
                         Err(err) => {
                             error!("Aborting loader transition due to cube save failure");
+                            #[cfg(feature = "mcp-proposals")]
+                            i.finish_proposal_failure("The wallet/Cube setup could not be saved completely. Partial local data is retained. Return to the launcher and inspect the outcome before retrying.");
                             self.pending_split_after_install = false;
                             self.pending_imported_claim = None;
                             return i
@@ -6899,5 +6918,78 @@ mod mcp_proposal_routing_tests {
                 assert!(matches!(tab.state, State::Home(_)));
             }
         }
+    }
+    #[test]
+    fn proposal_association_failure_can_exit_without_reopening_or_retrying() {
+        let _guard = crate::app::session::test_guard();
+        for locked in [false, true] {
+            let root = TestDir::new();
+            let (mut tab, proposal) = proposal_tab(root.path());
+            if let State::Installer(installer) = &mut tab.state {
+                installer.proposal_install_dispatched = true;
+            }
+            if locked {
+                let _ = tab.update(Message::LockCube);
+            }
+            let _ = tab.update(Message::Install(installer::Message::CubeSaved(
+                Err("synthetic association failure".into()),
+                None,
+                None,
+            )));
+            let State::Installer(installer) = &tab.state else {
+                panic!()
+            };
+            assert!(installer.proposal_finished);
+            assert!(installer.proposal_locked);
+            assert!(installer.proposal_failure.is_some());
+            assert!(!proposal.active());
+            drop(installer.view());
+            let retry = tab.update(Message::Install(installer::Message::RetryCubeSave));
+            assert_eq!(retry.units(), 0);
+            let _ = tab.update(Message::Install(installer::Message::BackToApp(
+                Network::Regtest,
+            )));
+            assert!(matches!(tab.state, State::Home(_)));
+            assert!(!crate::app::session::is_open());
+        }
+    }
+    #[test]
+    fn ordinary_native_failure_releases_reservation_only_after_owned_cleanup() {
+        let _guard = crate::app::session::test_guard();
+        let root = TestDir::new();
+        let (mut tab, _) = proposal_tab(root.path());
+        let State::Installer(installer) = &mut tab.state else {
+            panic!()
+        };
+        installer.context.mcp_proposal = None;
+        let ctx = installer.context.clone();
+        *ctx.creation_lease.lock().unwrap() = crate::installer::proposal::reserve(&ctx).unwrap();
+        let wallet = crate::app::settings::WalletId::generate(ctx.descriptor.as_ref().unwrap());
+        let directory = ctx
+            .coincube_directory
+            .network_directory(crate::chain::ChainId::Regtest)
+            .coincubed_data_directory(&wallet);
+        directory.init().unwrap();
+        // A second rejected request does not own the first operation's lease.
+        let _ = tab.update(Message::Install(installer::Message::Installed(
+            Some(wallet.clone()),
+            Err(installer::Error::CreationAdmission("duplicate".into())),
+        )));
+        assert!(ctx.creation_lease.lock().unwrap().is_some());
+        assert!(directory.path().exists());
+        // An ordinary failed operation completes its real cleanup before release.
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let _enter = runtime.enter();
+        let _ = tab.update(Message::Install(installer::Message::Installed(
+            Some(wallet),
+            Err(installer::Error::Unexpected(
+                "synthetic install failure".into(),
+            )),
+        )));
+        assert!(!directory.path().exists());
+        assert!(ctx.creation_lease.lock().unwrap().is_none());
+        let _retry = crate::installer::proposal::reserve(&ctx)
+            .expect("same-context retry must regain the reservation");
+        crate::app::session::close();
     }
 }
