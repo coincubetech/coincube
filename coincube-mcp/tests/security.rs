@@ -505,15 +505,20 @@ async fn capability_discovery_is_static_without_desktop_access() {
         .await
         .unwrap();
     let json = serde_json::to_value(result).unwrap();
-    assert_eq!(
-        json["structuredContent"],
-        serde_json::json!({
-            "schema_version": 1, "wallet_family": "bitcoin_vault_embedded",
-            "reads_require_existing_vault": true, "wallet_data_requires_consent": true,
-            "max_confirmed_transactions": 50, "wallet_proposals": false,
-            "wallet_creation_via_mcp": false, "public_key_material": false, "secrets_or_signing": false
-        })
-    );
+    let mut expected = serde_json::json!({
+        "schema_version": 1, "wallet_family": "bitcoin_vault_embedded",
+        "reads_require_existing_vault":true, "wallet_data_requires_consent":true,
+        "max_confirmed_transactions":50, "wallet_proposals": cfg!(feature = "native-proposals"),
+        "wallet_creation_via_mcp":false, "public_key_material":false, "secrets_or_signing":false
+    });
+    if cfg!(feature = "native-proposals") {
+        expected["proposal_support"] = serde_json::json!({"network":"regtest", "primary_threshold":3,
+        "primary_key_count":5, "recovery_required":true, "max_recovery_keys":5,
+        "max_relative_delay_blocks":65535, "native_key_selection_required":true,
+        "native_creation_authorization_required":true, "key_or_backup_verification":"manual_required",
+        "owner_recovery_key_is_vault_signer":false});
+    }
+    assert_eq!(json["structuredContent"], expected);
     let text = json.to_string();
     assert!(!text.contains(&adapter.credential));
     assert!(!text.contains("/not/"));
@@ -581,7 +586,7 @@ async fn stdio_companion(binary: &std::ffi::OsStr) {
     assert_eq!(value["result"]["structuredContent"]["schema_version"], 1);
     assert_eq!(
         value["result"]["structuredContent"]["wallet_proposals"],
-        false
+        cfg!(feature = "native-proposals")
     );
     assert_eq!(server.grant.successful_calls.load(Ordering::Relaxed), 0);
     stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"tools/call\",\"params\":{\"name\":\"tenshu_list_wallets\",\"arguments\":{}}}\n").await.unwrap();

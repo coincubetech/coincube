@@ -6,6 +6,8 @@ mod descriptor;
 mod message;
 pub(crate) mod migration;
 mod prompt;
+#[cfg(feature = "mcp-proposals")]
+pub(crate) mod proposal;
 pub(crate) mod step;
 mod view;
 
@@ -285,6 +287,16 @@ pub struct Installer {
     pub network: bitcoin::Network,
     pub datadir: CoincubeDirectory,
 
+    #[cfg(feature = "mcp-proposals")]
+    proposal_settings: Option<crate::app::local_mcp::Settings>,
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) proposal_install_dispatched: bool,
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) proposal_finished: bool,
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) proposal_locked: bool,
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) proposal_failure: Option<String>,
     current: usize,
     steps: Vec<Box<dyn Step>>,
     hws: HardwareWallets,
@@ -323,6 +335,10 @@ pub struct Installer {
 
 impl Installer {
     fn previous(&mut self) -> Task<Message> {
+        #[cfg(feature = "mcp-proposals")]
+        if let Some(session) = &self.context.mcp_proposal {
+            session.invalidate();
+        }
         self.hws.reset_watch_list();
         let network = self.network;
         if self.current > 0 {
@@ -669,6 +685,16 @@ impl Installer {
             network,
             source_cube: None,
             datadir: destination_path.clone(),
+            #[cfg(feature = "mcp-proposals")]
+            proposal_settings: None,
+            #[cfg(feature = "mcp-proposals")]
+            proposal_install_dispatched: false,
+            #[cfg(feature = "mcp-proposals")]
+            proposal_finished: false,
+            #[cfg(feature = "mcp-proposals")]
+            proposal_locked: false,
+            #[cfg(feature = "mcp-proposals")]
+            proposal_failure: None,
             current: 0,
             fork_install_task: None,
             hws: HardwareWallets::new(destination_path.clone(), network),
@@ -897,6 +923,65 @@ impl Installer {
         (installer, command)
     }
 
+    /// Replace only this experimental flow's steps after a native handoff.
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn use_mcp_proposal(
+        &mut self,
+        settings: crate::app::local_mcp::Settings,
+        proposal: proposal::Session,
+    ) -> Task<Message> {
+        let proposal = Arc::new(proposal);
+        self.context.descriptor_template = context::DescriptorTemplate::Custom;
+        self.context.mcp_proposal = Some(proposal.clone());
+        // This local demo has no Connect enrollment or remote key fetching.
+        self.context.coincube_client = None;
+        self.context.remote_backend = RemoteBackend::None;
+        self.context.use_coincube_connect = false;
+        self.steps = vec![
+            DefineDescriptor::new(self.network, self.signer.clone()).into(),
+            BackupMnemonic::new(self.signer.clone()).into(),
+            BackupDescriptor::default().into(),
+            RegisterDescriptor::new_create_wallet().into(),
+            DefineNode::new(crate::node::NodeType::Bitcoind).into(),
+            WalletAlias::default().into(),
+            Box::new(proposal::Review::new(proposal)),
+            Final::new().into(),
+        ];
+        self.proposal_settings = Some(settings);
+        self.current = 0;
+        self.steps[0].load_context(&self.context);
+        self.steps[0].load()
+    }
+
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn expire_mcp_proposal(&mut self) {
+        if self.context.mcp_proposal.is_none() {
+            return;
+        }
+        self.proposal_locked = true;
+        if let Some(proposal) = &self.context.mcp_proposal {
+            proposal.close();
+        }
+        if let Some(settings) = &mut self.proposal_settings {
+            settings.revoke();
+        }
+        // Existing Context password copies cannot authorize after admission is
+        // revoked. Clear ours too; other installer/signers are stopped on exit.
+        self.context.cube_pin = None;
+        self.context.passkey_seed_password = None;
+    }
+
+    /// A terminal native failure retains partial data and permits safe exit.
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn finish_proposal_failure(&mut self, message: &str) {
+        if self.context.mcp_proposal.is_none() {
+            return;
+        }
+        self.proposal_finished = true;
+        self.proposal_failure = Some(message.to_owned());
+        self.expire_mcp_proposal();
+    }
+
     pub fn destination_path(&self) -> CoincubeDirectory {
         self.context.coincube_directory.clone()
     }
@@ -909,6 +994,8 @@ impl Installer {
     }
 
     pub fn stop(&mut self) {
+        #[cfg(feature = "mcp-proposals")]
+        self.expire_mcp_proposal();
         // Use current step's `stop()` method for any changes not yet written to context.
         self.steps
             .get_mut(self.current)
@@ -962,6 +1049,44 @@ impl Installer {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        #[cfg(feature = "mcp-proposals")]
+        if self
+            .context
+            .mcp_proposal
+            .as_ref()
+            .is_some_and(|p| !p.active())
+            && !matches!(
+                message,
+                Message::Installed(..)
+                    | Message::ConnectVaultCreated(..)
+                    | Message::AllKeysRedeemed
+                    | Message::KeyRedeemed(..)
+                    | Message::RedeemNextKey
+                    | Message::Exit(..)
+                    | Message::CubeSaved(..)
+                    | Message::CubeSaveFailed(..)
+                    | Message::RetryCubeSave
+                    | Message::BackToApp(..)
+            )
+        {
+            self.navigation_error = Some("Proposal access ended. Reopen the Cube and start a new proposal. An already admitted native install may still finish; inspect its result before retrying.".into());
+            return Task::none();
+        }
+        #[cfg(feature = "mcp-proposals")]
+        if self.context.mcp_proposal.is_some()
+            && self
+                .context
+                .creation_lease
+                .lock()
+                .map(|lease| lease.is_some())
+                .unwrap_or(true)
+            && matches!(
+                message,
+                Message::Next | Message::Previous | Message::BackToApp(..) | Message::Install
+            )
+        {
+            return Task::none();
+        }
         if matches!(&message, Message::Next | Message::Previous) {
             self.navigation_error = None;
         }
@@ -1001,6 +1126,13 @@ impl Installer {
             Message::Next => self.next(),
             Message::Previous => self.previous(),
             Message::Install => {
+                #[cfg(feature = "mcp-proposals")]
+                if self.context.mcp_proposal.is_some() {
+                    if self.proposal_install_dispatched {
+                        return Task::none();
+                    }
+                    self.proposal_install_dispatched = true;
+                }
                 if self.context.bitcoin_config.chain.is_blake2b()
                     && (self.context.descriptor.is_none() || !self.context.remote_backend.is_none())
                 {
@@ -1103,7 +1235,23 @@ impl Installer {
                 }
             }
             Message::Installed(wallet_id, Err(e)) => {
-                if let Some(wallet_id) = &wallet_id {
+                #[cfg(feature = "mcp-proposals")]
+                if self.context.mcp_proposal.is_some() {
+                    self.finish_proposal_failure(if matches!(e, Error::CreationAdmission(_)) {
+                        "No new installation was admitted. Return to the launcher and prepare a fresh proposal. Inspect any prior admitted attempt before retrying."
+                    } else {
+                        "Vault installation could not finish. Partial local data is retained. Return to the launcher and inspect the outcome before retrying."
+                    });
+                }
+                #[cfg(feature = "mcp-proposals")]
+                let may_cleanup = self.context.mcp_proposal.is_none()
+                    && !matches!(e, Error::CreationAdmission(_));
+                #[cfg(not(feature = "mcp-proposals"))]
+                let may_cleanup = true;
+                // A rejected admission owns no wallet to delete. An admitted
+                // proposal may have partial durable state: preserve it and its
+                // tombstone for inspection rather than guessing at rollback.
+                if let Some(wallet_id) = wallet_id.as_ref().filter(|_| may_cleanup) {
                     let network_directory = self
                         .context
                         .coincube_directory
@@ -1124,6 +1272,14 @@ impl Installer {
                             "Successfully cleaned network directory at '{}'.",
                             network_directory.path().to_string_lossy()
                         );
+                        #[cfg(feature = "mcp-proposals")]
+                        {
+                            // Keep the shared lease during cleanup. Ordinary
+                            // native setup may retry the same Context afterward.
+                            if let Ok(mut lease) = self.context.creation_lease.lock() {
+                                lease.take();
+                            }
+                        }
                     }
                 }
                 self.steps
@@ -1157,6 +1313,14 @@ impl Installer {
     }
 
     pub fn view(&self) -> Element<Message> {
+        #[cfg(feature = "mcp-proposals")]
+        if self.proposal_locked {
+            return iced::widget::column![
+                coincube_ui::component::text::h3(if self.proposal_failure.is_some() { "Regtest setup needs inspection" } else { "Cube locked" }),
+                coincube_ui::component::text::text(self.proposal_failure.as_deref().unwrap_or("MCP access ended. An already authorized installation may finish. Its result will return to the launcher and require a fresh unlock.")),
+                iced::widget::button("Return to launcher").on_press_maybe(self.proposal_finished.then_some(Message::BackToApp(self.network)))
+            ].spacing(16).padding(24).into();
+        }
         let content = self
             .steps
             .get(self.current)
@@ -1450,6 +1614,20 @@ pub async fn install_local_wallet(
     signer: Arc<Mutex<Signer>>,
 ) -> Result<WalletSettings, Error> {
     require_installable_chain(&ctx)?;
+    #[cfg(feature = "mcp-proposals")]
+    {
+        let mut reservation = ctx
+            .creation_lease
+            .lock()
+            .map_err(|_| Error::CreationAdmission("Creation reservation unavailable".into()))?;
+        if reservation.is_some() {
+            return Err(Error::CreationAdmission(
+                "Vault creation already admitted for this session".into(),
+            ));
+        }
+        *reservation =
+            proposal::reserve(&ctx).map_err(|error| Error::CreationAdmission(error.to_string()))?;
+    }
     let network_datadir = ctx
         .coincube_directory
         .network_directory(ctx.bitcoin_config.chain);
@@ -2110,6 +2288,8 @@ pub enum Error {
     CannotWriteToFile(String),
     CannotGetAvailablePort(String),
     Unexpected(String),
+    #[cfg(feature = "mcp-proposals")]
+    CreationAdmission(String),
     HardwareWallet(async_hwi::Error),
     Backup(encrypted_backup::Error),
 }
@@ -2165,6 +2345,8 @@ impl std::fmt::Display for Error {
             Self::CannotWriteToFile(e) => write!(f, "Failed to write to file: {}", e),
             Self::CannotCreateFile(e) => write!(f, "Failed to create file: {}", e),
             Self::Unexpected(e) => write!(f, "Unexpected: {}", e),
+            #[cfg(feature = "mcp-proposals")]
+            Self::CreationAdmission(e) => write!(f, "Creation not admitted: {}", e),
             Self::HardwareWallet(e) => write!(f, "Hardware Wallet: {}", e),
             Self::Backup(e) => write!(f, "Backup: {:?}", e),
         }

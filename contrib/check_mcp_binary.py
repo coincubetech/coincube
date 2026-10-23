@@ -13,7 +13,7 @@ import tempfile
 import time
 
 
-def check(binary):
+def check(binary, expect_proposals=False):
     with tempfile.TemporaryDirectory(prefix="mcp-smoke-", dir="/tmp") as directory:
         endpoint = str(Path(directory) / "rpc")
         credential = secrets.token_hex(32)
@@ -83,7 +83,7 @@ def check(binary):
                         "name": "tenshu_get_capabilities", "arguments": {}}})
                     capabilities = receive(3)["structuredContent"]
                     assert capabilities["schema_version"] == 1
-                    assert capabilities["wallet_proposals"] is False
+                    assert capabilities["wallet_proposals"] is expect_proposals
                     assert capabilities["wallet_creation_via_mcp"] is False
                     send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
                         "name": "tenshu_list_wallets", "arguments": {}}})
@@ -101,6 +101,6 @@ def check(binary):
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("usage: check_mcp_binary.py /path/to/tenshu-mcp")
-    check(sys.argv[1])
+    if len(sys.argv) not in (2, 3) or (len(sys.argv) == 3 and sys.argv[2] != "--expect-proposals"):
+        raise SystemExit("usage: check_mcp_binary.py /path/to/tenshu-mcp [--expect-proposals]")
+    check(sys.argv[1], len(sys.argv) == 3)

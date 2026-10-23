@@ -46,6 +46,7 @@ jobs:
         run: |
           sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config protobuf-compiler libdbus-1-dev libwebkit2gtk-4.1-dev
           cargo clippy --all-targets -- -D warnings
+          cargo clippy -p coincube-gui --all-targets --features mcp-proposals --locked -- -D warnings
 
   mcp_tests:
     runs-on: ${{ matrix.os }}
@@ -62,6 +63,7 @@ jobs:
           toolchain: 1.97.1
           components: clippy
       - run: cargo test -p coincube-mcp --features adapter --locked
+      - run: cargo test -p coincube-mcp --features adapter,native-proposals --locked
       - run: cargo clippy -p coincube-mcp --features adapter --all-targets --locked -- -D warnings
 
   # coincube-spark-bridge is excluded from the root workspace (see the root
@@ -268,6 +270,12 @@ jobs:
           cargo build -p coincube-mcp --features adapter --locked
           adapter="$PWD/target/debug/tenshu-mcp"
           TENSHU_MCP_TEST_ADAPTER="$adapter" cargo test -p coincube-gui --lib stdio_client_reads_real_wallet_and_observes_revocation -- --ignored
+      - name: Experimental Regtest proposal and native lock boundaries
+        if: matrix.toolchain == 'pinned'
+        env:
+          BREEZ_API_KEY: DUMMY_REGTEST_ONLY
+          TMPDIR: ${{ runner.temp }}
+        run: cargo test -p coincube-gui --lib --features mcp-proposals --locked proposal -- --test-threads=2
       - name: Preserve Secret Service fixture diagnostics
         if: always() && runner.os == 'Linux'
         uses: actions/upload-artifact@v4

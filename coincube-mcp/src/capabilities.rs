@@ -66,12 +66,40 @@ pub struct Capabilities {
     /// End-to-end proposal workflow through native consent; not a grant.
     /// False while only the underlying protocol/service is staged.
     pub wallet_proposals: bool,
+    /// Static first-demo constraints, absent in ordinary builds. Never consent.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub proposal_support: Option<ProposalSupport>,
     /// Whether an MCP call can create a wallet. Always false for this design.
     pub wallet_creation_via_mcp: bool,
     /// Whether the MCP surface exports public keys or descriptors.
     pub public_key_material: bool,
     /// Whether the MCP surface exports secrets or offers signing/broadcast.
     pub secrets_or_signing: bool,
+}
+/// Non-sensitive protocol limits and human checkpoints for the first demo.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ProposalSupport {
+    /// Only an isolated Bitcoin Regtest Cube with no Vault/import is eligible.
+    pub network: String,
+    /// Fixed supported primary threshold.
+    pub primary_threshold: u8,
+    /// Fixed supported primary key count; not verified independent owners.
+    pub primary_key_count: u8,
+    /// The assistant must discuss and explicitly select recovery, never omit it.
+    pub recovery_required: bool,
+    /// Maximum keys in the explicitly chosen recovery path.
+    pub max_recovery_keys: u8,
+    /// Relative positive delay in blocks, not a guaranteed calendar duration.
+    pub max_relative_delay_blocks: u16,
+    /// Real keys are selected in the trusted Tenshu builder, never MCP args.
+    pub native_key_selection_required: bool,
+    /// Actual descriptor review and creation approval happen only inside Tenshu.
+    pub native_creation_authorization_required: bool,
+    /// No automated assertion of key ownership or a successful backup rehearsal.
+    pub key_or_backup_verification: String,
+    /// The owner's Cube Recovery Kit encryption key is never a Vault signer.
+    pub owner_recovery_key_is_vault_signer: bool,
 }
 impl Capabilities {
     /// Describe only operations actually implemented in this build.
@@ -82,7 +110,19 @@ impl Capabilities {
             reads_require_existing_vault: true,
             wallet_data_requires_consent: true,
             max_confirmed_transactions: 50,
-            wallet_proposals: false,
+            wallet_proposals: cfg!(feature = "native-proposals"),
+            proposal_support: cfg!(feature = "native-proposals").then(|| ProposalSupport {
+                network: "regtest".into(),
+                primary_threshold: 3,
+                primary_key_count: 5,
+                recovery_required: true,
+                max_recovery_keys: 5,
+                max_relative_delay_blocks: 65535,
+                native_key_selection_required: true,
+                native_creation_authorization_required: true,
+                key_or_backup_verification: "manual_required".into(),
+                owner_recovery_key_is_vault_signer: false,
+            }),
             wallet_creation_via_mcp: false,
             public_key_material: false,
             secrets_or_signing: false,

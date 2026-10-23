@@ -6573,7 +6573,7 @@ impl App {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         if let Message::View(view::Message::LocalMcp(message)) = message {
-            let supported = self.mcp_supported();
+            let supported = self.mcp_supported() || self.mcp_proposals_supported();
             return match self.local_mcp.update(
                 message,
                 self.wallet.clone(),
@@ -10280,6 +10280,28 @@ impl App {
         }
     }
 
+    pub(crate) fn mcp_proposals_supported(&self) -> bool {
+        cfg!(feature = "mcp-proposals")
+            && self.cube_settings.network == crate::chain::ChainId::Regtest
+            && self.wallet.is_none()
+            && self.daemon.is_none()
+            && self.cube_settings.vault_wallet_id.is_none()
+            && self.cube_settings.bitcoin_import.is_none()
+            && !self.daemon_switch_in_progress
+            && session::generation_for(&self.cube_settings.id).is_some()
+    }
+
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn take_mcp_proposal(
+        &mut self,
+    ) -> Option<(local_mcp::Settings, crate::installer::proposal::Session)> {
+        if !self.mcp_proposals_supported() {
+            return None;
+        }
+        let proposal = self.local_mcp.proposal_session(&self.cube_settings.id)?;
+        Some((std::mem::take(&mut self.local_mcp), proposal))
+    }
+
     fn mcp_supported(&self) -> bool {
         !self.cube_settings.network.is_blake2b()
             && self
@@ -10303,7 +10325,8 @@ impl App {
             view::dashboard(
                 &self.panels.current,
                 &self.cache,
-                self.local_mcp.view(self.mcp_supported()),
+                self.local_mcp
+                    .view_for_cube(self.mcp_supported(), self.mcp_proposals_supported()),
             )
         } else if self.show_received_celebration {
             // Global celebration overlay takes precedence over the normal panel view
