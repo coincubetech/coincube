@@ -339,6 +339,46 @@ mod shell_tests {
         }
     }
 
+    #[derive(Default)]
+    struct ControlBounds(Vec<(Id, iced::Rectangle)>);
+
+    impl Operation for ControlBounds {
+        fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
+            f(self);
+        }
+
+        fn container(&mut self, id: Option<&Id>, bounds: iced::Rectangle) {
+            if let Some(id) = id {
+                self.0.push((id.clone(), bounds));
+            }
+        }
+    }
+
+    fn visible_control(
+        bounds: &ControlBounds,
+        id: &'static str,
+        viewport: iced::Size,
+    ) -> iced::Rectangle {
+        let rect = bounds
+            .0
+            .iter()
+            .find(|(candidate, _)| candidate == &Id::new(id))
+            .unwrap_or_else(|| panic!("missing control {}", id))
+            .1;
+        assert!(
+            rect.width > 0.0
+                && rect.height > 0.0
+                && rect.x >= 0.0
+                && rect.y >= 0.0
+                && rect.x + rect.width <= viewport.width
+                && rect.y + rect.height <= viewport.height,
+            "{} outside compact viewport: {:?}",
+            id,
+            rect
+        );
+        rect
+    }
+
     fn load_fonts() {
         for bytes in [
             coincube_ui::font::REGULAR_BYTES,
@@ -603,6 +643,135 @@ mod shell_tests {
                     image::save_buffer(
                         std::path::Path::new(&directory)
                             .join(format!("tenshu-shell-{mode:?}-long-name-{state_name}.png")),
+                        &pixels,
+                        1024,
+                        768,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn extreme_names_keep_lock_and_settings_controls_inside_compact_viewport() {
+        load_fonts();
+        let names = [
+            ("ascii", "Family treasury ".repeat(40)),
+            ("wide", "家族の長期保管庫💠".repeat(48)),
+            ("newlines", "Family\n\nTreasury\r\n".repeat(40)),
+        ];
+        for (mode, theme) in [
+            (
+                coincube_ui::theme::palette::ThemeMode::Dark,
+                theme::Theme::dark(),
+            ),
+            (
+                coincube_ui::theme::palette::ThemeMode::Light,
+                theme::Theme::light(),
+            ),
+        ] {
+            for (case, cube_name) in &names {
+                let cache = crate::app::cache::Cache {
+                    cube_name: cube_name.clone(),
+                    has_vault: true,
+                    cube_switcher_open: true,
+                    cube_lock_confirmation: true,
+                    theme_mode: mode,
+                    ..Default::default()
+                };
+                let menu = Menu::Cube(crate::app::menu::CubeSubMenu::Overview);
+                let mut element = crate::app::view::dashboard(
+                    &menu,
+                    &cache,
+                    iced::widget::text("Synthetic shell preview"),
+                );
+                let mut renderer = <iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(14.0),
+                    Some("tiny-skia"),
+                )
+                .await
+                .unwrap();
+                let mut tree = Tree::new(element.as_widget());
+                let size = iced::Size::new(1024.0, 768.0);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, size),
+                );
+                let mut controls = ControlBounds::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut controls,
+                );
+                for (id, expected) in [
+                    ("cube-lock-confirm", "lock"),
+                    ("cube-lock-cancel", "cancel"),
+                    ("cube-sidebar-settings", "settings"),
+                ] {
+                    let rect = visible_control(&controls, id, size);
+                    let cursor = iced::mouse::Cursor::Available(rect.center());
+                    let mut messages = Vec::new();
+                    for event in [
+                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+                    ] {
+                        element.as_widget_mut().update(
+                            &mut tree,
+                            &iced::Event::Mouse(event),
+                            Layout::new(&node),
+                            cursor,
+                            &renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut iced::advanced::Shell::new(&mut messages),
+                            &iced::Rectangle::with_size(size),
+                        );
+                    }
+                    let activated = matches!(
+                        (expected, messages.as_slice()),
+                        ("lock", [Message::LockCubeToLauncher])
+                            | ("cancel", [Message::CancelCubeLock])
+                            | (
+                                "settings",
+                                [Message::Menu(Menu::Cube(
+                                    crate::app::menu::CubeSubMenu::Settings(
+                                        crate::app::menu::CubeSettingsOption::General,
+                                    )
+                                ))],
+                            )
+                    );
+                    assert!(
+                        activated,
+                        "{} did not activate for {}: {:?}",
+                        id, case, messages
+                    );
+                }
+                if let Ok(directory) = std::env::var("SIDEBAR_PREVIEW_DIR") {
+                    redraw(&mut element, &mut tree, &node, &renderer, size);
+                    std::fs::create_dir_all(&directory).unwrap();
+                    element.as_widget().draw(
+                        &tree,
+                        &mut renderer,
+                        &theme,
+                        &iced::advanced::renderer::Style {
+                            text_color: theme.colors.shell.ink,
+                        },
+                        Layout::new(&node),
+                        iced::mouse::Cursor::Unavailable,
+                        &iced::Rectangle::with_size(size),
+                    );
+                    let pixels = renderer.screenshot(
+                        iced::Size::new(1024, 768),
+                        1.0,
+                        theme.colors.shell.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(&directory)
+                            .join(format!("tenshu-shell-{mode:?}-extreme-{case}.png")),
                         &pixels,
                         1024,
                         768,

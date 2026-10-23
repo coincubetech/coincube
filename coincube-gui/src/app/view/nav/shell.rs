@@ -51,7 +51,15 @@ fn network_label(network: ChainId) -> &'static str {
 }
 
 fn short_cube_name(name: &str) -> String {
-    let mut chars = name.chars();
+    // Names are persisted without a length limit and may contain line breaks.
+    // Keep fixed sidebar regions to one short, predictable label.
+    let mut chars = name.chars().map(|ch| {
+        if ch.is_whitespace() || ch.is_control() {
+            ' '
+        } else {
+            ch
+        }
+    });
     let prefix: String = chars.by_ref().take(16).collect();
     if chars.next().is_some() {
         format!("{prefix}…")
@@ -304,20 +312,44 @@ fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Mes
     )]
     .spacing(4);
     if state.lock_confirmation {
-        let prompt = format!("Lock {} and open the Launcher?", ctx.cube_name);
-        items = items.push(muted(prompt, 13)).push(
-            row![
-                Button::new(text("Lock").size(13))
-                    .padding([6, 12])
-                    .style(theme::button::primary)
-                    .on_press(Message::LockCubeToLauncher),
-                Button::new(text("Cancel").size(13))
-                    .padding([6, 12])
-                    .style(theme::button::shell_nav)
-                    .on_press(Message::CancelCubeLock),
-            ]
-            .spacing(8),
+        let prompt = format!(
+            "Lock {} and open the Launcher?",
+            short_cube_name(ctx.cube_name)
         );
+        let full_name = container(
+            scrollable(
+                muted(ctx.cube_name, 12).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+            )
+            .width(Length::Fixed(200.0))
+            .height(Length::Fixed(120.0)),
+        )
+        .padding([6, 10])
+        .style(theme::container::shell_menu);
+        items = items
+            .push(iced::widget::tooltip(
+                muted(prompt, 13).wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+                full_name,
+                iced::widget::tooltip::Position::Right,
+            ))
+            .push(
+                row![
+                    container(
+                        Button::new(text("Lock").size(13))
+                            .padding([6, 12])
+                            .style(theme::button::primary)
+                            .on_press(Message::LockCubeToLauncher)
+                    )
+                    .id("cube-lock-confirm"),
+                    container(
+                        Button::new(text("Cancel").size(13))
+                            .padding([6, 12])
+                            .style(theme::button::shell_nav)
+                            .on_press(Message::CancelCubeLock)
+                    )
+                    .id("cube-lock-cancel"),
+                ]
+                .spacing(8),
+            );
     } else {
         items = items.push(nav_row(
             "Lock Cube",
@@ -610,7 +642,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     );
     let foot = column![
         rule::horizontal(1),
-        nav_row(
+        container(nav_row(
             "Settings",
             Some(settings_icon()),
             settings_active,
@@ -619,7 +651,8 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             )))),
             false,
             None
-        ),
+        ))
+        .id("cube-sidebar-settings"),
     ]
     .spacing(8)
     .padding([8, 10]);

@@ -150,26 +150,7 @@ fn main() -> Result<(), Box<dyn Error>> {
         iced::window::Settings::default().size
     };
 
-    #[allow(unused_mut)]
-    let mut window_settings = iced::window::Settings {
-        size: initial_size,
-        icon: Some(image::coincube_window_icon()),
-        position: iced::window::Position::Centered,
-        min_size: Some(Size {
-            width: 1024.0,
-            height: 800.0,
-        }),
-        exit_on_close_request: false,
-        ..Default::default()
-    };
-
-    #[cfg(target_os = "linux")]
-    {
-        window_settings.platform_specific = iced::window::settings::PlatformSpecific {
-            application_id: "CoincubeVault".to_string(),
-            ..Default::default()
-        };
-    }
+    let window_settings = window_settings(initial_size);
 
     if let Err(e) = iced::application(
         move || GUI::new(config.clone(), log_level),
@@ -189,6 +170,31 @@ fn main() -> Result<(), Box<dyn Error>> {
     } else {
         Ok(())
     }
+}
+
+fn window_settings(initial_size: Size) -> iced::window::Settings {
+    #[allow(unused_mut)]
+    let mut settings = iced::window::Settings {
+        size: initial_size,
+        icon: Some(image::coincube_window_icon()),
+        position: iced::window::Position::Centered,
+        min_size: Some(Size {
+            width: 1024.0,
+            height: 768.0,
+        }),
+        exit_on_close_request: false,
+        ..Default::default()
+    };
+
+    #[cfg(target_os = "linux")]
+    {
+        settings.platform_specific = iced::window::settings::PlatformSpecific {
+            application_id: "CoincubeVault".to_string(),
+            ..Default::default()
+        };
+    }
+
+    settings
 }
 
 // A panic in any thread should stop the main thread, and print the panic.
@@ -228,6 +234,12 @@ fn setup_panic_hook(coincube_directory: &CoincubeDirectory) {
 mod tests {
     use super::*;
     use coincube_gui::dir::CoincubeDirectory;
+
+    #[test]
+    fn window_settings_allow_compact_shell_size() {
+        let settings = window_settings(Size::new(1440.0, 900.0));
+        assert_eq!(settings.min_size, Some(Size::new(1024.0, 768.0)));
+    }
 
     #[test]
     fn live_split_option_preserves_default_wallet_directory_and_network() {
