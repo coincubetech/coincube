@@ -678,3 +678,16 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Prototype (P-Restore, path "import"):** steps are Cube → Source → Keys → Review → Scan → Done. Keys lists each signer from the descriptor with its fingerprint and path, offers Recovery words / Hardware wallet / Keychain phone as the source, and "Review wallet" stays disabled until the key verifies against the fingerprint. Review shows "Keys: 1 of 1 provided · recovery words · verified against the fingerprint". Done summarises the wallet, where its keys live, and that the Recovery Kit now includes it, with "Open Cube". Copy that described a watch-only import was rewritten on the hub, the Cube step and the Source step. Importing a wallet is not Blake2b-specific; only the later Split tool is.
 
 **Verified live in Chrome (v90):** Launcher › Import or restore › Import Bitcoin wallet, through Cube (PIN), Source, Keys (verify), Review, Scan, Done.
+
+## Activity declutter; recent-activity rows share one grammar (2026-10-23, canvas v93)
+
+**Robert:** "The activity page is a bit crowded, especially the side details screen", and the Vault/Spark "Recent activity" rows should match the Activity rows.
+
+**Activity page (P-Activity):**
+- Filter bar is one row: Wallet, Direction, Status, Date range, Search. The filter count and "Clear filters" appear only while a filter is active. The prototype-only Spark-history pickers moved to a small dashed "Prototype · Spark history" strip under the page title, out of the product bar.
+- Table: Amount and Fiat merged into one right-aligned cell, sats on top and fiat as a caption. Columns: Time, Wallet, Details, Amount, Status.
+- Detail panel: header is title, "Vault · Family savings · Bitcoin on-chain", amount with fiat beneath, one short status line ("Awaiting a second signature · 1 of 2 collected"). For a transaction that still needs signatures, "PSBT and signers" sits directly under the status with "Continue signing"; for other transactions it stays collapsed at the bottom. Detail rows cut to Date (time zone in a tooltip), Fee, Confirmations (only after broadcast) and Destination; the Wallet and Rail rows are gone because the header carries them. Txid is hidden until broadcast. Identifier rows use a small copy icon instead of a button.
+
+**Recent activity on the Overview pages (P-Overview, Vault, Spark and the hub list):** the same row as Activity minus the Wallet column: date, direction glyph with the label, amount with fiat caption, status chip. Rows link to Activity. Vault now has the same "View all transactions" link as Spark. The hub list keeps a small wallet name under the label.
+
+**Verified live in Chrome (v92/v93):** Activity filter row, merged amount cell, detail panel order for the 1-of-2 PSBT; Vault and Spark recent-activity rows.
