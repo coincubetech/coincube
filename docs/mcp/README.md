@@ -130,7 +130,7 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 
 | Tool | Input | Result / limitations |
 |---|---|---|
-| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Reports proposal/creation support unavailable until implemented. |
+| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Proposals are deferred; direct MCP wallet creation is prohibited by design. |
 | `tenshu_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
 | `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
 | `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed transactions; no pending history or pagination cursor. |
