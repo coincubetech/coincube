@@ -208,7 +208,7 @@ fn rejects_wrong_root_path_foreign_input_and_changed_economics() {
     ));
 
     let mut wrong_path = original.clone();
-    for (_, (_, path)) in &mut wrong_path.inputs[0].bip32_derivation {
+    for (_, path) in wrong_path.inputs[0].bip32_derivation.values_mut() {
         *path = DerivationPath::from_str("m/84h/1h/0h/0/77").unwrap();
     }
     assert!(sign_imported_psbt(&wallet, &original, &wrong_path, &roots[0]).is_err());
