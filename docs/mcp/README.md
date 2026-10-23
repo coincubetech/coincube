@@ -130,19 +130,18 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 
 | Tool | Input | Result / limitations |
 |---|---|---|
-| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Proposals are deferred; direct MCP wallet creation is prohibited by design. |
+| `tenshu_get_capabilities` | `{}` | Public static build metadata only; no installed-wallet inventory or live consent. Proposal availability depends on the experimental native build flag; direct MCP wallet creation is prohibited by design. |
 | `tenshu_list_wallets` | `{}` | Only the authorized active Vault; opaque session ID and generic display name. |
 | `tenshu_get_wallet_summary` | `{"wallet_id":"…"}` | Confirmed, unconfirmed and available sats, network and sync state. |
 | `tenshu_get_transactions` | `{"wallet_id":"…","limit":20}` | Up to 50 most recent confirmed transactions; no pending history or pagination cursor. |
 | `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
-| `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Staged preparation service only; requires a separate proposal grant that the current GUI does not yet issue. Produces an in-memory topology draft, never keys, a validated descriptor or a wallet. |
+| `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in the opt-in Regtest native build. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
 | `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
 
-The proposal service is a development prerequisite for the native setup flow.
-`wallet_proposals` remains false until native consent, key selection, actual
-descriptor validation and trusted creation review are integrated. No setting in
-the existing read-only AI access UI grants this authority. Direct MCP creation
-is prohibited; there is no approve/install/sign/broadcast tool.
+Ordinary builds report `wallet_proposals:false`. The opt-in native demo reports
+its Regtest bounds in `proposal_support`; this static metadata is not permission.
+Read-only AI access cannot grant proposal authority. There is no direct MCP
+approve/install/sign/broadcast tool. See the experimental demo below.
 
 The initial proposal shape is deliberately limited to a 3-of-5 primary and one
 explicitly chosen recovery path (1–5 slots, valid threshold, positive block delay)
@@ -151,7 +150,7 @@ No model input accepts keys, descriptors, paths, networks, labels or credentials
 Only one draft per proposal grant is retained. An exact retry returns that draft;
 changed content or a second request returns `proposal_conflict`. Revocation clears
 access, and native setup must independently verify the live session before using
-a draft. A topology draft always reports `needs_keys` and `descriptor_validated:false`.
+a draft. An initial topology draft reports `needs_keys` and `descriptor_validated:false`; only a trusted native callback can advance that validation status.
 
 Confirmed balance excludes coins with an ongoing spend and includes only confirmed
 UTXOs. Unconfirmed includes unspent change; the UI groups self-change differently.
@@ -224,3 +223,56 @@ Windows named-pipe security is included in this extension. Next add richer clien
 credential management. Any later unsigned transaction proposal needs a separate
 capability, scoped operation ID and trusted desktop review. Signing remains with
 existing user/Keychain mechanisms; it cannot be an extension of this read dispatch.
+
+## Experimental native proposal demo
+
+Ordinary builds keep proposal support off. A build opting into GUI
+`mcp-proposals` and companion `native-proposals,adapter` implements the first
+native-consent flow on an **empty, unlocked Bitcoin Regtest Cube only**. It is
+not enabled in release/nightly workflows. Capability discovery reports the
+build flag and bounded topology limits; that report is never live consent.
+
+1. Discuss signer independence, shared failure locations and loss of any two
+   primary signers. Choose the recovery quorum and positive relative block delay
+   explicitly. Block time varies; possession/control of keys and recovery
+   eligibility are separate from a descriptor's mathematical validity.
+2. In a fresh disposable Regtest Cube, enable AI access and approve the separate
+   proposal permission. Existing wallet-read grants cannot prepare a proposal.
+   Save the private client configuration only in the trusted client's local file.
+3. The client prepares one topology draft. It receives `needs_keys` with no
+   public/private keys or descriptor. In Tenshu, click **Review proposal and
+   select keys**. This native click opens the existing key picker, backup and
+   hardware registration flows. These preparatory actions have their existing
+   local/device confirmations; they are not MCP approvals.
+4. Select real public keys locally. The wallet engine compiles the descriptor.
+   The final native review verifies that its actual 3-of-5 primary and selected
+   recovery exactly match the proposal, and displays signer fingerprints, local
+   provenance and the descriptor. Only then does proposal status report
+   `ready_for_native_review` / `descriptor_validated:true`. Revisions advance
+   when validation is invalidated/restored. This proves neither independent
+   custody nor a completed key/backup verification.
+5. **Create this Regtest Vault** is a native action. Immediately before any
+   wallet/daemon persistence, a shared per-Cube OS reservation, captured session
+   generation, live grant and exact review snapshot must all pass. There is no
+   approve/install/sign/broadcast MCP operation. This first demo accepts only an
+   external loopback Bitcoin Core/Knots RPC on port28443 and no Connect/provider
+   enrollment. Creating the Vault consumes/revokes the proposal grant.
+6. Completion returns to the launcher. Unlock afresh and approve a new read
+   grant to inspect the installed policy/balance. Old proposal IDs/tokens never
+   become wallet-read authority. Lock before admission discards setup; lock
+   after admission hides setup content while admitted native completion may
+   finish. A grant revocation cannot undo already-admitted durable work.
+
+Failed/partial admitted installations retain a per-Cube admission tombstone and
+never automatically delete an existing/partial wallet or retry it. Inspect the
+local outcome before cleanup/retry; no MCP method can clear the tombstone. The
+reservation is retained through native post-install association. Closing the
+process can interrupt completion, which is a recovery/inspection case, not a
+claim of rollback. This is an experimental Regtest gate, not production release
+acceptance.
+
+Keychain guidance uses existing setup and verification screens. The owner's
+Cube Recovery Kit encryption key is not a Vault signing key. Do not label a
+manually entered key as phone-attested, or claim that a backup/recovery rehearsal
+passed because a key or descriptor exists. Phone/Connect-dependent setup is a
+separate manual checkpoint when unavailable in the isolated offline demo.

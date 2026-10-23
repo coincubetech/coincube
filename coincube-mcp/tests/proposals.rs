@@ -451,3 +451,81 @@ async fn actual_stdio_proposal_is_not_a_wallet_and_cannot_approve_itself() {
         .unwrap();
     assert!(stderr.is_empty());
 }
+
+#[test]
+fn native_admission_is_one_shot_and_serialized_with_revoke() {
+    use std::{
+        sync::{
+            Arc, Barrier,
+            atomic::{AtomicUsize, Ordering},
+        },
+        thread,
+    };
+    for revoke_first in [false, true] {
+        let grant = Arc::new(coincube_mcp::ipc::Grant::for_proposals(
+            std::time::Duration::from_secs(60),
+            || true,
+        ));
+        if revoke_first {
+            grant.revoke();
+        }
+        let admitted = AtomicUsize::new(0);
+        let result = grant.admit_native(|| {
+            admitted.fetch_add(1, Ordering::SeqCst);
+            Ok(())
+        });
+        assert_eq!(result.is_ok(), !revoke_first);
+        assert_eq!(admitted.load(Ordering::SeqCst), usize::from(!revoke_first));
+        assert!(!grant.active());
+        assert!(grant.admit_native(|| Ok(())).is_err());
+    }
+    // Failed native checks leave no authority consumed or work scheduled.
+    let grant =
+        coincube_mcp::ipc::Grant::for_proposals(std::time::Duration::from_secs(60), || true);
+    assert!(
+        grant
+            .admit_native(|| Err::<(), _>(coincube_mcp::Error::AccessDenied))
+            .is_err()
+    );
+    assert!(grant.active());
+    // The racing revoke/admit have a single winner. No second admission.
+    for _ in 0..32 {
+        let grant = Arc::new(coincube_mcp::ipc::Grant::for_proposals(
+            std::time::Duration::from_secs(60),
+            || true,
+        ));
+        let start = Arc::new(Barrier::new(2));
+        let other = grant.clone();
+        let barrier = start.clone();
+        let worker = thread::spawn(move || {
+            barrier.wait();
+            other.revoke();
+        });
+        start.wait();
+        let _ = grant.admit_native(|| Ok(()));
+        worker.join().unwrap();
+        assert!(!grant.active());
+        assert!(grant.admit_native(|| Ok(())).is_err());
+    }
+    let read = coincube_mcp::ipc::Grant::new(
+        "fixture".into(),
+        [true; 3],
+        std::time::Duration::from_secs(60),
+    );
+    assert!(read.admit_native(|| Ok(())).is_err());
+}
+
+#[test]
+fn native_validation_cannot_extend_expiration() {
+    let grant =
+        coincube_mcp::ipc::Grant::for_proposals(std::time::Duration::from_millis(20), || true);
+    assert!(
+        grant
+            .admit_native(|| {
+                std::thread::sleep(std::time::Duration::from_millis(40));
+                Ok(())
+            })
+            .is_err()
+    );
+    assert!(!grant.active());
+}

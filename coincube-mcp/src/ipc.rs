@@ -6,7 +6,7 @@ use std::{
     io,
     path::{Path, PathBuf},
     sync::{
-        Arc,
+        Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
     time::{Duration, Instant},
@@ -56,6 +56,7 @@ pub struct Grant {
     scope: Scope,
     expires: Instant,
     revoked: AtomicBool,
+    native_admission: Mutex<()>,
     /// Completed successful operations; this is not a connected-client count.
     pub successful_calls: AtomicU64,
 }
@@ -90,6 +91,7 @@ impl Grant {
             scope,
             expires: Instant::now() + duration,
             revoked: AtomicBool::new(false),
+            native_admission: Mutex::new(()),
             successful_calls: AtomicU64::new(0),
         }
     }
@@ -100,8 +102,41 @@ impl Grant {
     }
     /// Irreversibly invalidate the grant, including future completion checks.
     pub fn revoke(&self) {
+        let _admission = self
+            .native_admission
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         self.revoked.store(true, Ordering::SeqCst);
     }
+    /// Trusted native commit gate, never an MCP operation. The callback must
+    /// atomically check the captured desktop session and exact reviewed state.
+    /// The grant is consumed on success, before any async durable operation.
+    /// A prior revoke wins; an admitted native operation cannot be undone by
+    /// revoking afterward. No mutex is held across async work.
+    pub fn admit_native<T>(&self, admit: impl FnOnce() -> Result<T, Error>) -> Result<T, Error> {
+        let _guard = self
+            .native_admission
+            .lock()
+            .map_err(|_| Error::AccessDenied)?;
+        if !matches!(self.scope, Scope::Proposal)
+            || self.revoked.load(Ordering::SeqCst)
+            || Instant::now() >= self.expires
+        {
+            return Err(Error::AccessDenied);
+        }
+        // Deliberately no session_valid call: the callback must hold the native
+        // session lock through admission, not make a racy boolean snapshot.
+        let value = admit()?;
+        // A slow native validation/metadata fsync cannot extend the grant's
+        // monotonic lifetime. No wallet operation may begin on this error.
+        if Instant::now() >= self.expires {
+            self.revoked.store(true, Ordering::SeqCst);
+            return Err(Error::AccessDenied);
+        }
+        self.revoked.store(true, Ordering::SeqCst);
+        Ok(value)
+    }
+
     /// Require an unrevoked grant, unexpired lifetime and valid desktop session.
     pub fn active(&self) -> bool {
         !self.revoked.load(Ordering::SeqCst)

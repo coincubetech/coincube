@@ -288,6 +288,25 @@ impl Step for DefineDescriptor {
         if self.chain.is_blake2b() {
             self.use_taproot = false;
         }
+        #[cfg(feature = "mcp-proposals")]
+        if let Some(proposal) = &ctx.mcp_proposal {
+            if self.paths.is_empty() {
+                let topology = proposal.topology();
+                let mut recovery = Path::new_recovery_path()
+                    .with_n_keys(usize::from(topology.recovery.quorum.key_count))
+                    .with_threshold(usize::from(topology.recovery.quorum.threshold));
+                recovery.sequence = PathSequence::Recovery(topology.recovery.relative_delay_blocks);
+                self.paths = vec![
+                    Path::new_primary_path().with_n_keys(5).with_threshold(3),
+                    recovery,
+                ];
+                self.descriptor_template = DescriptorTemplate::Custom;
+            }
+            self.use_taproot = false;
+        } else {
+            self.load_template(ctx.descriptor_template);
+        }
+        #[cfg(not(feature = "mcp-proposals"))]
         self.load_template(ctx.descriptor_template);
         self.cube_id = ctx.cube_id.clone();
         self.coincube_client = ctx.coincube_client.clone();

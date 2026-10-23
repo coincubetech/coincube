@@ -75,7 +75,7 @@ User-controlled text never controls routing or authorization.
 
 - `tenshu_get_capabilities`: static build support, independent of installed
   wallets and live consent. It cannot authorize operations or reach the desktop.
-  Proposal support remains false until the separate implementation is present.
+  Proposal support is false in ordinary builds; the experimental native build reports fixed Regtest limits, never live consent.
 - `tenshu_list_wallets`: one authorized active Vault, opaque session wallet ID.
 - `tenshu_get_wallet_summary`: current daemon balances in satoshis and sync state;
   no promise that a policy is presently satisfiable or that data is fully synced.
@@ -100,13 +100,38 @@ Regtest P2WSH. It contains no keys/descriptor, never opens a window and cannot
 install or approve anything. Unknown arguments and invalid topology bounds fail
 before service use. Exact retries share one draft; conflicting requests fail.
 
-This service is not yet an enabled end-to-end feature. The current GUI issues
-only read grants, so capability metadata still reports proposals unavailable.
-Native first-Vault consent, local key binding/real descriptor validation, exact
-review revision and creation admission are separate integration work. They must
-pin the correct unlocked empty Regtest Cube, respect every existing key-role
-guard and session revocation, and require human creation authorization. A stored
-topology does not prove the validity of any actual descriptor.
+Ordinary builds retain only read consent. GUI `mcp-proposals` explicitly opts
+into a first-Vault Regtest workflow, with `native-proposals` on the companion.
+The trusted empty-Cube setting creates a fresh proposal-only grant/store. A
+native review click transfers ownership into the installer; MCP cannot trigger
+the transition. Existing key selection and engine validation compile real keys.
+A final native review binds descriptor, target root/chain, signer provenance,
+backends and security metadata in a private exact-state digest. Returning to
+setup invalidates approval. No digest, descriptor or signer material is returned
+to the AI.
+
+`Grant::admit_native` serializes commit admission with revocation; its trusted
+callback holds the captured native session generation lock, consumes the exact
+review approval and writes an admission tombstone. A per-Cube OS lock shared by
+native/proposal local installers is held across async wallet persistence and
+native association. Admission checks happen inside the actual installation
+future, before directory/database/daemon initialization, not merely before
+scheduling it. No UI mutex is held across await. Revocation first prevents
+admission; after admission the native operation may finish. Partial outcomes
+are retained for inspection, never blindly deleted/retried.
+
+The outer Tab controller enforces lifecycle routing as well as Installer.update:
+pre-admission lock drops setup to Home; admitted work cannot navigate back and
+renders a locked view after session end. Completion always lands at Home, never
+reconstructs an App from old unlocked clients. Fresh unlock/consent is required
+for reads; old proposal IDs and grants are not revived. Existing hardware
+registration/backup preparatory actions retain their native confirmations and
+are distinct from the wallet/daemon persistence admission boundary.
+
+This opt-in demo is not production acceptance. No Connect/provider enrollment,
+managed node, signing, broadcast, model-supplied keys or invented device/backup
+attestation is included. Source-specific Keychain/backup verification remains
+human work in existing flows.
 
 ## References and startup evidence
 

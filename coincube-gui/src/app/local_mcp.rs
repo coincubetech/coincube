@@ -29,6 +29,12 @@ pub enum Message {
     Revoke,
     /// Copy the companion command and temporary credential for a trusted client.
     CopyConfig,
+    /// Explicit separate consent for an empty Regtest Cube's proposal session.
+    #[cfg(feature = "mcp-proposals")]
+    Proposals(bool),
+    /// Native-only transition into the existing key selection builder.
+    #[cfg(feature = "mcp-proposals")]
+    ReviewProposal,
 }
 /// Session-local approval state. Dropping it shuts down its private IPC server.
 /// The default grants no access and no credential is persisted.
@@ -40,6 +46,10 @@ pub struct Settings {
     client_name: String,
     approved_name: String,
     failed: bool,
+    #[cfg(feature = "mcp-proposals")]
+    proposals_allowed: bool,
+    #[cfg(feature = "mcp-proposals")]
+    proposals: Option<Arc<wire::proposal::Store>>,
     #[cfg(any(unix, windows))]
     server: Option<wire::ipc::Server>,
 }
@@ -49,6 +59,10 @@ impl Settings {
         #[cfg(any(unix, windows))]
         {
             self.server.take();
+        }
+        #[cfg(feature = "mcp-proposals")]
+        if let Some(store) = self.proposals.take() {
+            store.revoke();
         }
         self.approved_name.clear();
     }
@@ -80,10 +94,40 @@ impl Settings {
                 self.revoke();
                 self.client_name = value.chars().filter(|c| !c.is_control()).take(64).collect();
             }
+            #[cfg(feature = "mcp-proposals")]
+            Message::Proposals(value) => {
+                self.revoke();
+                self.proposals_allowed = value;
+            }
             Message::Revoke => self.revoke(),
             Message::Approve => {
                 self.revoke();
                 self.failed = false;
+                #[cfg(feature = "mcp-proposals")]
+                if supported
+                    && wallet.is_none()
+                    && daemon.is_none()
+                    && self.enabled
+                    && self.proposals_allowed
+                    && !self.client_name.trim().is_empty()
+                {
+                    let generation = super::session::generation_for(cube_id)?;
+                    let cube_id = cube_id.to_owned();
+                    let store = Arc::new(wire::proposal::Store::default());
+                    let grant =
+                        wire::ipc::Grant::for_proposals(Duration::from_secs(3600), move || {
+                            super::session::generation_for(&cube_id) == Some(generation)
+                        });
+                    match wire::ipc::Server::start(store.clone(), grant) {
+                        Ok(server) => {
+                            self.server = Some(server);
+                            self.proposals = Some(store);
+                            self.approved_name = self.client_name.clone();
+                        }
+                        Err(_) => self.failed = true,
+                    }
+                    return None;
+                }
                 if !supported
                     || !self.enabled
                     || !self.wallet_allowed
@@ -145,9 +189,37 @@ impl Settings {
         }
         None
     }
+    /// Native handoff consumes Settings ownership, preserving only this session.
+    #[cfg(feature = "mcp-proposals")]
+    pub(crate) fn proposal_session(
+        &self,
+        cube_id: &str,
+    ) -> Option<crate::installer::proposal::Session> {
+        let server = self.server.as_ref().filter(|s| s.grant.active())?;
+        let store = self.proposals.as_ref()?;
+        let proposal = store.pending().ok()??;
+        Some(crate::installer::proposal::Session::new(
+            cube_id.to_owned(),
+            super::session::generation_for(cube_id)?,
+            server.grant.clone(),
+            store.clone(),
+            proposal,
+        ))
+    }
+
     /// Render consent controls and warn that the configured AI provider may receive data.
-    pub fn view(&self, supported: bool) -> Element<'_, view::Message> {
+    pub fn view_for_cube(
+        &self,
+        supported: bool,
+        proposal_supported: bool,
+    ) -> Element<'_, view::Message> {
         let message = |m| view::Message::LocalMcp(m);
+        #[cfg(feature = "mcp-proposals")]
+        if proposal_supported {
+            return self.proposal_view();
+        }
+        #[cfg(not(feature = "mcp-proposals"))]
+        let _ = proposal_supported;
         let mut content = column![
             h3("AI access"),
             text("Connect a local AI client to this Cube's Vault. Your AI provider may receive financial information. Only enable access for a client you trust."),
@@ -219,6 +291,65 @@ impl Settings {
                 }
             } else {
                 content = content.push(text("No client is authorized."));
+            }
+        }
+        if self.failed {
+            content = content.push(text("Could not start local MCP. No access was granted."));
+        }
+        content.into()
+    }
+}
+
+#[cfg(feature = "mcp-proposals")]
+impl Settings {
+    fn proposal_view(&self) -> Element<'_, view::Message> {
+        let msg = |m| view::Message::LocalMcp(m);
+        let mut content = column![h3("AI wallet proposals — Regtest experiment"),
+            text("A trusted local client may prepare one 3-of-5 topology with explicitly chosen recovery. It cannot choose keys, approve, create, sign or send coins. Your AI provider may receive the topology."),
+            text("Choose and verify actual keys in Tenshu. Review the compiled descriptor and authorize creation here. Grants expire after one hour, on lock/close, or when creation is admitted."),
+            checkbox(self.enabled).label("Enable MCP for this unlocked session").on_toggle(move |v| msg(Message::Enable(v)))].spacing(16);
+        if self.enabled {
+            content = content
+                .push(
+                    text_input("Client label (for your reference)", &self.client_name)
+                        .on_input(move |v| msg(Message::ClientName(v))),
+                )
+                .push(
+                    checkbox(self.proposals_allowed)
+                        .label("Allow this client to prepare a Regtest wallet proposal")
+                        .on_toggle(move |v| msg(Message::Proposals(v))),
+                )
+                .push(
+                    button("Approve proposal client for one hour").on_press_maybe(
+                        (self.proposals_allowed && !self.client_name.trim().is_empty())
+                            .then(|| msg(Message::Approve)),
+                    ),
+                );
+            if let Some(server) = &self.server {
+                content = content
+                    .push(text(if server.grant.active() {
+                        "Proposal client authorized"
+                    } else {
+                        "Inactive — approve again"
+                    }))
+                    .push(button("Revoke access now").on_press(msg(Message::Revoke)));
+                if server.grant.active() {
+                    content = content.push(button("Copy private client configuration").on_press(msg(Message::CopyConfig)))
+                        .push(text("Save the temporary grant only in your client's private local configuration. Never paste it into chat."));
+                    if let Some(proposal) = self
+                        .proposals
+                        .as_ref()
+                        .and_then(|s| s.pending().ok())
+                        .flatten()
+                    {
+                        content = content.push(text(format!("3-of-5 primary; recovery {}-of-{} after {} blocks. Actual keys and descriptor are not selected yet.", proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
+                            .push(button("Review proposal and select keys in Tenshu").on_press(msg(Message::ReviewProposal)));
+                    } else {
+                        content = content.push(text("Waiting for a proposal from your client."));
+                    }
+                }
+            } else {
+                content = content.push(text("No proposal client is authorized."));
             }
         }
         if self.failed {
@@ -908,5 +1039,77 @@ mod tests {
         drop(daemon);
         super::super::session::close();
         std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(all(test, feature = "mcp-proposals"))]
+mod proposal_consent_tests {
+    use super::*;
+    #[test]
+    fn explicit_empty_cube_proposal_consent_cannot_elevate_wallet_reads() {
+        let _guard = crate::app::session::test_guard();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(async {
+            crate::app::session::open_without_pin("empty-proposal-fixture");
+            let mut settings = Settings::default();
+            for message in [
+                Message::Enable(true),
+                Message::ClientName("fixture".into()),
+                Message::Proposals(true),
+                Message::Approve,
+            ] {
+                settings.update(message, None, None, true, "empty-proposal-fixture");
+            }
+            let server = settings.server.as_ref().unwrap();
+            let socket = server.socket.clone();
+            let credential = server.grant.credential().to_owned();
+            assert!(
+                wire::ipc::call(&socket, &credential, wire::Request::List(wire::Empty {}))
+                    .await
+                    .is_err()
+            );
+            let proposal = wire::ipc::call(
+                &socket,
+                &credential,
+                wire::Request::PrepareProposal(wire::proposal::PrepareInput {
+                    request_id: "fixture".into(),
+                    topology: wire::proposal::Topology {
+                        primary: wire::proposal::Quorum {
+                            threshold: 3,
+                            key_count: 5,
+                        },
+                        recovery: wire::proposal::Recovery {
+                            quorum: wire::proposal::Quorum {
+                                threshold: 1,
+                                key_count: 1,
+                            },
+                            relative_delay_blocks: 144,
+                        },
+                    },
+                }),
+            )
+            .await
+            .unwrap();
+            assert!(matches!(proposal, wire::Response::Proposal(_)));
+            assert!(settings.proposal_session("different-cube").is_none());
+            assert!(settings
+                .proposal_session("empty-proposal-fixture")
+                .is_some());
+            settings.update(
+                Message::Proposals(false),
+                None,
+                None,
+                true,
+                "empty-proposal-fixture",
+            );
+            assert!(settings.server.is_none());
+            assert!(settings.proposals.is_none());
+            assert!(
+                wire::ipc::call(&socket, &credential, wire::Request::List(wire::Empty {}))
+                    .await
+                    .is_err()
+            );
+            crate::app::session::close();
+        });
     }
 }

@@ -322,6 +322,34 @@ pub fn generation_for(cube_id: &str) -> Option<u64> {
         .map(|s| s.generation)
 }
 
+/// Serialize a native wallet creation admission with lock/close/reopen.
+/// The callback must be short and synchronous and must not call session APIs.
+#[cfg(feature = "mcp-proposals")]
+pub(crate) fn admit_generation<T>(
+    cube_id: &str,
+    generation: u64,
+    admit: impl FnOnce() -> Option<T>,
+) -> Option<T> {
+    let session = lock_session();
+    let current = session.as_ref()?;
+    if current.cube_id != cube_id || current.generation != generation {
+        return None;
+    }
+    admit()
+}
+
+/// Close only the captured experimental setup session, never a newer unlock.
+#[cfg(feature = "mcp-proposals")]
+pub(crate) fn close_generation(cube_id: &str, generation: u64) {
+    let mut current = lock_session();
+    if current
+        .as_ref()
+        .is_some_and(|s| s.cube_id == cube_id && s.generation == generation)
+    {
+        *current = None;
+    }
+}
+
 /// Id of the currently open Cube, if any.
 pub fn current_cube_id() -> Option<String> {
     lock_session().as_ref().map(|s| s.cube_id.clone())
@@ -371,6 +399,14 @@ pub(crate) fn close_cube(cube_id: &str) {
         .is_some_and(|session| session.cube_id == cube_id)
     {
         *session = None;
+    }
+}
+
+/// Advance only the synthetic test session's idle clock without a wall-clock wait.
+#[cfg(all(test, feature = "mcp-proposals"))]
+pub(crate) fn age_for_proposal_test(duration: Duration) {
+    if let Some(session) = lock_session().as_mut() {
+        session.last_activity = Instant::now() - duration;
     }
 }
 

@@ -101,6 +101,8 @@ impl ProposalInput {
 pub enum ProposalState {
     /// No actual keys or descriptor have been selected/validated.
     NeedsKeys,
+    /// The native wallet engine validated real keys; only native UI can approve.
+    ReadyForNativeReview,
 }
 
 /// Minimized topology draft; never a wallet or validated descriptor.
@@ -191,6 +193,43 @@ impl Store {
             proposal: proposal.clone(),
         });
         Ok(proposal)
+    }
+
+    /// Native inbox projection. It contains only the same minimized public DTO.
+    pub fn pending(&self) -> Result<Option<Proposal>, Error> {
+        let state = self.state.lock().map_err(|_| Error::Unavailable)?;
+        if state.revoked {
+            return Err(Error::AccessDenied);
+        }
+        Ok(state.draft.as_ref().map(|draft| draft.proposal.clone()))
+    }
+
+    /// Trusted native callback after actual descriptor validation, or invalidation.
+    /// No MCP request can invoke this method or supply its validation result.
+    pub fn native_validation(&self, id: &str, validated: bool) -> Result<(), Error> {
+        let mut state = self.state.lock().map_err(|_| Error::Unavailable)?;
+        if state.revoked {
+            return Err(Error::AccessDenied);
+        }
+        let draft = state
+            .draft
+            .as_mut()
+            .filter(|d| d.proposal.proposal_id == id)
+            .ok_or(Error::AccessDenied)?;
+        if draft.proposal.descriptor_validated != validated {
+            draft.proposal.revision = draft
+                .proposal
+                .revision
+                .checked_add(1)
+                .ok_or(Error::Unavailable)?;
+        }
+        draft.proposal.descriptor_validated = validated;
+        draft.proposal.state = if validated {
+            ProposalState::ReadyForNativeReview
+        } else {
+            ProposalState::NeedsKeys
+        };
+        Ok(())
     }
 
     /// Return only this grant's exact proposal, without existence hints.
