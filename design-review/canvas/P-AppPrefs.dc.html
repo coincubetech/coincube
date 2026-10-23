@@ -143,15 +143,16 @@ a.linkbtn:hover,.linkbtn:hover{color:var(--ink)}
 .disc[aria-expanded="true"] svg{transform:rotate(90deg)}
 .foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
 .coin-top{width:calc(var(--s) * .34);height:calc(var(--s) * .34)}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
 
   <header class="top">
-    <div class="brand">
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
       <span>Tenshu</span>
-    </div>
+    </a>
     <span class="grow"></span>
     <button type="button" class="tbtn ico" aria-label="Hide balances" aria-pressed="{{ hidePressed }}" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg>
@@ -250,11 +251,6 @@ a.linkbtn:hover,.linkbtn:hover{color:var(--ink)}
                       <label for="{{ o.id }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ o.icon }}"></path></svg>{{ o.label }}</label>
                     </sc-for>
                   </fieldset>
-                  <span class="scope">This device</span>
-                </li>
-                <li class="row">
-                  <label for="ap-testnets"><span class="lbl">Show test networks by default</span><span class="dsc" id="ap-testnets-d">The Launcher's starting filter only. It changes what the catalog shows, never a Cube's network.</span></label>
-                  <span class="ctl"><span class="swst" aria-hidden="true">{{ testNetsWord }}</span><input type="checkbox" role="switch" class="sw" id="ap-testnets" aria-describedby="ap-testnets-d" checked="{{ testNets }}" onChange="{{ toggleTestNets }}"></span>
                   <span class="scope">This device</span>
                 </li>
               </ul>
@@ -401,6 +397,8 @@ class Component extends DCLogic {
     this.state = { lv: null };
   }
   renderVals() {
+    // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage
+    let DEV = false; try { DEV = localStorage.getItem('tenshu.proto.dev') === '1'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props;
@@ -408,7 +406,7 @@ class Component extends DCLogic {
     const key = [L.section, L.os, L.osReduced, L.hide].join('|');
     // a lever change resets live state to the lever values; otherwise live state wins
     const s = this.state.lv !== key
-      ? { section: L.section, hide: L.hide, appearance: 'system', style: 'cubes', testNets: false, motion: 'system', dev: false, review: null, copied: false, repairAsked: false, vers: false }
+      ? { section: L.section, hide: L.hide, appearance: 'system', style: 'cubes', testNets: false, motion: 'system', dev: DEV, review: null, copied: false, repairAsked: false, vers: false }
       : this.state;
     const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
 
@@ -492,7 +490,7 @@ class Component extends DCLogic {
       showDeveloper: sec === 'Developer',
       dev: !!s.dev,
       devWord: s.dev ? 'On' : 'Off',
-      toggleDev: () => go({ dev: !s.dev }),
+      toggleDev: () => { try { if (s.dev) localStorage.removeItem('tenshu.proto.dev'); else localStorage.setItem('tenshu.proto.dev', '1'); } catch (e) {} go({ dev: !s.dev }); },
       b2b: B2B, b2bWord: B2B ? 'On' : 'Off',
       toggleB2b: () => { try { if (B2B) localStorage.removeItem('tenshu.proto.b2b'); else localStorage.setItem('tenshu.proto.b2b', '1'); } catch (e) {} go({}); },
       showDiagnostics: sec === 'Diagnostics',

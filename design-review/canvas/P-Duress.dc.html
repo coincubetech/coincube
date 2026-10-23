@@ -148,6 +148,7 @@ svg{flex:none}
 .lock .btn{width:220px;margin-top:24px;height:40px}
 .lock .em{margin-top:14px;font-size:14px;color:var(--muted)}
 .qdot{position:absolute;right:28px;bottom:44px;color:var(--muted);opacity:.6;font-size:14px}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -167,7 +168,7 @@ svg{flex:none}
 
   <sc-if value="{{ notActive }}" hint-placeholder-val="{{ true }}">
   <header class="top">
-    <div class="brand"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg><span>Tenshu</span></div>
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg><span>Tenshu</span></a>
     <span class="grow"></span>
     <button type="button" class="tbtn on" aria-current="page" aria-label="Connect, alex@example.test, signed in" title="alex@example.test · Signed in">
       <svg class="ic s" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>

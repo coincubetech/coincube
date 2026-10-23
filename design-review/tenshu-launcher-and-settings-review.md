@@ -658,3 +658,13 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Verified live in Chrome:** toggle off → Launcher shows Everyday, Lab, Archive, Household 2024 and the network menu lists Bitcoin mainnet, Testnet4, Signet, Regtest; Create › Network shows Bitcoin only. Toggle on → "Blake workspace" returns to the Launcher and the menu adds Bitcoin Blake2b mainnet and Blake2b Testnet4. Split coins and Claim pages show a "Bitcoin Blake2b is off on this device" notice with a link to App preferences when reached while off.
 
 **Prototype mechanics:** the flag is `tenshu.proto.b2b` in localStorage (same pattern as the open-Cube flag); every gated screen reads it at render. Lever-driven review states that assume Blake2b (Opening's `blake2bRetry` error, P2P on a Blake2b Cube, installer gap screens) are unchanged; they are reachable only through levers.
+
+## Developer mode gates test networks; brand mark returns to the Launcher (2026-10-23, canvas v87)
+
+**Decisions (Robert):**
+1. With Developer mode off there are no test networks anywhere: the Launcher drops the All / Live / Test filter chips and lists only live networks in its Network menu and Cube list; Create's "Test networks" group shows only "Test networks appear when Developer mode is on · App preferences". Turning Developer mode on restores all of it. The separate "Show test networks by default" preference in App preferences › Launcher was removed as redundant.
+2. The "Tenshu" mark with the cube icon at the top left of every screen is now a button back to the Launcher. It does not lock the open Cube; the Launcher shows that Cube as Open with "Go to Cube".
+
+**Verified live in Chrome (v87):** Developer mode off → Launcher shows "Network ▾ · 4 Cubes" with no chips; the menu lists Bitcoin mainnet and, with the Blake2b toggle on, Bitcoin Blake2b mainnet; Create › Network shows the note under "Test networks". Brand click from App preferences and Create returns to the Launcher.
+
+**Prototype mechanics:** the flag is `tenshu.proto.dev` in localStorage, written by the Developer-mode toggle and read by the Launcher and Create at render; a filter left on Live/Test or a test network falls back to "All" when the flag is off.

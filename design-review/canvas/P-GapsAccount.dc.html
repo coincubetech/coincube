@@ -185,12 +185,13 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
 .side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
 .side .lockgrp{display:contents}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
 
   <header class="top">
-    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
       <div class="chip" title="{{ acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 3.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg><span class="srl">{{ acctSr }}</span><span class="st {{ acctTone }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ acctIcon }}"/></svg>{{ acctWord }}</span></div>
       <div class="chip" title="{{ svcTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span><span class="st {{ svcTone }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="{{ svcIcon }}"/></svg>{{ svcWord }}</span></div>
