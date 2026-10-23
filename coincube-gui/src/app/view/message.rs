@@ -1629,6 +1629,8 @@ pub enum ConnectAccountMessage {
         epoch: u64,
     },
     LogOut,
+    /// Open or dismiss the account's inline sign-out review.
+    ReviewSignOut(bool),
     EmailChanged(String),
     SubmitLogin,
     SubmitRegistration,
@@ -1638,6 +1640,8 @@ pub enum ConnectAccountMessage {
         is_signup: bool,
     },
     OtpChanged(String),
+    /// Return from token entry to the same email form, retaining signup mode.
+    BackToEmail,
     OtpCooldownTick,
     ResendOtp,
     OtpResent,
@@ -1648,6 +1652,8 @@ pub enum ConnectAccountMessage {
     VerifiedDevicesLoaded(Vec<crate::services::coincube::VerifiedDevice>, u64),
     LoginActivityLoaded(Vec<crate::services::coincube::LoginActivity>, u64),
     DeleteVerifiedDevice(u32),
+    /// Open or dismiss the inline removal review for one verified device.
+    ReviewVerifiedDeviceRemoval(Option<u32>),
     VerifiedDeviceDeleted(u32, u64, Result<(), String>),
     CopyToClipboard(String),
     Contacts(ContactsMessage),

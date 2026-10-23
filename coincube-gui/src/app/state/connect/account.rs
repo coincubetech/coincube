@@ -817,6 +817,9 @@ pub struct ConnectAccountPanel {
     pub verified_devices: Option<Vec<VerifiedDevice>>,
     pub verified_devices_state: VerifiedDevicesState,
     pub login_activity: Option<Vec<LoginActivity>>,
+    /// Inline account actions awaiting the user's final choice.
+    pub review_sign_out: bool,
+    pub review_device_removal: Option<u32>,
     /// Account Overview summary counts, fetched on entering the Overview
     /// tab (kept separate from `contacts_state` so the count doesn't
     /// disturb the Contacts tab's own load/step state). `None` until the
@@ -918,6 +921,8 @@ impl ConnectAccountPanel {
             verified_devices: None,
             verified_devices_state: VerifiedDevicesState::default(),
             login_activity: None,
+            review_sign_out: false,
+            review_device_removal: None,
             overview_contact_count: None,
             overview_cube_count: None,
             contacts_state: ContactsState::new(),
@@ -1704,6 +1709,10 @@ impl ConnectAccountPanel {
                 }
             }
 
+            ConnectAccountMessage::ReviewSignOut(show) => {
+                self.review_sign_out = show && self.user.is_some();
+            }
+
             ConnectAccountMessage::LogOut => {
                 let was_logged_in = self.user.is_some();
                 self.clear_session();
@@ -1840,6 +1849,26 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::OtpChanged(otp) => {
                 if let ConnectFlowStep::OtpVerification { otp: o, .. } = &mut self.step {
                     *o = otp;
+                }
+            }
+
+            ConnectAccountMessage::BackToEmail => {
+                if let ConnectFlowStep::OtpVerification {
+                    email, is_signup, ..
+                } = &self.step
+                {
+                    self.step = if *is_signup {
+                        ConnectFlowStep::Register {
+                            email: email.clone(),
+                            loading: false,
+                        }
+                    } else {
+                        ConnectFlowStep::Login {
+                            email: email.clone(),
+                            loading: false,
+                        }
+                    };
+                    self.error = None;
                 }
             }
 
@@ -1987,7 +2016,19 @@ impl ConnectAccountPanel {
                 }
             }
 
+            ConnectAccountMessage::ReviewVerifiedDeviceRemoval(id) => {
+                self.review_device_removal = id.filter(|id| {
+                    self.verified_devices
+                        .as_ref()
+                        .is_some_and(|devices| devices.iter().any(|d| d.id == *id && !d.is_current))
+                });
+            }
+
             ConnectAccountMessage::DeleteVerifiedDevice(id) => {
+                if self.review_device_removal != Some(id) {
+                    return iced::Task::none();
+                }
+                self.review_device_removal = None;
                 self.verified_devices_state.deleting_ids.insert(id);
 
                 let gen = self.session_generation;
@@ -2741,6 +2782,8 @@ impl ConnectAccountPanel {
         self.plan = None;
         self.verified_devices = None;
         self.login_activity = None;
+        self.review_sign_out = false;
+        self.review_device_removal = None;
         self.overview_contact_count = None;
         self.overview_cube_count = None;
         self.features = None;
@@ -8361,5 +8404,59 @@ mod admitted_session_tests {
         let client = panel.authenticated_client().unwrap();
         assert_eq!(client.base_url, "http://127.0.0.1:2");
         assert_eq!(client.token(), Some("new-fixture"));
+    }
+}
+
+#[cfg(test)]
+mod connect_review_tests {
+    use super::*;
+
+    #[test]
+    fn token_back_preserves_signup_email_and_promo() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.register_campaign_code = "HELLO".into();
+        panel.step = ConnectFlowStep::OtpVerification {
+            email: "person@example.test".into(),
+            otp: "123456".into(),
+            sending: false,
+            is_signup: true,
+            cooldown: 30,
+        };
+        let _ = panel.update_message(ConnectAccountMessage::BackToEmail);
+        assert!(
+            matches!(panel.step, ConnectFlowStep::Register { ref email, loading: false } if email == "person@example.test")
+        );
+        assert_eq!(panel.register_campaign_code, "HELLO");
+    }
+
+    #[test]
+    fn device_removal_requires_review_of_a_noncurrent_device() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.verified_devices = Some(vec![
+            VerifiedDevice {
+                id: 1,
+                device_name: Some("This Mac".into()),
+                created_at: "2026-10-01T00:00:00Z".into(),
+                last_used_at: None,
+                is_current: true,
+            },
+            VerifiedDevice {
+                id: 2,
+                device_name: Some("Other device".into()),
+                created_at: "2026-10-01T00:00:00Z".into(),
+                last_used_at: None,
+                is_current: false,
+            },
+        ]);
+        let task = panel.update_message(ConnectAccountMessage::DeleteVerifiedDevice(2));
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(panel.verified_devices_state.deleting_ids.is_empty());
+
+        let _ = panel.update_message(ConnectAccountMessage::ReviewVerifiedDeviceRemoval(Some(1)));
+        assert_eq!(panel.review_device_removal, None);
+        let _ = panel.update_message(ConnectAccountMessage::ReviewVerifiedDeviceRemoval(Some(2)));
+        assert_eq!(panel.review_device_removal, Some(2));
+        let _ = panel.update_message(ConnectAccountMessage::ReviewVerifiedDeviceRemoval(None));
+        assert_eq!(panel.review_device_removal, None);
     }
 }

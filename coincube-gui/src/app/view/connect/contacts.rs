@@ -37,12 +37,15 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
         .push(
             Column::new()
                 .push(text::h4_bold("Contacts").style(theme::text::primary))
-                .push(text::p2_regular("Manage your trusted contacts.").color(color::GREY_3))
+                .push(
+                    text::p2_regular("People you trust with recovery alerts or Vault invitations.")
+                        .style(theme::text::secondary),
+                )
                 .spacing(2),
         )
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(
-            button::primary(None, "+")
+            button::primary(None, "Add contact")
                 .on_press(ConnectAccountMessage::Contacts(
                     ContactsMessage::ShowInviteForm,
                 ))
@@ -139,11 +142,11 @@ fn contacts_list_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAc
                     .push(text::p1_bold("No contacts yet").style(theme::text::primary))
                     .push(iced::widget::Space::new().height(Length::Fixed(4.0)))
                     .push(
-                        text::p2_regular("Invite your first trusted contact to get started.")
-                            .color(color::GREY_3),
+                            text::p2_regular("Add someone you trust. Connect will verify their role before they can join a Vault.")
+                                .style(theme::text::secondary),
                     )
                     .push(iced::widget::Space::new().height(Length::Fixed(16.0)))
-                    .push(button::primary(None, "Invite Contact").on_press(
+                    .push(button::primary(None, "Add contact").on_press(
                         ConnectAccountMessage::Contacts(ContactsMessage::ShowInviteForm),
                     ))
                     .align_x(Alignment::Center)
