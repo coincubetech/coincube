@@ -72,7 +72,7 @@ a.tbtn:hover{color:var(--ink)}
 .floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
 .field{position:absolute;inset:0;overflow-x:hidden;overflow-y:auto}
 .rows{display:flex;flex-direction:column;box-sizing:border-box}
-.rows.big{padding:84px 48px 24px}
+.rows.big{padding:168px 48px 24px}
 .rows.mid{padding:40px 48px 24px;gap:12px}
 .rows.dense{padding:28px 48px 24px;gap:8px}
 .row{display:flex;justify-content:center}
@@ -219,6 +219,17 @@ a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;c
 .dock{display:flex;align-items:center;gap:8px}
 .foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+/* paging (2026-10-23) */
+.pgbtn{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid var(--line);background:var(--panel);color:var(--ink);cursor:pointer;z-index:6;display:grid;place-items:center;box-shadow:0 6px 18px var(--shadow)}
+.pgbtn .ic{width:20px;height:20px}
+.pgbtn.l{left:18px}.pgbtn.r{right:18px}
+.pgbtn:hover{background:var(--hover)}
+.pgbtn[disabled]{opacity:.3;cursor:default}
+.pgdots{position:absolute;left:0;right:0;bottom:16px;display:flex;align-items:center;justify-content:center;gap:8px;z-index:6}
+.pgdots .dot{width:8px;height:8px;border-radius:50%;border:0;padding:0;background:var(--line);cursor:pointer}
+.pgdots .dot.on{background:var(--accent)}
+.pgdots .pgtx{margin-left:10px;font-size:12px;color:var(--muted)}
+.stage:focus{outline:none}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -282,9 +293,17 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </a>
   </header>
 
-  <main class="stage" aria-label="Cubes on this device">
+  <main class="stage" aria-label="Cubes on this device" tabIndex="-1" onWheel="{{ wheel }}" onKeyDown="{{ pageKeys }}">
     <div class="floor" style="{{ floorStyle }}" aria-hidden="true"></div>
     <p class="sr" aria-live="polite">{{ announce }}</p>
+    <sc-if value="{{ paged }}" hint-placeholder-val="{{ false }}">
+      <button type="button" class="pgbtn l" aria-label="Previous Cubes" disabled="{{ pgPrevOff }}" onClick="{{ pgPrev }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4 6 9l5 5"/></svg></button>
+      <button type="button" class="pgbtn r" aria-label="More Cubes" disabled="{{ pgNextOff }}" onClick="{{ pgNext }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4 5 5-5 5"/></svg></button>
+      <div class="pgdots" role="group" aria-label="Page {{ pgN }} of {{ pgTotal }}">
+        <sc-for list="{{ pgDots }}" as="d" hint-placeholder-count="2"><button type="button" class="dot {{ d.cls }}" aria-label="{{ d.aria }}" onClick="{{ d.pick }}"></button></sc-for>
+        <span class="pgtx">Page {{ pgN }} of {{ pgTotal }} · swipe, scroll sideways or use the arrow keys</span>
+      </div>
+    </sc-if>
 
     <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
       <div class="empty">
@@ -488,7 +507,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   <div class="foot">Concept prototype V3 · synthetic data · spin-to-face flow; face content is a flat panel over the scene, as the native Iced plan requires</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","20"],"default":"4","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","checks"],"default":"browse","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","9","20"],"default":"9","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","checks"],"default":"browse","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p) {
     super(p);
@@ -563,7 +582,7 @@ class Component extends DCLogic {
     ];
 
     const theme = this.props.theme ?? 'dark';
-    const count = parseInt(this.props.cubeCount ?? '4', 10) || 0;
+    const count = parseInt(this.props.cubeCount ?? '9', 10) || 0;
     const focusDemo = !!this.props.focusDemo;
     const lever = this.props.startPhase ?? 'browse';
     const st = this.state;
@@ -576,6 +595,8 @@ class Component extends DCLogic {
     const all = CUBES.filter((r) => (B2B || (r[2] !== 'b2b' && r[2] !== 'b2t')) && (DEV || CH[r[2]].live)).slice(0, count).map((r) => ({ id: r[0], name: r[1], network: r[2], bk: r[3], w: r[4], note: r[5] }));
     const vis = all.filter(matches);
     const n = vis.length;
+    const pages = Math.max(1, Math.ceil(n / 4));
+    const pg = Math.min(st.page || 0, pages - 1);
     const hidden = all.length - n;
 
     // state machine: browse -> details -> unlock -> checks. A selection hidden by filters falls back to browse.
@@ -590,7 +611,7 @@ class Component extends DCLogic {
     const browsing = phase === 'browse';
     const handoff = !leverWins && !browsing && !!st.handoff;
     // every action clears the handoff flag (so later spins have no delay) unless the patch sets it
-    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances };
+    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances, page: pg };
     const go = (patch) => this.setState(Object.assign({}, cur, { networkMenu: false, pin: null, showPin: false }, patch));
 
     // Robert (2026-10-23): "All networks" only when more than one network is listed; Live/Test only in Developer mode
@@ -607,9 +628,8 @@ class Component extends DCLogic {
     else if (count > 0) countText = n + ' of ' + count + ' Cubes · ' + hidden + ' hidden';
 
     // size tiers (V2). Slot heights are fixed so each scene's stage position is computable.
-    const T = n <= 4 ? { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 84, rowGap: 0 }
-      : n <= 8 ? { mode: 'mid', s: 120, slot: 192, h: 288, cols: 4, gap: 28, padT: 40, rowGap: 12 }
-      : { mode: 'dense', s: 85, slot: 152, h: 248, cols: 5, gap: 20, padT: 28, rowGap: 8 };
+    // Robert (2026-10-23): one size, four Cubes per page; more Cubes page sideways (arrows, trackpad swipe, arrow keys). padT matches .rows.big.
+    const T = { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 168, rowGap: 0 };
 
     // spin target: face center at stage (720, 392), projected face = 420px.
     // The scene's perspective-origin travels with the Cube so the final face sits on the optical axis:
@@ -691,8 +711,8 @@ class Component extends DCLogic {
 
     // Items keep the same order and keys in every phase: only classes and transform strings change, so both Cubes in a handoff keep their transitions.
     const rows = [];
-    for (let r = 0; r * T.cols < n; r++) {
-      const inRow = vis.slice(r * T.cols, (r + 1) * T.cols);
+    { const r = 0;
+      const inRow = vis.slice(pg * 4, pg * 4 + 4);
       const rowW = inRow.length * T.slot + (inRow.length - 1) * T.gap;
       const x0 = 48 + (1344 - rowW) / 2;
       const items = inRow.map((c, i) => {
@@ -765,7 +785,13 @@ class Component extends DCLogic {
       hasCubes: n > 0,
       hiddenText: hidden + (hidden === 1 ? ' Cube hidden.' : ' Cubes hidden.'),
       mode: T.mode, rows,
-      floorStyle: n === 0 ? 'top:44%' : T.mode === 'big' ? 'top:30%' : 'top:6%',
+      floorStyle: n === 0 ? 'top:44%' : 'top:40%',
+      paged: pages > 1, pgN: String(pg + 1), pgTotal: String(pages), pgPrevOff: pg === 0, pgNextOff: pg >= pages - 1,
+      pgPrev: () => { if (pg > 0) go({ page: pg - 1, phase: 'browse' }); },
+      pgNext: () => { if (pg < pages - 1) go({ page: pg + 1, phase: 'browse' }); },
+      pgDots: Array.from({ length: pages }, (_, i) => ({ cls: i === pg ? 'on' : '', aria: 'Page ' + (i + 1) + ' of ' + pages, pick: () => go({ page: i, phase: 'browse' }) })),
+      wheel: (e) => { if (pages < 2 || !e) return; const dx = e.deltaX || (e.shiftKey ? e.deltaY : 0); if (Math.abs(dx) < 24) return; const now = Date.now(); if (this._wheelAt && now - this._wheelAt < 600) return; this._wheelAt = now; if (dx > 0 && pg < pages - 1) go({ page: pg + 1, phase: 'browse' }); else if (dx < 0 && pg > 0) go({ page: pg - 1, phase: 'browse' }); },
+      pageKeys: (e) => { if (pages < 2 || !e) return; const tg = e.target && e.target.tagName; if (tg === 'INPUT' || tg === 'TEXTAREA') return; if (e.key === 'ArrowRight' || e.key === 'PageDown') { if (e.preventDefault) e.preventDefault(); if (pg < pages - 1) go({ page: pg + 1, phase: 'browse' }); } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { if (e.preventDefault) e.preventDefault(); if (pg > 0) go({ page: pg - 1, phase: 'browse' }); } },
       announce,
       hidePressed: String(!!st.hideBalances), eyeOpen: !st.hideBalances, eyeShut: !!st.hideBalances,
       hideTitle: st.hideBalances ? 'Balances hidden on this device' : 'Hide balances on this device',
