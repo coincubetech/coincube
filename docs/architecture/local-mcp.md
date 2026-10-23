@@ -89,6 +89,25 @@ and no single read-only authoritative session API. No fake status tool is shippe
 Future unsigned proposals must have separate capabilities and trusted UI approval;
 this read protocol cannot call signing, broadcast, unlock, import or recovery.
 
+## Staged wallet-proposal service
+
+The closed protocol additionally stages `PrepareProposal` and `Proposal` for an
+explicit preparation-only grant. Legacy wallet grants retain their exact read
+permissions and cannot invoke either operation. Preparation grants cannot list
+or read a wallet. A fresh bounded store belongs to each grant and contains at
+most one topology draft: 3-of-5 primary, explicitly chosen recovery, Bitcoin
+Regtest P2WSH. It contains no keys/descriptor, never opens a window and cannot
+install or approve anything. Unknown arguments and invalid topology bounds fail
+before service use. Exact retries share one draft; conflicting requests fail.
+
+This service is not yet an enabled end-to-end feature. The current GUI issues
+only read grants, so capability metadata still reports proposals unavailable.
+Native first-Vault consent, local key binding/real descriptor validation, exact
+review revision and creation admission are separate integration work. They must
+pin the correct unlocked empty Regtest Cube, respect every existing key-role
+guard and session revocation, and require human creation authorization. A stored
+topology does not prove the validity of any actual descriptor.
+
 ## References and startup evidence
 
 Repository: verified `git@github.com:coincubetech/coincube.git`, base `8495c3c0`.

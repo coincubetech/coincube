@@ -409,9 +409,10 @@ mod protocol {
         });
         let client = ().serve(client_io).await.unwrap();
         let listed = client.list_all_tools().await.unwrap();
-        assert_eq!(listed.len(), 5);
+        assert_eq!(listed.len(), 7);
         assert!(listed.iter().all(|t| t.output_schema.is_some()
-            && t.annotations.as_ref().unwrap().read_only_hint == Some(true)));
+            && t.annotations.as_ref().unwrap().read_only_hint
+                == Some(t.name != "tenshu_prepare_wallet_proposal")));
         let result = client
             .call_tool(CallToolRequestParams::new("tenshu_list_wallets"))
             .await
@@ -447,7 +448,9 @@ mod protocol {
                 "tenshu_list_wallets",
                 "tenshu_get_wallet_summary",
                 "tenshu_get_transactions",
-                "tenshu_get_wallet_policy_summary"
+                "tenshu_get_wallet_policy_summary",
+                "tenshu_prepare_wallet_proposal",
+                "tenshu_get_wallet_proposal"
             ]
         );
         for name in [
@@ -457,7 +460,6 @@ mod protocol {
             "unlock",
             "read_file",
             "execute",
-            "tenshu_prepare_wallet_proposal",
             "tenshu_create_wallet",
         ] {
             assert!(adapter.invoke(name, serde_json::json!({})).await.is_err());

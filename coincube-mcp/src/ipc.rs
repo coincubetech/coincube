@@ -41,14 +41,22 @@ struct Envelope {
 }
 
 /// Memory-only bearer grant bound to one wallet, capability set and expiry.
+enum Scope {
+    Read {
+        wallet_id: String,
+        permissions: ReadPermissions,
+    },
+    Proposal,
+}
+
+/// Memory-only bearer grant. Read and proposal scopes cannot upgrade each other.
 pub struct Grant {
     session_valid: Box<dyn Fn() -> bool + Send + Sync>,
     credential: String,
-    wallet_id: String,
-    permissions: ReadPermissions,
+    scope: Scope,
     expires: Instant,
     revoked: AtomicBool,
-    /// Completed successful reads; this is not a connected-client count.
+    /// Completed successful operations; this is not a connected-client count.
     pub successful_calls: AtomicU64,
 }
 impl Grant {
@@ -56,13 +64,30 @@ impl Grant {
     ///
     /// Capabilities are balance, confirmed history and policy, in that order.
     pub fn new(wallet_id: String, capabilities: [bool; 3], duration: Duration) -> Self {
+        Self::for_scope(
+            Scope::Read {
+                wallet_id,
+                permissions: ReadPermissions::from_legacy(capabilities),
+            },
+            duration,
+        )
+    }
+    /// New preparation-only grant, with a mandatory trusted session guard.
+    /// It cannot list or read wallets. The trusted desktop must supply a fresh
+    /// proposal store and a guard for the correct unlocked, empty Regtest Cube.
+    pub fn for_proposals(
+        duration: Duration,
+        valid: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> Self {
+        Self::for_scope(Scope::Proposal, duration).with_session_guard(valid)
+    }
+    fn for_scope(scope: Scope, duration: Duration) -> Self {
         let mut bytes = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut bytes);
         Self {
             session_valid: Box::new(|| true),
             credential: bytes.iter().map(|b| format!("{b:02x}")).collect(),
-            wallet_id,
-            permissions: ReadPermissions::from_legacy(capabilities),
+            scope,
             expires: Instant::now() + duration,
             revoked: AtomicBool::new(false),
             successful_calls: AtomicU64::new(0),
@@ -91,10 +116,24 @@ impl Grant {
         if !self.active() || !bool::from(self.credential.as_bytes().ct_eq(credential.as_bytes())) {
             return Err(Error::AccessDenied);
         }
-        if let Some((wallet, cap)) = request.scope()
-            && (wallet != self.wallet_id || !self.permissions.permits(cap))
-        {
-            return Err(Error::AccessDenied);
+        match (&self.scope, request) {
+            (Scope::Proposal, Request::PrepareProposal(_) | Request::Proposal(_)) => {}
+            (Scope::Read { .. }, Request::List(_)) => {}
+            (
+                Scope::Read {
+                    wallet_id,
+                    permissions,
+                },
+                _,
+            ) => {
+                let Some((wallet, cap)) = request.scope() else {
+                    return Err(Error::AccessDenied);
+                };
+                if wallet != wallet_id || !permissions.permits(cap) {
+                    return Err(Error::AccessDenied);
+                }
+            }
+            _ => return Err(Error::AccessDenied),
         }
         if !request.valid() {
             return Err(Error::InvalidInput);

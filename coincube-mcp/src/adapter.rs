@@ -55,6 +55,14 @@ pub fn tools() -> Vec<Tool> {
             "tenshu_get_wallet_policy_summary",
             "Deterministic Vault policy analysis without keys or descriptors. Recovery delays are relative blocks, not current eligibility.",
         ),
+        tool::<proposal::PrepareInput, proposal::Proposal>(
+            "tenshu_prepare_wallet_proposal",
+            "Prepare a bounded session-only Regtest 3-of-5 topology draft with explicitly chosen recovery. Requires separate proposal consent; keys and descriptor validation happen in Tenshu. Never creates a wallet.",
+        ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+        tool::<proposal::ProposalInput, proposal::Proposal>(
+            "tenshu_get_wallet_proposal",
+            "Read only the current preparation grant's proposal. A topology draft is not a validated descriptor or created wallet.",
+        ),
     ]
 }
 /// Decode typed arguments while withholding raw serialization error details.
@@ -84,6 +92,8 @@ impl Adapter {
             "tenshu_get_wallet_summary" => crate::Request::Summary(parse(arguments)?),
             "tenshu_get_transactions" => crate::Request::History(parse(arguments)?),
             "tenshu_get_wallet_policy_summary" => crate::Request::Policy(parse(arguments)?),
+            "tenshu_prepare_wallet_proposal" => crate::Request::PrepareProposal(parse(arguments)?),
+            "tenshu_get_wallet_proposal" => crate::Request::Proposal(parse(arguments)?),
             _ => return Err(ErrorData::invalid_params("unknown_tool", None)),
         };
         if !request.valid() {
@@ -103,6 +113,7 @@ impl Adapter {
                     Response::Summary(v) => serde_json::to_value(v),
                     Response::History(v) => serde_json::to_value(v),
                     Response::Policy(v) => serde_json::to_value(v),
+                    Response::Proposal(v) => serde_json::to_value(v),
                 }
                 .map_err(|_| ErrorData::internal_error("serialization_failed", None))?;
                 Ok(CallToolResult::structured(value))
