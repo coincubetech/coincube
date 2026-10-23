@@ -105,7 +105,7 @@ pub struct Transaction {
     pub txid: String,
     /// Incoming amount as represented by the existing wallet UI, in satoshis.
     pub incoming_sats: u64,
-    /// Outgoing amount as represented by the existing wallet UI, in satoshis.
+    /// Wallet spending to non-wallet outputs, in satoshis; zero for incoming payments.
     pub outgoing_sats: u64,
     /// Confirmation timestamp when available, in Unix seconds.
     pub timestamp: Option<u32>,
