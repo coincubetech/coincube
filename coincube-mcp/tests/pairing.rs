@@ -185,3 +185,19 @@ async fn paired_runtime_keeps_pre_and_post_read_session_checks() {
     assert_eq!(call.await.unwrap().unwrap_err(), Error::AccessDenied);
     assert!(!server.grant.active());
 }
+
+#[cfg(windows)]
+#[test]
+fn windows_atomic_replacement_retains_private_owner_acl() {
+    let (_root, dir) = directory();
+    let path = dir.join("registry");
+    for value in [b"first".as_slice(), b"replacement".as_slice()] {
+        pairing::write_private(&path, value).unwrap();
+        pairing::check_private(&path, false).unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), value);
+    }
+    // A default inherited ACL must not be accepted as a private registry.
+    let inherited = dir.parent().unwrap().join("inherited-file");
+    std::fs::write(&inherited, b"not private").unwrap();
+    assert!(pairing::check_private(&inherited, false).is_err());
+}

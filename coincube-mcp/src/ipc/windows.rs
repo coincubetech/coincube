@@ -141,10 +141,12 @@ pub(crate) fn protect_new_path(path: &Path) -> io::Result<()> {
 
 pub(crate) fn check_private_path(path: &Path) -> io::Result<()> {
     use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
-    use windows_sys::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW, SE_FILE_OBJECT,
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
     };
-    use windows_sys::Win32::Security::{DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION};
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
     if std::fs::symlink_metadata(path)?.file_attributes() & 0x400 != 0 {
         return Err(io::Error::other("reparse path denied"));
     }
@@ -169,26 +171,35 @@ pub(crate) fn check_private_path(path: &Path) -> io::Result<()> {
         if owner.is_null() || sid_text(owner)? != sid {
             return Err(io::Error::other("private owner mismatch"));
         }
-        let (mut text, mut length) = (ptr::null_mut(), 0);
-        if ConvertSecurityDescriptorToStringSecurityDescriptorW(
-            descriptor,
-            SDDL_REVISION_1,
-            DACL_SECURITY_INFORMATION,
-            &mut text,
-            &mut length,
-        ) == 0
+        // Inspect the binary ACL. SDDL is a display format and can render a
+        // well-known account as an alias instead of its numeric SID.
+        let (mut control, mut revision) = (0, 0);
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl = ptr::null_mut();
+        if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0
+            || control & SE_DACL_PROTECTED == 0
+            || GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) == 0
+            || present == 0
+            || dacl.is_null()
+            || (*dacl).AceCount != 1
         {
-            return Err(io::Error::last_os_error());
+            return Err(io::Error::other("shared pairing path denied"));
         }
-        let _text = LocalAllocation(text.cast());
-        let text = String::from_utf16(std::slice::from_raw_parts(
-            text,
-            length.saturating_sub(1) as usize,
-        ))
-        .map_err(|_| io::Error::other("invalid ACL"))?;
-        if !text.starts_with("D:P")
-            || text.matches('(').count() != 1
-            || !text.contains(&format!(";;;{sid})"))
+        let mut ace = ptr::null_mut();
+        if GetAce(dacl, 0, &mut ace) == 0 || ace.is_null() {
+            return Err(io::Error::other("private ACE unavailable"));
+        }
+        let header = &*ace.cast::<windows_sys::Win32::Security::ACE_HEADER>();
+        // Check the type/size before interpreting the allowed-ACE layout.
+        if header.AceType != 0 || usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
+            return Err(io::Error::other("private ACE unavailable"));
+        }
+        let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+        // ACCESS_ALLOWED_ACE_TYPE is zero. Only the owner may access this path.
+        if ace.Header.AceType != 0
+            || u32::from(ace.Header.AceFlags) & INHERIT_ONLY_ACE != 0
+            || ace.Mask != FILE_ALL_ACCESS
+            || sid_text(ptr::addr_of!(ace.SidStart).cast_mut().cast())? != sid
         {
             return Err(io::Error::other("shared pairing path denied"));
         }
