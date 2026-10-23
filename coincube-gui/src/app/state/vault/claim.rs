@@ -588,12 +588,14 @@ enum FundingAttemptOutcome {
 
 /// Identifier-free timing for one completed deposit check, including checks
 /// that stop before ancestry observation begins. Phase is a fixed UI label;
-/// no error text, wallet identity or transaction identifier is retained.
+/// no error text, wallet identity or transaction identifier is retained. The
+/// expiry marker is display-only and never renews a deposit proof.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FundingAttemptTiming {
     phase: &'static str,
     outcome: FundingAttemptOutcome,
     elapsed_ms: u64,
+    proof_expired: bool,
 }
 
 impl std::fmt::Display for FundingAttemptTiming {
@@ -607,7 +609,11 @@ impl std::fmt::Display for FundingAttemptTiming {
             formatter,
             "{result} at {}; elapsed={} ms",
             self.phase, self.elapsed_ms
-        )
+        )?;
+        if self.proof_expired {
+            write!(formatter, "; proof_expired_30s=true; recheck_required=true")?;
+        }
+        Ok(())
     }
 }
 
@@ -2356,6 +2362,7 @@ impl ClaimStep1Panel {
                         FundingAttemptOutcome::Returned
                     },
                     elapsed_ms: attempt_started.elapsed().as_millis() as u64,
+                    proof_expired: false,
                 };
                 if let Err(reason) = &result {
                     log::warn!("Claim deposit verification stopped at {phase}: {reason}");
@@ -4051,8 +4058,11 @@ impl ClaimStep1Panel {
                 {
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
-                    self.funding_timing.clear();
-                    self.funding_attempt = None;
+                    // Keep the completed attempt's read-only diagnostics for
+                    // copying, but label them historical after proof expiry.
+                    if let Some(attempt) = self.funding_attempt.as_mut() {
+                        attempt.proof_expired = true;
+                    }
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = Some(

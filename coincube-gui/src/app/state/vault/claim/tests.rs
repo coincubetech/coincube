@@ -1009,6 +1009,7 @@ fn funding_chain_diagnostics_do_not_hide_a_different_or_paired_timeout_refusal()
                 phase: "Checking paired Vault prerequisites",
                 outcome: FundingAttemptOutcome::Failed,
                 elapsed_ms: 1,
+                proof_expired: false,
             },
         )));
         let reason = funding_proof_refusal(refusal);
@@ -1056,6 +1057,7 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         phase: "synthetic phase",
         outcome: FundingAttemptOutcome::Deadline150s,
         elapsed_ms: 150_000,
+        proof_expired: false,
     };
     for revoke in [false, true] {
         p.stage = Stage::FundingDeposits(addresses.clone());
@@ -1260,6 +1262,7 @@ fn completed_check_without_ancestry_events_reports_only_attempt_status() {
         phase: "Scanning the Bitcoin and BTCB2 Vaults",
         outcome: FundingAttemptOutcome::Returned,
         elapsed_ms: 13,
+        proof_expired: false,
     };
     let revocations = p.revocations;
     drop(p.apply(ClaimEvent::FundingProofChecked(
@@ -1289,6 +1292,102 @@ fn completed_check_without_ancestry_events_reports_only_attempt_status() {
     assert!(!report.contains("Bitcoin: "));
     assert!(!report.contains("private-account"));
     assert!(!p.can_sign_or_submit());
+}
+
+#[test]
+fn expired_proof_retains_only_its_read_only_report_until_a_new_check() {
+    use crate::services::claim_observation::http::{AncestryTimingOutcome, AncestryTimingStage};
+
+    let (_sender, generation) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = generation;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "private-account".into(),
+    });
+    p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "private-bitcoin-address".into(),
+        btcb2_deposit: "private-btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
+    });
+    p.check_seq = 12;
+    p.funding_proofs = [FundingProofStatus::PathFound; 2];
+    let timing = AncestryTimingReport {
+        chain: ChainId::Bitcoin,
+        outcome: AncestryTimingOutcome::PathFound,
+        stage: AncestryTimingStage::RootQualification,
+        elapsed_ms: 42,
+        requests: 8,
+        charged_bytes: 3_000,
+        visited: 3,
+        pruned: 1,
+        roots: 1,
+        shared_roots: 0,
+        unsupported_roots: 0,
+    };
+    let attempt = FundingAttemptTiming {
+        phase: "Verifying both deposits’ chain-specific ancestry",
+        outcome: FundingAttemptOutcome::Returned,
+        elapsed_ms: 50,
+        proof_expired: false,
+    };
+    p.funding_timing = vec![timing];
+    p.funding_attempt = Some(attempt);
+    assert!(p.verification_report().is_some());
+
+    drop(p.apply(ClaimEvent::FundingProofExpired(11, 7, 0)));
+    assert_eq!(p.funding_proofs, [FundingProofStatus::PathFound; 2]);
+    drop(p.apply(ClaimEvent::FundingProofExpired(12, 7, 0)));
+    assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+    assert_eq!(p.funding_timing, vec![timing]);
+    assert!(p.funding_review().is_none());
+    assert!(!p.can_sign_or_submit());
+    let report = p.verification_report().expect("expired proof report");
+    assert!(report.contains("path_found at root_qualification"));
+    assert!(report.contains("proof_expired"));
+    assert!(report.contains("recheck_required=true"));
+    assert!(!report.contains("private-account"));
+    assert!(!report.contains("private-bitcoin-address"));
+
+    p.funding_checking = true;
+    p.check_seq = 13;
+    drop(p.apply(ClaimEvent::FundingProofChecked(
+        13,
+        7,
+        0,
+        [FundingProofStatus::Pending; 2],
+        false,
+        vec![timing],
+        attempt,
+    )));
+    p.funding_checking = false;
+    drop(p.apply(ClaimEvent::FundingProofExpired(12, 7, 0)));
+    let newer = p.verification_report().expect("newer attempt report");
+    assert!(newer.contains("overall_deposit_check_result=returned"));
+    assert!(!newer.contains("proof_expired"));
+    assert!(!newer.contains("recheck_required"));
+    let pending = p.check_funding(Arc::new(Recording::default()));
+    assert!(p.verification_report().is_none());
+    assert!(p.funding_timing.is_empty());
+    assert!(p.funding_attempt.is_none());
+    let current_seq = p.check_seq;
+    drop(p.apply(ClaimEvent::FundingProofChecked(
+        current_seq,
+        7,
+        0,
+        [FundingProofStatus::Pending; 2],
+        false,
+        vec![timing],
+        attempt,
+    )));
+    p.funding_checking = false;
+    assert!(p.verification_report().is_some());
+    drop(pending);
+    p.revoke();
+    assert!(p.verification_report().is_none());
 }
 
 #[test]

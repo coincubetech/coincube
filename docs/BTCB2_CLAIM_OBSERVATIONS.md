@@ -44,7 +44,9 @@ contains no transaction or
 outpoint IDs, URLs, addresses, account data or credentials. A negative search
 can thus distinguish a pruned pre-fork frontier from rejected candidate roots,
 but neither the report nor a log line is spend authority. Reports clear on a
-new check, cancellation or context revocation. These diagnostics do not change
+new check, cancellation or context revocation. When a completed proof expires,
+its report remains copyable with an expired/recheck-required marker while the
+proof itself is invalidated. These diagnostics do not change
 the established deadlines, budgets or proof gates.
 
 Each search node now fetches raw bytes and its fresh full-transaction metadata
