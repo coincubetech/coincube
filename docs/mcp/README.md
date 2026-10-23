@@ -255,7 +255,7 @@ build flag and bounded topology limits; that report is never live consent.
    wallet/daemon persistence, a shared per-Cube OS reservation, captured session
    generation, live grant and exact review snapshot must all pass. There is no
    approve/install/sign/broadcast MCP operation. This first demo accepts only an
-   external loopback Bitcoin Core/Knots RPC on port28443 and no Connect/provider
+   external loopback Bitcoin Core/Knots RPC on port 28443 and no Connect/provider
    enrollment. Creating the Vault consumes/revokes the proposal grant.
 6. Completion returns to the launcher. Unlock afresh and approve a new read
    grant to inspect the installed policy/balance. Old proposal IDs/tokens never
