@@ -1,5 +1,5 @@
 //! Authenticated local IPC. Every request checks the live grant twice.
-use crate::{Error, Reader, Request, Response};
+use crate::{Error, ReadPermissions, Reader, Request, Response};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -45,7 +45,7 @@ pub struct Grant {
     session_valid: Box<dyn Fn() -> bool + Send + Sync>,
     credential: String,
     wallet_id: String,
-    capabilities: [bool; 3],
+    permissions: ReadPermissions,
     expires: Instant,
     revoked: AtomicBool,
     /// Completed successful reads; this is not a connected-client count.
@@ -62,7 +62,7 @@ impl Grant {
             session_valid: Box::new(|| true),
             credential: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             wallet_id,
-            capabilities,
+            permissions: ReadPermissions::from_legacy(capabilities),
             expires: Instant::now() + duration,
             revoked: AtomicBool::new(false),
             successful_calls: AtomicU64::new(0),
@@ -92,7 +92,7 @@ impl Grant {
             return Err(Error::AccessDenied);
         }
         if let Some((wallet, cap)) = request.scope()
-            && (wallet != self.wallet_id || !self.capabilities[cap])
+            && (wallet != self.wallet_id || !self.permissions.permits(cap))
         {
             return Err(Error::AccessDenied);
         }

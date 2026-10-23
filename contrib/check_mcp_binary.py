@@ -73,10 +73,20 @@ def check(binary):
                     assert receive(1)["serverInfo"]["name"] == "tenshu-mcp"
                     send({"jsonrpc": "2.0", "method": "notifications/initialized"})
                     send({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
-                    assert len(receive(2)["tools"]) == 4
+                    assert {tool["name"] for tool in receive(2)["tools"]} == {
+                        "tenshu_get_capabilities", "tenshu_list_wallets",
+                        "tenshu_get_wallet_summary", "tenshu_get_transactions",
+                        "tenshu_get_wallet_policy_summary",
+                    }
                     send({"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {
+                        "name": "tenshu_get_capabilities", "arguments": {}}})
+                    capabilities = receive(3)["structuredContent"]
+                    assert capabilities["schema_version"] == 1
+                    assert capabilities["wallet_proposals"] is False
+                    assert capabilities["wallet_creation_via_mcp"] is False
+                    send({"jsonrpc": "2.0", "id": 4, "method": "tools/call", "params": {
                         "name": "tenshu_list_wallets", "arguments": {}}})
-                    assert receive(3)["structuredContent"]["wallets"][0]["wallet_id"] == "packaging-fixture"
+                    assert receive(4)["structuredContent"]["wallets"][0]["wallet_id"] == "packaging-fixture"
                     peer.result(timeout=10)
                     process.stdin.close()
                     assert process.wait(timeout=5) == 0

@@ -73,6 +73,9 @@ User-controlled text never controls routing or authorization.
 
 ## Tools and semantics
 
+- `tenshu_get_capabilities`: static build support, independent of installed
+  wallets and live consent. It cannot authorize operations or reach the desktop.
+  Proposal support remains false until the separate implementation is present.
 - `tenshu_list_wallets`: one authorized active Vault, opaque session wallet ID.
 - `tenshu_get_wallet_summary`: current daemon balances in satoshis and sync state;
   no promise that a policy is presently satisfiable or that data is fully synced.
