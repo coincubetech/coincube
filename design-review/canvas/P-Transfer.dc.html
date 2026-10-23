@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V3 · Cube transfer</title>
+<title>Cube transfer</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -517,13 +517,15 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 class Component extends DCLogic {
   constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P=this.props,self=this;
     const lever=P.step||'fromto';
     const init={for:lever,step:lever,from:lever==='split'?'vault':'spark',stage:'explain',prog:0,cname:'Family savings · Blake2b',to:'other',cube:'archive',phase:'pin',method:'pin',sats:10000,unit:'sats',text:null,cmethod:'pin',pin1:'',pin2:''};
     const S=(this.state.k&&this.state.k.for===lever)?this.state.k:init;
     const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
     const hb=!!P.hideBalances;
-    const beta=P.btcb2Beta!==false;
+    const beta=P.btcb2Beta!==false&&B2B;
     const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
     const D='••••••';
     const W={
@@ -568,7 +570,7 @@ class Component extends DCLogic {
        reason:'Different network: can’t receive this transfer'},
       {key:'archive',name:'Archive',net:'Bitcoin mainnet',mark:'btc',tag:'',tagCls:'',wallets:'Spark only',reason:''}
     ];
-    const cubes=CUBES.map((c)=>{
+    const cubes=CUBES.filter((c)=>B2B||c.mark!=='b2b').map((c)=>{
       const dis=!!c.reason;
       return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },name:c.name,net:c.net,wallets:c.wallets,tag:c.tag,tagCls:c.tagCls,hasTag:!!c.tag,reason:c.reason,

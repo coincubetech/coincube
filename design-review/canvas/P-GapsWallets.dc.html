@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V6 · Wallet gaps</title>
+<title>Wallet gaps</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -624,6 +624,8 @@ class Component extends DCLogic {
     this.state = { k: null, hide: null, lockAsk: false };
   }
   renderVals() {
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B_ON = false; try { B2B_ON = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props, self = this;
     const SCR = {
       sideshiftSend: ['ssAddress', 'ssNetwork', 'ssAmount', 'ssPreparing', 'ssReview', 'ssSubmitted', 'ssSettled', 'ssError'],
@@ -664,12 +666,12 @@ class Component extends DCLogic {
 
     // ---------- shell ----------
     const NAV = {
-      overview: ['Overview', 'V2-Cube-Overview.dc.html', 'M2.5 2.5h5v5h-5zM10.5 2.5h5v5h-5zM2.5 10.5h5v5h-5zM10.5 10.5h5v5h-5z'],
-      activity: ['Activity', 'V3-Activity.dc.html', 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.5V9l2.5 1.5'],
+      overview: ['Overview', 'P-Overview.dc.html', 'M2.5 2.5h5v5h-5zM10.5 2.5h5v5h-5zM2.5 10.5h5v5h-5zM10.5 10.5h5v5h-5z'],
+      activity: ['Activity', 'P-Activity.dc.html', 'M9 2.5a6.5 6.5 0 1 0 0 13a6.5 6.5 0 1 0 0-13M9 5.5V9l2.5 1.5'],
       backup: ['Backup & protection', 'P-Settings.dc.html', 'M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4zM6.5 9l1.8 1.8 3.5-3.5'],
-      spark: ['Spark · Daily spending', 'V2-Cube-Overview.dc.html', 'M10 2 4 10h4.5L8 16l6-8H9.5z'],
-      vault: ['Vault · Family savings', 'V3-Vault-Advanced.dc.html', 'M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z'],
-      liquid: ['Liquid · Travel', 'V6-Liquid.dc.html', 'M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z']
+      spark: ['Spark · Daily spending', 'P-Overview.dc.html', 'M10 2 4 10h4.5L8 16l6-8H9.5z'],
+      vault: ['Vault · Family savings', 'P-Advanced.dc.html', 'M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z'],
+      liquid: ['Liquid · Travel', 'P-Liquid.dc.html', 'M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z']
     };
     const ACTIVE = { sideshiftSend: 'liquid', sparkBridge: 'spark', sparkDeposits: 'spark', vaultOverview: 'vault', rbf: 'activity', nodeSettings: 'settings', feerate: 'vault' };
     const act = ACTIVE[scr];
@@ -684,8 +686,8 @@ class Component extends DCLogic {
       rbf: 'App: Vault › Transactions › detail › Bump fee / Cancel transaction', nodeSettings: 'App: Vault › Settings › Node',
       feerate: 'App: shared feerate picker (Vault Send, Transfer, Liquid refund)'
     };
-    const BACK = { sideshiftSend: ['Liquid · Travel', 'V6-Liquid.dc.html'], sparkBridge: ['Overview', 'V2-Cube-Overview.dc.html'], sparkDeposits: ['Spark · Daily spending', 'V2-Cube-Overview.dc.html'],
-      vaultOverview: ['Overview', 'V2-Cube-Overview.dc.html'], rbf: ['Activity', 'V3-Activity.dc.html'], nodeSettings: ['Settings', 'P-Settings.dc.html'], feerate: ['Vault · Family savings', 'V3-Vault-Advanced.dc.html'] };
+    const BACK = { sideshiftSend: ['Liquid · Travel', 'P-Liquid.dc.html'], sparkBridge: ['Overview', 'P-Overview.dc.html'], sparkDeposits: ['Spark · Daily spending', 'P-Overview.dc.html'],
+      vaultOverview: ['Overview', 'P-Overview.dc.html'], rbf: ['Activity', 'P-Activity.dc.html'], nodeSettings: ['Settings', 'P-Settings.dc.html'], feerate: ['Vault · Family savings', 'P-Advanced.dc.html'] };
 
     // ---------- #61 SideShift send ----------
     const SSP = { ssAddress: 0, ssNetwork: 1, ssAmount: 2, ssPreparing: 2, ssReview: 3, ssSubmitted: 4, ssSettled: 4, ssError: 0 };
@@ -824,7 +826,7 @@ class Component extends DCLogic {
       { name: 'Blake workspace', img: B2B, tag: 'Blake2b', tagCls: 'b2b', hasTag: true, line: 'Backup not confirmed · Vault only', state: 'Locked' },
       { name: 'Lab', img: BTC, tag: 'Testnet4', tagCls: 'test', hasTag: true, line: 'Backup status unknown · Vault only', state: 'Locked' },
       { name: 'Archive', img: BTC, tag: '', tagCls: '', hasTag: false, line: 'Backup confirmed · No Vault configured · Spark only', state: 'Locked' }
-    ];
+    ].filter((c) => B2B_ON || c.tagCls !== 'b2b');
     const remoteCubes = [
       ['Household 2024', 'Recovery Kit + Phone recovery available', 'Recover this Cube — choose password or phone'],
       ['Travel fund', 'Recovery Kit available', 'Restore this Cube from its Recovery Kit'],
@@ -834,14 +836,14 @@ class Component extends DCLogic {
     ].map((r, i) => ({ name: r[0], line: r[1], tip: r[2], can: !!r[2], showTip: i === 0, focusCls: i === 0 ? 'demo-focus' : '', delAria: 'Delete Remote Cube ' + r[0] }));
 
     const FOOT = {
-      sideshiftSend: 'Prototype V6 · synthetic SideShift quote, fee and swap ID · address 0x… is compatible with Ethereum and Binance, so the network step appears',
-      sparkBridge: 'Prototype V6 · Spark overview while the bridge subprocess is starting, failed, or absent (a build without the bridge shows "not configured")',
-      sparkDeposits: 'Prototype V6 · synthetic deposits · deposit address and QR live on V6-Wallet-Receive · the SDK claims mature deposits itself; Claim is the manual path',
-      vaultOverview: 'Prototype V6 · synthetic balance and timers · "Pick a date" opens Settings › Node › Blockchain rescan, as in the app',
-      rbf: 'Prototype V6 · synthetic transaction · the replacement is a new PSBT; it still needs signing and broadcast',
-      nodeSettings: 'Prototype V6 · panels follow the backend: Tor and node resources for a managed node, own Esplora for an Esplora backend, history recovery before a switch',
-      feerate: 'Prototype V6 · shared feerate picker · synthetic size · the same check guards Vault Send, Transfer and the Liquid refund',
-      launcherRestore: 'Prototype V6 · the restore icon shows only when a recovery method exists; its tooltip names the method · rows from the signed-in Connect account'
+      sideshiftSend: 'Prototype note · synthetic SideShift quote, fee and swap ID · address 0x… is compatible with Ethereum and Binance, so the network step appears',
+      sparkBridge: 'Prototype note · Spark overview while the bridge subprocess is starting, failed, or absent (a build without the bridge shows "not configured")',
+      sparkDeposits: 'Prototype note · synthetic deposits · deposit address and QR live on the Receive screen · the SDK claims mature deposits itself; Claim is the manual path',
+      vaultOverview: 'Prototype note · synthetic balance and timers · "Pick a date" opens Settings › Node › Blockchain rescan, as in the app',
+      rbf: 'Prototype note · synthetic transaction · the replacement is a new PSBT; it still needs signing and broadcast',
+      nodeSettings: 'Prototype note · panels follow the backend: Tor and node resources for a managed node, own Esplora for an Esplora backend, history recovery before a switch',
+      feerate: 'Prototype note · shared feerate picker · synthetic size · the same check guards Vault Send, Transfer and the Liquid refund',
+      launcherRestore: 'Prototype note · the restore icon shows only when a recovery method exists; its tooltip names the method · rows from the signed-in Connect account'
     };
 
     const inCube = scr !== 'launcherRestore';
@@ -854,7 +856,7 @@ class Component extends DCLogic {
       hideP: String(hide), shown: !hide, hidden: hide, toggleHide: () => self.setState({ hide: { for: hb, v: !hide } }),
       navTop: ['overview', 'activity', 'backup'].map(ni), navWallets: ['spark', 'vault', 'liquid'].map(ni),
       navSet: { cls: act === 'settings' ? 'on' : '', cur: act === 'settings' ? 'page' : 'false' },
-      title: TITLE[scr] || '', route: ROUTE[scr] || '', backLabel: (BACK[scr] || ['', ''])[0], backHref: (BACK[scr] || ['', 'V2-Cube-Overview.dc.html'])[1],
+      title: TITLE[scr] || '', route: ROUTE[scr] || '', backLabel: (BACK[scr] || ['', ''])[0], backHref: (BACK[scr] || ['', 'P-Overview.dc.html'])[1],
       v: { ss: scr === 'sideshiftSend', bridge: scr === 'sparkBridge', deposits: scr === 'sparkDeposits', vault: scr === 'vaultOverview', rbf: scr === 'rbf', node: scr === 'nodeSettings', fee: scr === 'feerate' },
       ss, sb, dp, vo, rb, nd, fr,
       localCubes, remoteCubes,

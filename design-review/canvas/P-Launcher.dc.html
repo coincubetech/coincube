@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V3 Launcher · Spin to face</title>
+<title>Launcher</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -476,7 +476,7 @@ a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;c
               <span>Right: lock, backup attention</span>
             </li>
             <li class="lg">
-              <span class="sw btc" aria-hidden="true"></span><span class="sw b2b" aria-hidden="true"></span><span class="sw test" aria-hidden="true"></span>
+              <span class="sw btc" aria-hidden="true"></span><sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}"><span class="sw b2b" aria-hidden="true"></span></sc-if><span class="sw test" aria-hidden="true"></span>
               <span>Edge: network family</span>
             </li>
           </ul>
@@ -496,6 +496,8 @@ class Component extends DCLogic {
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
   }
   renderVals() {
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const CH = {
       btc: { menu: 'Bitcoin mainnet', full: 'Bitcoin mainnet', live: true, edge: 'btc', tag: '' },
       b2b: { menu: 'Bitcoin Blake2b mainnet', full: 'Bitcoin Blake2b mainnet', live: true, edge: 'b2b', tag: 'Blake2b', logo: true },
@@ -504,7 +506,7 @@ class Component extends DCLogic {
       reg: { menu: 'Regtest', full: 'Bitcoin Regtest', live: false, edge: 'test', tag: 'Regtest' },
       b2t: { menu: 'Blake2b Testnet4', full: 'Bitcoin Blake2b Testnet4', live: false, edge: 'test', tag: 'Blake2b Testnet4', logo: true }
     };
-    const ORDER = ['btc', 'b2b', 't4', 'sig', 'reg', 'b2t'];
+    const ORDER = ['btc', 'b2b', 't4', 'sig', 'reg', 'b2t'].filter((k) => B2B || (k !== 'b2b' && k !== 'b2t'));
     const CIRC = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18';
     const LOCKED = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3';
     const UNLOCKED = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 5.6-1.5';
@@ -566,7 +568,7 @@ class Component extends DCLogic {
     const f = st.filter;
     const matches = (c) => f === 'all' ? true : f === 'live' ? CH[c.network].live : f === 'test' ? !CH[c.network].live : c.network === f;
 
-    const all = CUBES.slice(0, count).map((r) => ({ id: r[0], name: r[1], network: r[2], bk: r[3], w: r[4], note: r[5] }));
+    const all = CUBES.filter((r) => B2B || (r[2] !== 'b2b' && r[2] !== 'b2t')).slice(0, count).map((r) => ({ id: r[0], name: r[1], network: r[2], bk: r[3], w: r[4], note: r[5] }));
     const vis = all.filter(matches);
     const n = vis.length;
     const hidden = all.length - n;
@@ -737,6 +739,7 @@ class Component extends DCLogic {
 
     const km = st.keyMode || 'closed';
     return {
+      b2bOn: B2B,
       themeClass: theme === 'light' ? 'light' : '',
       motionClass: this.props.reducedMotion ? 'reduced' : '',
       quietCls: browsing ? '' : 'quiet',

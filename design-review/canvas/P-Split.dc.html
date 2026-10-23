@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V3 · Vault split coins</title>
+<title>Vault split coins</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -156,6 +156,7 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 .side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
 .side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
 .side .lockgrp{display:contents}
+.tenshu .main{position:relative}.b2bgate{position:absolute;inset:0;z-index:5;background:var(--bg);padding:28px 32px}.b2bgate .btn{display:inline-flex;align-items:center;height:36px;padding:0 14px;border-radius:8px;background:var(--accent);color:#201407;text-decoration:none;font-weight:600}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -210,7 +211,15 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 
     <main class="main">
       <div class="pg">
-        <a class="back" href="P-Advanced.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Advanced</a>
+        <sc-if value="{{ b2bOff }}" hint-placeholder-val="{{ false }}">
+        <div class="b2bgate" role="region" aria-label="Bitcoin Blake2b is off">
+          <a class="back" href="P-Advanced.dc.html">‹ Tools</a>
+          <h1 class="ph" style="margin-top:12px">Bitcoin Blake2b is off on this device</h1>
+          <p class="muted" style="margin-top:8px;max-width:520px">{{ b2bGateCopy }}</p>
+          <p style="margin-top:20px"><a class="btn pri" href="P-AppPrefs.dc.html">Open App preferences</a></p>
+        </div>
+        </sc-if>
+        <a class="back" href="P-Advanced.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Tools · Family savings</a>
         <h1 class="ph">Split coins</h1>
         <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Family savings · Bitcoin mainnet<span aria-hidden="true">→</span><span class="sr">to</span><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Family savings · Blake2b</p>
 
@@ -398,6 +407,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 class Component extends DCLogic {
   constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B_ON = false; try { B2B_ON = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P=this.props,self=this;
     const lever=P.step||'check';
     const init={for:lever,step:lever,deps:0,copied:'',sig:{kB:false,kK:false,hw:false},note:'',
@@ -495,6 +506,7 @@ class Component extends DCLogic {
       confirm:()=>set({ab:'gone'})};
 
     return {
+      b2bOff: !B2B_ON, b2bGateCopy: 'Splitting coins between Bitcoin and Bitcoin Blake2b needs the Bitcoin Blake2b network turned on in App preferences › Developer.',
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',

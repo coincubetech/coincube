@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V6 · Liquid wallet</title>
+<title>Liquid wallet</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -507,9 +507,9 @@ class Component extends DCLogic {
     const sec=S.sec;
     const T=(n)=>({cls:sec===n?'on':'',cur:sec===n?'page':'false',pick:()=>set({sec:n,phase:sec===n?S.phase:'input',view:sec===n?S.view:'list'})});
     const FOOT={
-      overview:'Prototype · synthetic balances and history · Overview differences from V2-Cube-Overview: USDt line, Swap entry, Last transactions',
+      overview:'Prototype · synthetic balances and history · Overview differences from the Cube Overview: USDt line, Swap entry, Last transactions',
       swap:'Prototype · synthetic SideSwap rate and fee · mainnet only · the app shows a swap minimum as an error, not a fixed limit line',
-      transactions:'Prototype · synthetic history · differs from V3-Activity: asset filter, USDt fees, refundable swaps and the refund form',
+      transactions:'Prototype · synthetic history · differs from the Activity screen: asset filter, USDt fees, refundable swaps and the refund form',
       settings:'Prototype · Liquid Settings holds one line in the app · whole wallet sits behind the Liquid sunset gate (account flag or existing local wallet)'
     };
     return {

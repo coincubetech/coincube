@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V6 · Installer gaps</title>
+<title>Installer gaps</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -277,7 +277,7 @@ textarea.inp{height:72px;padding:10px 12px;resize:none;font-family:'IBM Plex Mon
           <h2 id="g-h" class="sr">Network unavailable</h2>
           <div class="unav" role="status">
             <h3><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b <span class="tb b2b">Blake2b</span></h3>
-            <p class="copy">Bitcoin Blake2b is unavailable. Enable its beta preference in Global Settings and verify feature availability.</p>
+            <p class="copy">Bitcoin Blake2b is turned off on this device. Turn it on in App preferences › Developer to see this network.</p>
             <div class="acts">
               <a class="btn" href="P-Launcher.dc.html">Back to Bitcoin</a>
               <a class="linkbtn" href="P-AppPrefs.dc.html">App preferences</a>
@@ -768,14 +768,14 @@ class Component extends DCLogic {
     if (scr === 'legacyLogin') { nextLabel = 'Next'; nextDisabled = true; }
 
     const FOOT = {
-      register: 'Prototype V6 · synthetic keys, fingerprints and policy · descriptor never shown · App order: Back up descriptor, then Register descriptor',
-      chainUnavailable: 'Prototype V6 · shown when the network filter selects Bitcoin Blake2b and its beta preference or account grant is missing',
-      blake2bMode: 'Prototype V6 · Blake2b mode allows Cubes, Create Vault, Split, Connect and Settings; other launcher actions show the error above',
-      split: 'Prototype V6 · synthetic scan totals · launcher entry shows only on Bitcoin with Blake2b available via Connect',
-      keySource: 'Prototype V6 · synthetic devices and fingerprints · device states from the installer key modal and the shared hardware list',
-      connectStep: 'Prototype V6 · installer Connect step · Skip for now hidden on Bitcoin Blake2b',
-      importExtras: 'Prototype V6 · AddWallet flow · synthetic invitation and devices · mnemonic field stays disabled until the warning is accepted',
-      legacyLogin: 'Prototype V6 · legacy remote-backend login (shared wallets) · the token submits when complete, as in the app'
+      register: 'Prototype note · synthetic keys, fingerprints and policy · descriptor never shown · App order: Back up descriptor, then Register descriptor',
+      chainUnavailable: 'Prototype note · shown when the network filter selects Bitcoin Blake2b and its beta preference or account grant is missing',
+      blake2bMode: 'Prototype note · Blake2b mode allows Cubes, Create Vault, Split, Connect and Settings; other launcher actions show the error above',
+      split: 'Prototype note · synthetic scan totals · launcher entry shows only on Bitcoin with Blake2b available via Connect',
+      keySource: 'Prototype note · synthetic devices and fingerprints · device states from the installer key modal and the shared hardware list',
+      connectStep: 'Prototype note · installer Connect step · Skip for now hidden on Bitcoin Blake2b',
+      importExtras: 'Prototype note · AddWallet flow · synthetic invitation and devices · mnemonic field stays disabled until the warning is accepted',
+      legacyLogin: 'Prototype note · legacy remote-backend login (shared wallets) · the token submits when complete, as in the app'
     };
 
     const v = {

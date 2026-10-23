@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V3 · Vault Tools</title>
+<title>Vault Tools</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -254,7 +254,7 @@ a{color:#f3821d}a:hover{color:#ffa54d}
         <sc-if value="{{ is.coins }}" hint-placeholder-val="{{ true }}">
           <section class="sec" aria-labelledby="coins-h">
             <div class="sh"><h2 id="coins-h">Coin control</h2></div>
-            <p class="line"><span class="badge"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Before fork · both chains</span>also exists on Bitcoin Blake2b.<button type="button" class="lbtn" onClick="{{ goSplit }}">Split coins</button></p>
+            <sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}"><p class="line"><span class="badge"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Before fork · both chains</span>also exists on Bitcoin Blake2b.<button type="button" class="lbtn" onClick="{{ goSplit }}">Split coins</button></p></sc-if>
             <div class="bar">
               <p class="sum" role="status">{{ cc.sum }}</p>
               <sc-if value="{{ cc.canSend }}" hint-placeholder-val="{{ true }}"><a class="btn pri" href="P-Send.dc.html">Send selected</a></sc-if>
@@ -438,7 +438,7 @@ a{color:#f3821d}a:hover{color:#ffa54d}
             <div class="sh"><h2 id="s-h">Split coins</h2></div>
             <div class="entry">
               <h3><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="" style="width:20px;height:20px">{{ sp.title }}</h3>
-              <p class="muted" style="margin-top:4px">Turns each coin on both chains into a Bitcoin-only and a Blake2b-only coin. Needs the Bitcoin Blake2b beta preference and a signed-in Connect account; eligibility is checked when you start.</p>
+              <p class="muted" style="margin-top:4px">Turns each coin on both chains into a Bitcoin-only and a Blake2b-only coin. Needs Bitcoin Blake2b turned on in App preferences and a signed-in Connect account; eligibility is checked when you start.</p>
               <dl class="dl">
                 <div><dt>Coins on both chains</dt><dd>{{ sp.coins }}</dd></div>
                 <div><dt>Blake2b copy</dt><dd>Family savings · Blake2b <span class="muted">· Bitcoin Blake2b mainnet</span></dd></div>
@@ -465,6 +465,8 @@ a{color:#f3821d}a:hover{color:#ffa54d}
 class Component extends DCLogic {
   constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P=this.props,self=this;
     const lever=['coins','psbts','recovery','split'].indexOf(P.section)>=0?P.section:'coins',spl=P.splitState||'none',key=lever+'|'+spl;
     const init={for:key,sec:lever,sel:{c1:true,c2:true},labels:{},mode:'',draft:'',
@@ -480,7 +482,7 @@ class Component extends DCLogic {
 
     // sub-navigation
     const T=[['coins','Coin control'],['psbts','PSBT proposals'],['recovery','Recovery path'],['split','Split coins']];
-    const tabs=T.map((t)=>({label:t[1],cur:S.sec===t[0]?'page':'false',coins:t[0]==='coins',psbts:t[0]==='psbts',recovery:t[0]==='recovery',split:t[0]==='split',
+    const tabs=T.filter((t)=>B2B||t[0]!=='split').map((t)=>({label:t[1],cur:S.sec===t[0]?'page':'false',coins:t[0]==='coins',psbts:t[0]==='psbts',recovery:t[0]==='recovery',split:t[0]==='split',
       pick:()=>set({sec:t[0],psbt:null,del:false,mode:'',note:''})}));
 
     // coin control: no freeze in source; status = confirmation + time lock
@@ -501,7 +503,7 @@ class Component extends DCLogic {
     const rows=C.map((c)=>{const l=lab(c);return {cid:'coin-'+c.id,sel:!!S.sel[c.id],cls:S.sel[c.id]?'on':'',
       aria:'Select coin '+(l||(hide?'without label':fmt(c.sats)+' SATS')),
       amt:amt(c.sats),conf:c.conf==='0'?'0':c.conf,label:l||'No label',labCls:l?'':'muted',addr:c.addr,
-      both:c.chain==='both',notBoth:c.chain!=='both',chain:c.chain,status:ST[c.st][0],stCls:ST[c.st][1],
+      both:B2B&&c.chain==='both',notBoth:B2B&&c.chain!=='both',chain:c.chain,status:ST[c.st][0],stCls:ST[c.st][1],
       stOk:c.st==='ok',stClock:c.st!=='ok'&&c.st!=='spent',stSpent:c.st==='spent',
       spent:c.st==='spent',unspent:c.st!=='spent',name:l||(hide?'coin without label':fmt(c.sats)+' SATS'),
       did:'coin-det-'+c.id,detOpen:S.det===c.id,detA:S.det===c.id?'true':'false',
@@ -576,6 +578,7 @@ class Component extends DCLogic {
       coins:'2 · '+amt(200000),cta:prog?'Continue split':'Start split'};
 
     return {
+      b2bOn: B2B,
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
       themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',

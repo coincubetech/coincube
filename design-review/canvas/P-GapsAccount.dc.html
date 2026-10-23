@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V6 · Account gaps</title>
+<title>Account gaps</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -530,16 +530,16 @@ class Component extends DCLogic {
     // ---------- shell ----------
     const TABS = [['display', 'Display & appearance'], ['backup', 'Backup & protection'], ['payments', 'Payment checks'], ['data', 'Data & exports']];
     const curTab = scr === 'avatar' ? 'display' : 'backup';
-    const tabs = TABS.map((t) => ({ label: t[1], cls: t[0] === curTab ? 'on' : '', cur: t[0] === curTab ? 'page' : 'false', href: t[0] === curTab ? 'V6-Gaps-Account.dc.html' : 'P-Settings.dc.html' }));
+    const tabs = TABS.map((t) => ({ label: t[1], cls: t[0] === curTab ? 'on' : '', cur: t[0] === curTab ? 'page' : 'false', href: t[0] === curTab ? 'P-GapsAccount.dc.html' : 'P-Settings.dc.html' }));
     const ROUTE = {
       kitMode: 'App: Cube › Settings › Recovery › Cube Recovery Kit',
       alerts: 'App: Cube › Settings › Recovery › Vault Recovery Alerts',
       avatar: 'App: Cube › Settings › Avatar (Connect panel)'
     };
     const FOOT = {
-      kitMode: 'Prototype V6 · phone options need a registered phone key and the owner-keychain recovery switch (on by default) · password strength is synthetic',
-      alerts: 'Prototype V6 · synthetic keyholders · alerts are about the Vault recovery path, not the Recovery Kit backup · Vault only / Full Cube need the Estate plan',
-      avatar: 'Prototype V6 · avatar art is a placeholder · needs Connect sign-in and a claimed Lightning Address · quota from the Connect plan'
+      kitMode: 'Prototype note · phone options need a registered phone key and the owner-keychain recovery switch (on by default) · password strength is synthetic',
+      alerts: 'Prototype note · synthetic keyholders · alerts are about the Vault recovery path, not the Recovery Kit backup · Vault only / Full Cube need the Estate plan',
+      avatar: 'Prototype note · avatar art is a placeholder · needs Connect sign-in and a claimed Lightning Address · quota from the Connect plan'
     };
     const signedOut = st === 'avSignedOut';
     const hide = !!this.state.hide;

@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V3 Launcher · App preferences</title>
+<title>App preferences</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -296,12 +296,9 @@ a.linkbtn:hover,.linkbtn:hover{color:var(--ink)}
                   <span class="scope">This device</span>
                 </li>
                 <li class="row">
-                  <span><span class="lbl">Bitcoin Blake2b beta</span><span class="dsc">Access to the Bitcoin Blake2b chain is granted per account. This is not a network switch.</span></span>
-                  <span class="ctl" style="flex-direction:column;align-items:flex-end;gap:2px">
-                    <span class="stt tone-muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="{{ offPath }}"></path></svg>Not enabled for this account · managed through Connect</span>
-                    <a class="linkbtn" href="P-Connect.dc.html">Open Connect account</a>
-                  </span>
-                  <span class="scope">Account</span>
+                  <label for="ap-b2b"><span class="lbl">Bitcoin Blake2b</span><span class="dsc" id="ap-b2b-d">Show the Bitcoin Blake2b network in the Launcher, when creating Cubes and in Vault tools.</span></label>
+                  <span class="ctl"><span class="swst" aria-hidden="true">{{ b2bWord }}</span><input type="checkbox" role="switch" class="sw" id="ap-b2b" aria-describedby="ap-b2b-d" checked="{{ b2b }}" onChange="{{ toggleB2b }}"></span>
+                  <span class="scope">This device</span>
                 </li>
               </ul>
             </div>
@@ -404,6 +401,8 @@ class Component extends DCLogic {
     this.state = { lv: null };
   }
   renderVals() {
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props;
     const L = { section: P.section ?? 'Appearance', os: P.theme ?? 'dark', osReduced: !!P.reducedMotion, hide: !!P.hideBalances };
     const key = [L.section, L.os, L.osReduced, L.hide].join('|');
@@ -459,7 +458,7 @@ class Component extends DCLogic {
       { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b', walletPath: I.vault },
       { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4', walletPath: I.vault },
       { name: 'Archive', edge: 'btc', coinCls: '', tag: '', walletPath: I.bolt }
-    ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
+    ].filter((c) => B2B || c.edge !== 'b2b').map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
 
     const listForced = reduced;
     const styleNow = listForced
@@ -494,6 +493,8 @@ class Component extends DCLogic {
       dev: !!s.dev,
       devWord: s.dev ? 'On' : 'Off',
       toggleDev: () => go({ dev: !s.dev }),
+      b2b: B2B, b2bWord: B2B ? 'On' : 'Off',
+      toggleB2b: () => { try { if (B2B) localStorage.removeItem('tenshu.proto.b2b'); else localStorage.setItem('tenshu.proto.b2b', '1'); } catch (e) {} go({}); },
       showDiagnostics: sec === 'Diagnostics',
       copied: !!s.copied,
       copySummary: () => go({ copied: true }),

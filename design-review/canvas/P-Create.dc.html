@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V6 · Create Cube</title>
+<title>Create Cube</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -748,7 +748,7 @@ a.linkbtn:hover{color:var(--ink)}
     </section>
   </main>
 
-  <div class="foot">Prototype V6 · synthetic data · seed words masked · passkey choice shown only where passkey creation is available (macOS build flag) · levers: error jumps to the step it belongs to</div>
+  <div class="foot">Prototype note · synthetic data · seed words masked · passkey choice shown only where passkey creation is available (macOS build flag) · levers: error jumps to the step it belongs to</div>
 </div>
 <p style="margin:12px 24px 0;font-size:12px;color:var(--muted)">More installer screens: <a href="P-GapsInstaller.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">descriptor backup &amp; registration, Blake2b-only mode, split scan, hardware detection, Connect step, import extras, legacy login</a></p>
 </x-dc>
@@ -759,6 +759,8 @@ class Component extends DCLogic {
     this.state = { lv: null };
   }
   renderVals() {
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props;
     const L = {
       step: P.step ?? 'network', net: P.network ?? 'bitcoin', dev: !!P.developerMode, b2bAccess: P.blake2bAccess ?? 'grantedBetaOff',
@@ -842,7 +844,7 @@ class Component extends DCLogic {
 
     // ----- network step -----
     const access = s.b2bAccess;
-    const b2bGate = access === 'notGranted' ? "Bitcoin Blake2b isn't enabled for this account." : access === 'grantedBetaOff' ? 'Turn on "Bitcoin Blake2b - Beta" in App preferences.' : '';
+    const b2bGate = ''; // Robert (2026-10-23): Blake2b is a device toggle; when it is off the network is not listed at all
     const SUB = {
       bitcoin: 'Spark · Liquid · Vault',
       blake2b: 'Bitcoin Blake2b supports Vault creation only',
@@ -858,8 +860,8 @@ class Component extends DCLogic {
       return { label: n.label, isB2b: n.b2b && !n.test, notB2b: !(n.b2b && !n.test), hasTag: n.b2b && !n.test, tag: n.tag, sub: SUB[id], hasSub: !gate, gate, hasGate: !!gate,
         checked: sel, disabled: !!gate, cls: (sel ? 'sel' : '') + (gate ? ' off' : ''), pick: () => go({ net: id, err: 'none', unlock: NETS[id].b2b ? 'pin' : s.unlock }) };
     };
-    const liveNets = ['bitcoin', 'blake2b'].map(netRow);
-    const testNets = ['testnet4', 'signet', 'regtest', 'blake2bTestnet4'].map(netRow);
+    const liveNets = ['bitcoin', 'blake2b'].filter((id) => B2B || !NETS[id].b2b).map(netRow);
+    const testNets = ['testnet4', 'signet', 'regtest', 'blake2bTestnet4'].filter((id) => B2B || !NETS[id].b2b).map(netRow);
 
     // ----- Cube name -----
     const cubeName = idx >= path.indexOf(b2b ? 'alias' : 'cube') + (b2b ? 0 : 1) || step === 'done' ? (b2b ? 'Blake savings' : 'Travel fund') : 'New Cube';

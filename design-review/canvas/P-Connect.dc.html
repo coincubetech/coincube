@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>V3 Launcher · Connect</title>
+<title>Connect account</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -450,6 +450,8 @@ class Component extends DCLogic {
     this.state = { lv: null };
   }
   renderVals() {
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props;
     const L = { section: P.section ?? 'Account', theme: P.theme ?? 'dark', hide: !!P.hideBalances, acct: P.accountState ?? 'signedIn' };
     const key = [L.section, L.theme, L.hide, L.acct].join('|');
@@ -503,7 +505,7 @@ class Component extends DCLogic {
       { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b', walletPath: I.vault },
       { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4', walletPath: I.vault },
       { name: 'Archive', edge: 'btc', coinCls: '', tag: '', walletPath: I.bolt }
-    ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
+    ].filter((c) => B2B || c.edge !== 'b2b').map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
 
     const provides = [
       { icon: I.shieldOk, text: 'Encrypted Recovery Kit backup for each Cube \u2014 COINCUBE never sees your keys' },
@@ -519,8 +521,7 @@ class Component extends DCLogic {
     const ent = (name, k, text, note) => ({ name, tone: T[k], icon: I[k], text, note: note || '', hasNote: !!note });
     const entitlements = [
       ent('Recovery Kit', 'ok', 'Verified'),
-      ent('Recovery alerts', 'unk', 'Unknown · checking', 'Plan options appear once this is verified.'),
-      ent('Bitcoin Blake2b beta', 'off', 'Not enabled for this account')
+      ent('Recovery alerts', 'unk', 'Unknown · checking', 'Plan options appear once this is verified.')
     ];
     const bill = (status, k) => ({ date: '[DATE]', item: '[PLAN NAME] · paid upfront', status, tone: T[k], icon: I[k] });
     const billing = [bill('Paid', 'ok'), bill('Paid', 'ok'), bill('Refunded', 'off')];
@@ -562,7 +563,7 @@ class Component extends DCLogic {
       rec('Blake workspace', 'Bitcoin', '', 'Blake2b', 'b2b', 'Not set up', 'off', 'Unknown', 'unk'),
       rec('Lab', 'Bitcoin', 'tn', 'Testnet4', 'test', 'Unknown · locked', 'unk', 'Unknown', 'unk'),
       rec('Archive', 'Bitcoin mainnet', '', '', 'btc', 'Confirmed [DATE]', 'ok', 'Not applicable · no Vault', 'off')
-    ];
+    ].filter((r) => B2B || r.edge !== 'b2b');
 
     const planCancelled = (P.planState ?? 'active') === 'cancelled';
     const acctState = signedIn ? 'Signed in' : signedOut ? '' : acct === 'loading' ? 'Checking…' : 'Not reachable';
