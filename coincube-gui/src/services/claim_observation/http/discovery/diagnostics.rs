@@ -66,10 +66,13 @@ pub struct Report {
 pub(crate) type Observer = Arc<dyn Fn(Report) + Send + Sync>;
 
 impl Report {
+    /// Progress snapshots replace the retained in-flight snapshot for this
+    /// chain; they are not terminal findings.
     pub(crate) fn is_progress(&self) -> bool {
         self.outcome == Outcome::InProgress
     }
 
+    /// Keep the first specific timeout when later generic failures arrive.
     pub(crate) fn is_deadline(&self) -> bool {
         matches!(
             self.outcome,
@@ -137,6 +140,7 @@ pub(crate) struct Trace {
 }
 
 impl Trace {
+    /// Start a per-attempt clock; paired chains share request and byte totals.
     pub(crate) fn new(observer: Option<Observer>) -> Self {
         Self {
             started: Instant::now(),
@@ -151,6 +155,7 @@ impl Trace {
         usize::from(chain == ChainId::BitcoinBlake2b)
     }
 
+    /// Publish the last safe phase before an awaited request or check begins.
     pub(crate) fn stage(&self, chain: ChainId, stage: Stage) {
         *self.chains[Self::chain(chain)].stage.lock().unwrap() = stage;
         self.progress(chain);
@@ -198,6 +203,8 @@ impl Trace {
         self.emit_with_stage(chain, outcome, None);
     }
 
+    /// Mark this chain terminal while retaining its final counters for a later
+    /// outer-deadline snapshot of the other chain.
     pub(crate) fn complete(&self, chain: ChainId, outcome: Outcome) {
         self.chains[Self::chain(chain)]
             .completed
@@ -205,6 +212,8 @@ impl Trace {
         self.emit(chain, outcome);
     }
 
+    /// An outer 90-second cancellation can drop the child future before it
+    /// reports an error. Emit that timeout only for a started, active chain.
     pub(crate) fn deadline_if_active(&self, chain: ChainId) {
         let progress = &self.chains[Self::chain(chain)];
         let started = *progress.stage.lock().unwrap() != Stage::Starting;
@@ -213,6 +222,8 @@ impl Trace {
         }
     }
 
+    /// Send one identifier-free terminal event to the UI and structured log.
+    /// A request-specific stage overrides the chain's broader search phase.
     pub(crate) fn emit_with_stage(
         &self,
         chain: ChainId,
@@ -240,12 +251,15 @@ impl Trace {
         );
     }
 
+    /// Offer the UI a replaceable snapshot without logging each graph step.
     fn progress(&self, chain: ChainId) {
         if let Some(observer) = &self.observer {
             observer(self.snapshot(chain, Outcome::InProgress, None));
         }
     }
 
+    /// Capture approximate shared budget and chain-local search counters from
+    /// separate atomic loads; this report is never proof material.
     fn snapshot(&self, chain: ChainId, outcome: Outcome, request_stage: Option<Stage>) -> Report {
         let progress = &self.chains[Self::chain(chain)];
         let stage = request_stage.unwrap_or_else(|| *progress.stage.lock().unwrap());

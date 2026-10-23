@@ -344,7 +344,11 @@ async fn claim_gui_regtest_driver() {
                 init["fork_rpc"].as_str().unwrap().parse().unwrap(),
                 init["fork_cookie"].as_str().unwrap(),
                 ChainId::BitcoinBlake2b,
-                fork_wallet.main_descriptor.clone(),
+                fork_wallet
+                    .main_descriptor
+                    .as_vault()
+                    .expect("disposable Claim target has a Vault descriptor")
+                    .clone(),
             )
             .unwrap(),
         }),

@@ -10,7 +10,9 @@ use crate::{
         foreign_split_inventory, split_source,
     },
 };
-use coincube_core::miniscript::bitcoin::Psbt;
+use coincube_core::{
+    descriptors::CoincubeDescriptor, miniscript::bitcoin::Psbt, wallet_descriptor::WalletDescriptor,
+};
 use serde_json::{json, Value};
 use std::{
     convert::TryFrom,
@@ -150,8 +152,9 @@ async fn split_gui_regtest_driver() {
             .unwrap(),
     );
     let (_sender, generation) = watch::channel(1u64);
-    let descriptor =
-        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap();
+    let descriptor = WalletDescriptor::Vault(
+        CoincubeDescriptor::from_str(crate::services::claim_workflow::TEST_WSH_DESC).unwrap(),
+    );
     let wallet_id = WalletId::new(
         descriptor.to_string().split_once('#').unwrap().1.to_owned(),
         Some(1),

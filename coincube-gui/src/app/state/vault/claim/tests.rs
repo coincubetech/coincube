@@ -1005,7 +1005,11 @@ fn funding_chain_diagnostics_do_not_hide_a_different_or_paired_timeout_refusal()
             proofs,
             inline,
             vec![],
-            None,
+            FundingAttemptTiming {
+                phase: "Checking paired Vault prerequisites",
+                outcome: FundingAttemptOutcome::Failed,
+                elapsed_ms: 1,
+            },
         )));
         let reason = funding_proof_refusal(refusal);
         drop(p.apply(ClaimEvent::FundingChecked(12, 7, 0, Err(reason.into()))));
@@ -1048,6 +1052,11 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         shared_roots: 0,
         unsupported_roots: 0,
     };
+    let attempt = FundingAttemptTiming {
+        phase: "synthetic phase",
+        outcome: FundingAttemptOutcome::Deadline150s,
+        elapsed_ms: 150_000,
+    };
     for revoke in [false, true] {
         p.stage = Stage::FundingDeposits(addresses.clone());
         p.funding_checking = true;
@@ -1073,10 +1082,10 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
                 proofs,
                 true,
                 vec![timing],
-                Some("synthetic phase"),
+                attempt,
             )));
             assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
-            assert!(p.funding_outer_timeout.is_none());
+            assert!(p.funding_attempt.is_none());
             assert!(p.funding_timing.is_empty());
         }
         drop(p.apply(ClaimEvent::FundingProofChecked(
@@ -1086,11 +1095,11 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
             proofs,
             true,
             vec![timing],
-            Some("synthetic phase"),
+            attempt,
         )));
         assert_eq!(p.funding_proofs, proofs);
         assert_eq!(p.funding_timing, vec![timing]);
-        assert_eq!(p.funding_outer_timeout, Some("synthetic phase"));
+        assert_eq!(p.funding_attempt, Some(attempt));
         p.funding_checking = false;
         let report = p.verification_report().unwrap();
         assert!(report.contains("Claim verification timing report v1"));
@@ -1143,7 +1152,7 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         }
         assert!(p.funding_task.is_none());
         assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
-        assert!(p.funding_outer_timeout.is_none());
+        assert!(p.funding_attempt.is_none());
         assert!(p.funding_timing.is_empty());
         assert!(p.verification_report().is_none());
         assert!(!p.funding_inline_error());
@@ -1154,10 +1163,10 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
             proofs,
             true,
             vec![timing],
-            Some("synthetic phase"),
+            attempt,
         )));
         assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
-        assert!(p.funding_outer_timeout.is_none());
+        assert!(p.funding_attempt.is_none());
         assert!(p.funding_timing.is_empty());
         assert!(!p.funding_checking);
         assert!(matches!(p.stage, Stage::Preconditions));
@@ -1178,6 +1187,108 @@ fn funding_progress_is_scoped_and_closing_aborts_the_active_check() {
         let mut stream = iced_runtime::task::into_stream(task).unwrap();
         assert!(iced::futures::executor::block_on(stream.next()).is_none());
     }
+}
+
+#[tokio::test]
+async fn early_deposit_check_failure_retains_a_safe_verification_report() {
+    use iced::futures::StreamExt;
+
+    let (_sender, generation) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = generation;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "private-account".into(),
+    });
+    p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "private-bitcoin-address".into(),
+        btcb2_deposit: "private-btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
+    });
+    let task = p.check_funding(Arc::new(Recording::default()));
+    let mut stream = iced_runtime::task::into_stream(task).expect("deposit check starts");
+    while let Some(action) = stream.next().await {
+        if let iced_runtime::Action::Output(Message::Claim(event)) = action {
+            drop(p.apply(event));
+        }
+    }
+    assert!(p
+        .funding_error()
+        .unwrap()
+        .contains("paired BTCB2 Cube is missing"));
+    assert_eq!(p.funding_proofs, [FundingProofStatus::Pending; 2]);
+    assert!(!p.can_sign_or_submit());
+    let report = p
+        .verification_report()
+        .expect("completed early attempt report");
+    assert!(report.contains("overall_deposit_check_result=failed"));
+    assert!(!report.contains("private-account"));
+    assert!(!report.contains("private-bitcoin-address"));
+    assert!(!report.contains("private-btcb2-address"));
+    let pending = p.check_funding(Arc::new(Recording::default()));
+    assert!(p.funding_checking);
+    assert!(p.verification_report().is_none());
+    assert!(p.funding_attempt.is_none());
+    drop(pending);
+    p.cancel();
+    assert!(p.funding_attempt.is_none());
+}
+
+#[test]
+fn completed_check_without_ancestry_events_reports_only_attempt_status() {
+    let (_sender, generation) = watch::channel(7);
+    let mut p = panel(SINGLE_WSH);
+    p.generation = generation;
+    p.connect = Some(ConnectSession {
+        client: CoincubeClient::new(),
+        account: "private-account".into(),
+    });
+    p.stage = Stage::FundingDeposits(claim_workflow::CheckedClaimFundingAddresses {
+        bitcoin_deposit: "private-bitcoin-address".into(),
+        btcb2_deposit: "private-btcb2-address".into(),
+        bitcoin_minimum_sats: 2_000,
+        btcb2_minimum_sats: 3_000,
+        bitcoin_rate_sat_vb: 2,
+        btcb2_rate_sat_vb: 3,
+    });
+    p.funding_checking = true;
+    p.check_seq = 12;
+    let attempt = FundingAttemptTiming {
+        phase: "Scanning the Bitcoin and BTCB2 Vaults",
+        outcome: FundingAttemptOutcome::Returned,
+        elapsed_ms: 13,
+    };
+    let revocations = p.revocations;
+    drop(p.apply(ClaimEvent::FundingProofChecked(
+        12,
+        7,
+        revocations,
+        [FundingProofStatus::Pending; 2],
+        false,
+        vec![],
+        attempt,
+    )));
+    drop(p.apply(ClaimEvent::FundingChecked(
+        12,
+        7,
+        revocations,
+        Ok(ClaimDepositProgress {
+            bitcoin_candidate: false,
+            btcb2_candidate: false,
+            both_verified: false,
+            review: None,
+            prepared: None,
+        }),
+    )));
+    let report = p.verification_report().expect("completed attempt summary");
+    assert!(report.contains("overall_deposit_check_result=returned"));
+    assert!(report.contains("elapsed=13 ms"));
+    assert!(!report.contains("Bitcoin: "));
+    assert!(!report.contains("private-account"));
+    assert!(!p.can_sign_or_submit());
 }
 
 #[test]

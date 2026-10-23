@@ -34,10 +34,13 @@ deposit has qualifying ancestry.
 Claim ancestry now emits identifier-free timing snapshots for each chain's
 search result and for 5-second request, 30-second collection and 90-second
 search deadlines. The deposit-check screen can copy the current attempt's
-read-only report after a result, including a static phase label if its outer
-150-second check expires. Each snapshot contains a typed stage, elapsed time,
-shared charged requests/bytes and per-chain visited, pre-fork pruned, candidate
-root, shared-root and unsupported-root counts. It contains no transaction or
+read-only report after a result. A completed deposit check also records a fixed
+phase, result category and elapsed time even when it stops before ancestry
+observation begins; an outer 150-second expiry has its own category. The report
+never copies free-form failure text. Each ancestry snapshot contains a typed
+stage, elapsed time, shared charged requests/bytes and per-chain visited,
+pre-fork pruned, candidate root, shared-root and unsupported-root counts. It
+contains no transaction or
 outpoint IDs, URLs, addresses, account data or credentials. A negative search
 can thus distinguish a pruned pre-fork frontier from rejected candidate roots,
 but neither the report nor a log line is spend authority. Reports clear on a

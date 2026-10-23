@@ -577,6 +577,40 @@ fn claim_address_refusal(error: claim_workflow::ClaimAddressError) -> String {
     }.to_string()
 }
 
+/// Whether one completed deposit check returned, failed or hit its outer
+/// deadline. This is display context, never a proof or signer decision.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FundingAttemptOutcome {
+    Returned,
+    Failed,
+    Deadline150s,
+}
+
+/// Identifier-free timing for one completed deposit check, including checks
+/// that stop before ancestry observation begins. Phase is a fixed UI label;
+/// no error text, wallet identity or transaction identifier is retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FundingAttemptTiming {
+    phase: &'static str,
+    outcome: FundingAttemptOutcome,
+    elapsed_ms: u64,
+}
+
+impl std::fmt::Display for FundingAttemptTiming {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let result = match self.outcome {
+            FundingAttemptOutcome::Returned => "overall_deposit_check_result=returned",
+            FundingAttemptOutcome::Failed => "overall_deposit_check_result=failed",
+            FundingAttemptOutcome::Deadline150s => "overall_deposit_check_deadline_150s",
+        };
+        write!(
+            formatter,
+            "{result} at {}; elapsed={} ms",
+            self.phase, self.elapsed_ms
+        )
+    }
+}
+
 /// Results of the panel's async work. Every variant that carries the
 /// session carries it back to the one panel that sent it out.
 #[derive(Debug)]
@@ -597,7 +631,7 @@ pub enum ClaimEvent {
         [FundingProofStatus; 2],
         bool,
         Vec<AncestryTimingReport>,
-        Option<&'static str>,
+        FundingAttemptTiming,
     ),
     DepositPoll,
     DepositStatusChecked(u64, u64, u64, DepositStatus),
@@ -851,7 +885,7 @@ pub struct ClaimStep1Panel {
     funding_checking: bool,
     funding_proofs: [FundingProofStatus; 2],
     funding_timing: Vec<AncestryTimingReport>,
-    funding_outer_timeout: Option<&'static str>,
+    funding_attempt: Option<FundingAttemptTiming>,
     funding_inline_error: bool,
     funding_task: Option<iced::task::Handle>,
     paired_signing_pending: bool,
@@ -917,7 +951,7 @@ impl ClaimStep1Panel {
             funding_checking: false,
             funding_proofs: [FundingProofStatus::Pending; 2],
             funding_timing: Vec::new(),
-            funding_outer_timeout: None,
+            funding_attempt: None,
             funding_inline_error: false,
             funding_task: None,
             paired_signing_pending: false,
@@ -1106,10 +1140,10 @@ impl ClaimStep1Panel {
         if !matches!(self.stage, Stage::FundingDeposits(_))
             || !self.backend_ready()
             || self.funding_checking
-            || (self.funding_timing.is_empty() && self.funding_outer_timeout.is_none())
         {
             return None;
         }
+        let attempt = self.funding_attempt?;
         let mut text = format!(
             "Claim verification timing report v1\nApp version: {}\nCurrent completed attempt (read-only)\n",
             crate::VERSION.0
@@ -1118,9 +1152,7 @@ impl ClaimStep1Panel {
             text.push_str(&report.to_string());
             text.push('\n');
         }
-        if let Some(phase) = self.funding_outer_timeout {
-            text.push_str(&format!("overall_deposit_check_deadline_150s at {phase}\n"));
-        }
+        text.push_str(&format!("{attempt}\n"));
         Some(text)
     }
 
@@ -1215,7 +1247,7 @@ impl ClaimStep1Panel {
             self.funding_review = None;
             self.funding_proofs = [FundingProofStatus::Pending; 2];
             self.funding_timing.clear();
-            self.funding_outer_timeout = None;
+            self.funding_attempt = None;
             self.funding_inline_error = false;
             self.prepared_pair = None;
             self.funding_checking = false;
@@ -1968,13 +2000,14 @@ impl ClaimStep1Panel {
         self.funding_review = None;
         self.funding_proofs = [FundingProofStatus::Pending; 2];
         self.funding_timing.clear();
-        self.funding_outer_timeout = None;
+        self.funding_attempt = None;
         self.funding_inline_error = false;
         self.prepared_pair = None;
         let task = Task::stream(iced::stream::channel(
             8,
             move |mut output: iced::futures::channel::mpsc::Sender<Message>| async move {
-                let mut phase = "Reading the Bitcoin Vault";
+                let attempt_started = tokio::time::Instant::now();
+                let mut phase = "Checking paired Vault prerequisites";
                 let proofs = Arc::new(std::sync::Mutex::new([FundingProofStatus::Pending; 2]));
                 let observed_proofs = proofs.clone();
                 let observer = Arc::new(move |chain, status| {
@@ -2019,6 +2052,8 @@ impl ClaimStep1Panel {
                     fork_cube,
                     descriptor_digest: sha256::Hash::hash(descriptor.to_string().as_bytes()),
                 };
+                phase = "Reading the Bitcoin Vault";
+                let _ = output.send(Message::Claim(ClaimEvent::FundingCheckProgress(seq, expected, revocations, phase))).await;
                 let info = daemon
                     .get_info()
                     .await
@@ -2311,6 +2346,17 @@ impl ClaimStep1Panel {
                 outer_timeout = Some(phase);
                 Err(format!("{phase} timed out. Your deposits remain in your Vaults. Retry verification when the wallets and indexer are available."))
             });
+                let attempt = FundingAttemptTiming {
+                    phase,
+                    outcome: if outer_timeout.is_some() {
+                        FundingAttemptOutcome::Deadline150s
+                    } else if result.is_err() {
+                        FundingAttemptOutcome::Failed
+                    } else {
+                        FundingAttemptOutcome::Returned
+                    },
+                    elapsed_ms: attempt_started.elapsed().as_millis() as u64,
+                };
                 if let Err(reason) = &result {
                     log::warn!("Claim deposit verification stopped at {phase}: {reason}");
                 }
@@ -2332,7 +2378,7 @@ impl ClaimStep1Panel {
                         proof_status,
                         inline_error,
                         timing_reports,
-                        outer_timeout,
+                        attempt,
                     )))
                     .await;
                 let _ = output
@@ -3631,7 +3677,7 @@ impl ClaimStep1Panel {
                 self.funding_review = None;
                 self.funding_proofs = [FundingProofStatus::Pending; 2];
                 self.funding_timing.clear();
-                self.funding_outer_timeout = None;
+                self.funding_attempt = None;
                 self.funding_inline_error = false;
                 self.prepared_pair = None;
                 self.stage = Stage::Preconditions;
@@ -3897,7 +3943,7 @@ impl ClaimStep1Panel {
                 proofs,
                 inline_error,
                 timing,
-                outer_timeout,
+                attempt,
             ) => {
                 if seq == self.check_seq
                     && self.funding_checking
@@ -3907,7 +3953,7 @@ impl ClaimStep1Panel {
                 {
                     self.funding_proofs = proofs;
                     self.funding_timing = timing;
-                    self.funding_outer_timeout = outer_timeout;
+                    self.funding_attempt = Some(attempt);
                     self.funding_inline_error = inline_error;
                 }
                 Task::none()
@@ -3927,7 +3973,7 @@ impl ClaimStep1Panel {
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
                     self.funding_timing.clear();
-                    self.funding_outer_timeout = None;
+                    self.funding_attempt = None;
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_error =
@@ -3939,7 +3985,7 @@ impl ClaimStep1Panel {
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
                     self.funding_timing.clear();
-                    self.funding_outer_timeout = None;
+                    self.funding_attempt = None;
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = None;
@@ -4006,7 +4052,7 @@ impl ClaimStep1Panel {
                     self.funding_review = None;
                     self.funding_proofs = [FundingProofStatus::Pending; 2];
                     self.funding_timing.clear();
-                    self.funding_outer_timeout = None;
+                    self.funding_attempt = None;
                     self.funding_inline_error = false;
                     self.prepared_pair = None;
                     self.funding_status = Some(
@@ -4033,7 +4079,7 @@ impl ClaimStep1Panel {
                         self.stage = Stage::FundingDeposits(addresses);
                         self.funding_proofs = [FundingProofStatus::Pending; 2];
                         self.funding_timing.clear();
-                        self.funding_outer_timeout = None;
+                        self.funding_attempt = None;
                         self.funding_inline_error = false;
                         self.deposit_status = None;
                         self.deposit_details_override = None;
@@ -4122,7 +4168,7 @@ impl ClaimStep1Panel {
                         self.funding_review = None;
                         self.funding_proofs = [FundingProofStatus::Pending; 2];
                         self.funding_timing.clear();
-                        self.funding_outer_timeout = None;
+                        self.funding_attempt = None;
                         self.funding_inline_error = false;
                         self.prepared_pair = None;
                         self.funding_status = Some(
