@@ -1615,8 +1615,14 @@ pub enum ConnectAccountMessage {
     OverviewCountsLoaded {
         contacts: Option<usize>,
         cubes: Option<usize>,
+        /// Same `list_cubes` response, retained for the sanitized Recovery
+        /// services projection without another request.
+        recovery: Result<Vec<crate::services::coincube::CubeResponse>, UserError>,
         generation: u64,
+        request_seq: u64,
     },
+    /// Refresh public Cube metadata for Account → Recovery services.
+    RefreshRecoveryServices,
     /// A session refresh failed for a reason that is *not* an auth rejection
     /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
     /// rather than a raw error string — see [`crate::user_error`].
@@ -1642,9 +1648,12 @@ pub enum ConnectAccountMessage {
     OtpChanged(String),
     /// Return from token entry to the same email form, retaining signup mode.
     BackToEmail,
-    OtpCooldownTick,
+    /// A cooldown tick belongs only to the OTP attempt that scheduled it.
+    OtpCooldownTick(u64),
     ResendOtp,
-    OtpResent,
+    /// A resend completion belongs only to the OTP attempt that requested it.
+    OtpResent(u64),
+    OtpResendFailed(UserError, u64),
     VerifyOtp,
     EmailNotVerified {
         email: String,
@@ -1694,9 +1703,12 @@ pub enum ConnectAccountMessage {
     /// Renewal banner CTA — open Plan & Billing checkout pre-selected to
     /// the current tier + cycle (D1).
     RenewCurrentPlan,
-    /// Navigate to the Plan & Billing picker (e.g. the expired-state renew
-    /// CTA, D3).
+    /// Navigate to account-first Plan & Billing management.
     OpenPlanBilling,
+    /// Show or close the server-priced plan comparison within Plan & Billing.
+    ComparePlans(bool),
+    /// Show or close the optional referral-code field.
+    ShowCampaignRedeem(bool),
     /// Billing history load result, with the session generation it belongs to.
     ///
     /// The error is a [`UserError`], converted from the real `CoincubeError` at

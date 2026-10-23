@@ -12,7 +12,7 @@ use crate::{
     services::coincube::{
         BillingCycle, BillingHistoryEntry, ChargeStatus, CheckoutRequest, CheckoutResponse,
         CoincubeClient, ConnectPlan, Contact, ContactCube, ContactRole,
-        CreateDuressAlertContactRequest, CreateInviteRequest, DuressAlertContact,
+        CreateDuressAlertContactRequest, CreateInviteRequest, CubeResponse, DuressAlertContact,
         DuressCheckOutcome, FeaturesResponse, Invite, LoginActivity, LoginResponse, OtpRequest,
         OtpVerifyRequest, PlanStatus, PlanTier, ReceivedInvite, RecoveryKitStatus,
         UpdateDuressAlertContactRequest, User, VerifiedDevice, DURESS_CHANNEL_EMAIL,
@@ -126,6 +126,69 @@ pub struct InviteCubeOption {
     pub id: u64,
     pub name: String,
     pub network: String,
+}
+
+/// Public, non-secret Connect metadata for a Recovery services row. R03 may
+/// use `target` for the authenticated launcher handoff; R10 owns the eventual
+/// Backup & protection destination. This model never describes local secrets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryServiceTarget {
+    pub cube_id: u64,
+    pub network: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryKitReport {
+    /// Connect reported a server-side Cube Recovery Kit record. This is not
+    /// proof that every secret was backed up or that this device is verified.
+    Reported,
+    /// Older APIs also deserialize omitted `hasRecoveryKit` as false, so a
+    /// false value cannot safely be displayed as "no backup".
+    NotReported,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RecoveryServiceRow {
+    pub target: RecoveryServiceTarget,
+    pub name: String,
+    pub kit: RecoveryKitReport,
+}
+
+impl From<CubeResponse> for RecoveryServiceRow {
+    fn from(cube: CubeResponse) -> Self {
+        let name = cube.name.trim();
+        Self {
+            target: RecoveryServiceTarget {
+                cube_id: cube.id,
+                network: cube.network,
+            },
+            name: if name.is_empty() {
+                format!("Cube {}", cube.id)
+            } else {
+                name.to_string()
+            },
+            kit: if cube.has_recovery_kit {
+                RecoveryKitReport::Reported
+            } else {
+                RecoveryKitReport::NotReported
+            },
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecoveryServicesState {
+    NotLoaded,
+    Loading,
+    Ready(Vec<RecoveryServiceRow>),
+    Failed(UserError),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryAlertEligibility {
+    Included,
+    NotIncluded,
+    Unknown,
 }
 
 /// One mainnet cube shown in the Duress intro screen's "set up a Cube
@@ -830,6 +893,8 @@ pub struct ConnectAccountPanel {
     /// `OverviewCountsLoaded` handler).
     pub overview_contact_count: Option<usize>,
     pub overview_cube_count: Option<usize>,
+    pub recovery_services: RecoveryServicesState,
+    overview_seq: u64,
     pub contacts_state: ContactsState,
     /// Presentation-ready failure for this panel's error card, with the retry
     /// it should offer. Never a raw error string — see [`crate::user_error`].
@@ -850,6 +915,9 @@ pub struct ConnectAccountPanel {
     /// token, no user — and a refresh failure from such an operation logs
     /// nothing out (`stale_completion`).
     auth_epoch: u64,
+    /// Invalidates delayed cooldown ticks and resend completions when the
+    /// user leaves token entry or begins another OTP attempt.
+    otp_attempt_generation: u64,
     // ── Plan & Billing ──
     /// Cached plan features from GET /connect/features.
     pub features: Option<FeaturesResponse>,
@@ -861,6 +929,9 @@ pub struct ConnectAccountPanel {
     pub billing_history: Option<Vec<BillingHistoryEntry>>,
     /// Whether the billing history sub-view is shown.
     pub show_billing_history: bool,
+    /// Explicit secondary comparison and referral details within management.
+    pub show_plan_comparison: bool,
+    pub show_campaign_redeem: bool,
     /// Active duress enrollment wizard (Phases 2 & 8); `None` when closed.
     pub duress_enroll: Option<DuressEnrollState>,
     /// Active "Disable Duress Mode" step-up dialog (Issue 2); `None` when closed.
@@ -925,15 +996,20 @@ impl ConnectAccountPanel {
             review_device_removal: None,
             overview_contact_count: None,
             overview_cube_count: None,
+            recovery_services: RecoveryServicesState::NotLoaded,
+            overview_seq: 0,
             contacts_state: ContactsState::new(),
             error: None,
             session_generation: 0,
             auth_epoch: 0,
+            otp_attempt_generation: 0,
             features: None,
             selected_billing_cycle: BillingCycle::Monthly,
             checkout: None,
             billing_history: None,
             show_billing_history: false,
+            show_plan_comparison: false,
+            show_campaign_redeem: false,
             duress_enroll: None,
             duress_disable: None,
             duress_contacts: DuressContactsState::default(),
@@ -1335,11 +1411,24 @@ impl ConnectAccountPanel {
     /// demand when the Overview tab is opened. Cheap and best-effort —
     /// a failed fetch just leaves the count `None` and the row hidden.
     pub fn reload_overview(&mut self) -> iced::Task<Message> {
+        self.recovery_services = RecoveryServicesState::Loading;
+        self.overview_seq = self.overview_seq.wrapping_add(1);
         load_overview_counts(
             &self.client,
             self.session_generation,
+            self.overview_seq,
             self.contacts_state.active_network.clone(),
         )
+    }
+
+    /// Plan entitlement is account-level eligibility only. It does not prove
+    /// that alerts are enabled on any individual Cube.
+    pub fn recovery_alert_eligibility(&self) -> RecoveryAlertEligibility {
+        match self.plan.as_ref() {
+            Some(plan) if plan.entitlements.recovery_alerts => RecoveryAlertEligibility::Included,
+            Some(_) => RecoveryAlertEligibility::NotIncluded,
+            None => RecoveryAlertEligibility::Unknown,
+        }
     }
 
     fn load_session_from_keyring(&self) -> Option<StoredSession> {
@@ -1694,9 +1783,11 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::OverviewCountsLoaded {
                 contacts,
                 cubes,
+                recovery,
                 generation,
+                request_seq,
             } => {
-                if generation == self.session_generation {
+                if generation == self.session_generation && request_seq == self.overview_seq {
                     // Only overwrite a field when its fetch succeeded, so a
                     // partial failure doesn't blank out a previously-loaded
                     // count.
@@ -1706,6 +1797,18 @@ impl ConnectAccountPanel {
                     if cubes.is_some() {
                         self.overview_cube_count = cubes;
                     }
+                    self.recovery_services = match recovery {
+                        Ok(cubes) => RecoveryServicesState::Ready(
+                            cubes.into_iter().map(RecoveryServiceRow::from).collect(),
+                        ),
+                        Err(error) => RecoveryServicesState::Failed(error),
+                    };
+                }
+            }
+
+            ConnectAccountMessage::RefreshRecoveryServices => {
+                if self.user.is_some() && matches!(self.step, ConnectFlowStep::Dashboard) {
+                    return self.reload_overview();
                 }
             }
 
@@ -1833,6 +1936,8 @@ impl ConnectAccountPanel {
 
             ConnectAccountMessage::OtpRequested { email, is_signup } => {
                 self.error = None;
+                self.otp_attempt_generation = self.otp_attempt_generation.wrapping_add(1);
+                let attempt = self.otp_attempt_generation;
 
                 self.step = ConnectFlowStep::OtpVerification {
                     email,
@@ -1842,7 +1947,7 @@ impl ConnectAccountPanel {
                     cooldown: 60,
                 };
                 return iced::Task::done(Message::View(view::Message::ConnectAccount(
-                    ConnectAccountMessage::OtpCooldownTick,
+                    ConnectAccountMessage::OtpCooldownTick(attempt),
                 )));
             }
 
@@ -1857,6 +1962,7 @@ impl ConnectAccountPanel {
                     email, is_signup, ..
                 } = &self.step
                 {
+                    self.otp_attempt_generation = self.otp_attempt_generation.wrapping_add(1);
                     self.step = if *is_signup {
                         ConnectFlowStep::Register {
                             email: email.clone(),
@@ -1872,15 +1978,18 @@ impl ConnectAccountPanel {
                 }
             }
 
-            ConnectAccountMessage::OtpCooldownTick => {
+            ConnectAccountMessage::OtpCooldownTick(attempt) => {
+                if attempt != self.otp_attempt_generation {
+                    return iced::Task::none();
+                }
                 if let ConnectFlowStep::OtpVerification { cooldown, .. } = &mut self.step {
                     if *cooldown > 0 {
                         *cooldown -= 1;
                         return iced::Task::perform(
                             async { tokio::time::sleep(std::time::Duration::from_secs(1)).await },
-                            |_| {
+                            move |_| {
                                 Message::View(view::Message::ConnectAccount(
-                                    ConnectAccountMessage::OtpCooldownTick,
+                                    ConnectAccountMessage::OtpCooldownTick(attempt),
                                 ))
                             },
                         );
@@ -1903,6 +2012,7 @@ impl ConnectAccountPanel {
                     return iced::Task::none();
                 }
                 *sending = true;
+                let attempt = self.otp_attempt_generation;
                 let email_val = email.clone();
                 let is_signup = *is_signup;
                 let client = self.client.clone();
@@ -1914,18 +2024,21 @@ impl ConnectAccountPanel {
                             client.login_send_otp(OtpRequest { email: email_val }).await
                         }
                     },
-                    |res| match res {
+                    move |res| match res {
                         Ok(()) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::OtpResent,
+                            ConnectAccountMessage::OtpResent(attempt),
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error((&e).into()),
+                            ConnectAccountMessage::OtpResendFailed((&e).into(), attempt),
                         )),
                     },
                 );
             }
 
-            ConnectAccountMessage::OtpResent => {
+            ConnectAccountMessage::OtpResent(attempt) => {
+                if attempt != self.otp_attempt_generation {
+                    return iced::Task::none();
+                }
                 if let ConnectFlowStep::OtpVerification {
                     otp,
                     sending,
@@ -1936,9 +2049,18 @@ impl ConnectAccountPanel {
                     *otp = String::new();
                     *sending = false;
                     *cooldown = 60;
+                    self.otp_attempt_generation = self.otp_attempt_generation.wrapping_add(1);
                     return iced::Task::done(Message::View(view::Message::ConnectAccount(
-                        ConnectAccountMessage::OtpCooldownTick,
+                        ConnectAccountMessage::OtpCooldownTick(self.otp_attempt_generation),
                     )));
+                }
+            }
+
+            ConnectAccountMessage::OtpResendFailed(error, attempt) => {
+                if attempt == self.otp_attempt_generation
+                    && matches!(self.step, ConnectFlowStep::OtpVerification { .. })
+                {
+                    return self.update_message(ConnectAccountMessage::Error(error));
                 }
             }
 
@@ -1981,6 +2103,8 @@ impl ConnectAccountPanel {
             }
 
             ConnectAccountMessage::EmailNotVerified { email } => {
+                self.otp_attempt_generation = self.otp_attempt_generation.wrapping_add(1);
+                let attempt = self.otp_attempt_generation;
                 self.step = ConnectFlowStep::OtpVerification {
                     email: email.clone(),
                     otp: String::new(),
@@ -1991,12 +2115,12 @@ impl ConnectAccountPanel {
                 let client = self.client.clone();
                 return iced::Task::perform(
                     async move { client.resend_signup_otp(&email).await },
-                    |res| match res {
+                    move |res| match res {
                         Ok(()) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::OtpResent,
+                            ConnectAccountMessage::OtpResent(attempt),
                         )),
                         Err(e) => Message::View(view::Message::ConnectAccount(
-                            ConnectAccountMessage::Error((&e).into()),
+                            ConnectAccountMessage::OtpResendFailed((&e).into(), attempt),
                         )),
                     },
                 );
@@ -2287,16 +2411,22 @@ impl ConnectAccountPanel {
             }
 
             ConnectAccountMessage::OpenPlanBilling => {
-                // The view dispatches the body off `active_sub`, so flipping
-                // it here switches the visible sub-view to the picker. Used
-                // by the expired-state renew CTA (D3), which opens the
-                // picker rather than pre-filling an invoice. Clear the
-                // billing-history toggle so the picker actually renders —
-                // `plan_billing_ux` shows history ahead of the picker, and a
-                // session-stale `show_billing_history` would otherwise route
-                // "View plans" to the history list instead.
+                // The existing Duress CTA says "View plans"; preserve its
+                // comparison destination without touching the Duress view.
+                let from_plan_gate = matches!(self.active_sub, ConnectSubMenu::Duress);
                 self.active_sub = ConnectSubMenu::PlanBilling;
                 self.show_billing_history = false;
+                self.show_plan_comparison = from_plan_gate;
+            }
+
+            ConnectAccountMessage::ComparePlans(show) => {
+                self.active_sub = ConnectSubMenu::PlanBilling;
+                self.show_billing_history = false;
+                self.show_plan_comparison = show;
+            }
+
+            ConnectAccountMessage::ShowCampaignRedeem(show) => {
+                self.show_campaign_redeem = show;
             }
 
             ConnectAccountMessage::RenewCurrentPlan => {
@@ -2312,9 +2442,11 @@ impl ConnectAccountPanel {
                 // toggle would mask the picker on the Free/lapsed fallback
                 // path below (where no checkout is started).
                 self.show_billing_history = false;
+                self.show_plan_comparison = false;
                 // A Free/lapsed plan has no tier to pre-fill an invoice for
                 // — fall back to the picker.
                 if matches!(tier, PlanTier::Free) {
+                    self.show_plan_comparison = true;
                     return iced::Task::none();
                 }
                 if let Some(cycle) = cycle {
@@ -2330,6 +2462,7 @@ impl ConnectAccountPanel {
             ConnectAccountMessage::ToggleBillingHistory => {
                 self.show_billing_history = !self.show_billing_history;
                 if self.show_billing_history {
+                    self.show_plan_comparison = false;
                     let gen = self.session_generation;
                     let c1 = self.client.clone();
                     let c2 = self.client.clone();
@@ -2784,12 +2917,16 @@ impl ConnectAccountPanel {
         self.login_activity = None;
         self.review_sign_out = false;
         self.review_device_removal = None;
+        self.otp_attempt_generation = self.otp_attempt_generation.wrapping_add(1);
         self.overview_contact_count = None;
         self.overview_cube_count = None;
+        self.recovery_services = RecoveryServicesState::NotLoaded;
         self.features = None;
         self.checkout = None;
         self.billing_history = None;
         self.show_billing_history = false;
+        self.show_plan_comparison = false;
+        self.show_campaign_redeem = false;
         self.renewal_banner_dismissed = false;
         self.campaign_redeem = CampaignRedeemState::default();
         self.register_campaign_code = String::new();
@@ -4769,10 +4906,9 @@ impl ConnectAccountPanel {
 }
 
 /// Fetch the Account Overview summary counts. Runs the contacts and
-/// cubes list calls back-to-back and reports their lengths; an error on
-/// either resolves to `None` for that count, signalling "no fresh value"
-/// — the handler then keeps any prior value rather than surfacing a
-/// transient failure on a glanceable summary.
+/// cubes list calls back-to-back and reports their lengths. The Cube response
+/// is also projected into sanitized Recovery services rows; a fetch failure
+/// is visible there while summary counts keep their previous values.
 ///
 /// The cube count is scoped to `active_network` when set (same
 /// convention as `load_invite_cubes`: `None` counts cubes on every
@@ -4780,15 +4916,18 @@ impl ConnectAccountPanel {
 fn load_overview_counts(
     client: &CoincubeClient,
     generation: u64,
+    request_seq: u64,
     active_network: Option<String>,
 ) -> iced::Task<Message> {
     let client = client.clone();
     iced::Task::perform(
         async move {
             let contacts = client.get_contacts().await.ok().map(|c| c.len());
-            let cubes = client.list_cubes().await.ok().map(|cubes| {
+            let recovery: Result<Vec<CubeResponse>, UserError> =
+                client.list_cubes().await.map_err(|error| (&error).into());
+            let cubes = recovery.as_ref().ok().map(|cubes| {
                 cubes
-                    .into_iter()
+                    .iter()
                     .filter(|c| {
                         active_network
                             .as_deref()
@@ -4797,14 +4936,16 @@ fn load_overview_counts(
                     })
                     .count()
             });
-            (contacts, cubes)
+            (contacts, cubes, recovery)
         },
-        move |(contacts, cubes)| {
+        move |(contacts, cubes, recovery)| {
             Message::View(view::Message::ConnectAccount(
                 ConnectAccountMessage::OverviewCountsLoaded {
                     contacts,
                     cubes,
+                    recovery,
                     generation,
+                    request_seq,
                 },
             ))
         },
@@ -8412,6 +8553,50 @@ mod connect_review_tests {
     use super::*;
 
     #[test]
+    fn prior_otp_timer_cannot_advance_a_new_login_or_signup_attempt() {
+        for is_signup in [false, true] {
+            let mut panel = ConnectAccountPanel::new();
+            panel.register_campaign_code = "HELLO".into();
+            let email = "person@example.test".to_string();
+            let _ = panel.update_message(ConnectAccountMessage::OtpRequested {
+                email: email.clone(),
+                is_signup,
+            });
+            let old_attempt = panel.otp_attempt_generation;
+            let pending_tick =
+                panel.update_message(ConnectAccountMessage::OtpCooldownTick(old_attempt));
+            assert!(iced_runtime::task::into_stream(pending_tick).is_some());
+
+            let _ = panel.update_message(ConnectAccountMessage::BackToEmail);
+            let _ = panel.update_message(ConnectAccountMessage::OtpRequested {
+                email: email.clone(),
+                is_signup,
+            });
+            let new_attempt = panel.otp_attempt_generation;
+            assert_ne!(old_attempt, new_attempt);
+            let stale = panel.update_message(ConnectAccountMessage::OtpCooldownTick(old_attempt));
+            assert!(iced_runtime::task::into_stream(stale).is_none());
+            let stale_resend = panel.update_message(ConnectAccountMessage::OtpResent(old_attempt));
+            assert!(iced_runtime::task::into_stream(stale_resend).is_none());
+            let _ = panel.update_message(ConnectAccountMessage::OtpResendFailed(
+                UserError::new("Old request failed", "Try again", "CC-OTP-STALE", true),
+                old_attempt,
+            ));
+            assert!(panel.error.is_none());
+            assert!(matches!(
+                panel.step,
+                ConnectFlowStep::OtpVerification { cooldown: 60, .. }
+            ));
+            assert_eq!(panel.register_campaign_code, "HELLO");
+            let _ = panel.update_message(ConnectAccountMessage::OtpCooldownTick(new_attempt));
+            assert!(matches!(
+                panel.step,
+                ConnectFlowStep::OtpVerification { cooldown: 59, .. }
+            ));
+        }
+    }
+
+    #[test]
     fn token_back_preserves_signup_email_and_promo() {
         let mut panel = ConnectAccountPanel::new();
         panel.register_campaign_code = "HELLO".into();
@@ -8458,5 +8643,104 @@ mod connect_review_tests {
         assert_eq!(panel.review_device_removal, Some(2));
         let _ = panel.update_message(ConnectAccountMessage::ReviewVerifiedDeviceRemoval(None));
         assert_eq!(panel.review_device_removal, None);
+    }
+
+    #[test]
+    fn billing_management_precedes_explicit_comparison_and_history() {
+        let mut panel = ConnectAccountPanel::new();
+        assert!(!panel.show_plan_comparison);
+        let _ = panel.update_message(ConnectAccountMessage::ComparePlans(true));
+        assert!(panel.show_plan_comparison);
+        let _ = panel.update_message(ConnectAccountMessage::ComparePlans(false));
+        assert!(!panel.show_plan_comparison);
+        let _ = panel.update_message(ConnectAccountMessage::ComparePlans(true));
+        let _ = panel.update_message(ConnectAccountMessage::ToggleBillingHistory);
+        assert!(panel.show_billing_history);
+        assert!(!panel.show_plan_comparison);
+        let _ = panel.update_message(ConnectAccountMessage::OpenPlanBilling);
+        assert!(!panel.show_billing_history);
+        assert!(!panel.show_plan_comparison);
+        panel.active_sub = ConnectSubMenu::Duress;
+        let _ = panel.update_message(ConnectAccountMessage::OpenPlanBilling);
+        assert!(panel.show_plan_comparison);
+    }
+
+    #[test]
+    fn recovery_rows_distinguish_server_record_from_backup_completeness() {
+        let reported: CubeResponse = serde_json::from_str(r#"{"id":7,"uuid":"cube-7","name":"  Family  ","network":"bitcoin","status":"active","hasRecoveryKit":true}"#).unwrap();
+        let missing_field: CubeResponse = serde_json::from_str(
+            r#"{"id":8,"uuid":"cube-8","name":"","network":"testnet","status":"active"}"#,
+        )
+        .unwrap();
+        let rows = [
+            RecoveryServiceRow::from(reported),
+            RecoveryServiceRow::from(missing_field),
+        ];
+        assert_eq!(rows[0].name, "Family");
+        assert_eq!(rows[0].target.cube_id, 7);
+        assert_eq!(rows[0].target.network, "bitcoin");
+        assert_eq!(rows[0].kit, RecoveryKitReport::Reported);
+        assert_eq!(rows[1].name, "Cube 8");
+        assert_eq!(rows[1].kit, RecoveryKitReport::NotReported);
+    }
+
+    #[test]
+    fn recovery_result_ignores_stale_session_and_clears_on_logout() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.session_generation = 2;
+        panel.overview_seq = 2;
+        let cube: CubeResponse = serde_json::from_str(r#"{"id":7,"uuid":"cube-7","name":"Family","network":"bitcoin","status":"active","hasRecoveryKit":true}"#).unwrap();
+        let _ = panel.update_message(ConnectAccountMessage::OverviewCountsLoaded {
+            contacts: None,
+            cubes: Some(1),
+            recovery: Ok(vec![cube.clone()]),
+            generation: 1,
+            request_seq: 2,
+        });
+        assert!(matches!(
+            panel.recovery_services,
+            RecoveryServicesState::NotLoaded
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::OverviewCountsLoaded {
+            contacts: None,
+            cubes: Some(1),
+            recovery: Ok(vec![cube.clone()]),
+            generation: 2,
+            request_seq: 1,
+        });
+        assert!(matches!(
+            panel.recovery_services,
+            RecoveryServicesState::NotLoaded
+        ));
+        let _ = panel.update_message(ConnectAccountMessage::OverviewCountsLoaded {
+            contacts: None,
+            cubes: Some(1),
+            recovery: Ok(vec![cube]),
+            generation: 2,
+            request_seq: 2,
+        });
+        assert!(
+            matches!(panel.recovery_services, RecoveryServicesState::Ready(ref rows) if rows.len() == 1)
+        );
+        let _ = panel.update_message(ConnectAccountMessage::LogOut);
+        assert!(matches!(
+            panel.recovery_services,
+            RecoveryServicesState::NotLoaded
+        ));
+    }
+
+    #[test]
+    fn signed_out_recovery_refresh_never_requests_cube_metadata() {
+        let mut panel = ConnectAccountPanel::new();
+        panel.step = ConnectFlowStep::Login {
+            email: String::new(),
+            loading: false,
+        };
+        let task = panel.update_message(ConnectAccountMessage::RefreshRecoveryServices);
+        assert!(iced_runtime::task::into_stream(task).is_none());
+        assert!(matches!(
+            panel.recovery_services,
+            RecoveryServicesState::NotLoaded
+        ));
     }
 }

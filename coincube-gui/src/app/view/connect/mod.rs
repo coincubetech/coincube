@@ -34,7 +34,9 @@ use crate::{
     },
 };
 
-use crate::app::state::connect::account::PanelError;
+use crate::app::state::connect::account::{
+    PanelError, RecoveryAlertEligibility, RecoveryKitReport, RecoveryServicesState,
+};
 
 use crate::app::view::Message as ViewMessage;
 
@@ -669,6 +671,8 @@ fn overview_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
         .push(text::p1_bold("What Connect provides").style(theme::text::primary))
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
         .push(connect_benefits())
+        .push(iced::widget::Space::new().height(Length::Fixed(24.0)))
+        .push(recovery_services_ux(state))
         .push(iced::widget::Space::new().height(Length::Fixed(24.0)));
 
     let consequence = "Cubes stay on this device; Connect services pause until you sign in again.";
@@ -710,6 +714,94 @@ fn overview_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
     }
 
     col.spacing(0).width(Length::Fill).into()
+}
+
+/// Source-backed Recovery services table. R03 can call this from its own
+/// Connect section after it owns launcher navigation; each row's typed
+/// `RecoveryServiceTarget` carries only the server Cube ID and network. R10
+/// supplies the authenticated Backup & protection destination.
+pub fn recovery_services_ux<'a>(
+    state: &'a ConnectAccountPanel,
+) -> Element<'a, ConnectAccountMessage> {
+    let eligibility = match state.recovery_alert_eligibility() {
+        RecoveryAlertEligibility::Included => {
+            "Recovery alerts: Included in this plan; per-Cube setup unknown"
+        }
+        RecoveryAlertEligibility::NotIncluded => "Recovery alerts: Not included in this plan",
+        RecoveryAlertEligibility::Unknown => "Recovery alerts: Plan eligibility unknown",
+    };
+    let mut col = Column::new()
+        .push(text::p1_bold("Recovery services").style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(6.0)))
+        .push(text::p2_regular("Cube status reported by Connect. Open a Cube from the launcher to manage Backup & protection.").style(theme::text::secondary))
+        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+        .spacing(8)
+        .width(Length::Fill);
+
+    match &state.recovery_services {
+        RecoveryServicesState::NotLoaded => {
+            col = col
+                .push(
+                    text::p2_regular("Cube status has not been loaded.")
+                        .style(theme::text::secondary),
+                )
+                .push(
+                    button::secondary(None, "Load Cube status")
+                        .on_press(ConnectAccountMessage::RefreshRecoveryServices),
+                );
+        }
+        RecoveryServicesState::Loading => {
+            col = col.push(text::p2_regular("Loading Cube status…").style(theme::text::secondary));
+        }
+        RecoveryServicesState::Failed(error) => {
+            col = col
+                .push(text::p2_bold(&error.title).style(theme::text::primary))
+                .push(text::p2_regular(&error.guidance).style(theme::text::secondary))
+                .push(
+                    button::secondary(None, "Try again")
+                        .on_press(ConnectAccountMessage::RefreshRecoveryServices),
+                );
+        }
+        RecoveryServicesState::Ready(rows) if rows.is_empty() => {
+            col = col.push(
+                text::p2_regular("No Cubes are registered with Connect yet.")
+                    .style(theme::text::secondary),
+            );
+        }
+        RecoveryServicesState::Ready(rows) => {
+            for row in rows {
+                let kit = match row.kit {
+                    RecoveryKitReport::Reported => "Kit record: Reported by Connect",
+                    RecoveryKitReport::NotReported => "Kit record: Not reported by Connect",
+                };
+                let network = if row.target.network.trim().is_empty() {
+                    "Unknown network"
+                } else {
+                    row.target.network.as_str()
+                };
+                col = col.push(
+                    container(
+                        Column::new()
+                            .push(text::p1_bold(&row.name).style(theme::text::primary))
+                            .push(text::p2_regular(network).style(theme::text::secondary))
+                            .push(text::p2_regular(kit).style(theme::text::primary))
+                            .push(text::p2_regular(eligibility).style(theme::text::secondary))
+                            .push(
+                                text::p2_regular("Open Cube to manage")
+                                    .style(theme::text::secondary),
+                            )
+                            .spacing(5)
+                            .padding(14),
+                    )
+                    .style(card_style)
+                    .width(Length::Fill),
+                );
+            }
+            col = col.push(text::p2_regular("A reported Kit record does not confirm this device is verified or that every secret is backed up.").style(theme::text::secondary));
+        }
+    }
+
+    col.into()
 }
 
 /// One label/value line in the Account Overview card: muted label on the
@@ -833,7 +925,7 @@ fn renewal_banner<'a>(
                 // plan reports as Free, so the prior tier is gone and there's
                 // nothing to pre-fill an invoice with. Label reflects that.
                 "View plans",
-                ConnectAccountMessage::OpenPlanBilling,
+                ConnectAccountMessage::ComparePlans(true),
                 false,
             )
         }
@@ -940,7 +1032,85 @@ fn plan_billing_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAcc
     if state.show_billing_history {
         return billing_history_ux(state);
     }
-    plan_selection_ux(state)
+    if state.show_plan_comparison {
+        return plan_selection_ux(state);
+    }
+    billing_management_ux(state)
+}
+
+fn billing_management_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
+    let mut col = Column::new()
+        .push(text::h4_bold("Plan & Billing").style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+        .push(current_plan_summary(state))
+        .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
+
+    if let Some(banner) = renewal_banner(state) {
+        col = col
+            .push(banner)
+            .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
+    }
+    if let Some(provenance) = state.plan.as_ref().and_then(plan_provenance_card) {
+        col = col
+            .push(provenance)
+            .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
+    }
+
+    let current_features = state.plan.as_ref().and_then(|plan| {
+        let tier_name = match plan.tier() {
+            PlanTier::Free => "free",
+            PlanTier::Pro => "pro",
+            PlanTier::Estate => "estate",
+        };
+        state.features.as_ref()?.plans.iter().find(|info| {
+            info.name.eq_ignore_ascii_case(tier_name)
+                || (tier_name == "estate" && info.name.eq_ignore_ascii_case("legacy"))
+        })
+    });
+    let mut features = Column::new()
+        .push(text::p1_bold("Current plan includes").style(theme::text::primary))
+        .spacing(8);
+    if let Some(info) = current_features {
+        if info.features.is_empty() {
+            features = features.push(
+                text::p2_regular("No feature details are available for this plan.")
+                    .style(theme::text::secondary),
+            );
+        } else {
+            for feature in &info.features {
+                features = features.push(
+                    text::p2_regular(launch_feature_copy(feature)).style(theme::text::primary),
+                );
+            }
+        }
+    } else {
+        features = features.push(
+            text::p2_regular(
+                "Current plan features are unavailable. Try again when Connect is online.",
+            )
+            .style(theme::text::secondary),
+        );
+    }
+    col = col
+        .push(container(features.padding(16)).style(card_style).width(Length::Fill))
+        .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
+        .push(button::secondary(None, "View billing history").on_press(ConnectAccountMessage::ToggleBillingHistory).width(Length::Fill))
+        .push(iced::widget::Space::new().height(Length::Fixed(8.0)))
+        .push(text::p2_regular("Payments use Bitcoin (Lightning or on-chain). Plans are paid upfront, with no recurring subscription.").style(theme::text::secondary))
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(button::secondary(None, "Compare plans").on_press(ConnectAccountMessage::ComparePlans(true)).width(Length::Fill))
+        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
+        .push(button::secondary(None, if state.show_campaign_redeem { "Hide referral code" } else { "Have a promo or referral code?" })
+            .on_press(ConnectAccountMessage::ShowCampaignRedeem(!state.show_campaign_redeem))
+            .width(Length::Fill));
+    if state.show_campaign_redeem {
+        col = col
+            .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
+            .push(campaign_redeem_field(state));
+    }
+    col.push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .width(Length::Fill)
+        .into()
 }
 
 fn current_plan_summary<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccountMessage> {
@@ -1260,6 +1430,11 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
         let mut col = Column::new()
             .push(text::h4_bold("Plan & Billing").style(theme::text::primary))
             .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+            .push(
+                button::secondary(None, "Back to billing")
+                    .on_press(ConnectAccountMessage::ComparePlans(false)),
+            )
+            .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
             .push(current_plan_summary(state))
             .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
         if let Some(banner) = renewal_banner(state) {
@@ -1283,22 +1458,23 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
                 .push(schema_update_note())
                 .push(iced::widget::Space::new().height(Length::Fixed(12.0)));
         }
-        col = col
-            .push(
-                text::p1_regular(
-                    "Pricing temporarily unavailable.\n\
+        col = col.push(
+            text::p1_regular(
+                "Pricing temporarily unavailable.\n\
                      Reconnect to the internet to view current plans and features.",
-                )
-                .color(color::GREY_3),
             )
-            // The redeem field doesn't depend on the pricing fetch.
-            .push(iced::widget::Space::new().height(Length::Fixed(15.0)))
-            .push(campaign_redeem_field(state));
+            .color(color::GREY_3),
+        );
         return container(col).padding(16).into();
     }
 
     let mut col = Column::new()
         .push(text::h4_bold("Plan & Billing").style(theme::text::primary))
+        .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
+        .push(
+            button::secondary(None, "Back to billing")
+                .on_press(ConnectAccountMessage::ComparePlans(false)),
+        )
         .push(iced::widget::Space::new().height(Length::Fixed(12.0)))
         .push(current_plan_summary(state))
         .push(iced::widget::Space::new().height(Length::Fixed(15.0)));
@@ -1521,43 +1697,7 @@ fn plan_selection_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectA
         .push(cards_column)
         .push(iced::widget::Space::new().height(Length::Fixed(10.0)));
 
-    // Promo / referral code field (server-driven redemption, v2).
-    col = col
-        .push(iced::widget::Space::new().height(Length::Fixed(5.0)))
-        .push(campaign_redeem_field(state))
-        .push(iced::widget::Space::new().height(Length::Fixed(10.0)));
-
-    // Billing history link
-    col = col
-        .push(iced::widget::Space::new().height(Length::Fixed(5.0)))
-        .push(
-            button::secondary(None, "View Billing History")
-                .on_press(ConnectAccountMessage::ToggleBillingHistory)
-                .width(Length::Fill),
-        )
-        .push(iced::widget::Space::new().height(Length::Fixed(10.0)))
-        .push(
-            container(
-                text::p2_regular(
-                    "Payments via Bitcoin (Lightning or on-chain). \
-                     No recurring subscriptions — pay upfront, renewal reminders sent by email.",
-                )
-                .color(color::GREY_3),
-            )
-            .padding(12)
-            .style(|t| container::Style {
-                background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                border: iced::Border {
-                    radius: 10.0.into(),
-                    ..Default::default()
-                },
-                ..Default::default()
-            })
-            .width(Length::Fill),
-        )
-        // Breathing room beneath the final block so it doesn't sit flush
-        // against the bottom of the scroll area.
-        .push(iced::widget::Space::new().height(Length::Fixed(20.0)));
+    col = col.push(iced::widget::Space::new().height(Length::Fixed(20.0)));
 
     col.spacing(0).width(Length::Fill).into()
 }
@@ -1882,12 +2022,28 @@ fn security_ux<'a>(state: &'a ConnectAccountPanel) -> Element<'a, ConnectAccount
                     col = col.push(
                         container(
                             Column::new()
-                                .push(text::p1_bold(format!("Remove {name}?")).style(theme::text::primary))
-                                .push(text::p2_regular("This revokes the device's Connect sessions. It will need to sign in again.").style(theme::text::secondary))
-                                .push(Row::new()
-                                    .push(button::primary(None, "Remove device").on_press(ConnectAccountMessage::DeleteVerifiedDevice(d.id)))
-                                    .push(button::secondary(None, "Cancel").on_press(ConnectAccountMessage::ReviewVerifiedDeviceRemoval(None)))
-                                    .spacing(8))
+                                .push(
+                                    text::p1_bold(format!("Remove {name}?"))
+                                        .style(theme::text::primary),
+                                )
+                                .push(
+                                    text::p2_regular(
+                                        "This removes the device from your verified devices.",
+                                    )
+                                    .style(theme::text::secondary),
+                                )
+                                .push(
+                                    Row::new()
+                                        .push(button::primary(None, "Remove device").on_press(
+                                            ConnectAccountMessage::DeleteVerifiedDevice(d.id),
+                                        ))
+                                        .push(button::secondary(None, "Cancel").on_press(
+                                            ConnectAccountMessage::ReviewVerifiedDeviceRemoval(
+                                                None,
+                                            ),
+                                        ))
+                                        .spacing(8),
+                                )
                                 .spacing(10)
                                 .padding(12),
                         )
@@ -3500,6 +3656,31 @@ mod renewal_banner_tests {
     }
 
     #[test]
+    fn recovery_services_build_unknown_loading_error_empty_and_reported_states() {
+        let mut account = dashboard_panel();
+        account.plan = None;
+        let _ = recovery_services_ux(&account);
+        account.recovery_services = RecoveryServicesState::Loading;
+        let _ = recovery_services_ux(&account);
+        account.recovery_services =
+            RecoveryServicesState::Failed(crate::user_error::UserError::new(
+                "Could not load Cube status",
+                "Check your connection and try again.",
+                "CC-RECOVERY-TEST",
+                true,
+            ));
+        let _ = recovery_services_ux(&account);
+        account.recovery_services = RecoveryServicesState::Ready(Vec::new());
+        let _ = recovery_services_ux(&account);
+        let cube: crate::services::coincube::CubeResponse = serde_json::from_str(
+            r#"{"id":7,"uuid":"cube-7","name":"Family","network":"bitcoin","status":"active","hasRecoveryKit":true}"#,
+        )
+        .unwrap();
+        account.recovery_services = RecoveryServicesState::Ready(vec![cube.into()]);
+        let _ = recovery_services_ux(&account);
+    }
+
+    #[test]
     fn plan_billing_checkout_and_history_views_build_for_branch_states() {
         let mut account = dashboard_panel();
         account.active_sub = ConnectSubMenu::PlanBilling;
@@ -3509,6 +3690,8 @@ mod renewal_banner_tests {
         account.campaign_redeem.code = "FOUNDERS".to_string();
         account.campaign_redeem.result = Some(Ok("Code applied.".to_string()));
         let _ = plan_billing_ux(&account);
+        account.show_plan_comparison = true;
+        let _ = plan_billing_ux(&account);
 
         account.features = Some(priced_features(
             Some(SUPPORTED_PRICING_SCHEMA_VERSION + 1),
@@ -3517,6 +3700,14 @@ mod renewal_banner_tests {
         account.selected_billing_cycle = BillingCycle::Annual;
         account.campaign_redeem.submitting = true;
         let _ = plan_billing_ux(&account);
+        account.show_plan_comparison = false;
+        account.show_campaign_redeem = true;
+        let _ = plan_billing_ux(&account);
+
+        for status in [PlanStatus::Canceled, PlanStatus::PastDue] {
+            account.plan = Some(plan(PlanTier::Pro, status, Some("2026-01-01T00:00:00Z")));
+            let _ = plan_billing_ux(&account);
+        }
 
         account.show_billing_history = true;
         account.billing_history = None;
@@ -3773,6 +3964,8 @@ mod renewal_banner_tests {
                 "account",
                 "account-review",
                 "plan",
+                "compare",
+                "recovery",
                 "checkout",
                 "security",
                 "device-review",
@@ -3811,7 +4004,7 @@ mod renewal_banner_tests {
                         ));
                         panel.features = Some(priced_features(None, Some(false)));
                         panel.active_sub = match section {
-                            "plan" | "checkout" => ConnectSubMenu::PlanBilling,
+                            "plan" | "compare" | "checkout" => ConnectSubMenu::PlanBilling,
                             "security" | "device-review" => ConnectSubMenu::Security,
                             "contacts" => ConnectSubMenu::Contacts,
                             _ => ConnectSubMenu::Overview,
@@ -3842,6 +4035,16 @@ mod renewal_banner_tests {
                         panel.contacts_state.contacts = Some(Vec::new());
                         panel.contacts_state.invites = Some(Vec::new());
                         panel.contacts_state.received_invites = Some(Vec::new());
+                        if section == "compare" {
+                            panel.show_plan_comparison = true;
+                        }
+                        if section == "recovery" {
+                            let cube: crate::services::coincube::CubeResponse = serde_json::from_str(
+                                r#"{"id":7,"uuid":"cube-7","name":"Family Vault","network":"bitcoin","status":"active","hasRecoveryKit":true}"#,
+                            ).unwrap();
+                            panel.recovery_services =
+                                RecoveryServicesState::Ready(vec![cube.into()]);
+                        }
                         if section == "account-review" {
                             panel.review_sign_out = true;
                         }
@@ -3866,8 +4069,13 @@ mod renewal_banner_tests {
                 )
                 .await
                 .expect("software renderer for Connect");
+                let content = if scenario == "recovery" {
+                    recovery_services_ux(&panel)
+                } else {
+                    connect_account_panel(&panel)
+                };
                 let mut element: Element<'_, ConnectAccountMessage> =
-                    iced::widget::scrollable(connect_account_panel(&panel))
+                    iced::widget::scrollable(content)
                         .height(Length::Fill)
                         .into();
                 let mut tree = Tree::new(element.as_widget());
