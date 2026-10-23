@@ -2777,6 +2777,8 @@ pub enum ClaimMessage {
     ToggleDepositDetails,
     ToggleSetupDetails,
     CheckFunding,
+    /// Copy identifier-free timing evidence from the current deposit check.
+    CopyVerificationReport,
     /// Open the two ordinary Claim PSBTs after a fresh pair requalification.
     SignPair,
     ShowPairBitcoin,

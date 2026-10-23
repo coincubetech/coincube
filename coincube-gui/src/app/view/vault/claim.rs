@@ -377,6 +377,8 @@ fn funding_view<'a>(
         .push_maybe(panel.funding_checking().then(|| p1_regular(panel.funding_status().unwrap_or("Verifying deposits…")).style(theme::text::secondary)))
         .push_maybe(((panel.funding_error().is_some() || panel.funding_proof_needs_retry()) && !panel.funding_checking()).then(|| button::secondary_compact(Some(icon::reload_icon()), "Retry verification")
             .on_press(Message::Claim(ClaimMessage::CheckFunding))))
+        .push_maybe(panel.verification_report().map(|_| button::secondary_compact(None, "Copy verification report")
+            .on_press(Message::Claim(ClaimMessage::CopyVerificationReport))))
         .push_maybe((!verified).then(|| button::secondary_compact(None, "Pause checks")
             .on_press(Message::Claim(ClaimMessage::Cancel))));
     let review = verified.then(|| {

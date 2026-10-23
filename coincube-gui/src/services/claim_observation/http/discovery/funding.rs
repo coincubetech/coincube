@@ -1517,7 +1517,19 @@ impl HttpObservationSource {
             })
         })
         .await
-        .map_err(|_| FailureKind::Deadline)?
+        .map_err(|_| {
+            if let Some(trace) = &snapshot.ancestry_trace {
+                trace.emit(
+                    ChainId::Bitcoin,
+                    diagnostics::Outcome::CollectionDeadline30s,
+                );
+                trace.emit(
+                    ChainId::BitcoinBlake2b,
+                    diagnostics::Outcome::CollectionDeadline30s,
+                );
+            }
+            FailureKind::Deadline
+        })?
     }
 }
 

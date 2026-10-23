@@ -13,6 +13,11 @@ use std::{
 mod ancestry;
 mod discovery;
 pub use ancestry::{CanonicalCoinbase, CoinbasePair};
+pub use discovery::diagnostics::Report as AncestryTimingReport;
+#[cfg(test)]
+pub(crate) use discovery::diagnostics::{
+    Outcome as AncestryTimingOutcome, Stage as AncestryTimingStage,
+};
 pub use discovery::{
     AncestryContext, ClaimPairError, CollectedAncestry, CollectedAncestrySweep,
     CollectedFundingCoin, CollectedFundingPair, CollectedPostBitcoinInputs, CollectedSpendInputs,
@@ -37,6 +42,8 @@ pub struct HttpObservationSource {
     generation: watch::Receiver<u64>,
     expected: u64,
     budget: Option<std::sync::Arc<discovery::CollectionBudget>>,
+    ancestry_trace: Option<std::sync::Arc<discovery::diagnostics::Trace>>,
+    ancestry_timing_observer: Option<discovery::diagnostics::Observer>,
     funding_observer: Option<discovery::FundingProofObserver>,
     #[cfg(all(test, feature = "regtest-harness"))]
     test_ancestry_history: Option<crate::services::coincube::client::TestAncestryHistory>,
@@ -103,6 +110,8 @@ impl HttpObservationSource {
             expected: context.expected_generation,
             generation: context.generation,
             budget: None,
+            ancestry_trace: None,
+            ancestry_timing_observer: None,
             funding_observer: None,
             #[cfg(all(test, feature = "regtest-harness"))]
             test_ancestry_history,
@@ -115,6 +124,16 @@ impl HttpObservationSource {
         observer: discovery::FundingProofObserver,
     ) -> Self {
         self.funding_observer = Some(observer);
+        self
+    }
+
+    /// Attach an identifier-free read-only ancestry timing observer. Reports
+    /// cannot manufacture proofs, signer permits or broadcast permission.
+    pub(crate) fn with_ancestry_timing_observer(
+        mut self,
+        observer: discovery::diagnostics::Observer,
+    ) -> Self {
+        self.ancestry_timing_observer = Some(observer);
         self
     }
 
@@ -206,6 +225,13 @@ impl HttpObservationSource {
         body_limit: usize,
     ) -> Result<(u16, Vec<u8>, HeaderMap, i64), (FailureKind, bool)> {
         let prefix = Self::prefix(chain).map_err(|error| (error, false))?;
+        let request_stage = if path.starts_with("tx/") && path.ends_with("/hex") {
+            discovery::diagnostics::Stage::RawTransaction
+        } else if path.starts_with("tx/") && !path.contains("/outspend/") {
+            discovery::diagnostics::Stage::FreshTransaction
+        } else {
+            discovery::diagnostics::Stage::ChainView
+        };
         self.bounded(async {
             if crate::services::esplora_backoff::remaining(&self.base).is_some() {
                 return Err(FailureKind::Http(429));
@@ -214,6 +240,9 @@ impl HttpObservationSource {
             if let Some(budget) = &self.budget {
                 budget.charge_request(0)?;
             }
+            if let Some(trace) = &self.ancestry_trace {
+                trace.request(chain, 0);
+            }
             let mut request = self
                 .anonymous
                 .get(format!("{}/api/v1/esplora/{}/{}", self.base, prefix, path))
@@ -221,7 +250,13 @@ impl HttpObservationSource {
             if fresh {
                 request = request.header("X-Coincube-Observation", "fresh");
             }
-            let mut response = request.send().await.map_err(|_| FailureKind::Unavailable)?;
+            let mut response = request.send().await.map_err(|error| {
+                if error.is_timeout() {
+                    FailureKind::Deadline
+                } else {
+                    FailureKind::Unavailable
+                }
+            })?;
             let status = response.status().as_u16();
             if status == 429 {
                 crate::services::esplora_backoff::record(&self.base, response.headers());
@@ -246,13 +281,18 @@ impl HttpObservationSource {
                 return Ok(Err(()));
             }
             let mut bytes = Vec::new();
-            while let Some(chunk) = response
-                .chunk()
-                .await
-                .map_err(|_| FailureKind::Unavailable)?
-            {
+            while let Some(chunk) = response.chunk().await.map_err(|error| {
+                if error.is_timeout() {
+                    FailureKind::Deadline
+                } else {
+                    FailureKind::Unavailable
+                }
+            })? {
                 if let Some(budget) = &self.budget {
                     budget.charge_bytes(chunk.len())?;
+                }
+                if let Some(trace) = &self.ancestry_trace {
+                    trace.bytes(chain, chunk.len());
                 }
                 if chunk.len() > body_limit.saturating_sub(bytes.len()) {
                     return Ok(Err(()));
@@ -262,7 +302,18 @@ impl HttpObservationSource {
             Ok(Ok((status, bytes, headers, stamp)))
         })
         .await
-        .map_err(|error| (error, false))?
+        .map_err(|error| {
+            if error == FailureKind::Deadline {
+                if let Some(trace) = &self.ancestry_trace {
+                    trace.emit_with_stage(
+                        chain,
+                        discovery::diagnostics::Outcome::RequestDeadline5s,
+                        Some(request_stage),
+                    );
+                }
+            }
+            (error, false)
+        })?
         .map_err(|()| (FailureKind::Malformed, true))
     }
     /// Fetch one bounded ancestry link using the anonymous immutable-data route.
@@ -448,6 +499,12 @@ impl ObservationSource for HttpObservationSource {
                     crate::services::coincube::network_anchor::MAX_ANCHOR_BODY_BYTES,
                 )?;
             }
+            if let Some(trace) = &self.ancestry_trace {
+                trace.request(
+                    chain,
+                    crate::services::coincube::network_anchor::MAX_ANCHOR_BODY_BYTES,
+                );
+            }
             self.authenticated.network_anchor(chain).await.map_err(|e| {
                 match AnchorStartupError::from(e) {
                     AnchorStartupError::Http(status) => FailureKind::Http(status),
@@ -457,6 +514,17 @@ impl ObservationSource for HttpObservationSource {
             })
         })
         .await
+        .inspect_err(|error| {
+            if *error == FailureKind::Deadline {
+                if let Some(trace) = &self.ancestry_trace {
+                    trace.emit_with_stage(
+                        chain,
+                        discovery::diagnostics::Outcome::RequestDeadline5s,
+                        Some(discovery::diagnostics::Stage::AuthenticatedAnchor),
+                    );
+                }
+            }
+        })
     }
     async fn tip(&self, chain: ChainId) -> Result<FreshRead<BlockRef>, FailureKind> {
         let before = self.hash(chain, "blocks/tip/hash").await?;

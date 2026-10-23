@@ -31,6 +31,42 @@ and retained-path requalification retain their existing bounds. Repeating a
 deterministic search-limit result does not extend the graph or prove that a
 deposit has qualifying ancestry.
 
+Claim ancestry now emits identifier-free timing snapshots for each chain's
+search result and for 5-second request, 30-second collection and 90-second
+search deadlines. The deposit-check screen can copy the current attempt's
+read-only report after a result. A completed deposit check also records a fixed
+phase, result category and elapsed time even when it stops before ancestry
+observation begins; an outer 150-second expiry has its own category. The report
+never copies free-form failure text. Each ancestry snapshot contains a typed
+stage, elapsed time, shared charged requests/bytes and per-chain visited,
+pre-fork pruned, candidate root, shared-root and unsupported-root counts. It
+contains no transaction or
+outpoint IDs, URLs, addresses, account data or credentials. A negative search
+can thus distinguish a pruned pre-fork frontier from rejected candidate roots,
+but neither the report nor a log line is spend authority. Reports clear on a
+new check, cancellation or context revocation. When a completed proof expires,
+its report remains copyable with an expired/recheck-required marker while the
+proof itself is invalidated. These diagnostics do not change
+the established deadlines, budgets or proof gates.
+
+Each search node now fetches raw bytes and its fresh full-transaction metadata
+at the same time under the same shared bounds. Raw-read failures retain their
+precedence; metadata identity, freshness and canonical pre-fork checks still
+complete before the node advances. Graph traversal and root qualification
+remain ordered. At most two node reads run together per chain, or four across
+the paired search. The 5-second request, 30-second collection and 90-second
+search deadlines, shared request/byte budgets, core proof rules and signing
+gates are unchanged.
+
+In a synthetic two-chain fixture, each qualifying root sat behind 121 canonical
+pre-fork siblings (123 visited transactions, 121 pruned nodes and one root per
+chain). Only raw and full-transaction metadata reads had 380 ms mock latency;
+height, anchor, root and final collection reads answered immediately. The
+serial search hit its 90-second deadline after 90.99 seconds. With paired node
+reads, the same fixture completed final paired collection in 49.63 seconds.
+This establishes the bounded-latency improvement under the fixture, not the
+cause or eligibility of any live deposit.
+
 The source is one immutable API/provider/account context. Its authenticated
 anchor must come from the typed `CoincubeClient::network_anchor` endpoint. That
 response already binds dynamic RDTS, MTP, hash and height coherently; there is no
