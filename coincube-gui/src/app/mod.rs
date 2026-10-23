@@ -3340,6 +3340,17 @@ pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checks
 }
 
 impl App {
+    /// Identifies a harmless shell dismissal for the GUI's sole Escape
+    /// dispatcher. This does not handle the key or mutate the App.
+    pub fn shell_escape_intent(&self) -> Option<view::Message> {
+        view::nav::shell::escape_intent(view::nav::shell::ShellState {
+            switcher_open: self.cache.cube_switcher_open,
+            lock_confirmation: self.cache.cube_lock_confirmation,
+            tools_open: self.cache.vault_tools_open,
+            backup_attention: false,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cache: Cache,
@@ -9306,7 +9317,7 @@ impl App {
             Message::View(view::Message::ToggleCubeSwitcher) => {
                 self.cache.cube_switcher_open = !self.cache.cube_switcher_open;
                 self.cache.cube_lock_confirmation = false;
-                return Task::none();
+                return iced::widget::operation::focus(view::nav::shell::CUBE_SWITCHER_ID);
             }
             Message::View(view::Message::AskCubeLock) => {
                 self.cache.cube_switcher_open = true;
@@ -9315,11 +9326,11 @@ impl App {
             }
             Message::View(view::Message::CancelCubeLock) => {
                 self.cache.cube_lock_confirmation = false;
-                return Task::none();
+                return iced::widget::operation::focus(view::nav::shell::CUBE_LOCK_ID);
             }
             Message::View(view::Message::ToggleVaultTools) => {
                 self.cache.vault_tools_open = !self.cache.vault_tools_open;
-                return Task::none();
+                return iced::widget::operation::focus(view::nav::shell::VAULT_TOOLS_ID);
             }
             Message::View(view::Message::Menu(menu)) => {
                 // Always honor the navigation even when the current
