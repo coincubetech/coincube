@@ -647,3 +647,14 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 - The Claude Design runtime navigates on a prototype link before the link's own `onClick`/`onMouseDown` run, so a link cannot change state on its way out. Two hand-off artboards absorb that: `P-Locking.dc.html` and `V3-Locking.dc.html` clear the open-Cube flag (`tenshu.proto.open`) and mount the Launcher in place with `dc-import`. Every "Lock" link points at them.
 - The Overview pages mark `tenshu.proto.seen` on load; the Launcher bounces a stale unlock/checks face to browse only once that marker matches the open Cube, so the checks face still shows once after unlocking.
 - A `<div>` wrapper around the menu's `<sc-if>` block lost its closing tag in three screens because the extraction regex stopped at the lock prompt's own `</div></sc-if>`; the menu now sits first inside `<nav class="side">` with `.side{position:relative}` and a fixed `top:69px`, matching the old header pattern.
+
+## Bitcoin Blake2b device toggle; canvas reduced to the prototype (2026-10-23, canvas v86)
+
+**Decisions (Robert):**
+1. Nothing Blake2b shows anywhere in Tenshu unless Bitcoin Blake2b is turned on for this device. With it off, Create's Network step lists only Bitcoin (and the test networks under Developer mode); the Launcher's network menu and Cube list carry no Blake2b entries; Transfer has no "Blake2b copy"; Tools has no Split tab and no "both chains" coin notes; Connect's account page has no Blake2b entitlement row.
+2. Enabling it is a plain toggle in App preferences › Developer ("Bitcoin Blake2b · This device"), not a Connect beta grant. Robert may reverse this later; the gate is a single device flag so that is a one-place change.
+3. The canvas keeps only the linked prototype: 30 screens in six titled rows (Launcher & account; Create, restore, delete; Inside a Cube; Vault tools & signing; Settings & protection; Marketplace). The 41 exploration boards (Launcher 1–3, Concept C, V2, V3/V4, V6) are off the canvas and archived under `design-review/archive/explorations/`. All links inside the prototype were re-pointed to prototype screens; the full walk still works.
+
+**Verified live in Chrome:** toggle off → Launcher shows Everyday, Lab, Archive, Household 2024 and the network menu lists Bitcoin mainnet, Testnet4, Signet, Regtest; Create › Network shows Bitcoin only. Toggle on → "Blake workspace" returns to the Launcher and the menu adds Bitcoin Blake2b mainnet and Blake2b Testnet4. Split coins and Claim pages show a "Bitcoin Blake2b is off on this device" notice with a link to App preferences when reached while off.
+
+**Prototype mechanics:** the flag is `tenshu.proto.b2b` in localStorage (same pattern as the open-Cube flag); every gated screen reads it at render. Lever-driven review states that assume Blake2b (Opening's `blake2bRetry` error, P2P on a Blake2b Cube, installer gap screens) are unchanged; they are reachable only through levers.

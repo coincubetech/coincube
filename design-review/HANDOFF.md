@@ -6,8 +6,9 @@ Read this file first, then the review doc, then the inventory.
 
 | What | Where |
 | --- | --- |
-| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v74) |
-| Artboard sources (71 screens, plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index in `canvas/canvas.json` |
+| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v86) |
+| Artboard sources (30 linked screens, plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index in `canvas/canvas.json` |
+| Earlier exploration boards the prototype was distilled from (superseded) | `archive/explorations/` |
 | Every decision Robert made, in order, with reasons | `tenshu-launcher-and-settings-review.md` |
 | Feature coverage matrix (88 rows: existing feature → screen) | `tenshu-feature-inventory.md` |
 | Product frame (users, platform, constraints) | `PRODUCT.md` |
@@ -25,10 +26,10 @@ Precedence when sources disagree: review doc > artboard source > brief.
 - The files reference `./support.js` and the Claude Design runtime, which are not
   in this repo. They do not render standalone. Use the live link for pixels and the
   files for exact copy, spacing, colours and state logic.
-- The `P-*` artboards (page `proto` in `canvas.json`) are the single linked
-  prototype and the source of truth for flows. `V2-`/`V3-`/`V6-` boards are the
-  explorations they were distilled from; they match the `P-` boards where the
-  review doc says a decision was "applied to all Cube screens".
+- The canvas holds only the linked prototype, in six rows: Launcher & account;
+  Create, restore, delete; Inside a Cube; Vault tools & signing; Settings &
+  protection; Marketplace. Every link stays inside this set. The earlier
+  exploration boards live in `archive/explorations/` and are not current.
 - Inside the live canvas, the per-screen "play" button opens that screen
   full-frame with working links. Prefer it over scrolling the canvas.
 
@@ -39,6 +40,7 @@ Implement none of these. They exist only so the prototype could be clicked throu
 | In the prototype | Why it is there | In the app |
 | --- | --- | --- |
 | `localStorage` keys `tenshu.proto.open` and `tenshu.proto.seen` | Share "which Cube is open" across artboards | In-memory app state (`gui/tab.rs::State`, `app/session.rs`) |
+| `localStorage` key `tenshu.proto.b2b` | Share the Bitcoin Blake2b device toggle across artboards | A persisted per-device app setting (next to Developer mode in `app/view/settings/general.rs`); when off, nothing Blake2b is rendered anywhere |
 | `P-Locking` / `V3-Locking` artboards | The runtime navigates on a link before the link's own handler runs | Lock Cube is one action: clear the session, return to the Launcher |
 | `P-Opening` mounting `P-Overview` after 900 ms via `dc-import` | No programmatic navigation in the runtime | Opening finishes → Overview, no timer |
 | Dashed "picker" buttons (`.pb`) and `data-props` levers | Reach lever-only states by clicking | Real state from the daemon / Connect |
@@ -71,7 +73,7 @@ navigation.
 | Transfer to another Cube (P-Transfer) | `app/view/vault/spend/**` + Launcher unlock-in-flow |
 | Marketplace Buy/Sell, P2P (P-BuySell, P-P2P) | `app/view/buysell/**`, `app/view/p2p/**`, `app/state/buysell.rs` |
 | Duress, Members, Border Wallet, Delete, Signing (P-Duress, P-Members, P-BorderWallet, P-Delete, P-Signing) | `app/view/duress/**`, `app/view/connect/cube_members.rs`, `app/view/settings/local_signing.rs`, `app/view/vault/hw.rs`, `phone_signer/**` |
-| App preferences (P-AppPrefs) | `app/view/settings/general.rs`, `app/view/settings/about.rs` |
+| App preferences (P-AppPrefs), incl. the Developer-mode and Bitcoin Blake2b device toggles | `app/view/settings/general.rs`, `app/view/settings/about.rs`, `feature_flags.rs` (Blake2b is a runtime device setting now, not a Connect entitlement) |
 | Theme, type, components | `coincube-ui/src/theme/**` (`palette.rs` for tokens), `coincube-ui/src/font.rs`, `coincube-ui/src/component/**` |
 
 Do not touch `coincubed/`, `coincube-core/`, `coincube-spark-bridge/`, `services/unlock/`,
@@ -152,5 +154,10 @@ review doc section in parentheses.
   descriptors, recovery words, emails or PINs.
 - No change to unlock, passkey, signing, recovery, duress or Connect crypto paths.
 - Keep both themes and reduced motion working on every screen you touch.
-- Window minimum 1024×768 (`Cube-Compact` / `V2-Cube-Compact` show the compact
-  layout).
+- Window minimum 1024×768 (the compact-layout boards are in
+  `archive/explorations/`).
+- Bitcoin Blake2b is a per-device toggle (App preferences › Developer). With it
+  off, no Blake2b network, Cube, tab, card, copy or badge appears anywhere: not in
+  the Launcher's network menu or Cube list, not in Create's network step, not in
+  Transfer, Tools, Settings or Connect. Robert may later make this an account
+  entitlement again; keep the gate in one place.
