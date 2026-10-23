@@ -1,0 +1,271 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Opening Cube</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+.tenshu{--acc-ink:#f59a45;--on-accent:#201407;--hover:rgba(245,240,232,.06);font-variant-numeric:tabular-nums}
+.tenshu.light{--acc-ink:#a14d00;--hover:rgba(32,32,32,.05)}
+.tenshu *{box-sizing:border-box}
+.tenshu button{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu p,.tenshu blockquote,.tenshu figure{margin:0}
+.tenshu a{color:var(--acc-ink)}
+.sr{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important}
+.grow{flex:1}
+.muted{color:var(--muted)}
+svg{flex:none}
+
+/* top bar: V3-Launcher-Spin chrome, quiet while a Cube opens */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px;color:var(--muted)}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:8px;font-size:14px;white-space:nowrap}
+.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:6px;color:var(--muted);font-size:13px}
+.net img{display:block;width:18px;height:18px;border-radius:50%}
+.ttag{font-size:11.5px;font-weight:600;padding:1px 7px;border:1px solid var(--muted);border-radius:9px;color:var(--ink)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;color:var(--muted);text-decoration:none}
+.tenshu a.tbtn{color:var(--muted)}
+.tbtn:hover{border-color:var(--line)}
+.tbtn svg{width:16px;height:16px}
+
+/* stage */
+.stage{flex:1;min-height:0;position:relative;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px 48px 56px}
+.col{width:640px;display:flex;flex-direction:column;align-items:center;text-align:center}
+.art{width:260px;height:260px;display:block;object-fit:contain}
+.quote{margin-top:24px;max-width:600px}
+.quote blockquote{font-size:18px;line-height:1.5;font-weight:400}
+.quote figcaption{margin-top:10px;font-size:13px;color:var(--muted)}
+.dots{display:flex;gap:10px;margin-top:32px;height:10px;align-items:center}
+.dots i{display:block;width:8px;height:8px;border-radius:50%;background:var(--ink);opacity:.25;animation:pulse 1.5s ease-in-out infinite}
+.dots i:nth-child(2){animation-delay:.5s}
+.dots i:nth-child(3){animation-delay:1s}
+.tenshu.reduced .dots i:first-child{opacity:.9}
+@keyframes pulse{0%,100%{opacity:.25}33%{opacity:.95}}
+.stagetx{margin-top:14px;font-size:14px;color:var(--muted);min-height:20px}
+.body2{margin-top:8px;font-size:13px;color:var(--muted);max-width:520px}
+.logs{margin-top:8px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12px;color:var(--muted)}
+.adm{display:flex;align-items:center;gap:8px;margin-top:20px;padding-top:14px;border-top:1px solid var(--line);font-size:13px;color:var(--muted)}
+.adm svg{width:16px;height:16px}
+.adm .ok{color:var(--good);font-weight:500}
+
+/* error */
+.banner{position:absolute;left:24px;right:24px;top:20px;display:flex;align-items:flex-start;gap:12px;padding:12px 16px;border:1px solid var(--line);border-left:3px solid var(--bad);border-radius:8px;background:var(--panel);text-align:left}
+.banner svg{width:18px;height:18px;color:var(--bad);margin-top:1px}
+.banner b{display:block;font-weight:600}
+.banner p{font-size:13px;color:var(--muted);margin-top:2px;overflow-wrap:anywhere}
+.head{margin-top:32px;font-size:16px;font-weight:600}
+.retryline{margin-top:8px;font-size:13px;color:var(--muted);max-width:520px}
+.acts{display:flex;gap:12px;margin-top:20px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;min-width:200px;height:40px;padding:0 18px;border-radius:8px;border:1px solid var(--line);background:var(--panel);cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink)}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{border-color:var(--muted)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.primary{color:var(--on-accent)}
+.btn.primary:hover{background:#ffa54d;border-color:#ffa54d}
+.fail{display:flex;align-items:center;justify-content:center;width:28px;height:28px;margin-top:28px;color:var(--bad)}
+.fail svg{width:28px;height:28px}
+
+/* done */
+.donemk{display:flex;align-items:center;gap:8px;margin-top:28px;color:var(--good);font-weight:500}
+.donemk svg{width:18px;height:18px}
+.doneh{margin-top:8px;font-size:22px;font-weight:600}
+
+.pfoot{position:absolute;left:0;right:0;bottom:16px;text-align:center;font-size:12px;color:var(--muted)}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+</style>
+</helmet>
+<sc-if value="{{ v.opened }}" hint-placeholder-val="{{ false }}">
+  <dc-import name="P-Overview" hint-size="1440px,900px"></dc-import>
+</sc-if>
+<sc-if value="{{ v.notOpened }}" hint-placeholder-val="{{ true }}">
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </a>
+    <span class="vsep"></span>
+    <p class="cid"><span class="muted">Opening</span> <b>{{ cube.name }}</b>
+      <span class="net">
+        <sc-if value="{{ cube.btc }}" hint-placeholder-val="{{ true }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></sc-if>
+        <sc-if value="{{ cube.b2b }}" hint-placeholder-val="{{ false }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""><span class="ttag">Blake2b</span></sc-if>
+        <span>{{ cube.net }}</span>
+      </span>
+    </p>
+    <span class="grow"></span>
+    <a class="tbtn" href="P-Connect.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect · alex@example.test</span><span>· Signed in</span>
+    </a>
+    <a class="tbtn" href="P-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage" aria-labelledby="open-h" aria-busy="{{ busyAttr }}">
+    <h1 class="sr" id="open-h">Opening {{ cube.name }}, {{ cube.net }}</h1>
+
+    <sc-if value="{{ v.error }}" hint-placeholder-val="{{ false }}">
+      <div class="banner" role="alert">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 21.5 20h-19z"></path><path d="M12 10v4.5M12 17.2v.01"></path></svg>
+        <div><b>Error while starting Tenshu</b><p>{{ err.detail }}</p></div>
+      </div>
+    </sc-if>
+
+    <div class="col">
+      <img class="art" src="/_blob/6fc543aaeec8ba507b3f8509ad3ae2f9" alt="">
+
+      <figure class="quote">
+        <blockquote><p>{{ q.text }}</p></blockquote>
+        <figcaption>— {{ q.author }}, {{ q.source }}</figcaption>
+      </figure>
+
+      <sc-if value="{{ v.loading }}" hint-placeholder-val="{{ true }}">
+        <div class="dots" aria-hidden="true"><i></i><i></i><i></i></div>
+        <p class="stagetx" role="status" aria-live="polite">{{ stageText }}</p>
+        <sc-if value="{{ v.scanBody }}" hint-placeholder-val="{{ false }}">
+          <p class="body2">Performing an initial scan of the Bitcoin blockchain via Esplora. This typically takes 1–2 minutes on the first run.</p>
+        </sc-if>
+        <sc-if value="{{ v.logs }}" hint-placeholder-val="{{ false }}">
+          <p class="logs">UpdateTip: height=[N] progress=[P] · synthetic</p>
+        </sc-if>
+        <sc-if value="{{ v.adm }}" hint-placeholder-val="{{ false }}">
+          <p class="adm">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3 5 6v5.5c0 4.2 2.9 7.6 7 9.5 4.1-1.9 7-5.3 7-9.5V6z"></path><path d="M9 12.2l2.2 2.2 4-4.2"></path></svg>
+            <span>Bitcoin Blake2b requires an authenticated Connect Vault session.</span>
+            <span class="ok">Verified</span>
+          </p>
+        </sc-if>
+      </sc-if>
+
+      <sc-if value="{{ v.error }}" hint-placeholder-val="{{ false }}">
+        <span class="fail" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg></span>
+        <p class="head">{{ err.headline }}</p>
+        <sc-if value="{{ err.cooldown }}" hint-placeholder-val="{{ false }}">
+          <p class="retryline" aria-live="polite">Connect startup can be retried in {{ err.secs }} seconds. Wait for the backend to be ready, then Retry.</p>
+        </sc-if>
+        <div class="acts">
+          <a class="btn" href="P-Launcher.dc.html">Back</a>
+          <button type="button" class="btn primary" disabled="{{ err.retryOff }}" onClick="{{ retry }}">{{ err.retryLabel }}</button>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ v.done }}" hint-placeholder-val="{{ false }}">
+        <p class="donemk" role="status"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg>Checks passed</p>
+        <h2 class="doneh">{{ cube.name }} is open</h2>
+        <p class="pfoot" style="margin-top:14px">Opening…</p>
+      </sc-if>
+    </div>
+
+    <p class="pfoot">Prototype · synthetic data · stage text quoted from the app's loader · the Cube opens by itself once the checks pass, as in the app</p>
+  </main>
+</div>
+</sc-if>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"stage":{"editor":"enum","options":["connecting","starting","scanning","syncing","almost","error","done"],"default":"connecting","section":"Review"},"errorKind":{"editor":"enum","options":["daemon","sessionChanged","esplora","blake2bRetry"],"default":"daemon","section":"Review"},"cube":{"editor":"enum","options":["everyday","blake"],"default":"everyday","section":"Review"},"quoteIndex":{"editor":"enum","options":["0","1","2","3","4","5"],"default":"0","section":"Review"},"autoplay":{"editor":"boolean","default":true,"section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};this._timer=null;}
+  renderVals() {
+    const P = this.props, self = this;
+    const theme = P.theme ?? 'dark';
+    const lever = P.stage || 'connecting', ek = P.errorKind || 'daemon', ck = P.cube || 'everyday';
+    const qi = Math.max(0, Math.min(5, parseInt(P.quoteIndex || '0', 10) || 0));
+    const auto = P.autoplay !== false;
+    const key = [lever, ek, ck, qi].join('|');
+    const S = this.state.k === key ? this.state : { k: key, stage: lever, err: ek, q: qi, secs: 12 };
+
+    const QUOTES = [
+      ['Exponentially advancing technological gains bring efficiency. That efficiency is deflationary.', 'Jeff Booth', 'The Greatest Game, The Bitcoin Times Ed. 3, 2020'],
+      ['Inflation is a tax on those most unable to pay.', 'Jeff Booth', 'The Greatest Game, The Bitcoin Times Ed. 3, 2020'],
+      ['For the first time in history… the unique characteristics of Bitcoin give everyone a choice on how they play the game.', 'Jeff Booth', 'The Greatest Game, The Bitcoin Times Ed. 3, 2020'],
+      ['Learn about Bitcoin. Learn why its importance is so much greater than the wealth it might create for you and your family.', 'Jeff Booth', 'The Greatest Game, The Bitcoin Times Ed. 3, 2020'],
+      ['Bitcoin is the hardest money ever invented: growth in its value cannot possibly increase its supply.', 'Saifedean Ammous', 'The Bitcoin Standard, 2018'],
+      ['Bitcoin can be best understood as distributed software that allows for transfer of value using a currency protected from unexpected inflation without relying on trusted third parties.', 'Saifedean Ammous', 'The Bitcoin Standard, 2018']
+    ];
+    const q = QUOTES[S.q % QUOTES.length];
+
+    const b2b = ck === 'blake';
+    const cube = b2b
+      ? { name: 'Blake workspace', net: 'Bitcoin Blake2b mainnet', btc: false, b2b: true }
+      : { name: 'Everyday', net: 'Bitcoin mainnet', btc: true, b2b: false };
+
+    // stage text quoted from coincube-gui/src/loader.rs view()
+    const TEXT = { connecting: 'Connecting to daemon...', starting: 'Starting daemon...', scanning: 'Scanning the blockchain...', syncing: 'Syncing blockchain...', almost: 'Almost there...' };
+    const NEXT = { connecting: 'starting', starting: 'syncing', scanning: 'syncing', syncing: 'almost', almost: 'done' };
+    const st = S.stage;
+    const loading = !!TEXT[st];
+
+    // Robert (2026-10-23): no Continue step; once the checks pass the Cube opens by itself.
+    // The "is open" line shows for a beat, then the Cube's Overview mounts in place (dc-import of the Overview artboard).
+    if (auto && st === 'done' && !this._open) {
+      this._open = setTimeout(() => { self._open = null; const cur = self.state.k === key ? self.state : S; if (cur.stage === 'done') self.setState(Object.assign({}, cur, { opened: true })); }, 900);
+    }
+    // prototype autoplay: advance one stage at a time; never on error or done
+    if (auto && loading && !this._timer) {
+      this._timer = setTimeout(() => {
+        self._timer = null;
+        const cur = self.state.k === key ? self.state : S;
+        if (!TEXT[cur.stage]) return;
+        self.setState(Object.assign({}, cur, { stage: NEXT[cur.stage], q: (cur.q + 1) % 6 }));
+      }, 1800);
+    }
+
+    const ERR = {
+      daemon: { headline: 'Tenshu failed to start, please check if bitcoind is running', detail: 'Bitcoind error: [synthetic startup error]' },
+      esplora: { headline: 'Tenshu failed to start: the Esplora chain backend is unreachable', detail: 'Tenshu daemon error: [synthetic Esplora error]' },
+      sessionChanged: { headline: 'Tenshu failed to start', detail: 'Unexpected error: Connect session changed; reopen this Cube' },
+      blake2bRetry: { headline: 'Tenshu failed to start', detail: 'Unexpected error: [synthetic Bitcoin Blake2b startup error]' }
+    };
+    const e = ERR[S.err] || ERR.daemon;
+    const cooldown = S.err === 'blake2bRetry' && S.secs > 0;
+    if (st === 'error' && cooldown && auto && !this._cd) {
+      this._cd = setTimeout(() => {
+        self._cd = null;
+        const cur = self.state.k === key ? self.state : S;
+        if (cur.stage === 'error' && cur.secs > 0) self.setState(Object.assign({}, cur, { secs: cur.secs - 1 }));
+      }, 1000);
+    }
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      cube: cube,
+      q: { text: q[0], author: q[1], source: q[2] },
+      stageText: TEXT[st] || '',
+      busyAttr: loading ? 'true' : 'false',
+      v: {
+        loading: loading, error: st === 'error', done: st === 'done' && !S.opened, opened: st === 'done' && !!S.opened, notOpened: !(st === 'done' && !!S.opened),
+        scanBody: st === 'scanning', logs: st === 'syncing' || st === 'almost',
+        adm: b2b && loading && st !== 'connecting'
+      },
+      err: {
+        headline: e.headline, detail: e.detail, cooldown: cooldown, secs: String(S.secs),
+        retryOff: cooldown, retryLabel: cooldown ? 'Retry (' + S.secs + 's)' : 'Retry'
+      },
+      retry: () => self.setState(Object.assign({}, S, { stage: 'connecting', secs: 12 }))
+    };
+  }
+}
+</script>
+</body>
+</html>

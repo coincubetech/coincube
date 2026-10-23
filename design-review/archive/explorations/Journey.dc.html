@@ -1,0 +1,268 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Open Cube journey</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--shadow:rgba(0,0,0,.5);--scrim:rgba(0,0,0,.55)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--shadow:rgba(60,40,10,.2);--scrim:rgba(40,30,20,.35)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol{margin:0}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}.small{font-size:13px}
+.strip{height:40px;flex:none;display:flex;align-items:center;gap:12px;padding:0 16px;background:var(--panel);border-bottom:1px dashed var(--line);font-size:13px}
+.strip .lbl{color:var(--muted)}
+.strip .steps{display:flex;gap:4px;margin-left:12px}
+.strip .dot{font-size:12px;padding:2px 8px;border-radius:10px;color:var(--muted);border:1px solid transparent}
+.strip .dot.on{border-color:var(--accent);color:var(--ink);font-weight:600}
+.strip .nav{margin-left:auto;display:flex;gap:8px}
+.app{width:1440px;height:860px;display:flex;flex-direction:column;position:relative;overflow:hidden}
+.hdr{height:52px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--rail);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.tabs{display:flex;gap:4px}
+.ctab{display:flex;align-items:center;gap:8px;height:34px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:transparent;cursor:pointer;font-size:13px;color:var(--ink)}
+.ctab[aria-current="page"]{background:var(--selected);border-color:var(--accent);font-weight:600}
+.switch{display:flex;align-items:center;gap:10px;height:36px;padding:0 10px 0 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;color:var(--ink)}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.bm{font-weight:600;color:var(--ink)}
+.tb{border:1px solid currentColor;color:var(--warn);font-size:11px;line-height:16px;padding:0 5px;border-radius:3px;font-weight:600}
+.b2{border:1px solid var(--line);color:var(--ink);font-size:11px;line-height:16px;padding:0 5px;border-radius:3px;font-weight:600}
+.chips{margin-left:auto;display:flex;gap:8px}
+.chip{display:flex;align-items:center;gap:8px;height:30px;padding:0 12px;border:1px solid var(--line);border-radius:15px;font-size:12px;background:var(--panel);white-space:nowrap}
+.chip .k{color:var(--muted)}
+.st{display:inline-flex;align-items:center;gap:6px;font-weight:500}
+.st::before{display:inline-grid;place-items:center;width:15px;height:15px;font-size:10px;line-height:1;border-radius:50%;flex:none;border:1.5px solid currentColor}
+.s-ok{color:var(--good)}.s-ok::before{content:"\2713"}
+.s-warn{color:var(--warn)}.s-warn::before{content:"!";border-radius:3px;font-weight:700}
+.s-unk{color:var(--muted)}.s-unk::before{content:"?";border-style:dashed}
+.s-off{color:var(--muted)}.s-off::before{content:"\2013"}
+.s-busy{color:var(--ink)}.s-busy::before{content:"\2026";border-style:dotted}
+.s-wait{color:var(--muted)}.s-wait::before{content:"";border-style:solid;opacity:.6}
+.lock{display:inline-flex;align-items:center;gap:6px;font-size:13px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:32px;padding:0 14px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;color:var(--ink);text-decoration:none;white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#1a1208}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.lnk{background:none;border:0;padding:0;color:var(--acc-ink);cursor:pointer;text-decoration:underline;text-underline-offset:2px;font-size:13px}
+.cat{flex:1;overflow:auto;padding:28px 40px}
+.cat h1{font-size:24px;font-weight:600}
+.cat .lede{color:var(--muted);margin-top:4px}
+.ctop{display:flex;align-items:flex-end;gap:16px}
+.ctop .acts{margin-left:auto;display:flex;gap:8px}
+.list{margin-top:20px;border-bottom:1px solid var(--line)}
+.lhead,.lrow{display:grid;grid-template-columns:minmax(0,1.3fr) 260px 140px minmax(0,1.3fr) 150px;gap:16px;align-items:center}
+.lhead{font-size:12px;color:var(--muted);padding:8px 12px;border-bottom:1px solid var(--line)}
+.lrow{padding:14px 12px;border-bottom:1px solid var(--line)}
+.lrow:last-child{border-bottom:0}
+.lrow.hl{background:color-mix(in srgb,var(--accent) 6%,transparent);box-shadow:inset 3px 0 0 var(--accent)}
+.lrow .nm{font-weight:600}
+.lrow .ac{display:flex;justify-content:flex-end}
+.foot-note{margin-top:14px;font-size:13px;color:var(--muted)}
+.scrim{position:absolute;inset:52px 0 0 0;background:var(--scrim);display:grid;place-items:center}
+dialog.modal{position:static;margin:0;width:440px;padding:24px;border:1px solid var(--line);border-radius:10px;background:var(--panel);color:var(--ink);box-shadow:0 18px 48px var(--shadow)}
+.modal h2{font-size:20px;font-weight:600;line-height:1.3}
+.modal label{display:block;font-weight:500;margin-top:18px;margin-bottom:6px}
+.modal input{width:100%;height:40px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--bg);letter-spacing:.3em;font-size:16px}
+.modal .row{display:flex;gap:8px;margin-top:16px}
+.modal .row .btn{flex:1}
+.modal .note{margin-top:16px;padding-top:12px;border-top:1px solid var(--line);font-size:12.5px;color:var(--muted)}
+.load{flex:1;display:grid;place-items:center}
+.load .box{width:480px}
+.load h2{font-size:20px;font-weight:600}
+.load ol{list-style:none;padding:0;margin-top:20px;border-top:1px solid var(--line)}
+.load li{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;padding:14px 0;border-bottom:1px solid var(--line)}
+.body{flex:1;display:flex;min-height:0}
+.side{width:232px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.ident{padding:14px 16px 12px;border-bottom:1px solid var(--line)}
+.ident .cn{font-weight:600;font-size:15px;margin:2px 0 4px}
+.snav{padding:8px;display:flex;flex-direction:column;gap:2px}
+.ni{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;width:100%;min-height:34px;padding:6px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;color:var(--ink)}
+.ni.on{background:var(--selected);box-shadow:inset 3px 0 0 var(--accent);font-weight:600}
+.ni .sub{font-size:12px;color:var(--muted);font-weight:400}
+.mid{flex:1;min-height:0;overflow:auto;border-top:1px solid var(--line);padding:4px 8px}
+.gl{font-size:12px;color:var(--muted);font-weight:500;padding:10px 10px 4px}
+.foot{border-top:1px solid var(--line);padding:8px;display:flex;flex-direction:column;gap:2px}
+.main{flex:1;overflow:auto;padding:28px 40px}
+.main h1{font-size:24px;font-weight:600}
+.wal{display:grid;grid-template-columns:minmax(0,1fr) 220px auto;gap:24px;align-items:center;padding:18px 0;border-top:1px solid var(--line)}
+.wal .amt{font-size:20px;font-weight:600;font-variant-numeric:tabular-nums}
+.acts{display:flex;gap:8px}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <div class="strip" aria-label="Review controls, outside the app">
+    <span class="lbl">Journey review</span>
+    <b>Step {{ stepNo }} of 5 · {{ stepName }}</b>
+    <span class="steps">
+      <sc-for list="{{ steps }}" as="s" hint-placeholder-count="5"><span class="dot {{ s.cls }}">{{ s.label }}</span></sc-for>
+    </span>
+    <span class="nav"><button type="button" class="btn" onClick="{{ back }}" disabled="{{ atStart }}">Back</button><button type="button" class="btn" onClick="{{ next }}" disabled="{{ atEnd }}">Next</button></span>
+  </div>
+
+  <div class="app">
+
+    <!-- Launcher header (launcher, unlock, allcubes) -->
+    <sc-if value="{{ show.launcherHdr }}" hint-placeholder-val="{{ true }}">
+      <header class="hdr">
+        <div class="brand"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2 17 6v8l-7 4-7-4V6z"/><path d="M3 6l7 4 7-4M10 10v8"/></svg>Tenshu</div>
+        <div class="vsep"></div>
+        <nav class="tabs" aria-label="Open Cube tabs">
+          <button type="button" class="ctab" aria-current="page">All Cubes</button>
+          <sc-for list="{{ openTabs }}" as="t" hint-placeholder-count="1">
+            <button type="button" class="ctab" onClick="{{ t.pick }}">{{ t.name }} <span class="net"><span class="bm" aria-hidden="true">₿</span>{{ t.net }}<sc-if value="{{ t.test }}" hint-placeholder-val="{{ false }}"><span class="tb">Testnet4</span></sc-if></span></button>
+          </sc-for>
+        </nav>
+        <div class="chips"><div class="chip"><span class="k">Account</span><span class="st s-ok">alex@example.test · Signed in</span></div></div>
+      </header>
+    </sc-if>
+
+    <!-- Catalog (launcher, unlock backdrop, allcubes) -->
+    <sc-if value="{{ show.catalog }}" hint-placeholder-val="{{ true }}">
+      <section class="cat" aria-labelledby="cat-h">
+        <div class="ctop">
+          <div><h1 id="cat-h">All Cubes</h1><p class="lede">Only what is safe before unlock: name, network, lock state and protection summary. No balances.</p></div>
+          <div class="acts"><button type="button" class="btn">Import or restore</button><button type="button" class="btn">Create Cube…</button></div>
+        </div>
+        <div class="list">
+          <div class="lhead"><span>Cube</span><span>Network</span><span>State</span><span>Protection and capability</span><span></span></div>
+          <sc-for list="{{ cubes }}" as="c" hint-placeholder-count="4">
+            <div class="lrow {{ c.hl }}">
+              <span class="nm">{{ c.name }}</span>
+              <span class="net"><span class="bm" aria-hidden="true">₿</span><sc-if value="{{ c.b2 }}" hint-placeholder-val="{{ false }}"><span class="b2">Blake2b</span></sc-if>{{ c.net }}<sc-if value="{{ c.test }}" hint-placeholder-val="{{ false }}"><span class="tb">Testnet4</span></sc-if></span>
+              <span class="st {{ c.stateCls }}">{{ c.state }}</span>
+              <span><span class="st {{ c.protCls }}">{{ c.prot }}</span><br><span class="cap">{{ c.cap }}</span></span>
+              <span class="ac"><button type="button" class="btn {{ c.btnCls }}" onClick="{{ c.pick }}" aria-label="{{ c.aria }}">{{ c.action }}</button></span>
+            </div>
+          </sc-for>
+        </div>
+        <p class="foot-note">{{ catalogNote }}</p>
+      </section>
+    </sc-if>
+
+    <!-- Unlock modal -->
+    <sc-if value="{{ show.unlock }}" hint-placeholder-val="{{ false }}">
+      <div class="scrim">
+        <dialog open class="modal" aria-labelledby="ul-h" aria-modal="true">
+          <h2 id="ul-h">Open Everyday · <span class="bm">₿</span> Bitcoin mainnet</h2>
+          <p class="muted small" style="margin-top:4px">Enter this Cube's PIN, or use its passkey.</p>
+          <label for="pin">PIN</label>
+          <input id="pin" type="password" inputmode="numeric" autocomplete="off" value="••••••" aria-describedby="ul-note" readOnly>
+          <div class="row"><button type="button" class="btn pri" onClick="{{ next }}">Unlock</button><button type="button" class="btn" onClick="{{ next }}">Use passkey</button></div>
+          <div class="row" style="margin-top:8px"><button type="button" class="btn" onClick="{{ back }}">Cancel</button></div>
+          <p class="note" id="ul-note">Network admission checks run before the Cube opens.</p>
+        </dialog>
+      </div>
+    </sc-if>
+
+    <!-- Loading -->
+    <sc-if value="{{ show.loading }}" hint-placeholder-val="{{ false }}">
+      <header class="hdr"><div class="brand"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2 17 6v8l-7 4-7-4V6z"/><path d="M3 6l7 4 7-4M10 10v8"/></svg>Tenshu</div><div class="vsep"></div><span><b>Everyday</b> <span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin mainnet</span></span></header>
+      <section class="load" aria-labelledby="ld-h" aria-live="polite">
+        <div class="box">
+          <h2 id="ld-h">Opening Everyday</h2>
+          <p class="muted small" style="margin-top:4px">Each step finishes before the next starts. Nothing here is skipped or shortened for display.</p>
+          <ol>
+            <li><span>PIN accepted</span><span class="st s-ok">Done</span></li>
+            <li><span>Bitcoin mainnet checks<br><span class="cap">Network admission for this Cube</span></span><span class="st s-busy">In progress</span></li>
+            <li><span>Loading Vault, Spark, Liquid</span><span class="st s-wait">Waiting</span></li>
+          </ol>
+          <div style="margin-top:16px"><button type="button" class="btn">Cancel opening</button></div>
+        </div>
+      </section>
+    </sc-if>
+
+    <!-- Cube shell (compact Overview) -->
+    <sc-if value="{{ show.cube }}" hint-placeholder-val="{{ false }}">
+      <header class="hdr">
+        <div class="brand"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2 17 6v8l-7 4-7-4V6z"/><path d="M3 6l7 4 7-4M10 10v8"/></svg>Tenshu</div>
+        <div class="vsep"></div>
+        <button type="button" class="switch" aria-haspopup="true" aria-expanded="false" onClick="{{ next }}" aria-label="Switch Cube. Current: Everyday, Bitcoin mainnet. Opens All Cubes in this review"><b>Everyday</b><span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin mainnet</span><svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 4.5 3 3 3-3"/></svg></button>
+        <button type="button" class="lnk" onClick="{{ next }}">All Cubes</button>
+        <div class="chips"><div class="chip"><span class="k">Account</span><span class="st s-ok">alex@example.test · Signed in</span></div><div class="chip"><span class="k">Cube connection</span><span class="st s-ok">Connected</span></div></div>
+      </header>
+      <div class="body">
+        <nav class="side" aria-label="Cube navigation">
+          <div class="ident"><p class="cap">Cube</p><p class="cn">Everyday</p><span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin mainnet</span></div>
+          <div class="snav">
+            <button type="button" class="ni on" aria-current="page">Overview</button>
+            <button type="button" class="ni">Activity</button>
+            <button type="button" class="ni">Backup &amp; protection</button>
+          </div>
+          <div class="mid">
+            <p class="gl">Wallets</p>
+            <button type="button" class="ni"><span>Spark · Daily spending</span><span class="sub">Lightning</span></button>
+            <button type="button" class="ni"><span>Vault · Family savings</span><span class="sub">2-of-3 · synthetic</span></button>
+            <button type="button" class="ni"><span>Liquid · Travel</span><span class="sub">Liquid network</span></button>
+            <button type="button" class="ni" aria-expanded="false" style="margin-top:8px;font-weight:500">Expert <span class="sub">5 tools</span></button>
+          </div>
+          <div class="foot">
+            <button type="button" class="ni">Settings</button>
+            <button type="button" class="ni"><span>Connect account</span><span class="sub">alex@example.test</span></button>
+          </div>
+        </nav>
+        <main class="main">
+          <h1>Overview</h1>
+          <p class="muted" style="margin-top:4px">Balances per wallet, never combined across networks · synthetic.</p>
+          <div style="margin-top:16px;border-bottom:1px solid var(--line)">
+            <div class="wal"><div><p style="font-weight:600">Spark · Daily spending</p><p class="cap">Spark · Lightning · Bitcoin mainnet</p></div><p class="amt">0.01240000 BTC</p><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+            <div class="wal"><div><p style="font-weight:600">Vault · Family savings</p><p class="cap">Vault · 2-of-3 synthetic policy · Bitcoin mainnet</p></div><p class="amt">0.85000000 BTC</p><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+            <div class="wal"><div><p style="font-weight:600">Liquid · Travel</p><p class="cap">Liquid wallet · Liquid network</p></div><p class="amt">0.05000000 L-BTC</p><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+          </div>
+        </main>
+      </div>
+    </sc-if>
+
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"step":{"editor":"enum","options":["launcher","unlock","loading","cube","allcubes"],"default":"launcher","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={s:null};}
+  renderVals(){
+    const P=this.props,S=this.state,self=this;
+    const ORDER=['launcher','unlock','loading','cube','allcubes'];
+    const NAMES={launcher:'Launcher',unlock:'Unlock',loading:'Loading',cube:'Cube',allcubes:'All Cubes'};
+    const prop=P.step||'launcher';
+    const step=(S.s&&S.s.for===prop)?S.s.v:prop;
+    const i=ORDER.indexOf(step);
+    const go=(v)=>self.setState({s:{for:prop,v:v}});
+    const after=step==='allcubes';
+    const pre=step==='launcher'||step==='unlock';
+    const everyday=after?{state:'Open · stays open',stateCls:'s-ok',action:'Switch to',btnCls:'pri',hl:'hl',aria:'Switch to Everyday, already open'}
+      :{state:'Locked',stateCls:'s-off',action:'Open',btnCls:'pri',hl:step==='unlock'?'hl':'',aria:'Open Everyday'};
+    const cubes=[
+      Object.assign({name:'Everyday',net:'Bitcoin mainnet',b2:false,test:false,prot:'Backup confirmed',protCls:'s-ok',cap:'Vault · Spark · Liquid',pick:()=>go(after?'cube':'unlock')},everyday),
+      {name:'Blake workspace',net:'Bitcoin Blake2b mainnet',b2:true,test:false,state:'Locked',stateCls:'s-off',prot:'Backup not confirmed',protCls:'s-warn',cap:'Vault only · Bitcoin Blake2b supports Vault creation only',action:'Open',btnCls:'',hl:'',aria:'Open Blake workspace',pick:()=>{}},
+      {name:'Lab',net:'Bitcoin',b2:false,test:true,state:'Open',stateCls:'s-ok',prot:'Backup status unknown',protCls:'s-unk',cap:'Vault only · Spark unavailable on this network',action:'Switch to',btnCls:'',hl:'',aria:'Switch to Lab, already open',pick:()=>{}},
+      {name:'Archive',net:'Bitcoin mainnet',b2:false,test:false,state:'Locked',stateCls:'s-off',prot:'Backup confirmed',protCls:'s-ok',cap:'No Vault configured · Spark only',action:'Open',btnCls:'',hl:'',aria:'Open Archive',pick:()=>{}}
+    ];
+    const openTabs=after?[{name:'Everyday',net:'Bitcoin mainnet',test:false,pick:()=>go('cube')},{name:'Lab',net:'Bitcoin',test:true,pick:()=>{}}]:[{name:'Lab',net:'Bitcoin',test:true,pick:()=>{}}];
+    return {
+      themeClass:(P.theme||'dark')==='light'?'light':'', motionClass:P.reducedMotion?'reduced':'',
+      stepNo:i+1, stepName:NAMES[step],
+      steps:ORDER.map(k=>({label:NAMES[k],cls:k===step?'on':''})),
+      atStart:i===0, atEnd:i===ORDER.length-1,
+      next:()=>{if(i<ORDER.length-1)go(ORDER[i+1]);},
+      back:()=>{if(i>0)go(ORDER[i-1]);},
+      show:{launcherHdr:pre||after,catalog:pre||after,unlock:step==='unlock',loading:step==='loading',cube:step==='cube'},
+      cubes:cubes, openTabs:openTabs,
+      catalogNote:after?'Returning to All Cubes never locks or closes open Cubes. Everyday and Lab stay open as tabs.':'Filters change what is listed only; they never change a Cube’s network.'
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,356 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V2 Cube faces</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens (same values as V2-Launcher-3D) */
+.tenshu,.tenshu .tk-dark{--floor:#1b1c1a;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--aura:rgba(243,130,29,.4);--on-accent:#201407;font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--aura:rgba(243,130,29,.34)}
+.tenshu .tk-dark{--bg:#161716;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--warn:#f3b465}
+.tenshu .tk-light{--bg:#faf9f6;--ink:#202020;--muted:#575a54;--line:#c4beb4;--warn:#77450b;--floor:#efebe3;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--aura:rgba(243,130,29,.34);--on-accent:#201407}
+svg{flex:none}
+
+.sheet{flex:1;min-height:0;display:flex;flex-direction:column;padding:20px 32px 16px;box-sizing:border-box}
+.h1{margin:0;font-size:22px;font-weight:600;line-height:1.25}
+.why{margin:4px 0 0;font-size:14px;color:var(--muted)}
+.h2{margin:0 0 10px;font-size:14px;font-weight:600}
+.cap{font-size:12px;line-height:1.4;color:var(--muted)}
+
+/* (a) fixture row */
+.fix{display:flex;justify-content:center;gap:24px;margin-top:12px;padding:12px 0 10px;border-radius:16px;background:var(--floor)}
+.slot{width:280px;display:flex;flex-direction:column;align-items:center;text-align:center}
+.nm{font-weight:600;font-size:14px;line-height:1.3}
+.st{font-size:13px;color:var(--muted)}
+.slot .cap{margin-top:2px;max-width:240px}
+
+/* bottom band */
+.band{display:flex;gap:24px;margin-top:14px;padding-top:12px;border-top:1px solid var(--line)}
+.col{display:flex;flex-direction:column}
+
+/* cube (shared with the launcher) */
+.scene{position:relative;display:block;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.58);perspective:1100px}
+.aura{position:absolute;left:50%;top:calc(47.5% + var(--s) * .52);width:calc(var(--s) * 2);height:calc(var(--s) * .95);transform:translate(-50%,-50%);border-radius:50%;background:radial-gradient(closest-side,var(--aura),transparent);opacity:0}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(calc(var(--s) * .055))}
+.lift{position:absolute;inset:0;transform-style:preserve-3d}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.btc{--edge:var(--edge-btc)}
+.b2b{--edge:var(--edge-b2b)}
+.test{--edge:var(--edge-test)}
+.neutral{--edge:var(--line)}
+.f,.ff{box-sizing:border-box;border:1.5px solid var(--edge);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--ink)}
+.test .f,.test.ff,.test .ftag,.test.ftag{border-style:dashed}
+.f{position:absolute;inset:0;backface-visibility:hidden}
+.t{background:var(--face-t)}
+.l{background:var(--face-l)}
+.r{background:var(--face-r)}
+.f.t{transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:calc(var(--s) * .04)}
+.f .tc{transform:rotate(45deg)}
+/* Network marks: the supplied Bitcoin and Bitcoin Blake2b coin images. Test network = 60% image inside a dashed ring, plus the text tag */
+.coin{display:inline-flex;align-items:center;justify-content:center;flex:none;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.coin img{display:block;width:100%;height:100%;border-radius:50%}
+.coin.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.coin.tn img{opacity:.6}
+.hue .coin{width:18px;height:18px}
+.hue .coin.tn{border-width:1px;padding:1.5px}
+.ftag{font-size:calc(var(--s) * .095);font-weight:600;line-height:1.2;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.lc{display:flex;align-items:center;gap:calc(var(--s) * .04)}
+.wi{width:calc(var(--s) * .25);height:calc(var(--s) * .25)}
+.rc{display:flex;align-items:flex-start;gap:calc(var(--s) * .02)}
+.pad{width:calc(var(--s) * .36);height:calc(var(--s) * .36)}
+.bdg{width:calc(var(--s) * .21);height:calc(var(--s) * .21);margin-top:calc(var(--s) * -.03)}
+.bdg.warn{color:var(--warn)}
+.bdg.unk{color:var(--muted)}
+.is-sel .aura{opacity:1}
+.is-sel .lift{transform:translateY(-10px)}
+.is-sel .shadow{transform:translate(-46%,-46%) scale(.88);opacity:.6}
+
+/* (b) flat faces */
+.faces{display:flex;gap:16px}
+.fcell{width:112px;display:flex;flex-direction:column;gap:8px}
+.ff{--s:80px;width:80px;height:80px;border-radius:2px}
+.fcell .lead{font-size:13px;font-weight:500;color:var(--ink)}
+
+/* (c) edge hue */
+.hues{display:flex;flex-direction:column;gap:10px;width:264px}
+.hue{display:flex;align-items:flex-start;gap:12px}
+.hue .ff{--s:40px;width:40px;height:40px}
+.sws{display:flex;flex-direction:column;gap:4px}
+.hname{font-size:13px;font-weight:500}
+.tags{display:flex;flex-wrap:wrap;gap:4px;margin-top:4px}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;line-height:1}
+.tb.b2b{border-color:#d4a62a}
+.tb.test{border-style:dashed}
+
+/* (d) selection, (f) themes */
+.pair{display:flex;gap:12px}
+.mini{width:104px;display:flex;flex-direction:column;align-items:center;text-align:center;gap:4px}
+.strips{display:flex;flex-direction:column;gap:8px;width:220px}
+.strip{display:flex;align-items:center;gap:12px;height:86px;padding:0 12px;border-radius:12px;border:1px solid var(--line);background:var(--bg);color:var(--ink);box-shadow:0 6px 16px -8px rgba(0,0,0,.35)}
+.strip .nm{font-size:13px}
+
+/* (e) badges */
+.badges{display:flex;flex-direction:column;gap:12px;width:170px}
+.brow{display:flex;align-items:center;gap:10px;font-size:13px}
+.brow svg{width:32px;height:32px}
+.brow .warn{color:var(--warn)}
+.brow .unk{color:var(--muted)}
+.brow .none{width:32px;height:32px;box-sizing:border-box;border:1px dashed var(--line);border-radius:50%}
+
+/* (g) rail badges: chain coin + small round rail badge at bottom-right, on both chain coins */
+.rails{display:flex;align-items:center;gap:24px;margin-top:12px;padding-top:12px;border-top:1px solid var(--line)}
+.rhead{width:232px;flex:none}
+.rhead .h2{margin:0 0 2px}
+.rgrp{display:flex;align-items:center;gap:12px}
+.rgl{font-size:13px;font-weight:500;margin-right:4px;white-space:nowrap}
+.rspec{display:flex;align-items:center;gap:6px;font-size:12px;color:var(--muted)}
+.acoin{position:relative;--s:40px;width:40px;height:40px;flex:none;display:inline-flex}
+.acoin .coin{width:40px;height:40px}
+.rb{position:absolute;right:-4px;bottom:-4px;width:18px;height:18px;box-sizing:border-box;border:2px solid var(--bg);border-radius:50%;display:flex;align-items:center;justify-content:center}
+.rb svg{width:10px;height:10px}
+.rb.spark{background:#000;color:#fff}
+.rb.ln{background:#2b2b2b;color:#f7c948}
+.rb.lq{background:#1b9e95;color:#fff}
+.rb.vault{background:#5b5d58;color:#fff}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:760px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+  <div class="sheet">
+    <h1 class="h1">Cube faces</h1>
+    <p class="why">Faces carry meaning; edge hue is network family (orange Bitcoin, gold Bitcoin Blake2b, dashed grey test networks); aura is selection only.</p>
+
+    <div class="fix">
+      <sc-for list="{{ fixtures }}" as="c" hint-placeholder-count="4">
+        <div class="slot">
+          <span class="scene {{ c.wrapCls }}" style="{{ c.sceneStyle }}" aria-hidden="true">
+            <span class="aura"></span>
+            <span class="shadow"></span>
+            <span class="lift"><span class="cube {{ c.edge }}">
+              <span class="f t"><span class="tc">
+                <sc-if value="{{ c.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                <sc-if value="{{ c.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ c.coinCls }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+              </span></span>
+              <span class="f l"><span class="lc">
+                <sc-if value="{{ c.hasVault }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg></sc-if>
+                <sc-if value="{{ c.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg></sc-if>
+                <sc-if value="{{ c.hasLiquid }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg></sc-if>
+              </span></span>
+              <span class="f r"><span class="rc">
+                <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ c.lockPath }}"></path></svg>
+                <sc-if value="{{ c.warn }}" hint-placeholder-val="{{ false }}"><svg class="bdg warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg></sc-if>
+                <sc-if value="{{ c.unk }}" hint-placeholder-val="{{ false }}"><svg class="bdg unk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3"></path></svg></sc-if>
+              </span></span>
+            </span></span>
+          </span>
+          <span class="nm">{{ c.name }}</span>
+          <span class="st">{{ c.state }}</span>
+          <span class="cap">{{ c.cap }}</span>
+        </div>
+      </sc-for>
+    </div>
+
+    <div class="band">
+      <section class="col" aria-labelledby="h-faces">
+        <h2 class="h2" id="h-faces">Faces</h2>
+        <div class="faces">
+          <div class="fcell">
+            <div class="ff t b2b" aria-hidden="true"><span class="tc">
+              <span class="coin"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span>
+              <span class="ftag">Blake2b</span>
+            </span></div>
+            <span class="cap"><span class="lead">Top</span><br>Network mark. A tag names any network other than Bitcoin mainnet.</span>
+          </div>
+          <div class="fcell">
+            <div class="ff l btc" aria-hidden="true"><span class="lc">
+              <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
+              <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
+              <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
+            </span></div>
+            <span class="cap"><span class="lead">Left</span><br>Vault, Spark, Liquid. Wallets a Cube lacks are not drawn.</span>
+          </div>
+          <div class="fcell">
+            <div class="ff r b2b" aria-hidden="true"><span class="rc">
+              <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>
+              <svg class="bdg warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg>
+            </span></div>
+            <span class="cap"><span class="lead">Right</span><br>Locked or open. One badge only when backup needs attention.</span>
+          </div>
+        </div>
+      </section>
+
+      <section class="col" aria-labelledby="h-hue">
+        <h2 class="h2" id="h-hue">Edge hue</h2>
+        <div class="hues">
+          <div class="hue">
+            <div class="ff t btc" aria-hidden="true"><span class="coin"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></div>
+            <div><div class="hname">Bitcoin mainnet</div><div class="cap">Warm orange edge · no tag</div></div>
+          </div>
+          <div class="hue">
+            <div class="ff t b2b" aria-hidden="true"><span class="coin"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></div>
+            <div><div class="hname">Bitcoin Blake2b mainnet</div><div class="tags"><span class="tb b2b">Blake2b</span></div><div class="cap">Gold edge · coin mark</div></div>
+          </div>
+          <div class="hue">
+            <div class="sws"><div class="ff t test" aria-hidden="true"><span class="coin tn"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></div><div class="ff t test" aria-hidden="true"><span class="coin tn"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></div></div>
+            <div><div class="hname">Test networks</div><div class="tags"><span class="tb test">Testnet4</span><span class="tb test">Signet</span><span class="tb test">Regtest</span><span class="tb test">Blake2b Testnet4</span></div><div class="cap">Dashed grey · 60% coin in a dashed ring</div></div>
+          </div>
+        </div>
+      </section>
+
+      <section class="col" aria-labelledby="h-sel">
+        <h2 class="h2" id="h-sel">Selection</h2>
+        <div class="pair">
+          <sc-for list="{{ minis }}" as="c" hint-placeholder-count="2">
+            <div class="mini">
+              <span class="scene {{ c.wrapCls }}" style="{{ c.sceneStyle }}" aria-hidden="true">
+                <span class="aura"></span>
+                <span class="shadow"></span>
+                <span class="lift"><span class="cube {{ c.edge }}">
+                  <span class="f t"><span class="tc">
+                    <span class="coin"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+                  </span></span>
+                  <span class="f l"><span class="lc">
+                    <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
+                    <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
+                    <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
+                  </span></span>
+                  <span class="f r"><span class="rc">
+                    <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ c.lockPath }}"></path></svg>
+                  </span></span>
+                </span></span>
+              </span>
+              <span class="cap">{{ c.cap }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+
+      <section class="col" aria-labelledby="h-bdg">
+        <h2 class="h2" id="h-bdg">Backup badges</h2>
+        <div class="badges">
+          <div class="brow"><svg class="warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg><span>Backup not confirmed</span></div>
+          <div class="brow"><svg class="unk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3"></path></svg><span>Backup status unknown</span></div>
+          <div class="brow"><span class="none" aria-hidden="true"></span><span class="cap">Confirmed: no badge</span></div>
+        </div>
+      </section>
+
+      <section class="col" aria-labelledby="h-th">
+        <h2 class="h2" id="h-th">Themes</h2>
+        <div class="strips">
+          <sc-for list="{{ themes }}" as="c" hint-placeholder-count="2">
+            <div class="strip {{ c.tkCls }}">
+              <span class="scene" style="{{ c.sceneStyle }}" aria-hidden="true">
+                <span class="aura"></span>
+                <span class="shadow"></span>
+                <span class="lift"><span class="cube {{ c.edge }}">
+                  <span class="f t"><span class="tc">
+                    <span class="coin"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+                  </span></span>
+                  <span class="f l"><span class="lc">
+                    <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
+                    <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
+                    <svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
+                  </span></span>
+                  <span class="f r"><span class="rc">
+                    <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ c.lockPath }}"></path></svg>
+                  </span></span>
+                </span></span>
+              </span>
+              <span><span class="nm">{{ c.name }}</span><br><span class="cap">{{ c.cap }}</span></span>
+            </div>
+          </sc-for>
+        </div>
+      </section>
+    </div>
+
+    <section class="rails" aria-labelledby="h-rail">
+      <div class="rhead">
+        <h2 class="h2" id="h-rail">Rail badges</h2>
+        <p class="cap" style="margin:0">Rail badge pattern works on both network coins</p>
+      </div>
+      <sc-for list="{{ railGroups }}" as="g" hint-placeholder-count="2">
+        <div class="rgrp">
+          <span class="rgl">{{ g.label }}</span>
+          <sc-for list="{{ g.items }}" as="r" hint-placeholder-count="4">
+            <span class="rspec">
+              <span class="acoin" aria-hidden="true">
+                <sc-if value="{{ r.btc }}" hint-placeholder-val="{{ true }}"><span class="coin"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                <sc-if value="{{ r.b2 }}" hint-placeholder-val="{{ false }}"><span class="coin"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                <span class="rb {{ r.cls }}"><sc-if value="{{ r.fill }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="currentColor"><path d="{{ r.path }}"></path></svg></sc-if><sc-if value="{{ r.stroke }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"><path d="{{ r.path }}"></path></svg></sc-if></span>
+              </span>
+              <span>{{ r.rail }}</span>
+            </span>
+          </sc-for>
+        </div>
+      </sc-for>
+    </section>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"$preview":{"width":1440,"height":760}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'dark';
+    const LOCKED = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3';
+    const OPEN = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 5.8-1.1';
+    const FIX = [
+      { name: 'Everyday', open: true, edge: 'btc', live: true, tag: '', w: 'VSL', bk: 'warn', cap: 'Bitcoin mainnet · Vault, Spark, Liquid · backup not confirmed' },
+      { name: 'Blake workspace', open: false, edge: 'b2b', live: true, logo: true, tag: 'Blake2b', w: 'V', bk: 'warn', cap: 'Bitcoin Blake2b mainnet · Vault · backup not confirmed' },
+      { name: 'Lab', open: false, edge: 'test', live: false, tag: 'Testnet4', w: 'V', bk: 'unk', cap: 'Testnet4 · Vault · backup status unknown' },
+      { name: 'Archive', open: false, edge: 'btc', live: true, tag: '', w: 'S', bk: 'ok', cap: 'Bitcoin mainnet · Spark, no Vault · backup confirmed' }
+    ];
+    const fixtures = FIX.map((c) => ({
+      name: c.name, state: c.open ? 'Open · this tab' : 'Locked', cap: c.cap,
+      wrapCls: '', sceneStyle: '--s:144px',
+      edge: c.edge, hasTag: !!c.tag, tag: c.tag,
+      btcLogo: !c.logo, logo: !!c.logo, coinCls: c.live ? '' : 'tn',
+      hasVault: c.w.indexOf('V') >= 0, hasSpark: c.w.indexOf('S') >= 0, hasLiquid: c.w.indexOf('L') >= 0,
+      lockPath: c.open ? OPEN : LOCKED, warn: c.bk === 'warn', unk: c.bk === 'unk'
+    }));
+    const mini = (extra) => Object.assign({ sceneStyle: '--s:64px', edge: 'btc', lockPath: OPEN, wrapCls: '' }, extra);
+    const minis = [
+      mini({ wrapCls: 'is-sel', cap: 'Selected: aura and lift' }),
+      mini({ cap: 'Not selected' })
+    ];
+    const themes = [
+      mini({ sceneStyle: '--s:50px', tkCls: 'tk-dark', name: 'Dark', cap: 'Everyday' }),
+      mini({ sceneStyle: '--s:50px', tkCls: 'tk-light', name: 'Light', cap: 'Everyday' })
+    ];
+    // rail badges: Spark = black disc, white spark; Lightning = bolt; Liquid = teal, drop; Vault/mainchain = chain link
+    const RAILS = [
+      { rail: 'Spark', cls: 'spark', fill: true, path: 'M12 2.5l2.1 7.4 7.4 2.1-7.4 2.1-2.1 7.4-2.1-7.4-7.4-2.1 7.4-2.1z' },
+      { rail: 'Lightning', cls: 'ln', fill: true, path: 'M13.5 2L4.5 13.5h6.5L9.5 22l10-12.5h-6.5z' },
+      { rail: 'Liquid', cls: 'lq', fill: true, path: 'M12 2.5c4 4.8 7 8.6 7 12a7 7 0 0 1-14 0c0-3.4 3-7.2 7-12z' },
+      { rail: 'Vault', cls: 'vault', fill: false, path: 'M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1' }
+    ];
+    const railGroups = [['Bitcoin', false], ['Bitcoin Blake2b', true]].map(([label, b2]) => ({
+      label, items: RAILS.map((r) => Object.assign({ btc: !b2, b2, stroke: !r.fill }, r))
+    }));
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: '',
+      fixtures, minis, themes, railGroups
+    };
+  }
+}
+</script>
+</body>
+</html>

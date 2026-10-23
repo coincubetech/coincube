@@ -1,0 +1,787 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Launcher</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens (V2): flat neutral greys, top lightest; edge hue = network family. --face-b = the two back faces and the flat panel laid over them */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--face-b:#2a2b28;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--spin:cubic-bezier(0.22,1,0.36,1);font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--face-b:#e6e0d5;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3)}
+.tenshu button{font:inherit;color:inherit}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.tenshu .sr{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important}
+svg{flex:none}
+
+/* top bar (V2); quiet = details/unlock/checks: still visible and usable, text drops to muted, selection fill drops */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.h1{margin:0 8px 0 0;font-size:20px;font-weight:600}
+.chips{display:flex;align-items:center;gap:8px;border:0;margin:0;padding:0}
+.chip{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px}
+.chip:hover{border-color:var(--muted)}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.chip svg{width:14px;height:14px}
+.chipwrap{position:relative}
+.menu{position:absolute;top:40px;left:0;width:272px;padding:6px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 18px 40px -12px rgba(0,0,0,.5)}
+.mi{display:flex;align-items:center;gap:8px;width:100%;height:34px;padding:0 10px;border:0;border-radius:6px;background:none;cursor:pointer;font-size:13px;text-align:left}
+.mi:hover{background:var(--selected)}
+.mi.on{font-weight:600}
+.mi .n{margin-left:auto;color:var(--muted);font-size:12px}
+.mi .ck{width:14px;height:14px;display:inline-flex}
+.mi svg{width:14px;height:14px}
+.mnote{margin:6px 6px 4px;padding-top:8px;border-top:1px solid var(--line);font-size:12px;color:var(--muted)}
+.count{font-size:13px;color:var(--muted)}
+.linkbtn{border:0;background:none;padding:2px 4px;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px}
+.tbtn:hover{border-color:var(--line)}
+.tbtn svg{width:16px;height:16px}
+a.tbtn{text-decoration:none;color:var(--ink)}
+a.tbtn:hover{color:var(--ink)}
+.tbtn.eye{width:32px;padding:0;justify-content:center}
+.tbtn.eye[aria-pressed="true"]{background:var(--selected);border-color:var(--accent)}
+.tenshu{--accent-ink:#f3821d}.tenshu.light{--accent-ink:#8a4304}
+.tbtn .dot{color:var(--muted)}
+.tbtn .stw{font-size:12px;color:var(--muted)}
+.tbtn.out .who{color:var(--accent-ink);font-weight:600}
+.quiet .chip,.quiet .tbtn,.quiet .h1,.quiet .brand,.quiet .dock .btn{color:var(--muted)}
+.quiet .chip.on{background:none;border-color:var(--line);font-weight:400}
+.quiet .dock .btn.primary{background:none;border-color:var(--line)}
+
+/* stage */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.floor{position:absolute;left:0;right:0;bottom:0;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.field{position:absolute;inset:0;overflow-x:hidden;overflow-y:auto}
+.rows{display:flex;flex-direction:column;box-sizing:border-box}
+.rows.big{padding:84px 48px 24px}
+.rows.mid{padding:40px 48px 24px;gap:12px}
+.rows.dense{padding:28px 48px 24px;gap:8px}
+.row{display:flex;justify-content:center}
+.rows.big .row{gap:40px}
+.rows.mid .row{gap:28px}
+.rows.dense .row{gap:20px}
+
+/* cube slot: a div holding the 3D scene and a real button (label + hit area). Face content lives on the geometry, so the scene can't sit inside the button.
+   Fixed slot heights keep each scene's stage position computable */
+.cb{position:relative;display:flex;flex-direction:column;align-items:center;flex:none;padding-top:8px;box-sizing:border-box}
+.hit{position:absolute;inset:0;display:flex;flex-direction:column;justify-content:flex-end;align-items:center;border:0;background:none;padding:0 4px 10px;border-radius:12px;cursor:pointer;text-align:center;box-sizing:border-box}
+.hit:hover .nm{text-decoration:underline;text-decoration-color:var(--line);text-underline-offset:3px}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+.cb.prev{z-index:3}
+.cb.lead{z-index:4}
+/* the one authored motion: 820ms spin on the cube transform and the scene's perspective-origin; dimming 500ms */
+.scene{position:relative;display:block;flex:none;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px;pointer-events:none;transition:perspective-origin 820ms var(--spin),opacity 500ms var(--spin),transform 500ms var(--spin)}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(calc(var(--s) * .055));transition:opacity 500ms var(--spin)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transition:transform 820ms var(--spin)}
+/* handoff: the incoming Cube starts 160ms after the outgoing one */
+.cb.handoff .cube{transition-delay:160ms}
+.cb.handoff .scene{transition-delay:160ms,0ms,0ms}
+.cube.btc{--edge:var(--edge-btc)}
+.cube.b2b{--edge:var(--edge-b2b)}
+.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);overflow:hidden;display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+/* the two previously hidden vertical faces. bl = back-left (details), br = back-right (unlock, checks). Empty unless the Cube is active */
+.f.bl{background:var(--face-b);transform:rotateY(180deg) translateZ(calc(var(--s) / 2))}
+.f.br{background:var(--face-b);transform:rotateY(90deg) translateZ(calc(var(--s) / 2))}
+/* the two panel faces must not clip: overflow:hidden on a 3D-transformed face drops its content from hit testing in Chromium,
+   so clicks on the PIN field fell through to the dimmed neighbours' buttons and handed off. The .fc panel is scaled to fit, so nothing overflows.
+   A face that is turned away (aria-hidden) takes no pointer events */
+.f.bl,.f.br{overflow:visible}
+.f[aria-hidden="true"] .fc{pointer-events:none}
+.tc{display:flex;flex-direction:column;align-items:center;gap:calc(var(--s) * .04);transform:rotate(45deg)}
+/* Network marks: the supplied Bitcoin and Bitcoin Blake2b coin images. Test network = 60% image inside a dashed ring, plus the text tag */
+.coin{display:inline-flex;align-items:center;justify-content:center;flex:none;width:calc(var(--s) * .34);height:calc(var(--s) * .34);box-sizing:border-box;border-radius:50%}
+.coin img{display:block;width:100%;height:100%;border-radius:50%}
+.coin.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.coin.tn img{opacity:.6}
+.pnet .coin{width:18px;height:18px;color:var(--ink)}
+.pnet .coin.tn{border-width:1px;padding:1.5px}
+.lg .coin{width:16px;height:16px}
+.ftag{font-size:calc(var(--s) * .095);font-weight:600;line-height:1.2;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.cube.test .ftag{border-style:dashed}
+.lc{display:flex;align-items:center;gap:calc(var(--s) * .04)}
+.wi{width:calc(var(--s) * .25);height:calc(var(--s) * .25)}
+.rc{display:flex;align-items:flex-start;gap:calc(var(--s) * .02)}
+.pad{width:calc(var(--s) * .36);height:calc(var(--s) * .36)}
+.bdg{width:calc(var(--s) * .21);height:calc(var(--s) * .21);margin-top:calc(var(--s) * -.03)}
+.bdg.warn{color:var(--warn)}
+.bdg.unk{color:var(--muted)}
+/* phase classes: the active Cube hides its floor label and shadow; the others dim the 3D only (labels keep 4.5:1) and shrink in place */
+.cb.active .shadow{opacity:0}
+.cb.active .lbl{visibility:hidden}
+.cb.dim .scene{opacity:.4;transform:scale(.92)}
+.cb.dim .nm{color:var(--muted);font-weight:500}
+
+.lbl{display:flex;flex-direction:row;align-items:center;justify-content:center;gap:8px;width:100%;overflow:hidden}
+.lblt{display:flex;flex-direction:column;align-items:flex-start;gap:2px;min-width:0}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.st.open{color:var(--good)}
+.nm{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-weight:600;font-size:14px;line-height:1.3;word-break:break-word}
+.dense .nm{font-size:13px}
+.st{font-size:13px;color:var(--muted)}
+.ntag{font-size:12px;color:var(--muted)}
+
+/* face content: laid out at 420x420 and scaled into the face (local size s), so cube scale x perspective brings it back to ~420px on screen.
+   Real controls; pointer events re-enabled only here */
+.fc{position:absolute;left:0;top:0;width:420px;height:420px;box-sizing:border-box;padding:28px;display:flex;flex-direction:column;align-items:stretch;justify-content:flex-start;transform-origin:0 0;text-align:left;color:var(--ink);font-size:14px;line-height:1.45;pointer-events:auto}
+.pn{margin:0;font-size:20px;font-weight:600;line-height:1.3;word-break:break-word}
+.pn .sub{font-weight:400;color:var(--muted)}
+.pnet{display:flex;align-items:center;flex-wrap:wrap;gap:6px;margin:8px 0 0;font-size:14px}
+.tb{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--muted);font-size:12px;font-weight:500;line-height:1}
+.tb.b2b{border-color:#d4a62a}
+.tb.test{border-style:dashed}
+.pdl{margin:20px 0 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:10px}
+.pdl div{display:flex;align-items:flex-start;gap:12px}
+.pdl dt{width:64px;flex:none;font-size:13px;color:var(--muted);line-height:22px}
+.pdl dd{margin:0;display:flex;align-items:center;flex-wrap:wrap;gap:6px 12px;font-size:14px;line-height:22px}
+.pdl dd svg,.wch svg{width:16px;height:16px}
+.wch{display:inline-flex;align-items:center;gap:6px}
+.tone-good{color:var(--good)}
+.tone-warn{color:var(--warn)}
+.tone-muted{color:var(--muted)}
+.pnote{margin:12px 0 0;font-size:13px;color:var(--muted);line-height:1.4}
+.pact{display:flex;align-items:center;gap:16px}
+.pfoot{margin:10px 0 0;font-size:12px;color:var(--muted)}
+.fld{display:flex;flex-direction:column;gap:6px;margin-top:24px}
+.fld legend{padding:0;margin-bottom:6px;font-size:13px;font-weight:500}
+fieldset.fld{border:0;margin:24px 0 0;padding:0;min-width:0}
+/* native PIN entry: four single-digit boxes, eye toggle beside them */
+.pinrow{display:flex;align-items:center;gap:10px}
+.dg{width:48px;height:48px;box-sizing:border-box;padding:0;border:1px solid var(--line);border-radius:8px;background:var(--bg);color:var(--ink);font:inherit;font-size:22px;font-weight:500;text-align:center;font-variant-numeric:tabular-nums}
+.dg:focus{border-color:var(--focus)}
+.pineye{width:40px;height:40px;margin-left:4px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:8px;background:none;cursor:pointer;color:var(--muted)}
+.pineye:hover{border-color:var(--line)}
+.pineye[aria-pressed="true"]{border-color:var(--line);color:var(--ink)}
+.pineye svg{width:20px;height:20px}
+.fld .help{margin-top:6px}
+.help{font-size:12px;color:var(--muted)}
+.steps{list-style:none;margin:20px 0 0;padding:16px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:14px}
+.step{display:flex;align-items:flex-start;gap:10px;font-size:14px;line-height:20px}
+.step svg{width:20px;height:20px}
+.step .tx{flex:1}
+.step .sv{font-size:12px;color:var(--muted)}
+.step.pending .tx{color:var(--muted)}
+/* buttons */
+.btn{display:inline-flex;align-items:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted);color:var(--ink)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn:disabled,.btn.primary:disabled:hover{opacity:.45;cursor:not-allowed;background:var(--accent);border-color:var(--accent)}
+a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;color:var(--on-accent)}
+.fc .linkbtn{font-size:14px}
+
+/* empty / no-match */
+.empty{position:absolute;left:0;right:0;top:32%;display:flex;flex-direction:column;align-items:center;gap:8px;text-align:center}
+.empty h2{margin:0;font-size:20px;font-weight:600}
+.empty p{margin:0;color:var(--muted);font-size:14px}
+.empty .ghost{width:64px;height:64px;margin-bottom:8px;color:var(--muted)}
+
+/* bottom bar: create/import left, Key right. The Key card opens on hover, focus or click (click pins/unpins); Escape closes */
+.bottom{height:64px;flex:none;display:flex;align-items:center;gap:24px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.keywrap{position:relative}
+.keybtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px}
+.keybtn:hover{border-color:var(--line)}
+.keybtn[aria-expanded="true"]{border-color:var(--line);background:var(--panel)}
+.keybtn svg{width:16px;height:16px}
+.keycard{display:none;position:absolute;right:0;bottom:calc(100% + 8px);width:264px;box-sizing:border-box;padding:12px 14px;background:var(--panel);border:1px solid var(--line);border-radius:8px}
+.keywrap.open .keycard,.keywrap:not(.shut):hover .keycard,.keywrap:not(.shut):has(.keybtn:focus-visible) .keycard{display:block}
+.legend{display:flex;flex-direction:column;align-items:stretch;gap:10px;margin:0;padding:0;list-style:none;font-size:13px;color:var(--ink)}
+.lg{display:flex;align-items:center;gap:6px}
+.lg svg{width:16px;height:16px;color:var(--ink)}
+.sw{width:12px;height:12px;box-sizing:border-box;border:1.5px solid;border-radius:2px;background:var(--face-t)}
+.sw.btc{border-color:var(--edge-btc)}
+.sw.b2b{border-color:var(--edge-b2b)}
+.sw.test{border-color:var(--edge-test);border-style:dashed}
+.dock{display:flex;align-items:center;gap:8px}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top {{ quietCls }}">
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </a>
+    <span class="vsep"></span>
+    <h1 class="sr">All Cubes</h1>
+    <sc-if value="{{ hasAny }}" hint-placeholder-val="{{ true }}">
+      <fieldset class="chips"><legend class="sr">Show Cubes by network</legend>
+        <sc-for list="{{ chips }}" as="c" hint-placeholder-count="3">
+          <button type="button" class="chip {{ c.cls }}" aria-pressed="{{ c.pressed }}" onClick="{{ c.pick }}">{{ c.label }}</button>
+        </sc-for>
+        <span class="chipwrap">
+          <button type="button" class="chip {{ networkCls }}" aria-pressed="{{ networkPressed }}" aria-expanded="{{ networkExpanded }}" aria-haspopup="true" onClick="{{ toggleChain }}">
+            <span>{{ networkLabel }}</span>
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg>
+          </button>
+          <sc-if value="{{ networkMenu }}" hint-placeholder-val="{{ false }}">
+            <div class="menu">
+              <sc-for list="{{ networkItems }}" as="m" hint-placeholder-count="6">
+                <button type="button" class="mi {{ m.cls }}" aria-pressed="{{ m.pressed }}" onClick="{{ m.pick }}">
+                  <span class="ck"><sc-if value="{{ m.on }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg></sc-if></span>
+                  <span>{{ m.label }}</span>
+                  <span class="n">{{ m.n }}</span>
+                </button>
+              </sc-for>
+              <p class="mnote">Filters change what is shown, never a Cube's network.</p>
+            </div>
+          </sc-if>
+        </span>
+      </fieldset>
+      <span class="count" aria-live="polite">{{ countText }}</span>
+      <sc-if value="{{ filterActive }}" hint-placeholder-val="{{ false }}">
+        <button type="button" class="linkbtn" onClick="{{ clear }}">Clear filters</button>
+      </sc-if>
+    </sc-if>
+    <span class="grow"></span>
+    <button type="button" class="tbtn eye" aria-pressed="{{ hidePressed }}" aria-label="Hide balances" title="{{ hideTitle }}" onClick="{{ toggleHide }}">
+      <sc-if value="{{ eyeOpen }}" hint-placeholder-val="{{ true }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12z"></path><circle cx="12" cy="12" r="3"></circle></svg></sc-if>
+      <sc-if value="{{ eyeShut }}" hint-placeholder-val="{{ false }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16"></path></svg></sc-if>
+    </button>
+    <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
+    <a class="tbtn" href="P-Connect.dc.html" aria-label="Connect, alex@example.test, signed in">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="dot">·</span><span class="who">alex@example.test</span><span class="stw">Signed in</span>
+    </a>
+    </sc-if>
+    <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}">
+    <a class="tbtn out" href="P-SignIn.dc.html" aria-label="Connect, sign in">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect</span><span class="dot">·</span><span class="who">Sign in</span>
+    </a>
+    </sc-if>
+    <a class="tbtn" href="P-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage" aria-label="Cubes on this device">
+    <div class="floor" style="{{ floorStyle }}" aria-hidden="true"></div>
+    <p class="sr" aria-live="polite">{{ announce }}</p>
+
+    <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
+      <div class="empty">
+        <svg class="ghost" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-dasharray="2 2" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+        <h2>No Cubes yet</h2>
+        <p>Create a Cube or import one. You choose its network when you create it.</p>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ noMatch }}" hint-placeholder-val="{{ false }}">
+      <div class="empty">
+        <h2>No Cubes match these filters</h2>
+        <p>{{ hiddenText }} <button type="button" class="linkbtn" onClick="{{ clear }}">Clear filters</button></p>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ hasCubes }}" hint-placeholder-val="{{ true }}">
+      <div class="field">
+        <div class="rows {{ mode }}">
+          <sc-for list="{{ rows }}" as="row" hint-placeholder-count="1">
+            <div class="row">
+              <sc-for list="{{ row.items }}" as="item" hint-placeholder-count="4">
+                <div class="cb {{ item.cls }}" style="{{ item.slotStyle }}">
+                  <button type="button" class="hit {{ item.hitCls }}" tabIndex="{{ item.tab }}" aria-expanded="{{ item.expanded }}" aria-label="{{ item.aria }}" onClick="{{ item.pick }}">
+                    <span class="lbl">
+                      <span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>
+                      <span class="lblt">
+                      <span class="nm" title="{{ item.name }}">{{ item.name }}</span>
+                      <span class="st {{ item.stCls }}">{{ item.state }}</span>
+                      </span>
+                      <sc-if value="{{ item.showNet }}" hint-placeholder-val="{{ false }}"><span class="ntag">{{ item.tag }}</span>
+                    </span></sc-if>
+                    </span>
+                  </button>
+                  <div class="scene" style="{{ item.sceneStyle }}">
+                    <div class="shadow" aria-hidden="true"></div>
+                    <div class="cube {{ item.edge }}" style="{{ item.cubeStyle }}">
+                      <div class="f t" aria-hidden="true"><div class="tc">
+                        <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                        <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                        <sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ item.tag }}</span></sc-if>
+                      </div></div>
+                      <div class="f l" aria-hidden="true"><div class="lc">
+                        <sc-if value="{{ item.hasVault }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg></sc-if>
+                        <sc-if value="{{ item.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg></sc-if>
+                        <sc-if value="{{ item.hasLiquid }}" hint-placeholder-val="{{ true }}"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg></sc-if>
+                      </div></div>
+                      <div class="f r" aria-hidden="true"><div class="rc">
+                        <svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="{{ item.lockPath }}"></path></svg>
+                        <sc-if value="{{ item.warn }}" hint-placeholder-val="{{ false }}"><svg class="bdg warn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg></sc-if>
+                        <sc-if value="{{ item.unk }}" hint-placeholder-val="{{ false }}"><svg class="bdg unk" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"><circle cx="12" cy="12" r="9"></circle><path d="M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3"></path></svg></sc-if>
+                      </div></div>
+
+                      <!-- back-left face: DETAILS, on the geometry -->
+                      <div class="f bl" aria-hidden="{{ item.blHidden }}">
+                        <sc-if value="{{ item.showDetails }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="face-title">
+                            <h2 class="pn" id="face-title" style="display:flex;align-items:center;gap:10px"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>{{ item.p.name }}</h2>
+                            <p class="pnet">
+                              <sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ item.p.net }}</span>
+                              <sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ item.edge }}">{{ item.tag }}</span></sc-if>
+                            </p>
+                            <dl class="pdl">
+                              <div><dt>Lock</dt><dd><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ item.lockPath }}"></path></svg><span>{{ item.state }}</span></dd></div>
+                              <div><dt>Backup</dt><dd class="{{ item.p.bTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ item.p.bPath }}"></path></svg><span>{{ item.p.bText }}</span></dd></div>
+                              <div><dt>Connect</dt><dd class="{{ item.p.cTone }}">{{ item.p.cText }}</dd></div>
+                              <div><dt>Wallets</dt><dd>
+                                <sc-for list="{{ item.p.wallets }}" as="w" hint-placeholder-count="3">
+                                  <span class="wch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="{{ w.path }}"></path></svg><span>{{ w.label }}</span></span>
+                                </sc-for>
+                              </dd></div>
+                            </dl>
+                            <sc-if value="{{ item.p.hasNote }}" hint-placeholder-val="{{ false }}"><p class="pnote">{{ item.p.note }}</p></sc-if>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <sc-if value="{{ item.isOpen }}" hint-placeholder-val="{{ false }}"><a class="btn primary" onMouseDown="{{ item.p.markSeen }}" onClick="{{ item.p.toBrowse }}" href="P-Overview.dc.html">Go to Cube</a><button type="button" class="btn" onClick="{{ item.p.lockNow }}">Lock</button></sc-if><sc-if value="{{ item.notOpen }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn primary {{ item.p.openDemo }}" tabIndex="{{ item.p.dTab }}" aria-label="{{ item.p.openLabel }}" onClick="{{ item.p.toUnlock }}">Open</button></sc-if>
+                              <button type="button" class="linkbtn" tabIndex="{{ item.p.dTab }}" onClick="{{ item.p.toBrowse }}">Back</button>
+                              <a class="linkbtn" tabIndex="{{ item.p.dTab }}" href="P-Delete.dc.html">Delete…</a>
+                            </div>
+                            <p class="pfoot">{{ item.hint }}</p>
+                          </section>
+                        </sc-if>
+                      </div>
+
+                      <!-- back-right face: UNLOCK, then CHECKS, on the geometry -->
+                      <div class="f br">
+                        <sc-if value="{{ item.showUnlock }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="unlock-title">
+                            <h2 class="pn" id="unlock-title">Open {{ item.p.name }} <span class="sub">· {{ item.p.net }}</span></h2>
+                            <fieldset class="fld">
+                              <legend>PIN</legend>
+                              <div class="pinrow">
+                                <input id="pin-d1" class="dg {{ item.p.pinDemo }}" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 1" aria-describedby="pin-note" value="{{ item.p.d1 }}" onInput="{{ item.p.set1 }}" onKeyDown="{{ item.p.back1 }}">
+                                <input id="pin-d2" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 2" aria-describedby="pin-note" value="{{ item.p.d2 }}" onInput="{{ item.p.set2 }}" onKeyDown="{{ item.p.back2 }}">
+                                <input id="pin-d3" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 3" aria-describedby="pin-note" value="{{ item.p.d3 }}" onInput="{{ item.p.set3 }}" onKeyDown="{{ item.p.back3 }}">
+                                <input id="pin-d4" class="dg" type="{{ item.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 4" aria-describedby="pin-note" value="{{ item.p.d4 }}" onInput="{{ item.p.set4 }}" onKeyDown="{{ item.p.back4 }}">
+                                <button type="button" class="pineye" aria-pressed="{{ item.p.showPressed }}" aria-label="Show PIN" onClick="{{ item.p.toggleShow }}">
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ item.p.eyePath }}"></path></svg>
+                                </button>
+                              </div>
+                              <span class="help">Enter this Cube's PIN, or use its passkey.</span>
+                            </fieldset>
+                            <div class="pact" style="margin-top:20px">
+                              <button type="button" class="btn primary" disabled="{{ item.p.unlockOff }}" onClick="{{ item.p.unlockPin }}">Unlock</button>
+                              <button type="button" class="btn" onClick="{{ item.p.unlockKey }}">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15.5" r="4"></circle><path d="M10.9 12.6L19 4.5M16 7.5l2.5 2.5M13.8 9.7l2 2"></path></svg>
+                                <span>Use passkey</span>
+                              </button>
+                            </div>
+                            <div class="grow"></div>
+                            <p class="pnote" id="pin-note">Network checks run after your PIN is accepted.</p>
+                            <div class="pact" style="margin-top:8px">
+                              <button type="button" class="linkbtn" onClick="{{ item.p.toDetails }}">Cancel</button>
+                            </div>
+                          </section>
+                        </sc-if>
+                        <sc-if value="{{ item.showChecks }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc" style="{{ item.fcStyle }}" aria-labelledby="checks-title">
+                            <h2 class="pn" id="checks-title">Opening {{ item.p.name }} <span class="sub">· {{ item.p.net }}</span></h2>
+                            <ol class="steps" aria-live="polite">
+                              <li class="step">
+                                <svg class="tone-good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg>
+                                <span class="tx">{{ item.p.step1 }}</span><span class="sv">Done</span>
+                              </li>
+                              <li class="step">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="2.5" fill="currentColor"></circle></svg>
+                                <span class="tx">{{ item.p.step2 }}</span><span class="sv">In progress</span>
+                              </li>
+                              <li class="step pending">
+                                <svg class="tone-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle></svg>
+                                <span class="tx">{{ item.p.step3 }}</span><span class="sv">Waiting</span>
+                              </li>
+                            </ol>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <a class="btn primary {{ item.p.contDemo }}" onMouseDown="{{ item.p.markSeen }}" onClick="{{ item.p.toBrowse }}" href="P-Opening.dc.html">Continue to Cube</a>
+                              <button type="button" class="linkbtn" onClick="{{ item.p.cancelOpen }}">Cancel</button>
+                            </div>
+                            <p class="pfoot">Prototype shortcut. The app continues only after every check passes.</p>
+                          </section>
+                        </sc-if>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+    </sc-if>
+  </main>
+
+  <div class="bottom {{ quietCls }}">
+    <div class="dock">
+      <a class="btn primary" href="P-Create.dc.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>
+        <span>Create Cube</span>
+      </a>
+      <a class="btn" href="P-Restore.dc.html">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14"></path></svg>
+        <span>Import or restore a Cube</span>
+      </a>
+    </div>
+    <span class="grow"></span>
+    <sc-if value="{{ hasAny }}" hint-placeholder-val="{{ true }}">
+      <div class="keywrap {{ keyCls }}" onMouseEnter="{{ keyEnter }}" onMouseLeave="{{ keyLeave }}" onKeyDown="{{ keyDown }}">
+        <button type="button" class="keybtn" aria-expanded="{{ keyExpanded }}" aria-controls="cube-key" onClick="{{ keyClick }}" onFocus="{{ keyFocus }}" onBlur="{{ keyBlur }}">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l8-8M16 7l2 2M14 9l2 2"></path></svg>
+          <span>Key</span>
+        </button>
+        <div class="keycard">
+          <ul class="legend" id="cube-key" aria-label="How to read a Cube">
+            <li class="lg">
+              <span class="coin" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span>
+              <span class="coin" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span>
+              <span>Top: network</span>
+            </li>
+            <li class="lg">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z"></path></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M13 3L5 13.5h6L10 21l8-10.5h-6z"></path></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z"></path></svg>
+              <span>Left: wallets</span>
+            </li>
+            <li class="lg">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg>
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.2v.3"></path></svg>
+              <span>Right: lock, backup attention</span>
+            </li>
+            <li class="lg">
+              <span class="sw btc" aria-hidden="true"></span><sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}"><span class="sw b2b" aria-hidden="true"></span></sc-if><span class="sw test" aria-hidden="true"></span>
+              <span>Edge: network family</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+    </sc-if>
+  </div>
+  <div class="foot">Concept prototype V3 · synthetic data · spin-to-face flow; face content is a flat panel over the scene, as the native Iced plan requires</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","20"],"default":"4","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","checks"],"default":"browse","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) {
+    super(p);
+    const lever = (this.props && this.props.startPhase) || 'browse';
+    // lever = the startPhase value the current state was made under; when the lever changes, it wins (Everyday selected)
+    this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
+  }
+  renderVals() {
+    // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage
+    let DEV = false; try { DEV = localStorage.getItem('tenshu.proto.dev') === '1'; } catch (e) {}
+    // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
+    let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
+    const CH = {
+      btc: { menu: 'Bitcoin mainnet', full: 'Bitcoin mainnet', live: true, edge: 'btc', tag: '' },
+      b2b: { menu: 'Bitcoin Blake2b mainnet', full: 'Bitcoin Blake2b mainnet', live: true, edge: 'b2b', tag: 'Blake2b', logo: true },
+      t4: { menu: 'Testnet4', full: 'Bitcoin Testnet4', live: false, edge: 'test', tag: 'Testnet4' },
+      sig: { menu: 'Signet', full: 'Bitcoin Signet', live: false, edge: 'test', tag: 'Signet' },
+      reg: { menu: 'Regtest', full: 'Bitcoin Regtest', live: false, edge: 'test', tag: 'Regtest' },
+      b2t: { menu: 'Blake2b Testnet4', full: 'Bitcoin Blake2b Testnet4', live: false, edge: 'test', tag: 'Blake2b Testnet4', logo: true }
+    };
+    const ORDER = ['btc', 'b2b', 't4', 'sig', 'reg', 'b2t'].filter((k) => (B2B || (k !== 'b2b' && k !== 'b2t')) && (DEV || CH[k].live));
+    const CIRC = 'M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18';
+    const LOCKED = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3';
+    const UNLOCKED = 'M7 11h10v9H7zM9 11V8a3 3 0 0 1 5.6-1.5';
+    // prototype-only: the open Cube is remembered across artboards in localStorage (the app keeps it in memory)
+    const OPEN_KEY = 'tenshu.proto.open';
+    let openId = null; try { openId = Number(localStorage.getItem(OPEN_KEY)) || null; } catch (e) {}
+    const setOpen = (id) => { try { if (id) localStorage.setItem(OPEN_KEY, String(id)); else localStorage.removeItem(OPEN_KEY); localStorage.removeItem('tenshu.proto.seen'); } catch (e) {} };
+    const AV = {1: "M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4", 2: "M8 20c.6-5.2.3-10.4 1.4-15.6M8.9 9.8c2.2-1.2 4.2-1 6.3.2M8.6 14.2c2.4-1.5 4.8-1.3 7.1 0M12 4l1.6 3.4", 3: "M3 18 9.2 7.3 12.4 12l2.1-3.3L21 18M6.8 14.9l1.3-.9 1.4 1.1", 4: "M4 15c3.2-2.6 5.6-2.6 8.2 0s5.2 2.6 8 0M5 10.4c2.9-2.3 5-2.3 7.4 0s4.7 2.3 7.2 0M13.6 6.2c1.2-.9 2.3-.9 3.4 0", 5: "M5 19c2.4-4.6 5.8-8 10-10.4M9.5 8.5c1.7-2.2 3.8-3.3 6.2-3.5-.1 2.6-1.2 4.8-3.3 6.5M16 14.5c-1.3 2.4-3.3 3.9-6 4.4", 6: "M12 20V9M12 9 6.5 13M12 9l5.5 4M12 13.5 7.8 17M12 13.5l4.2 3.5M9.2 6.4 12 3.6l2.8 2.8"};
+    const ICON = {
+      V: { label: 'Vault', path: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z' },
+      S: { label: 'Spark', path: 'M13 3L5 13.5h6L10 21l8-10.5h-6z' },
+      L: { label: 'Liquid', path: 'M12 3.5c3.5 4.2 6 7.6 6 10.5a6 6 0 0 1-12 0c0-2.9 2.5-6.3 6-10.5z' }
+    };
+    const BK = {
+      ok: { text: 'Confirmed', aria: 'Backup confirmed', tone: 'tone-good', path: 'M5 12.5l4.5 4.5L19 7.5' },
+      warn: { text: 'Not confirmed', aria: 'Backup not confirmed', tone: 'tone-warn', path: CIRC + 'M12 7.5v5.5M12 16.2v.3' },
+      unk: { text: 'Status unknown', aria: 'Backup status unknown', tone: 'tone-muted', path: CIRC + 'M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4M12 16.3v.3' },
+      na: { text: 'Watch-only, no local keys', aria: 'Watch-only, no local keys', tone: 'tone-muted', path: CIRC + 'M8.5 12h7' }
+    };
+    // Home list Connect status lines (home.rs): one per backup state in these fixtures
+    const CN = {
+      ok: { text: 'Backed up to Connect \u2014 recovery kit ready', tone: 'tone-good' },
+      warn: { text: 'Registered to Connect \u2014 no recovery kit', tone: 'tone-warn' },
+      unk: { text: 'Not yet synced to Connect. It will sync automatically in a moment.', tone: 'tone-muted' },
+      na: { text: 'Sovereign \u2014 local only', tone: 'tone-muted' }
+    };
+    const B2 = 'Bitcoin Blake2b supports Vault creation only.';
+    const NOV = 'No Vault configured.';
+    // V2 fixtures. This artboard shows the Launcher at app start, so every Cube is locked (Everyday included).
+    const CUBES = [
+      [1, 'Everyday', 'btc', 'warn', 'VSL', ''],
+      [2, 'Blake workspace', 'b2b', 'warn', 'V', B2],
+      [3, 'Lab', 't4', 'unk', 'V', 'Spark is unavailable on Testnet4.'],
+      [4, 'Archive', 'btc', 'ok', 'S', NOV],
+      [5, 'Household 2024', 'btc', 'ok', 'VS', ''],
+      [6, 'Travel fund', 'btc', 'unk', 'VSL', ''],
+      [7, 'Signet scratch', 'sig', 'unk', 'V', 'Spark is unavailable on Signet.'],
+      [8, 'Regtest bench', 'reg', 'unk', 'VS', ''],
+      [9, 'Blake test', 'b2t', 'warn', 'V', B2],
+      [10, 'Imported Vault (watch)', 'btc', 'na', 'V', 'Imported Vault. Signing keys live elsewhere.'],
+      [11, 'A very long Cube name that keeps going to test wrapping behaviour', 'btc', 'ok', 'VS', ''],
+      [12, 'Team treasury', 'b2b', 'ok', 'V', B2],
+      [13, 'Grandparents', 'btc', 'ok', 'VS', ''],
+      [14, 'Donations', 'btc', 'warn', 'S', NOV],
+      [15, 'Side project', 'btc', 'unk', 'VS', ''],
+      [16, 'Cold archive 2', 'btc', 'ok', 'V', ''],
+      [17, 'Lab 2', 't4', 'unk', 'V', 'Spark is unavailable on Testnet4.'],
+      [18, 'Lab 3', 'sig', 'unk', 'V', 'Spark is unavailable on Signet.'],
+      [19, 'Emergency', 'btc', 'ok', 'VSL', ''],
+      [20, 'Shop till', 'btc', 'ok', 'S', NOV]
+    ];
+
+    const theme = this.props.theme ?? 'dark';
+    const count = parseInt(this.props.cubeCount ?? '4', 10) || 0;
+    const focusDemo = !!this.props.focusDemo;
+    const lever = this.props.startPhase ?? 'browse';
+    const st = this.state;
+    const leverWins = st.lever !== lever;
+    // without Developer mode there are no test networks, so the live/test chips and test-network filters fall back to 'all'
+    const f0 = st.filter;
+    const f = (!DEV && (f0 === 'live' || f0 === 'test' || (CH[f0] && !CH[f0].live))) ? 'all' : f0;
+    const matches = (c) => f === 'all' ? true : f === 'live' ? CH[c.network].live : f === 'test' ? !CH[c.network].live : c.network === f;
+
+    const all = CUBES.filter((r) => (B2B || (r[2] !== 'b2b' && r[2] !== 'b2t')) && (DEV || CH[r[2]].live)).slice(0, count).map((r) => ({ id: r[0], name: r[1], network: r[2], bk: r[3], w: r[4], note: r[5] }));
+    const vis = all.filter(matches);
+    const n = vis.length;
+    const hidden = all.length - n;
+
+    // state machine: browse -> details -> unlock -> checks. A selection hidden by filters falls back to browse.
+    const selId = leverWins ? 1 : st.selected;
+    const selCube = vis.find((c) => c.id === selId) || null;
+    let phase = selCube ? (leverWins ? lever : st.phase) : 'browse';
+    // the open flag is written when the checks face shows (the runtime navigates on pointer-down, before a link's click handler);
+    // a Cube that is already open never shows its unlock/checks faces again, so returning to the Launcher lands on browse
+    let seenId = null; try { seenId = localStorage.getItem('tenshu.proto.seen'); } catch (e) {}
+    if (!leverWins && selCube && selCube.id === openId && (phase === 'unlock' || (phase === 'checks' && seenId === selCube.id))) { phase = 'browse'; }
+    const method = leverWins ? 'pin' : st.method;
+    const browsing = phase === 'browse';
+    const handoff = !leverWins && !browsing && !!st.handoff;
+    // every action clears the handoff flag (so later spins have no delay) unless the patch sets it
+    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances };
+    const go = (patch) => this.setState(Object.assign({}, cur, { networkMenu: false, pin: null, showPin: false }, patch));
+
+    // Robert (2026-10-23): "All networks" only when more than one network is listed; Live/Test only in Developer mode
+    const chips = (ORDER.length > 1 ? [['all', 'All networks']] : []).concat(DEV ? [['live', 'Live networks'], ['test', 'Test networks']] : []).map(([k, label]) => ({
+      label, cls: f === k ? 'on' : '', pressed: String(f === k), pick: () => go({ filter: k })
+    }));
+    const networkOn = !!CH[f];
+    const networkItems = ORDER.map((k) => ({
+      label: CH[k].menu, n: String(all.filter((c) => c.network === k).length),
+      on: f === k, cls: f === k ? 'on' : '', pressed: String(f === k), pick: () => go({ filter: k })
+    }));
+    let countText = '';
+    if (count > 0 && f === 'all') countText = n + (n === 1 ? ' Cube' : ' Cubes');
+    else if (count > 0) countText = n + ' of ' + count + ' Cubes · ' + hidden + ' hidden';
+
+    // size tiers (V2). Slot heights are fixed so each scene's stage position is computable.
+    const T = n <= 4 ? { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 84, rowGap: 0 }
+      : n <= 8 ? { mode: 'mid', s: 120, slot: 192, h: 288, cols: 4, gap: 28, padT: 40, rowGap: 12 }
+      : { mode: 'dense', s: 85, slot: 152, h: 248, cols: 5, gap: 20, padT: 28, rowGap: 8 };
+
+    // spin target: face center at stage (720, 392), projected face = 420px.
+    // The scene's perspective-origin travels with the Cube so the final face sits on the optical axis:
+    // square, axis-aligned, side faces edge-on. Projected size = S * d / (d - S/2) with d = 1100.
+    const D = 1100, FACE = 420, TX = 720, TY = 392;
+    const S = FACE * D / (D + FACE / 2);
+    const k = S / T.s;
+    const yaw = phase === 'details' ? 180 : 270; // 45 -> 180 shows back-left; 180 -> 270 shows back-right
+    const px = (v) => v.toFixed(2) + 'px';
+    const REST = 'translate3d(0px,0px,0px) scale(1) rotateX(-35deg) rotateY(45deg)';
+
+    // panel data for the active Cube; it rides that Cube's back faces
+    // PIN boxes live in state only while the unlock face is up; every go() clears them, so each unlock starts empty and masked
+    const digits = (!leverWins && Array.isArray(st.pin)) ? st.pin : ['', '', '', ''];
+    const showPin = !leverWins && !!st.showPin;
+    const pinFull = digits.every((x) => x !== '');
+    const EYE_OPEN = 'M2.5 12S6 5.5 12 5.5 21.5 12 21.5 12 18 18.5 12 18.5 2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6';
+    const EYE_SHUT = 'M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16';
+    let P = null;
+    let announce = '';
+    if (selCube) {
+      const ch = CH[selCube.network];
+      const b = BK[selCube.bk];
+      const wl = selCube.w.split('').map((x) => ICON[x]);
+      P = {
+        name: selCube.name, net: ch.full,
+        bText: b.text, bTone: b.tone, bPath: b.path, wallets: wl,
+        cText: CN[selCube.bk].text, cTone: CN[selCube.bk].tone,
+        hasNote: !!selCube.note, note: selCube.note, openLabel: 'Open ' + selCube.name,
+        dTab: phase === 'details' ? '0' : '-1',
+        step1: method === 'key' ? 'Passkey accepted' : 'PIN accepted',
+        step2: 'Checking ' + ch.menu + ' admission…',
+        step3: 'Loading ' + wl.map((w) => w.label).join(', '),
+        openDemo: focusDemo ? 'demo-focus' : '', pinDemo: focusDemo ? 'demo-focus' : '', contDemo: focusDemo ? 'demo-focus' : '',
+        toBrowse: () => go({ phase: 'browse' }),
+        markSeen: () => { try { localStorage.setItem('tenshu.proto.seen', selCube.id); } catch (e) {} },
+        cancelOpen: () => { setOpen(null); go({ phase: 'browse' }); },
+        toDetails: () => go({ phase: 'details' }),
+        toUnlock: () => go({ phase: 'unlock' }),
+        unlockPin: () => { if (pinFull) { setOpen(selCube.id); go({ phase: 'checks', method: 'pin' }); } },
+        pinType: showPin ? 'text' : 'password', unlockOff: !pinFull,
+        showPressed: String(showPin), eyePath: showPin ? EYE_SHUT : EYE_OPEN,
+        toggleShow: () => this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: digits, showPin: !showPin })),
+        unlockKey: () => { setOpen(selCube.id); go({ phase: 'checks', method: 'key' }); },
+        lockNow: () => { setOpen(null); go({ phase: 'browse' }); }
+      };
+      if (!browsing) announce = phase === 'details' ? P.name + ' details' : phase === 'unlock' ? 'Unlock ' + P.name : 'Opening ' + P.name;
+    }
+    if (P) {
+      // four PIN boxes: typing keeps the last digit and moves focus on; Backspace on an empty box clears and returns to the previous one.
+      // Focus moves by element id after the re-render; no global key handler.
+      // No autoFocus on box 1: re-applying it on re-render blanked that box's dot. Open focuses box 1 by id instead.
+      // After each render the boxes are re-synced from state, so every box shows exactly the digit the handler stored.
+      const later = (f) => { f(); setTimeout(f, 0); setTimeout(f, 60); };
+      const moveTo = (j) => later(() => { const el = document.getElementById('pin-d' + (j + 1)); if (el && document.activeElement !== el) el.focus({ preventScroll: true }); });
+      const syncBoxes = (vals) => later(() => vals.forEach((x, k) => { const el = document.getElementById('pin-d' + (k + 1)); if (el && el.value !== x) el.value = x; }));
+      P.toUnlock = () => { go({ phase: 'unlock' }); moveTo(0); };
+      digits.forEach((dv, i) => {
+        P['d' + (i + 1)] = dv;
+        P['set' + (i + 1)] = (e) => {
+          const raw = e && e.target ? String(e.target.value) : '';
+          const v = raw.replace(/[^0-9]/g, '').slice(-1);
+          const next = digits.slice(); next[i] = v;
+          this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: next, showPin }));
+          syncBoxes(next);
+          if (v && i < 3) moveTo(i + 1);
+        };
+        P['back' + (i + 1)] = (e) => {
+          if (!e || e.key !== 'Backspace' || digits[i] !== '' || i === 0) return;
+          if (e.preventDefault) e.preventDefault();
+          const next = digits.slice(); next[i - 1] = '';
+          this.setState(Object.assign({}, cur, { keyMode: st.keyMode, pin: next, showPin }));
+          syncBoxes(next);
+          moveTo(i - 1);
+        };
+      });
+    }
+    const EMPTY = { name: '', net: '', bText: '', bTone: '', bPath: '', wallets: [], cText: '', cTone: '', hasNote: false, note: '', openLabel: '', dTab: '-1', step1: '', step2: '', step3: '', openDemo: '', pinDemo: '', contDemo: '', pinType: 'password', unlockOff: true, showPressed: 'false', eyePath: '', d1: '', d2: '', d3: '', d4: '' };
+
+    // Items keep the same order and keys in every phase: only classes and transform strings change, so both Cubes in a handoff keep their transitions.
+    const rows = [];
+    for (let r = 0; r * T.cols < n; r++) {
+      const inRow = vis.slice(r * T.cols, (r + 1) * T.cols);
+      const rowW = inRow.length * T.slot + (inRow.length - 1) * T.gap;
+      const x0 = 48 + (1344 - rowW) / 2;
+      const items = inRow.map((c, i) => {
+        const ch = CH[c.network];
+        const idx = r * T.cols + i;
+        const isSel = !!selCube && selCube.id === c.id;
+        const active = isSel && !browsing;
+        // rest cube center in stage coords and in scene coords
+        const cx = x0 + i * (T.slot + T.gap) + T.slot / 2;
+        const cy = T.padT + r * (T.h + T.rowGap) + 8 + 1.72 * T.s * 0.475;
+        const sx = 0.75 * T.s, sy = 1.72 * T.s * 0.475;
+        const dx = TX - cx, dy = TY - cy;
+        const origin = active ? px(sx + dx) + ' ' + px(sy + dy) : px(sx) + ' ' + px(1.72 * T.s * 0.5);
+        const cubeT = active ? 'translate3d(' + px(dx) + ',' + px(dy) + ',0px) scale(' + k.toFixed(4) + ') rotateX(0deg) rotateY(' + yaw + 'deg)' : REST;
+        const ws = c.w.split('').map((x) => ICON[x].label).join(', ');
+        const isPrev = !browsing && st.prev === c.id && !isSel;
+        return {
+          hint: c.id === openId ? 'Already open on this device.' : 'PIN or passkey, then network checks.',
+          name: c.name, state: c.id === openId ? 'Open' : 'Locked', stCls: c.id === openId ? 'open' : '', isOpen: c.id === openId, notOpen: c.id !== openId, av: AV[c.id] || AV[1],
+          tag: ch.tag, hasTag: !!ch.tag, showNet: T.mode === 'dense' && !!ch.tag,
+          edge: ch.edge,
+          btcLogo: !ch.logo, logo: !!ch.logo, coinCls: ch.live ? '' : 'tn',
+          hasVault: c.w.indexOf('V') >= 0, hasSpark: c.w.indexOf('S') >= 0, hasLiquid: c.w.indexOf('L') >= 0,
+          lockPath: c.id === openId ? UNLOCKED : LOCKED, warn: c.bk === 'warn', unk: c.bk === 'unk',
+          expanded: String(active),
+          tab: browsing ? '0' : '-1',
+          aria: c.name + ', ' + ch.full + ', locked, ' + BK[c.bk].aria + ', wallets: ' + ws + '. Show details',
+          cls: T.mode + (isSel ? ' lead' : '') + (isPrev ? ' prev' : '') + (active ? ' active' : '') + (active && handoff ? ' handoff' : '') + (!browsing && !isSel ? ' dim' : ''),
+          hitCls: focusDemo && browsing && idx === 1 ? 'demo-focus' : '',
+          slotStyle: 'width:' + T.slot + 'px;height:' + T.h + 'px',
+          sceneStyle: '--s:' + T.s + 'px;perspective-origin:' + origin,
+          cubeStyle: 'transform:' + cubeT,
+          // face content: 420x420 layout scaled into the face's padding box (s minus the 1.5px edges)
+          fcStyle: 'transform:scale(' + ((T.s - 3) / FACE).toFixed(5) + ')',
+          showDetails: active, showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
+          blHidden: String(!(active && phase === 'details')),
+          p: active ? P : EMPTY,
+          // a background Cube hands off: outgoing reverses at once, incoming starts 160ms later in details with a fresh PIN field
+          pick: (e) => {
+            // a click from inside an open panel never re-selects; clicking the active Cube is a no-op
+            if (e && e.target && e.target.closest && e.target.closest('.fc')) return;
+            if (active) return;
+            const switching = !browsing && !isSel;
+            go({ selected: c.id, phase: 'details', prev: switching ? selId : null, handoff: switching });
+          }
+        };
+      });
+      rows.push({ items });
+    }
+
+    const km = st.keyMode || 'closed';
+    return {
+      b2bOn: B2B,
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: this.props.reducedMotion ? 'reduced' : '',
+      quietCls: browsing ? '' : 'quiet',
+      signedIn: (this.props.accountState ?? 'signedIn') !== 'signedOut',
+      signedOut: (this.props.accountState ?? 'signedIn') === 'signedOut',
+      hasAny: count > 0,
+      chips, networkItems,
+      networkCls: networkOn ? 'on' : '', networkPressed: String(networkOn),
+      networkExpanded: String(!!st.networkMenu), networkMenu: !!st.networkMenu,
+      networkLabel: networkOn ? 'Network: ' + CH[f].menu : 'Network',
+      toggleChain: () => go({ networkMenu: !st.networkMenu }),
+      clear: () => go({ filter: 'all' }),
+      filterActive: f !== 'all',
+      countText,
+      isEmpty: count === 0,
+      noMatch: count > 0 && n === 0,
+      hasCubes: n > 0,
+      hiddenText: hidden + (hidden === 1 ? ' Cube hidden.' : ' Cubes hidden.'),
+      mode: T.mode, rows,
+      floorStyle: n === 0 ? 'top:44%' : T.mode === 'big' ? 'top:30%' : 'top:6%',
+      announce,
+      hidePressed: String(!!st.hideBalances), eyeOpen: !st.hideBalances, eyeShut: !!st.hideBalances,
+      hideTitle: st.hideBalances ? 'Balances hidden on this device' : 'Hide balances on this device',
+      toggleHide: () => this.setState(Object.assign({}, st, { hideBalances: !st.hideBalances })),
+      // Key card (km = keyMode; go() drops it, so undefined reads as closed): closed | peek (hover/focus) | pinned (click) | shut (Escape or second click; suppresses the hover/focus peek until pointer or focus leaves)
+      keyCls: km === 'peek' || km === 'pinned' ? 'open' : km === 'shut' ? 'shut' : '',
+      keyExpanded: String(km === 'peek' || km === 'pinned'),
+      keyClick: () => this.setState(Object.assign({}, st, { keyMode: km === 'pinned' ? 'shut' : 'pinned' })),
+      keyFocus: () => { if (km === 'closed') this.setState(Object.assign({}, st, { keyMode: 'peek' })); },
+      keyBlur: () => { if (km === 'peek' || km === 'shut') this.setState(Object.assign({}, st, { keyMode: 'closed' })); },
+      keyEnter: () => { if (km === 'closed') this.setState(Object.assign({}, st, { keyMode: 'peek' })); },
+      keyLeave: () => { if (km === 'peek' || km === 'shut') this.setState(Object.assign({}, st, { keyMode: 'closed' })); },
+      keyDown: (e) => { if (e && e.key === 'Escape' && km !== 'shut' && km !== 'closed') this.setState(Object.assign({}, st, { keyMode: 'shut' })); }
+    };
+  }
+}
+</script>
+</body>
+</html>

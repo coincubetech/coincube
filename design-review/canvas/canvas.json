@@ -1,0 +1,374 @@
+{
+  "v": 3,
+  "attachments": {},
+  "boards": {
+    "P-Launcher.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "1 · Launcher (Open → PIN → checks → Continue)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Unlock.dc.html": {
+      "x": 1600,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "PIN / passkey unlock (standalone)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Opening.dc.html": {
+      "x": 3200,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Opening Cube (after checks / create / restore)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Locking.dc.html": {
+      "x": 4800,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Locking Cube (hand-off → Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-AppPrefs.dc.html": {
+      "x": 6400,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "App preferences (from the Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Connect.dc.html": {
+      "x": 8000,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect (from the Launcher account entry)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-SignIn.dc.html": {
+      "x": 9600,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect sign-in / sign-up",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Create.dc.html": {
+      "x": 0,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Create Cube (from the Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Restore.dc.html": {
+      "x": 1600,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Import or restore (from the Launcher)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-GapsInstaller.dc.html": {
+      "x": 3200,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Installer gap screens (from Create)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-BorderWallet.dc.html": {
+      "x": 4800,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Border Wallet",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Delete.dc.html": {
+      "x": 6400,
+      "y": 1200,
+      "w": 1440,
+      "h": 900,
+      "title": "Delete Cube",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Overview.dc.html": {
+      "x": 0,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "2 · Overview hub (wallet pages, Send/Receive, Transfer, Tools)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Activity.dc.html": {
+      "x": 1600,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Activity (sidebar)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Send.dc.html": {
+      "x": 3200,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Send (from any Send pill)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Receive.dc.html": {
+      "x": 4800,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Receive(Bitcoin / Stablecoin selectors)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Transfer.dc.html": {
+      "x": 6400,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Transfer / Blake2b copy (from the Transfer pill)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Liquid.dc.html": {
+      "x": 8000,
+      "y": 2400,
+      "w": 1440,
+      "h": 1100,
+      "title": "Liquid wallet",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Advanced.dc.html": {
+      "x": 0,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "Vault › Tools (from the Vault page)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Split.dc.html": {
+      "x": 1600,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "Split coins (from Tools)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Claim.dc.html": {
+      "x": 3200,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "Claim BTCB2 (from Tools)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Signing.dc.html": {
+      "x": 4800,
+      "y": 3600,
+      "w": 1440,
+      "h": 1100,
+      "title": "Signing, pairing, labels, export",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Settings.dc.html": {
+      "x": 0,
+      "y": 4800,
+      "w": 1440,
+      "h": 900,
+      "title": "Settings (sidebar foot)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Members.dc.html": {
+      "x": 1600,
+      "y": 4800,
+      "w": 1440,
+      "h": 900,
+      "title": "Members (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Duress.dc.html": {
+      "x": 3200,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Duress (from Connect)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-GapsAccount.dc.html": {
+      "x": 4800,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Account gap screens (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-GapsWallets.dc.html": {
+      "x": 6400,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Wallet gap screens (from Tools / Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-GapsDetails.dc.html": {
+      "x": 8000,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Detail gap screens (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-BuySell.dc.html": {
+      "x": 0,
+      "y": 6000,
+      "w": 1440,
+      "h": 1100,
+      "title": "Marketplace · Buy/Sell",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-P2P.dc.html": {
+      "x": 1600,
+      "y": 6000,
+      "w": 1440,
+      "h": 1100,
+      "title": "Marketplace · P2P",
+      "is_interactive": true,
+      "page": "proto"
+    }
+  },
+  "createdOnFiles": {
+    "at": "2026-10-21T22:46:41Z",
+    "v": 1
+  },
+  "designSystems": [],
+  "launch": {
+    "view": "focused",
+    "file": "P-Launcher.dc.html"
+  },
+  "notes": {
+    "g1": {
+      "kind": "title1",
+      "text": "Launcher & account · start here, press Play on the Launcher and walk the whole app",
+      "x": 0,
+      "y": -140,
+      "w": 240,
+      "maxW": 11200
+    },
+    "g2": {
+      "kind": "title1",
+      "text": "Create, restore, delete",
+      "x": 0,
+      "y": 1060,
+      "w": 240,
+      "maxW": 8000
+    },
+    "g3": {
+      "kind": "title1",
+      "text": "Inside a Cube · overview, wallets, activity, send, receive, transfer",
+      "x": 0,
+      "y": 2260,
+      "w": 240,
+      "maxW": 9600
+    },
+    "g4": {
+      "kind": "title1",
+      "text": "Vault tools & signing",
+      "x": 0,
+      "y": 3460,
+      "w": 240,
+      "maxW": 6400
+    },
+    "g5": {
+      "kind": "title1",
+      "text": "Settings & protection",
+      "x": 0,
+      "y": 4660,
+      "w": 240,
+      "maxW": 9600
+    },
+    "g6": {
+      "kind": "title1",
+      "text": "Marketplace",
+      "x": 0,
+      "y": 5860,
+      "w": 240,
+      "maxW": 3200
+    }
+  },
+  "order": [
+    "P-Launcher.dc.html",
+    "P-Unlock.dc.html",
+    "P-Opening.dc.html",
+    "P-Locking.dc.html",
+    "P-AppPrefs.dc.html",
+    "P-Connect.dc.html",
+    "P-SignIn.dc.html",
+    "P-Create.dc.html",
+    "P-Restore.dc.html",
+    "P-GapsInstaller.dc.html",
+    "P-BorderWallet.dc.html",
+    "P-Delete.dc.html",
+    "P-Overview.dc.html",
+    "P-Activity.dc.html",
+    "P-Send.dc.html",
+    "P-Receive.dc.html",
+    "P-Transfer.dc.html",
+    "P-Liquid.dc.html",
+    "P-Advanced.dc.html",
+    "P-Split.dc.html",
+    "P-Claim.dc.html",
+    "P-Signing.dc.html",
+    "P-Settings.dc.html",
+    "P-Members.dc.html",
+    "P-Duress.dc.html",
+    "P-GapsAccount.dc.html",
+    "P-GapsWallets.dc.html",
+    "P-GapsDetails.dc.html",
+    "P-BuySell.dc.html",
+    "P-P2P.dc.html"
+  ],
+  "pages": [
+    {
+      "id": "proto",
+      "name": "Prototype (clickable)"
+    }
+  ],
+  "title": "Tenshu Launcher & Concept C"
+}

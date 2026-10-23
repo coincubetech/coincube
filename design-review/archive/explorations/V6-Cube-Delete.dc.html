@@ -1,0 +1,337 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 Cube · Delete</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens copied from V3-Launcher-Connect (static floor) */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--scrim:rgba(10,10,9,.55);font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--scrim:rgba(60,50,40,.28)}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu .sr{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important}
+.grow{flex:1}
+.muted{color:var(--muted)}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar (as V3-Launcher-Spin, V5) */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.vsep{width:1px;height:20px;background:var(--line)}
+.chip{display:inline-flex;align-items:center;height:32px;padding:0 12px;border-radius:16px;border:1px solid var(--line);font-size:13px}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.count{font-size:13px;color:var(--muted)}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;font-size:13px;white-space:nowrap}
+.tbtn svg{width:16px;height:16px}
+.tbtn .stw{font-size:12px;color:var(--muted)}
+
+/* static, dimmed Launcher */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.backdrop{position:absolute;inset:0;opacity:.4;pointer-events:none}
+.floor{position:absolute;left:0;right:0;bottom:0;top:30%;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.brow{position:absolute;left:0;right:0;top:84px;display:flex;justify-content:center;gap:40px}
+.cb{width:232px;height:344px;display:flex;flex-direction:column;align-items:center;padding-top:8px;box-sizing:border-box;--s:152px}
+.scene{position:relative;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(8px)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.cube.btc{--edge:var(--edge-btc)}.cube.b2b{--edge:var(--edge-b2b)}.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:6px;transform:rotate(45deg)}
+.bmk{display:inline-flex;width:calc(var(--s) * .34);height:calc(var(--s) * .34);border-radius:50%;box-sizing:border-box}
+.bmk img{display:block;width:100%;height:100%;border-radius:50%}
+.bmk.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.bmk.tn img{opacity:.6}
+.ftag{font-size:14px;font-weight:600;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.wi{width:38px;height:38px}
+.pad{width:54px;height:54px}
+.bnm{margin-top:auto;padding-bottom:10px;font-weight:600}
+
+/* modal: scrim is the app's on_blur close, drawn as a real button */
+.scrim{position:absolute;inset:0;border:0;padding:0;margin:0;background:var(--scrim);cursor:default;z-index:3}
+.scrim:disabled{cursor:progress}
+.dlg{position:absolute;left:50%;top:72px;transform:translateX(-50%);width:700px;box-sizing:border-box;padding:28px 32px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);z-index:4}
+.light .dlg{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
+.dlg h2{margin:0;font-size:20px;font-weight:600;line-height:1.3;color:var(--bad);overflow-wrap:anywhere}
+.dlg p{margin:10px 0 0}
+.sec2{color:var(--muted);font-size:13px}
+.warnw{font-weight:600}
+.ck{display:flex;align-items:center;gap:10px;margin-top:20px;cursor:pointer}
+.ck input{width:18px;height:18px;margin:0;accent-color:var(--accent)}
+.wtone{color:var(--warn);font-size:13px}
+.pinlbl{margin-top:20px!important;font-size:13px;color:var(--muted)}
+.pinrow{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:12px}
+.pinrow fieldset{display:flex;gap:15px;border:0;margin:0;padding:0}
+.dg{width:60px;height:64px;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;background:var(--bg);text-align:center;font-size:28px;font-weight:500}
+.dg:focus{border-color:var(--focus)}
+.dg[aria-invalid="true"]{border-color:var(--bad)}
+.eye{width:50px;height:50px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:8px;background:none;cursor:pointer;color:var(--muted)}
+.eye:hover{border-color:var(--line)}
+.eye svg{width:20px;height:20px}
+.err{display:flex;align-items:center;justify-content:center;gap:6px;color:var(--bad);font-size:14px}
+.err svg{width:16px;height:16px}
+.note{display:flex;align-items:flex-start;gap:10px;margin-top:16px;padding:10px 14px;border:1px solid var(--line);border-left:3px solid var(--warn);border-radius:8px;font-size:14px}
+.note svg{width:18px;height:18px;color:var(--warn);margin-top:1px}
+.acts{display:flex;align-items:center;justify-content:center;gap:10px;margin-top:24px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:40px;padding:0 18px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;color:var(--ink);text-decoration:none;white-space:nowrap}
+.btn:hover{border-color:var(--muted)}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.danger{border-color:var(--bad);color:var(--bad)}
+.btn.danger:hover:not(:disabled){background:var(--bad);color:var(--bg)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn svg{width:16px;height:16px}
+.w120{width:120px}.w200{width:200px}.w250{width:250px}
+.done{display:flex;align-items:center;justify-content:center;gap:8px;color:var(--good);font-weight:500}
+.done svg{width:18px;height:18px}
+.busy{display:flex;align-items:center;justify-content:center;gap:8px;color:var(--muted)}
+.closed{position:absolute;left:0;right:0;top:40%;display:flex;flex-direction:column;align-items:center;gap:12px;z-index:2}
+
+.bbar{height:64px;flex:none;display:flex;align-items:center;gap:8px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+.bbar .btn{height:36px;padding:0 16px;pointer-events:none}
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top" aria-hidden="{{ modalOpen }}">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </div>
+    <span class="vsep"></span>
+    <span class="chip on">All networks</span><span class="chip">Live chains</span><span class="chip">Test networks</span><span class="chip">Network ▾</span>
+    <span class="count">4 Cubes</span>
+    <span class="grow"></span>
+    <span class="tbtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect · alex@example.test</span><span class="stw">Signed in</span>
+    </span>
+    <span class="tbtn">App preferences</span>
+  </header>
+
+  <main class="stage">
+    <div class="backdrop" aria-hidden="true">
+      <div class="floor"></div>
+      <div class="brow">
+        <sc-for list="{{ floorCubes }}" as="c" hint-placeholder-count="4">
+          <div class="cb">
+            <div class="scene">
+              <div class="shadow"></div>
+              <div class="cube {{ c.edge }}">
+                <div class="f t"><div class="tc">
+                  <sc-if value="{{ c.isB2b }}" hint-placeholder-val="{{ false }}"><span class="bmk"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                  <sc-if value="{{ c.notB2b }}" hint-placeholder-val="{{ true }}"><span class="bmk {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                  <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+                </div></div>
+                <div class="f l"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="{{ c.walletPath }}"></path></svg></div>
+                <div class="f r"><svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg></div>
+              </div>
+            </div>
+            <span class="bnm">{{ c.name }}</span>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+
+    <sc-if value="{{ v.closed }}" hint-placeholder-val="{{ false }}">
+      <div class="closed">
+        <p class="muted" role="status">{{ closedText }}</p>
+        <button type="button" class="btn" onClick="{{ reopen }}">Show the dialog again</button>
+      </div>
+    </sc-if>
+
+    <sc-if value="{{ v.open }}" hint-placeholder-val="{{ true }}">
+      <button type="button" class="scrim" aria-label="Close dialog" tabIndex="-1" disabled="{{ v.deleting }}" onClick="{{ close }}"></button>
+
+      <!-- LOCAL: home.rs DeleteCubeModal -->
+      <sc-if value="{{ v.local }}" hint-placeholder-val="{{ true }}">
+        <section class="dlg" role="dialog" aria-modal="true" aria-labelledby="del-t">
+          <h2 id="del-t">Delete Cube "{{ cube.name }}"</h2>
+          <p>{{ cube.ask }}</p>
+          <sc-if value="{{ cube.hasNode }}" hint-placeholder-val="{{ true }}"><p class="sec2">(The Tenshu-managed Bitcoin node for this network will not be affected by this action.)</p></sc-if>
+          <p class="warnw">WARNING: This cannot be undone.</p>
+
+          <label class="ck">
+            <input type="checkbox" checked="{{ s.backup }}" onChange="{{ toggleBackup }}">
+            <span>Also delete Connect backup (frees a Cube slot)</span>
+          </label>
+          <sc-if value="{{ s.backup }}" hint-placeholder-val="{{ false }}">
+            <p class="wtone">The Connect backup will be permanently deleted. This frees a Cube slot on your account.</p>
+          </sc-if>
+
+          <p class="pinlbl" id="pin-lbl">Enter your PIN to confirm:</p>
+          <div class="pinrow">
+            <fieldset aria-labelledby="pin-lbl">
+              <sc-for list="{{ digits }}" as="d" hint-placeholder-count="4">
+                <input class="dg {{ d.cls }}" type="{{ pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="{{ d.label }}" aria-invalid="{{ pinInvalid }}" value="{{ d.val }}" onChange="{{ d.set }}">
+              </sc-for>
+            </fieldset>
+            <button type="button" class="eye" aria-pressed="{{ showPressed }}" aria-label="Show PIN" onClick="{{ toggleShow }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg>
+            </button>
+          </div>
+          <sc-if value="{{ v.wrongPin }}" hint-placeholder-val="{{ false }}">
+            <p class="err" role="alert">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg>
+              <span>Incorrect PIN. Please try again.</span>
+            </p>
+          </sc-if>
+
+          <sc-if value="{{ v.notDeleted }}" hint-placeholder-val="{{ true }}">
+            <div class="acts">
+              <button type="button" class="btn w120" onClick="{{ close }}">Cancel</button>
+              <button type="button" class="btn danger w200" disabled="{{ delOff }}" onClick="{{ confirmLocal }}">Delete Cube</button>
+            </div>
+          </sc-if>
+          <sc-if value="{{ v.deleted }}" hint-placeholder-val="{{ false }}">
+            <p class="acts done" role="status">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="4" y="4" width="16" height="16" rx="3"></rect><path d="M8.5 12.3l2.5 2.5 4.6-5"></path></svg>
+              <span>Cube successfully deleted</span>
+            </p>
+          </sc-if>
+        </section>
+      </sc-if>
+
+      <!-- REMOTE: home.rs DeleteRemoteCubeModal -->
+      <sc-if value="{{ v.remote }}" hint-placeholder-val="{{ false }}">
+        <section class="dlg" role="dialog" aria-modal="true" aria-labelledby="rdel-t" aria-busy="{{ busyAttr }}">
+          <h2 id="rdel-t">Delete Remote Cube "Household 2024"</h2>
+          <p>This Cube exists on the Connect server but not on this device. Deleting it will permanently remove it and free a Cube slot.</p>
+          <p class="warnw">WARNING: This cannot be undone.</p>
+          <p class="sec2">If another device still has this Cube locally, it will re-sync to Connect the next time it opens, consuming a Cube slot again. To permanently free the slot, delete the Cube on all devices.</p>
+          <sc-if value="{{ v.remoteErr }}" hint-placeholder-val="{{ false }}">
+            <p class="note" role="alert">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 21.5 20h-19z"></path><path d="M12 10v4.5M12 17.2v.01"></path></svg>
+              <span>{{ remoteErr }}</span>
+            </p>
+          </sc-if>
+          <sc-if value="{{ v.deleting }}" hint-placeholder-val="{{ false }}">
+            <p class="acts busy" role="status">Deleting...</p>
+          </sc-if>
+          <sc-if value="{{ v.notDeleting }}" hint-placeholder-val="{{ true }}">
+            <div class="acts">
+              <button type="button" class="btn w120 demo-focus" onClick="{{ close }}">Cancel</button>
+              <button type="button" class="btn danger w250" onClick="{{ confirmRemote }}">Delete Remote Cube</button>
+            </div>
+          </sc-if>
+        </section>
+      </sc-if>
+    </sc-if>
+  </main>
+
+  <div class="bbar" aria-hidden="true">
+    <span class="btn primary">Create Cube</span>
+    <span class="btn">Import or restore a Cube</span>
+  </div>
+  <div class="foot">{{ foot }}</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"state":{"editor":"enum","options":["confirm","backupChecked","noVault","wrongPin","deleted","remote","remoteDeleting","remoteNotFound","remoteSignedOut"],"default":"confirm","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { lv: null }; }
+  renderVals() {
+    const P = this.props;
+    const theme = P.theme ?? 'dark';
+    const lever = P.state || 'confirm';
+    const s = this.state.lv !== lever
+      ? { st: lever, closed: false, backup: lever === 'backupChecked', show: false,
+          d: (lever === 'deleted' || lever === 'backupChecked') ? ['1', '2', '3', '4'] : ['', '', '', ''] }
+      : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: lever }, patch));
+    const st = s.st;
+    const remote = st.indexOf('remote') === 0;
+
+    const VAULT = 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6z';
+    const BOLT = 'M13 3L5 13.5h6L10 21l8-10.5h-6z';
+    const floorCubes = [
+      { name: 'Everyday', edge: 'btc', coinCls: '', tag: '', walletPath: VAULT },
+      { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b', walletPath: VAULT },
+      { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4', walletPath: VAULT },
+      { name: 'Archive', edge: 'btc', coinCls: '', tag: '', walletPath: BOLT }
+    ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' }));
+
+    // home.rs DeleteCubeModal::view: a Cube with a local Vault (no shared remote backend) names "all its associated data (including Vault)";
+    // a Tenshu-managed node adds the node note; a Cube without a Vault gets the short question and no node note
+    const noVault = st === 'noVault';
+    const cube = noVault
+      ? { name: 'Archive', ask: 'Are you sure you want to delete the Cube "Archive"?', hasNode: false }
+      : { name: 'Everyday', ask: 'Are you sure you want to delete the Cube "Everyday" and all its associated data (including Vault)?', hasNode: true };
+
+    const digits = s.d.map((val, i) => ({
+      val, label: 'PIN digit ' + (i + 1),
+      cls: (i === 0 && st === 'confirm') ? 'demo-focus' : '',
+      set: (e) => {
+        const raw = e && e.target ? String(e.target.value) : '';
+        const next = s.d.slice(); next[i] = raw.replace(/[^0-9]/g, '').slice(-1);
+        go({ d: next, st: st === 'wrongPin' ? 'confirm' : st });
+      }
+    }));
+    const complete = s.d.every((x) => x !== '');
+    const EYE_OPEN = 'M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6';
+    const EYE_SHUT = 'M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16';
+
+    const REMOTE_ERR = { remoteNotFound: 'Cube not found on server', remoteSignedOut: 'Not authenticated with Connect' };
+    const deleting = st === 'remoteDeleting';
+    const FOOT = {
+      deleted: 'Prototype · synthetic data · the app closes this dialog and reloads the Cube list right after deleting',
+      remoteDeleting: 'Prototype · synthetic data · while deleting, clicking outside does not close the dialog'
+    };
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      modalOpen: s.closed ? 'false' : 'true',
+      floorCubes,
+      cube,
+      s: { backup: !!s.backup },
+      v: {
+        closed: s.closed, open: !s.closed,
+        local: !remote, remote,
+        wrongPin: st === 'wrongPin',
+        deleted: st === 'deleted', notDeleted: st !== 'deleted',
+        deleting, notDeleting: !deleting,
+        remoteErr: !!REMOTE_ERR[st]
+      },
+      busyAttr: deleting ? 'true' : 'false',
+      remoteErr: REMOTE_ERR[st] || '',
+      digits,
+      pinType: s.show ? 'text' : 'password',
+      pinInvalid: st === 'wrongPin' ? 'true' : 'false',
+      showPressed: s.show ? 'true' : 'false',
+      eyePath: s.show ? EYE_SHUT : EYE_OPEN,
+      toggleShow: () => go({ show: !s.show }),
+      toggleBackup: () => go({ backup: !s.backup }),
+      delOff: !complete || st === 'deleted',
+      // prototype: any complete PIN deletes; the wrongPin lever shows the failure (digits cleared)
+      confirmLocal: () => { if (complete) go({ st: 'deleted' }); },
+      confirmRemote: () => go({ st: 'remoteDeleting' }),
+      close: () => { if (!deleting) go({ closed: true }); },
+      reopen: () => go({ closed: false }),
+      closedText: st === 'deleted' ? cube.name + ' is no longer on this device.' : 'Nothing was deleted.',
+      foot: FOOT[st] || 'Prototype · synthetic data · dialog copy quoted from the app; Cancel is added (the app closes on an outside click only)'
+    };
+  }
+}
+</script>
+</body>
+</html>

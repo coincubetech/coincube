@@ -1,0 +1,1055 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Import or restore</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+/* scene tokens copied from V3-Launcher-Connect (static floor) */
+.tenshu{--floor:#1b1c1a;--floor-rule:#2b2c29;--face-t:#41423e;--face-l:#2e2f2c;--face-r:#262724;--edge-btc:rgba(243,130,29,.6);--edge-b2b:rgba(212,166,42,.6);--edge-test:rgba(185,187,181,.6);--shadow:rgba(0,0,0,.6);--on-accent:#201407;--scrim:rgba(10,10,9,.55);font-variant-numeric:tabular-nums}
+.tenshu.light{--floor:#efebe3;--floor-rule:#e0d9cd;--face-t:#e6e0d5;--face-l:#d6cfc2;--face-r:#c9c1b2;--edge-test:rgba(87,90,84,.6);--shadow:rgba(70,52,30,.3);--scrim:rgba(60,50,40,.28)}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu .sr{position:absolute!important;width:1px!important;height:1px!important;margin:-1px!important;padding:0!important;border:0!important;overflow:hidden!important;clip:rect(0 0 0 0)!important;clip-path:inset(50%)!important;white-space:nowrap!important}
+.grow{flex:1}
+.muted{color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px;overflow-wrap:anywhere}
+svg{flex:none}
+.demo-focus{outline:2px solid var(--focus);outline-offset:2px}
+
+/* top bar (V3-Launcher-Spin + V5 Connect entry) */
+.top{height:64px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px;border-bottom:1px solid var(--line);background:var(--rail);position:relative;z-index:8}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.brand svg{width:20px;height:20px}
+.tbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px;border-radius:6px;border:1px solid transparent;background:none;cursor:pointer;font-size:13px;white-space:nowrap;text-decoration:none}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{border-color:var(--line)}
+.tbtn svg{width:16px;height:16px}
+.tbtn .stw{font-size:12px;color:var(--muted)}
+
+/* dimmed Launcher behind the layer */
+.stage{flex:1;min-height:0;position:relative;overflow:hidden}
+.backdrop{position:absolute;inset:0;opacity:.4;pointer-events:none;display:flex;flex-direction:column}
+.bfield{flex:1;position:relative}
+.floor{position:absolute;left:0;right:0;bottom:0;top:30%;background:var(--floor);clip-path:polygon(14% 0,86% 0,100% 100%,0 100%)}
+.floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
+.brow{position:absolute;left:0;right:0;top:84px;display:flex;justify-content:center;gap:40px}
+.cb{width:232px;height:344px;display:flex;flex-direction:column;align-items:center;padding-top:8px;box-sizing:border-box;--s:152px}
+.scene{position:relative;width:calc(var(--s) * 1.5);height:calc(var(--s) * 1.72);perspective:1100px}
+.shadow{position:absolute;left:50%;top:calc(47.5% + var(--s) * .5);width:calc(var(--s) * 1.45);height:calc(var(--s) * .62);transform:translate(-46%,-46%);border-radius:50%;background:var(--shadow);filter:blur(8px)}
+.cube{position:absolute;left:50%;top:47.5%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-35deg) rotateY(45deg)}
+.cube.btc{--edge:var(--edge-btc)}.cube.b2b{--edge:var(--edge-b2b)}.cube.test{--edge:var(--edge-test)}
+.f{position:absolute;inset:0;box-sizing:border-box;border:1.5px solid var(--edge);display:flex;align-items:center;justify-content:center;color:var(--ink);backface-visibility:hidden}
+.cube.test .f{border-style:dashed}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2))}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.tc{display:flex;flex-direction:column;align-items:center;gap:6px;transform:rotate(45deg)}
+.bmk{display:inline-flex;width:calc(var(--s) * .34);height:calc(var(--s) * .34);border-radius:50%;box-sizing:border-box}
+.bmk img{display:block;width:100%;height:100%;border-radius:50%}
+.bmk.tn{border:1.5px dashed currentColor;padding:calc(var(--s) * .018)}
+.bmk.tn img{opacity:.6}
+.ftag{font-size:14px;font-weight:600;padding:0 .35em;border:1px solid var(--edge);border-radius:.3em;white-space:nowrap}
+.wi{width:38px;height:38px}
+.pad{width:54px;height:54px}
+.bnm{margin-top:auto;padding-bottom:10px;font-weight:600}
+.bbar{height:64px;flex:none;display:flex;align-items:center;gap:8px;padding:0 24px;border-top:1px solid var(--line);background:var(--rail)}
+.bbar .btn{pointer-events:none}
+
+/* the layer: one surface, path list left, flow right (V3-Launcher-Connect panel) */
+.sheet{position:absolute;left:160px;top:28px;width:1120px;bottom:28px;display:flex;flex-direction:column;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);overflow:hidden;z-index:4}
+.light .sheet{box-shadow:0 24px 64px -20px rgba(70,52,30,.35)}
+.shead{height:72px;flex:none;display:flex;align-items:center;gap:16px;padding:0 24px 0 28px;border-bottom:1px solid var(--line)}
+.shead h1{margin:0;font-size:24px;font-weight:600}
+.netl{display:inline-flex;align-items:center;gap:6px;font-size:14px;color:var(--muted)}
+.netl img{width:18px;height:18px;border-radius:50%;display:block}
+.sbody{flex:1;min-height:0;display:flex}
+.nav{width:248px;flex:none;box-sizing:border-box;padding:16px 12px;border-right:1px solid var(--line);display:flex;flex-direction:column;gap:6px}
+/* 6px gap is wider than the focus ring; the current or focused row paints above its neighbours (V5 item 9) */
+.ni{position:relative;z-index:0;display:flex;align-items:center;gap:10px;min-height:40px;padding:0 12px;border:0;border-radius:8px;background:none;cursor:pointer;font-size:14px;text-align:left}
+.ni[aria-current="page"]{z-index:1;background:var(--selected);font-weight:600}
+.ni:focus-visible{z-index:2}
+.ni:hover{background:var(--selected)}
+.ni svg{width:18px;height:18px;color:var(--muted)}
+.ni[aria-current="page"] svg{color:var(--accent)}
+.ni .gt{margin-left:auto;font-size:11px;font-weight:500;color:var(--muted);border:1px dashed var(--muted);border-radius:4px;padding:0 5px;white-space:nowrap}
+.navgap{height:8px}
+.content{flex:1;min-width:0;overflow-y:auto;padding:28px 40px 40px}
+.sec{max-width:700px}
+.sec h2{margin:0;font-size:20px;font-weight:600;line-height:1.3}
+.sec h3{margin:0;font-size:16px;font-weight:600}
+.lead{margin:6px 0 0;color:var(--muted);font-size:14px}
+.gate{display:flex;align-items:flex-start;gap:10px;margin:0 0 20px;padding:10px 14px;border:1px dashed var(--muted);border-radius:8px;font-size:13px}
+.gate svg{width:18px;height:18px;color:var(--muted)}
+.gate b{font-weight:600}
+
+/* hub list */
+.list{list-style:none;margin:16px 0 0;padding:0;border-top:1px solid var(--line)}
+.li{display:flex;align-items:center;gap:16px;min-height:60px;padding:12px 0;border-bottom:1px solid var(--line);box-sizing:border-box}
+.li > svg{width:22px;height:22px;color:var(--muted)}
+.li .main{flex:1;min-width:0}
+.li .t{font-weight:500}
+.li .s{font-size:13px;color:var(--muted)}
+.tag{display:inline-flex;align-items:center;height:20px;padding:0 6px;border:1px solid var(--line);border-radius:4px;font-size:12px;font-weight:500;white-space:nowrap}
+.tag.off{border-style:dashed;color:var(--muted)}
+.grp{margin-top:32px}
+
+/* stepper: one or two words per step */
+.stepper{display:flex;gap:6px;margin:20px 0 0;padding:0 0 16px;list-style:none;border-bottom:1px solid var(--line)}
+.stp{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 10px 0 6px;border:0;border-radius:15px;background:none;font-size:13px;color:var(--muted);cursor:pointer}
+.stp:disabled{cursor:default}
+.stp .n{width:20px;height:20px;border-radius:50%;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:11px}
+.stp[aria-current="step"]{color:var(--ink);font-weight:600;background:var(--selected)}
+.stp[aria-current="step"] .n{border-color:var(--accent)}
+.stp.done{color:var(--ink)}
+.stp.done .n{border-color:var(--good);color:var(--good)}
+.chev{color:var(--muted);align-self:center;font-size:12px}
+
+/* forms */
+.form{display:flex;flex-direction:column;gap:20px;margin-top:24px}
+.fld{display:flex;flex-direction:column;gap:6px}
+.fld > label,.lbl{font-size:13px;font-weight:600}
+.inp{height:40px;box-sizing:border-box;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:var(--bg);max-width:520px;width:100%}
+.inp.wide{max-width:none}
+.inp.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+.inp.code{width:200px;font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:16px;letter-spacing:.3em}
+.inp:focus{border-color:var(--focus)}
+.inp[aria-invalid="true"]{border-color:var(--bad)}
+.cap{margin:0;font-size:12px;color:var(--muted);max-width:620px}
+.seg{display:inline-flex;gap:0;border:1px solid var(--line);border-radius:8px;overflow:hidden;width:max-content}
+.seg button{height:34px;padding:0 14px;border:0;background:none;cursor:pointer;font-size:13px}
+.seg button + button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--selected);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.radios{display:flex;flex-direction:column;gap:2px;border:0;margin:0;padding:0}
+.radios legend{font-size:13px;font-weight:600;margin-bottom:6px;padding:0}
+.ro{display:flex;align-items:flex-start;gap:10px;padding:8px 10px;border-radius:8px;cursor:pointer}
+.ro:hover{background:var(--selected)}
+.ro input{margin:3px 0 0;width:16px;height:16px;accent-color:var(--accent)}
+.ro .d{display:block;font-size:12px;color:var(--muted)}
+.ro.dis{cursor:default;color:var(--muted)}
+.ro.dis:hover{background:none}
+.err,.okline{display:flex;align-items:flex-start;gap:6px;margin:0;font-size:13px}
+.err{color:var(--bad)}.okline{color:var(--good)}
+.err svg,.okline svg{width:16px;height:16px;margin-top:1px}
+.alert{display:flex;align-items:flex-start;gap:10px;margin:20px 0 0;padding:12px 14px;border:1px solid var(--line);border-left:3px solid var(--bad);border-radius:8px;background:var(--bg)}
+.alert svg{width:18px;height:18px;color:var(--bad);margin-top:1px}
+.alert .ab{display:flex;flex-direction:column;gap:8px;align-items:flex-start}
+.pinrow{display:flex;align-items:center;gap:10px}
+.pinrow fieldset{display:flex;gap:12px;border:0;margin:0;padding:0}
+.dg{width:52px;height:56px;box-sizing:border-box;border:1px solid var(--line);border-radius:8px;background:var(--bg);text-align:center;font-size:24px;font-weight:500}
+.dg:focus{border-color:var(--focus)}
+.dg[aria-invalid="true"]{border-color:var(--bad)}
+.eye{width:44px;height:44px;display:inline-flex;align-items:center;justify-content:center;border:1px solid transparent;border-radius:8px;background:none;cursor:pointer;color:var(--muted)}
+.eye:hover{border-color:var(--line)}
+.eye svg{width:20px;height:20px}
+.words{display:grid;grid-template-columns:repeat(4,150px);gap:16px 24px;border:0;margin:0;padding:0}
+.kv{display:flex;flex-direction:column;gap:6px;padding:16px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.kv p{margin:0}
+.addr{display:flex;align-items:center;gap:12px}
+.status{display:flex;align-items:center;gap:12px;margin-top:24px;font-size:15px}
+.dots{display:flex;gap:8px;align-items:center}
+.dots i{display:block;width:7px;height:7px;border-radius:50%;background:var(--ink);opacity:.25;animation:pulse 1.5s ease-in-out infinite}
+.dots i:nth-child(2){animation-delay:.5s}
+.dots i:nth-child(3){animation-delay:1s}
+.tenshu.reduced .dots i:first-child{opacity:.9}
+@keyframes pulse{0%,100%{opacity:.25}33%{opacity:.95}}
+.bar{height:6px;border-radius:3px;background:var(--line);overflow:hidden;max-width:520px}
+.bar i{display:block;height:100%;width:42%;background:var(--accent)}
+.loop{list-style:none;margin:20px 0 0;padding:0;border-top:1px solid var(--line)}
+.loop li{display:flex;align-items:center;gap:14px;min-height:56px;padding:10px 0;border-bottom:1px solid var(--line)}
+.loop .n{width:24px;height:24px;border-radius:50%;border:1px solid var(--line);display:inline-flex;align-items:center;justify-content:center;font-size:12px;flex:none}
+.loop li.done .n{border-color:var(--good);color:var(--good)}
+.loop .main{flex:1}
+.loop .s{font-size:13px;color:var(--muted)}
+.picker .ro{border-bottom:1px solid var(--line);border-radius:0;padding:12px 10px}
+.vrow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+
+.acts{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-top:28px}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 16px;border-radius:8px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink);white-space:nowrap}
+.tenshu a.btn{color:var(--ink)}
+.btn svg{width:16px;height:16px}
+.btn:hover{border-color:var(--muted)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.tenshu a.btn.primary{color:var(--on-accent)}
+.btn.primary:hover:not(:disabled){background:#ffa54d;border-color:#ffa54d}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+.btn.close{gap:6px;padding:0 12px 0 10px}
+.linkbtn{border:0;background:none;padding:2px 0;color:var(--ink);text-decoration:underline;text-decoration-color:var(--accent);text-underline-offset:3px;cursor:pointer;font-size:13px}
+.tenshu a.linkbtn{color:var(--ink)}
+
+/* recover-choice modal (home.rs RecoveryMethodModal) */
+.scrim{position:absolute;inset:0;background:var(--scrim);border:0;padding:0;z-index:5;cursor:default}
+.choice{position:absolute;left:50%;top:180px;transform:translateX(-50%);width:460px;box-sizing:border-box;padding:20px;display:flex;flex-direction:column;gap:15px;background:var(--panel);border:1px solid var(--line);border-radius:12px;box-shadow:0 24px 64px -16px rgba(0,0,0,.55);z-index:6}
+.choice h2{margin:0;font-size:18px;font-weight:600}
+.choice p{margin:0;color:var(--muted)}
+.choice .btn{width:100%;justify-content:flex-start}
+
+.foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
+a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+      <span>Tenshu</span>
+    </a>
+    <span class="grow"></span>
+    <a class="tbtn" href="P-Connect.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="8.5" r="3.5"></circle><path d="M5 20c.8-3.6 3.6-5.5 7-5.5s6.2 1.9 7 5.5"></path></svg>
+      <span>Connect · alex@example.test</span><span class="stw">Signed in</span>
+    </a>
+    <a class="tbtn" href="P-AppPrefs.dc.html">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M4 7h10M18 7h2M4 17h4M12 17h8"></path><circle cx="16" cy="7" r="2"></circle><circle cx="10" cy="17" r="2"></circle></svg>
+      <span>App preferences</span>
+    </a>
+  </header>
+
+  <main class="stage">
+    <div class="backdrop" aria-hidden="true">
+      <div class="bfield">
+        <div class="floor"></div>
+        <div class="brow">
+          <sc-for list="{{ floorCubes }}" as="c" hint-placeholder-count="4">
+            <div class="cb">
+              <div class="scene">
+                <div class="shadow"></div>
+                <div class="cube {{ c.edge }}">
+                  <div class="f t"><div class="tc">
+                    <sc-if value="{{ c.isB2b }}" hint-placeholder-val="{{ false }}"><span class="bmk"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                    <sc-if value="{{ c.notB2b }}" hint-placeholder-val="{{ true }}"><span class="bmk {{ c.coinCls }}"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                    <sc-if value="{{ c.hasTag }}" hint-placeholder-val="{{ false }}"><span class="ftag">{{ c.tag }}</span></sc-if>
+                  </div></div>
+                  <div class="f l"><svg class="wi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round"><path d="{{ c.walletPath }}"></path></svg></div>
+                  <div class="f r"><svg class="pad" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg></div>
+                </div>
+              </div>
+              <span class="bnm">{{ c.name }}</span>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div class="bbar"><span class="btn primary">Create Cube</span><span class="btn">Import or restore a Cube</span></div>
+    </div>
+
+    <section class="sheet" aria-labelledby="ir-title">
+      <div class="shead">
+        <h1 id="ir-title">Import or restore</h1>
+        <span class="netl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""><span>Bitcoin mainnet</span></span>
+        <span class="grow"></span>
+        <a class="btn close" href="P-Launcher.dc.html" aria-label="Close Import or restore">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
+          <span>Close</span>
+        </a>
+      </div>
+      <div class="sbody">
+        <nav class="nav" aria-label="Import and restore paths">
+          <sc-for list="{{ navItems }}" as="n" hint-placeholder-count="6">
+            <button type="button" class="ni" aria-current="{{ n.cur }}" onClick="{{ n.pick }}">
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ n.icon }}"></path></svg>
+              <span>{{ n.label }}</span>
+              <sc-if value="{{ n.gated }}" hint-placeholder-val="{{ false }}"><span class="gt">{{ n.gate }}</span></sc-if>
+            </button>
+          </sc-for>
+        </nav>
+
+        <div class="content">
+          <!-- ================= HUB ================= -->
+          <sc-if value="{{ v.hub }}" hint-placeholder-val="{{ true }}">
+            <div class="sec">
+              <h2>Choose what to bring in</h2>
+              <p class="lead">Bitcoin Blake2b supports Vault creation only.</p>
+              <ul class="list">
+                <sc-for list="{{ hubPaths }}" as="p" hint-placeholder-count="5">
+                  <li class="li">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ p.icon }}"></path></svg>
+                    <span class="main"><span class="t">{{ p.title }}</span><br><span class="s">{{ p.line }}</span></span>
+                    <span class="tag {{ p.tagCls }}">{{ p.tag }}</span>
+                    <button type="button" class="btn sm" disabled="{{ p.off }}" aria-label="{{ p.aria }}" onClick="{{ p.start }}">Start</button>
+                  </li>
+                </sc-for>
+              </ul>
+
+              <div class="grp">
+                <h3>On your Connect account</h3>
+                <ul class="list">
+                  <sc-for list="{{ remoteCubes }}" as="r" hint-placeholder-count="4">
+                    <li class="li">
+                      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9zM4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
+                      <span class="main"><span class="t">{{ r.name }}</span><br><span class="s">{{ r.line }}</span></span>
+                      <sc-if value="{{ r.can }}" hint-placeholder-val="{{ true }}">
+                        <button type="button" class="btn sm" aria-label="{{ r.aria }}" title="{{ r.tip }}" onClick="{{ r.go }}">{{ r.action }}</button>
+                      </sc-if>
+                    </li>
+                  </sc-for>
+                </ul>
+              </div>
+            </div>
+          </sc-if>
+
+          <!-- ================= A PATH ================= -->
+          <sc-if value="{{ v.path }}" hint-placeholder-val="{{ false }}">
+            <div class="sec">
+              <sc-if value="{{ gate.on }}" hint-placeholder-val="{{ false }}">
+                <p class="gate"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 11h10v9H7zM9 11V8a3 3 0 0 1 6 0v3"></path></svg><span><b>{{ gate.title }}</b> {{ gate.text }}</span></p>
+              </sc-if>
+              <h2>{{ pathTitle }}</h2>
+              <ol class="stepper" aria-label="Steps">
+                <sc-for list="{{ stepper }}" as="k" hint-placeholder-count="5">
+                  <li><button type="button" class="stp {{ k.cls }}" aria-current="{{ k.cur }}" disabled="{{ k.off }}" onClick="{{ k.pick }}"><span class="n">{{ k.n }}</span>{{ k.label }}</button></li>
+                </sc-for>
+              </ol>
+
+              <sc-if value="{{ hasErr }}" hint-placeholder-val="{{ false }}">
+                <div class="alert" role="alert">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3.5 21.5 20h-19z"></path><path d="M12 10v4.5M12 17.2v.01"></path></svg>
+                  <div class="ab">
+                    <span>{{ errText }}</span>
+                    <sc-if value="{{ errRetry }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn sm" onClick="{{ retry }}">{{ errRetryLabel }}</button></sc-if>
+                    <sc-if value="{{ errSignIn }}" hint-placeholder-val="{{ false }}"><a class="btn sm" href="P-SignIn.dc.html">Sign in to Connect</a></sc-if>
+                  </div>
+                </div>
+              </sc-if>
+
+              <!-- ---------- Create the Cube (Import step 1, Recovery phrase step 1) ---------- -->
+              <sc-if value="{{ v.cubeStep }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <div>
+                    <h3>{{ cubeHead }}</h3>
+                    <p class="lead">{{ cubeLead }}</p>
+                  </div>
+                  <div class="fld">
+                    <label for="cube-name">Cube name</label>
+                    <input id="cube-name" class="inp" type="text" value="{{ cubeName }}" onChange="{{ setName }}">
+                  </div>
+                  <div class="fld">
+                    <span class="lbl" id="pin1-l">Enter PIN:</span>
+                    <div class="pinrow">
+                      <fieldset aria-labelledby="pin1-l"><sc-for list="{{ pin1 }}" as="d" hint-placeholder-count="4"><input class="dg" type="{{ pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="{{ d.label }}" value="{{ d.val }}" onChange="{{ d.set }}"></sc-for></fieldset>
+                      <button type="button" class="eye" aria-pressed="{{ showPressed }}" aria-label="Show PIN" onClick="{{ toggleShow }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg></button>
+                    </div>
+                  </div>
+                  <div class="fld">
+                    <span class="lbl" id="pin2-l">Confirm PIN:</span>
+                    <div class="pinrow">
+                      <fieldset aria-labelledby="pin2-l"><sc-for list="{{ pin2 }}" as="d" hint-placeholder-count="4"><input class="dg" type="{{ pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="{{ d.label }}" aria-invalid="{{ pinBad }}" value="{{ d.val }}" onChange="{{ d.set }}"></sc-for></fieldset>
+                    </div>
+                    <sc-if value="{{ pinMismatch }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg><span>{{ cubePinErr }}</span></p></sc-if>
+                  </div>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn primary" disabled="{{ pinNotReady }}" onClick="{{ next }}">Create Cube</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- IMPORT 2: source ---------- -->
+              <sc-if value="{{ v.imp2 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <p class="lead" style="margin:0">Use your existing Bitcoin wallet in this Cube. The descriptor describes the wallet; you add its keys on the next step, and the wallet then works like any other wallet here.</p>
+                  <div class="fld">
+                    <span class="lbl" id="src-l">Source wallet</span>
+                    <div class="seg" role="group" aria-labelledby="src-l">
+                      <button type="button" aria-pressed="{{ src.desc }}" onClick="{{ pickDesc }}">Public descriptor</button>
+                      <button type="button" aria-pressed="{{ src.hw }}" onClick="{{ pickHw }}">Hardware wallet</button>
+                    </div>
+                  </div>
+                  <sc-if value="{{ v.srcDesc }}" hint-placeholder-val="{{ true }}">
+                    <div class="fld">
+                      <label for="ext-d">External / receive descriptor</label>
+                      <input id="ext-d" class="inp wide mono" type="text" spellcheck="false" placeholder="wpkh([fingerprint/path]xpub.../0/*)" value="wpkh([a1b2c3d4/84'/0'/0']xpub-synthetic/0/*)">
+                    </div>
+                    <div class="fld">
+                      <label for="int-d">Internal / change descriptor</label>
+                      <input id="int-d" class="inp wide mono" type="text" spellcheck="false" placeholder="wpkh([fingerprint/path]xpub.../1/*)">
+                      <p class="cap">Use public Bitcoin mainnet descriptors with signer origins for hardware and PSBT signing. For a combined descriptor ending in /&lt;0;1&gt;/*, use the receive field and leave change empty.</p>
+                    </div>
+                  </sc-if>
+                  <sc-if value="{{ v.srcHw }}" hint-placeholder-val="{{ false }}">
+                    <fieldset class="radios">
+                      <legend>Hardware wallet</legend>
+                      <label class="ro"><input type="radio" name="hwdev" checked="{{ hwOn }}" onChange="{{ noop }}"><span>Ledger-style device · <span class="mono">a1b2c3d4</span></span></label>
+                    </fieldset>
+                    <fieldset class="radios">
+                      <legend>Address type</legend>
+                      <sc-for list="{{ purposes }}" as="o" hint-placeholder-count="3">
+                        <label class="ro"><input type="radio" name="purpose" checked="{{ o.on }}" onChange="{{ o.pick }}"><span>{{ o.label }}</span></label>
+                      </sc-for>
+                    </fieldset>
+                    <div class="fld">
+                      <label for="acct">Account</label>
+                      <input id="acct" class="inp" style="width:120px" type="text" inputmode="numeric" value="0">
+                    </div>
+                    <div class="vrow">
+                      <button type="button" class="btn" onClick="{{ readAccount }}">Read account</button>
+                      <span class="cap" aria-live="polite">{{ hwStatus }}</span>
+                    </div>
+                    <p class="cap">Read one standard Bitcoin mainnet singlesig account from a connected hardware wallet (BIP84, BIP49 or BIP44). The device keeps its seed and signs for this wallet; the account is read, not copied.</p>
+                  </sc-if>
+
+                  <div class="fld">
+                    <span class="lbl" id="scan-l">Where should the history scan start?</span>
+                    <div class="seg" role="group" aria-labelledby="scan-l">
+                      <button type="button" aria-pressed="{{ scan.begin }}" onClick="{{ pickBegin }}">From the beginning</button>
+                      <button type="button" aria-pressed="{{ scan.date }}" onClick="{{ pickDate }}">From a creation date</button>
+                    </div>
+                    <sc-if value="{{ v.scanDate }}" hint-placeholder-val="{{ false }}">
+                      <input class="inp" style="width:200px" type="text" placeholder="YYYY-MM-DD" aria-label="Wallet creation date" aria-invalid="{{ dateBad }}" value="{{ dateVal }}" onChange="{{ setDate }}">
+                    </sc-if>
+                    <p class="cap">{{ scanCap }}</p>
+                  </div>
+                  <div class="fld">
+                    <label for="look">Addresses to search per branch</label>
+                    <input id="look" class="inp" style="width:120px" type="text" inputmode="numeric" placeholder="200" value="200">
+                    <p class="cap">Start with 200 receive and 200 change addresses. You can search further after the scan finishes.</p>
+                  </div>
+                  <fieldset class="radios">
+                    <legend>Bitcoin server</legend>
+                    <sc-for list="{{ servers }}" as="o" hint-placeholder-count="4">
+                      <label class="ro"><input type="radio" name="server" checked="{{ o.on }}" onChange="{{ o.pick }}"><span>{{ o.label }}</span></label>
+                    </sc-for>
+                  </fieldset>
+                  <sc-if value="{{ v.serverUrl }}" hint-placeholder-val="{{ false }}">
+                    <input class="inp" type="text" placeholder="Server URL" aria-label="Server URL">
+                  </sc-if>
+                  <sc-if value="{{ v.serverCap }}" hint-placeholder-val="{{ true }}"><p class="cap">{{ serverCap }}</p></sc-if>
+                </div>
+                <div class="acts"><button type="button" class="btn primary" onClick="{{ next }}">Review wallet</button></div>
+              </sc-if>
+
+              <!-- ---------- IMPORT 3: keys (the descriptor names the signers; the user supplies each key) ---------- -->
+              <sc-if value="{{ v.imp3 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <div>
+                    <h3>Add the wallet's keys</h3>
+                    <p class="lead">The descriptor names 1 signer. Provide its key so this Cube can sign with the wallet. Each key is checked against its fingerprint before it is accepted.</p>
+                  </div>
+                  <div class="kv">
+                    <p><b>Key 1 of 1</b> · fingerprint <span class="mono">a1b2c3d4</span> · path <span class="mono">84'/0'/0'</span></p>
+                    <sc-if value="{{ v.keyOk }}" hint-placeholder-val="{{ false }}"><p class="okline" role="status"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg><span>Verified · matches a1b2c3d4 · {{ keySrcLabel }}</span></p></sc-if>
+                    <sc-if value="{{ v.keyPending }}" hint-placeholder-val="{{ true }}"><p class="cap">Not provided yet</p></sc-if>
+                  </div>
+                  <div class="fld">
+                    <span class="lbl" id="key-l">Where is this key?</span>
+                    <div class="seg" role="group" aria-labelledby="key-l">
+                      <button type="button" aria-pressed="{{ keySrc.words }}" onClick="{{ pickKeyWords }}">Recovery words</button>
+                      <button type="button" aria-pressed="{{ keySrc.hw }}" onClick="{{ pickKeyHw }}">Hardware wallet</button>
+                      <button type="button" aria-pressed="{{ keySrc.kc }}" onClick="{{ pickKeyKc }}">Keychain phone</button>
+                    </div>
+                  </div>
+                  <sc-if value="{{ v.keyWords }}" hint-placeholder-val="{{ true }}">
+                    <div class="fld">
+                      <label for="key-words">Recovery words</label>
+                      <input id="key-words" class="inp wide mono" type="text" spellcheck="false" autocomplete="off" placeholder="12 or 24 words, separated by spaces">
+                      <p class="cap">Words are checked locally and stored inside this Cube, protected by its PIN, like any Vault key.</p>
+                    </div>
+                    <div class="fld">
+                      <label for="key-pass">Passphrase (if the wallet used one)</label>
+                      <input id="key-pass" class="inp" style="width:280px" type="password" autocomplete="off" placeholder="Optional">
+                    </div>
+                    <div class="vrow"><button type="button" class="btn" onClick="{{ verifyKey }}">Verify key</button></div>
+                  </sc-if>
+                  <sc-if value="{{ v.keyHw }}" hint-placeholder-val="{{ false }}">
+                    <fieldset class="radios">
+                      <legend>Connected device</legend>
+                      <label class="ro"><input type="radio" name="keydev" checked="{{ hwOn }}" onChange="{{ noop }}"><span>Ledger-style device · <span class="mono">a1b2c3d4</span></span></label>
+                    </fieldset>
+                    <p class="cap">The seed stays on the device. Tenshu asks the device to sign whenever this wallet spends.</p>
+                    <div class="vrow"><button type="button" class="btn" onClick="{{ verifyKey }}">Check device</button></div>
+                  </sc-if>
+                  <sc-if value="{{ v.keyKc }}" hint-placeholder-val="{{ false }}">
+                    <p class="cap">Pair the phone that holds this key. The phone signs for this wallet the way it signs for a Vault.</p>
+                    <div class="vrow"><button type="button" class="btn" onClick="{{ verifyKey }}">Pair phone</button><a class="linkbtn" href="P-Signing.dc.html">How pairing works</a></div>
+                  </sc-if>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn" onClick="{{ back }}">Back</button>
+                  <button type="button" class="btn primary" disabled="{{ keysNotReady }}" onClick="{{ next }}">Review wallet</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- IMPORT 4: review (verify before importing) ---------- -->
+              <sc-if value="{{ v.imp4 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <h3>Review Bitcoin wallet</h3>
+                  <div class="kv">
+                    <p><b>Wallet details</b></p>
+                    <p>Bitcoin mainnet · Native SegWit · 1 signer</p>
+                    <p>Signer fingerprints: <span class="mono">a1b2c3d4</span></p>
+                    <p>Keys: 1 of 1 provided · {{ keySrcLabel }} · verified against the fingerprint</p>
+                  </div>
+                  <div class="fld">
+                    <span class="lbl">First receive address</span>
+                    <div class="addr"><span class="mono">bc1q-synthetic-receive-address-0</span><button type="button" class="btn sm" onClick="{{ copied }}">Copy address</button></div>
+                    <p class="cap">Compare this address with your original wallet before importing.</p>
+                  </div>
+                  <div class="kv">
+                    <p>History starts: Beginning</p>
+                    <p>Address search: 200 receive and 200 change addresses</p>
+                  </div>
+                  <p class="cap">Your balance and transactions will appear after the scan finishes. The Cube Recovery Kit is updated to include this wallet and its keys.</p>
+                  <div>
+                    <button type="button" class="linkbtn" aria-expanded="{{ detailsOpen }}" onClick="{{ toggleDetails }}">{{ detailsLabel }}</button>
+                    <sc-if value="{{ v.details }}" hint-placeholder-val="{{ false }}">
+                      <p class="cap mono" style="margin-top:8px">Receive: wpkh([a1b2c3d4/84'/0'/0']xpub-synthetic/0/*)</p>
+                    </sc-if>
+                  </div>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn" onClick="{{ back }}">Back to keys</button>
+                  <button type="button" class="btn primary" onClick="{{ next }}">Import and scan wallet</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- IMPORT 5: scan ---------- -->
+              <sc-if value="{{ v.imp5 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <h3>{{ scanHead }}</h3>
+                  <sc-if value="{{ v.scanOk }}" hint-placeholder-val="{{ true }}">
+                    <div class="bar" aria-hidden="true"><i></i></div>
+                    <p class="cap" role="status">[N]% · [N] addresses checked (about [N] expected)</p>
+                    <p>Your balance and transactions will appear when the scan finishes.</p>
+                  </sc-if>
+                  <div class="vrow">
+                    <button type="button" class="btn" disabled="{{ alwaysOff }}" aria-describedby="recv-wait">Receive</button>
+                    <span class="cap" id="recv-wait">Wait for the complete Bitcoin history scan before receiving.</span>
+                  </div>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn primary" onClick="{{ next }}">Continue</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- IMPORT 6: done ---------- -->
+              <sc-if value="{{ v.imp6 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <div>
+                    <h3>{{ cubeName }} is ready</h3>
+                    <p class="lead">Imported wallet · Bitcoin mainnet · Native SegWit · 1 key verified. It works like any wallet in this Cube: Send, Receive, Activity and Tools, with Tenshu signing.</p>
+                  </div>
+                  <div class="kv">
+                    <p>Balance and history: from the scan</p>
+                    <p>Keys: {{ keySrcLabel }}, protected by this Cube's PIN</p>
+                    <p>Recovery Kit: updated to include this wallet</p>
+                  </div>
+                  <p class="cap">Any pre-fork coins can be split later from Vault › Tools once Bitcoin Blake2b is turned on for this device.</p>
+                </div>
+                <div class="acts">
+                  <a class="btn primary" href="P-Opening.dc.html">Open Cube</a>
+                </div>
+              </sc-if>
+
+              <!-- ---------- KIT 1: sign in ---------- -->
+              <sc-if value="{{ v.kit1 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <p class="lead" style="margin:0">Sign in to your Connect account to fetch your Cube Recovery Kit.</p>
+                  <div class="fld">
+                    <label for="kit-email">Email</label>
+                    <div class="vrow"><input id="kit-email" class="inp" type="email" placeholder="you@example.com" value="alex@example.test"><button type="button" class="btn primary" onClick="{{ sendCode }}">Send code</button></div>
+                  </div>
+                  <sc-if value="{{ v.codeSent }}" hint-placeholder-val="{{ false }}">
+                    <div class="fld">
+                      <label for="kit-code">Enter the 6-digit code we sent to your email.</label>
+                      <input id="kit-code" class="inp code" type="text" inputmode="numeric" autocomplete="one-time-code" placeholder="123456" aria-invalid="{{ codeBad }}" value="{{ codeVal }}" onChange="{{ setCode }}">
+                      <sc-if value="{{ v.codeBad }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><span>Invalid code</span></p></sc-if>
+                    </div>
+                  </sc-if>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn primary" disabled="{{ codeOff }}" onClick="{{ verifyCode }}">Next</button>
+                  <button type="button" class="linkbtn" onClick="{{ toHub }}">Skip — restore later</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- KIT 2: pick the Cube ---------- -->
+              <sc-if value="{{ v.kit2 }}" hint-placeholder-val="{{ false }}">
+                <sc-if value="{{ v.kitList }}" hint-placeholder-val="{{ true }}">
+                  <fieldset class="radios picker" style="margin-top:24px">
+                    <legend>Cubes on alex@example.test · Bitcoin mainnet</legend>
+                    <sc-for list="{{ kitCubes }}" as="o" hint-placeholder-count="4">
+                      <label class="ro {{ o.cls }}"><input type="radio" name="kitcube" checked="{{ o.on }}" disabled="{{ o.off }}" onChange="{{ o.pick }}"><span>{{ o.label }}</span></label>
+                    </sc-for>
+                  </fieldset>
+                </sc-if>
+                <div class="acts">
+                  <button type="button" class="btn primary" disabled="{{ kitListOff }}" onClick="{{ next }}">Next</button>
+                  <button type="button" class="linkbtn" onClick="{{ toHub }}">Skip — restore later</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- KIT 3: password, decrypt, verify ---------- -->
+              <sc-if value="{{ v.kit3 }}" hint-placeholder-val="{{ false }}">
+                <sc-if value="{{ v.kitEntry }}" hint-placeholder-val="{{ true }}">
+                  <div class="form">
+                    <div class="fld">
+                      <label for="kit-pw">Enter the recovery password for "{{ kitName }}".</label>
+                      <input id="kit-pw" class="inp" type="password" placeholder="Recovery password" aria-invalid="{{ pwBad }}">
+                    </div>
+                  </div>
+                  <div class="acts">
+                    <button type="button" class="btn primary" onClick="{{ restoreKit }}">Restore</button>
+                    <button type="button" class="linkbtn" onClick="{{ toHub }}">Skip — restore later</button>
+                  </div>
+                </sc-if>
+                <sc-if value="{{ v.kitBusy }}" hint-placeholder-val="{{ false }}">
+                  <p class="status" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Decrypting your Recovery Kit. This takes a moment.</span></p>
+                </sc-if>
+                <sc-if value="{{ v.kitReady }}" hint-placeholder-val="{{ false }}">
+                  <p class="status okline" role="status"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg><span>Ready to restore from "{{ kitName }}".</span></p>
+                  <p class="cap" style="margin-top:8px">Cube and network match this Recovery Kit.</p>
+                  <div class="acts"><button type="button" class="btn primary" onClick="{{ next }}">Next</button></div>
+                </sc-if>
+              </sc-if>
+
+              <!-- ---------- PHONE 1 / HEIR 2: approve on the phone ---------- -->
+              <sc-if value="{{ v.approve }}" hint-placeholder-val="{{ false }}">
+                <sc-if value="{{ v.approving }}" hint-placeholder-val="{{ true }}">
+                  <p class="status" role="status"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>{{ approveText }}</span></p>
+                  <div class="acts">
+                    <button type="button" class="btn" onClick="{{ toHub }}">Cancel</button>
+                    <button type="button" class="linkbtn" onClick="{{ next }}">Approved on phone</button>
+                  </div>
+                </sc-if>
+              </sc-if>
+
+              <!-- ---------- HEIR 1: Recover a Vault list ---------- -->
+              <sc-if value="{{ v.heir1 }}" hint-placeholder-val="{{ false }}">
+                <p class="lead" style="margin-top:20px">Vaults you're a keyholder for appear here. When a vault's recovery window opens, you can recover it with your Keychain — no password needed.</p>
+                <sc-if value="{{ v.heirList }}" hint-placeholder-val="{{ true }}">
+                  <ul class="list">
+                    <li class="li">
+                      <span class="main"><span class="t">Vault #1 <span class="tag">Full Cube</span> <span class="tag" style="border-color:var(--good)">Recovery open</span></span><br><span class="s">Recovery is open — a keyholder of this vault can complete it.</span></span>
+                      <button type="button" class="btn sm primary" onClick="{{ next }}">Recover full Cube</button>
+                    </li>
+                    <li class="li">
+                      <span class="main"><span class="t">Vault #2 <span class="tag">Vault only</span></span><br><span class="s">Recovery isn't open yet — expected around [DATE]. We'll email you.</span></span>
+                    </li>
+                  </ul>
+                </sc-if>
+              </sc-if>
+
+              <!-- ---------- PIN for the restored Cube (installer RestorePinSetup) ---------- -->
+              <sc-if value="{{ v.pinStep }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <div>
+                    <h3>Create a PIN to secure your Cube</h3>
+                    <p class="lead">Your Cube's mnemonic will be encrypted with this PIN on disk.</p>
+                  </div>
+                  <div class="fld">
+                    <span class="lbl" id="rp1-l">Enter a 4-digit PIN:</span>
+                    <div class="pinrow">
+                      <fieldset aria-labelledby="rp1-l"><sc-for list="{{ pin1 }}" as="d" hint-placeholder-count="4"><input class="dg" type="{{ pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="{{ d.label }}" value="{{ d.val }}" onChange="{{ d.set }}"></sc-for></fieldset>
+                      <button type="button" class="eye" aria-pressed="{{ showPressed }}" aria-label="Show PIN" onClick="{{ toggleShow }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ eyePath }}"></path></svg></button>
+                    </div>
+                  </div>
+                  <div class="fld">
+                    <span class="lbl" id="rp2-l">Confirm PIN:</span>
+                    <div class="pinrow">
+                      <fieldset aria-labelledby="rp2-l"><sc-for list="{{ pin2 }}" as="d" hint-placeholder-count="4"><input class="dg" type="{{ pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="{{ d.label }}" aria-invalid="{{ pinBad }}" value="{{ d.val }}" onChange="{{ d.set }}"></sc-for></fieldset>
+                    </div>
+                    <sc-if value="{{ pinMismatch }}" hint-placeholder-val="{{ false }}"><p class="err" role="alert"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M12 7.5v5.5M12 16.3v.01"></path></svg><span>PINs do not match.</span></p></sc-if>
+                  </div>
+                </div>
+                <div class="acts"><button type="button" class="btn primary" disabled="{{ pinNotReady }}" onClick="{{ next }}">Next</button></div>
+              </sc-if>
+
+              <!-- ---------- FINISH: node choice + finalize (kit, phone, heir) ---------- -->
+              <sc-if value="{{ v.finStep }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <fieldset class="radios">
+                    <legend>Bitcoin server</legend>
+                    <sc-for list="{{ nodes }}" as="o" hint-placeholder-count="3">
+                      <label class="ro"><input type="radio" name="node" checked="{{ o.on }}" onChange="{{ o.pick }}"><span>{{ o.label }}<span class="d">{{ o.desc }}</span></span></label>
+                    </sc-for>
+                  </fieldset>
+                </div>
+                <div class="acts">
+                  <sc-if value="{{ fin.idle }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn primary" onClick="{{ finalize }}">Finalize installation</button></sc-if>
+                  <sc-if value="{{ fin.busy }}" hint-placeholder-val="{{ false }}"><p class="status" role="status" style="margin:0"><span class="dots" aria-hidden="true"><i></i><i></i><i></i></span><span>Installing...</span></p></sc-if>
+                  <sc-if value="{{ fin.done }}" hint-placeholder-val="{{ false }}">
+                    <p class="okline" role="status" style="font-size:15px"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg><span>Installed</span></p>
+                    <a class="btn primary" href="P-Opening.dc.html">Open {{ restoredName }}</a>
+                  </sc-if>
+                </div>
+              </sc-if>
+
+              <!-- ---------- PHRASE 2: 12 words ---------- -->
+              <sc-if value="{{ v.pp2 }}" hint-placeholder-val="{{ false }}">
+                <div class="form">
+                  <div>
+                    <h3>Enter Recovery Phrase</h3>
+                    <p class="lead">Enter your 12-word recovery phrase to restore your Liquid wallet.</p>
+                  </div>
+                  <fieldset class="words">
+                    <legend class="sr">Recovery phrase, 12 words</legend>
+                    <sc-for list="{{ words }}" as="w" hint-placeholder-count="12">
+                      <input class="inp" type="text" autocomplete="off" spellcheck="false" placeholder="{{ w.ph }}" aria-label="{{ w.aria }}" value="{{ w.val }}" onChange="{{ w.set }}">
+                    </sc-for>
+                  </fieldset>
+                </div>
+                <div class="acts">
+                  <button type="button" class="btn" onClick="{{ toHub }}">Cancel</button>
+                  <button type="button" class="btn primary" disabled="{{ wordsOff }}" onClick="{{ next }}">Recover Wallet</button>
+                </div>
+              </sc-if>
+
+              <!-- ---------- PHRASE 3: done ---------- -->
+              <sc-if value="{{ v.pp3 }}" hint-placeholder-val="{{ false }}">
+                <p class="status okline" role="status"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg><span>{{ cubeName }} restored</span></p>
+                <div class="acts"><a class="btn primary" href="P-Opening.dc.html">Open {{ cubeName }}</a></div>
+              </sc-if>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+    </section>
+
+    <!-- Recover choice (home.rs RecoveryMethodModal): a Cube with both backups -->
+    <sc-if value="{{ v.choice }}" hint-placeholder-val="{{ false }}">
+      <button type="button" class="scrim" aria-label="Close dialog" tabIndex="-1" onClick="{{ closeChoice }}"></button>
+      <section class="choice" role="dialog" aria-modal="true" aria-labelledby="ch-t">
+        <h2 id="ch-t">Recover "Household 2024"</h2>
+        <p>This Cube has two backups. Choose how to recover it — both restore the same wallet.</p>
+        <button type="button" class="btn demo-focus" onClick="{{ choosePassword }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15" r="4"></circle><path d="M11 12l8-8M16 7l2 2M14 9l2 2"></path></svg>Recover with password</button>
+        <button type="button" class="btn" onClick="{{ choosePhone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="7" y="3" width="10" height="18" rx="2"></rect><path d="M11 18h2"></path></svg>Recover with phone</button>
+        <button type="button" class="btn" onClick="{{ closeChoice }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>Cancel</button>
+      </section>
+    </sc-if>
+  </main>
+  <div class="foot">{{ foot }}</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"path":{"editor":"enum","options":["hub","import","kit","phone","heir","phrase"],"default":"hub","section":"Review"},"step":{"editor":"enum","options":["1","2","3","4","5","6"],"default":"1","section":"Review"},"error":{"editor":"enum","options":["none","invalid","mismatch","signedOut","unavailable","delayed","network","pin"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  constructor(p) { super(p); this.state = { lv: null }; }
+  renderVals() {
+    const P = this.props, self = this;
+    const theme = P.theme ?? 'dark';
+    const L = { path: P.path || 'hub', step: Math.max(1, parseInt(P.step || '1', 10) || 1), err: P.error || 'none' };
+    const key = [L.path, L.step, L.err].join('|');
+
+    // Step lists follow the app's order (home.rs, imported_bitcoin.rs, installer/mod.rs step sequences)
+    const STEPS = {
+      import: ['Cube', 'Source', 'Keys', 'Review', 'Scan', 'Done'],
+      kit: ['Sign in', 'Cube', 'Password', 'PIN', 'Finish'],
+      phone: ['Approve', 'PIN', 'Finish'],
+      heir: ['Vault', 'Approve', 'PIN', 'Finish'],
+      phrase: ['Cube', 'Phrase', 'Finish']
+    };
+    // error lever -> [step it belongs to, source string]; unmapped errors do not apply to that path
+    const ERR = {
+      import: {
+        invalid: [2, 'Enter the wallet creation date in YYYY-MM-DD format.'],
+        signedOut: [2, 'Sign in to Connect or choose another Bitcoin server.'],
+        network: [5, 'Could not synchronize this Bitcoin wallet. Check the Bitcoin server and your connection, then retry synchronization.'],
+        mismatch: [5, 'This Bitcoin server reported a different wallet or chain. Check the wallet setup and retry synchronization.'],
+        unavailable: [5, 'More signer signatures are needed before broadcast.'],
+        pin: [1, 'PIN codes do not match']
+      },
+      kit: {
+        unavailable: [2, 'No Cubes found on this Connect account for the current network.'],
+        invalid: [3, 'Recovery password is incorrect or the backup is corrupted.'],
+        mismatch: [3, 'This Recovery Kit contains data for a different Cube or network. Sign out and retry — or contact support if the problem persists.'],
+        delayed: [3, 'Recovery kit download is delayed on new devices. Available at [DATE].'],
+        network: [3, 'Connect error: [synthetic]'],
+        pin: [4, 'PINs do not match.']
+      },
+      phone: {
+        signedOut: [1, 'Sign in to your account to recover this Cube.'],
+        unavailable: [1, 'Recovery is unavailable right now. Try again later.'],
+        mismatch: [1, 'This phone backup belongs to a different Cube or chain.'],
+        invalid: [1, 'This seed backup needs a newer version of Tenshu.'],
+        network: [1, "Couldn't reach Connect: [synthetic]"],
+        pin: [2, 'PINs do not match.']
+      },
+      heir: {
+        signedOut: [1, 'Sign in to your account to see vaults you can recover.'],
+        unavailable: [2, "There's nothing escrowed for you to recover here."],
+        mismatch: [2, "This Vault isn't set up for the kind of recovery you started."],
+        network: [2, "Couldn't reach Connect: [synthetic]"],
+        pin: [3, 'PINs do not match.']
+      },
+      phrase: {
+        invalid: [2, 'Failed to restore from mnemonic: [synthetic]'],
+        unavailable: [2, 'Failed to store master seed mnemonic: [synthetic]'],
+        mismatch: [2, 'Bitcoin Blake2b supports Vault creation only'],
+        pin: [1, 'PIN codes do not match']
+      }
+    };
+
+    const leverErr = (ERR[L.path] || {})[L.err];
+    const startStep = leverErr ? leverErr[0] : Math.min(L.step, (STEPS[L.path] || [1]).length);
+    const pinPre = L.err === 'pin' ? { p1: ['1', '2', '3', '4'], p2: ['1', '2', '4', '3'] } : { p1: ['', '', '', ''], p2: ['', '', '', ''] };
+    const s = this.state.lv !== key
+      ? Object.assign({
+          path: L.path, step: startStep, err: leverErr ? L.err : 'none', show: false, choice: false,
+          src: 'desc', scan: L.err === 'invalid' && L.path === 'import' ? 'date' : 'begin', date: L.err === 'invalid' ? '2024-13-40' : '', server: L.err === 'signedOut' && L.path === 'import' ? 'connect' : 'public',
+          purpose: 'bip84', hwRead: false, details: false, keySrc: 'words', keyOk: false,
+          codeSent: L.path === 'kit' && startStep === 1 ? false : true, code: '', codeBad: false, pick: 'Household 2024',
+          kitPhase: 'entry', psbt: 0, node: 'connect', fin: 'idle', name: L.path === 'phrase' ? 'Travel fund' : 'Imported wallet',
+          words: Array.from({ length: 12 }, () => '')
+        }, pinPre)
+      : this.state;
+    const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
+    const later = (ms, patch) => setTimeout(() => {
+      const cur = self.state.lv === key ? self.state : s;
+      self.setState(Object.assign({}, cur, { lv: key }, patch));
+    }, ms);
+
+    const path = s.path, step = s.step;
+    const steps = STEPS[path] || [];
+    const errPair = (ERR[path] || {})[s.err];
+    const errHere = !!errPair && errPair[0] === step && s.err !== 'pin';
+    const goStep = (n) => go({ step: n, err: 'none' });
+    const next = () => goStep(Math.min(step + 1, steps.length));
+
+    const I = {
+      hub: 'M4 5h16M4 12h16M4 19h16',
+      imp: 'M12 4v11M7.5 10.5L12 15l4.5-4.5M5 19h14',
+      kit: 'M12 3l7 3v5.5c0 4.3-3 7.6-7 9.5-4-1.9-7-5.2-7-9.5V6zM8.8 12l2.2 2.2 4.2-4.4',
+      phone: 'M7 3h10v18H7zM11 18h2',
+      heir: 'M9 5.5a3 3 0 1 0 0 6a3 3 0 1 0 0-6M3.5 19c.6-3 2.8-4.6 5.5-4.6s4.9 1.6 5.5 4.6M15.5 5.8a3 3 0 0 1 0 5.4M17 14.6c1.8.5 3 1.9 3.5 4.4',
+      phrase: 'M5 5h14v14H5zM8.5 9h7M8.5 12h7M8.5 15h4'
+    };
+    // gates from feature_flags.rs and home.rs: RECOVER_VAULT_ENABLED defaults off; StartRecovery has no emitter
+    const GATE = {
+      heir: { title: 'Off in this build.', text: 'Turned on per build; also needs Connect sign-in and a non-Blake2b network. Drawn for review.' },
+      phrase: { title: 'No entry point in this build.', text: 'The screen exists in the app, but nothing opens it. Drawn for review.' }
+    };
+    const PATHS = [
+      { id: 'import', label: 'Import Bitcoin wallet', title: 'Import Bitcoin wallet', line: 'Bring an existing wallet and its keys into a Cube.', tag: 'Bitcoin only', icon: I.imp },
+      { id: 'kit', label: 'Recovery Kit', title: 'Restore from Cube Recovery Kit', line: 'Your Recovery Kit and its recovery password.', tag: 'Connect sign-in', icon: I.kit },
+      { id: 'phone', label: 'Recover with phone', title: 'Recover with phone', line: "Approve on the phone that holds this Cube's backup.", tag: 'Connect sign-in', icon: I.phone },
+      { id: 'heir', label: 'Recover a Vault', title: 'Recover a Vault', line: "Vaults you're a keyholder for.", tag: 'Off in this build', icon: I.heir, off: true },
+      { id: 'phrase', label: 'Recovery phrase', title: 'Recover Wallet', line: 'A Liquid wallet from 12 words.', tag: 'No entry point', icon: I.phrase, off: true }
+    ];
+    const openPath = (id, st) => go({ path: id, step: st || 1, err: 'none', choice: false, kitPhase: 'entry', fin: 'idle', psbt: 0, keySrc: 'words', keyOk: false, codeSent: id !== 'kit', p1: ['', '', '', ''], p2: ['', '', '', ''] });
+    const navItems = [{ id: 'hub', label: 'Overview', icon: I.hub }].concat(PATHS).map((p) => ({
+      label: p.label, icon: p.icon,
+      cur: path === p.id ? 'page' : 'false',
+      gated: !!p.off, gate: p.id === 'heir' ? 'Off' : 'No entry',
+      pick: () => p.id === 'hub' ? go({ path: 'hub', err: 'none', choice: false }) : openPath(p.id)
+    }));
+    const hubPaths = PATHS.map((p) => ({
+      title: p.title, line: p.line, tag: p.tag, icon: p.icon,
+      tagCls: p.off ? 'off' : '', off: !!p.off,
+      aria: 'Start ' + p.title,
+      start: () => openPath(p.id)
+    }));
+    // home.rs remote-only rows (signed in): status line + the restore action the row offers
+    const remoteCubes = [
+      { name: 'Household 2024', line: 'Recovery Kit + Phone recovery available', tip: 'Recover this Cube — choose password or phone', action: 'Recover', can: true, go: () => go({ choice: true }) },
+      { name: 'Travel fund', line: 'Recovery Kit available', tip: 'Restore this Cube from its Recovery Kit', action: 'Restore', can: true, go: () => openPath('kit') },
+      { name: 'Grandparents', line: 'Phone recovery available', tip: 'Recover this Cube with your phone', action: 'Recover', can: true, go: () => openPath('phone') },
+      { name: 'Donations', line: 'Recovery Kit has no Master Seed — restore from the device where it was backed up', tip: '', action: '', can: false, go: () => {} }
+    ].map((r) => Object.assign(r, { aria: r.action + ' ' + r.name }));
+
+    const stepper = steps.map((label, i) => ({
+      label, n: String(i + 1),
+      cur: i + 1 === step ? 'step' : 'false',
+      cls: i + 1 < step ? 'done' : '',
+      off: i + 1 >= step,
+      pick: () => goStep(i + 1)
+    }));
+
+    // PIN boxes (pin_input.rs: 4 digit fields + eye toggle); shared by the Create and RestorePinSetup steps
+    const mkPin = (k, tag) => s[k].map((val, i) => ({
+      val, label: tag + ' digit ' + (i + 1),
+      set: (e) => {
+        const raw = e && e.target ? String(e.target.value) : '';
+        const n = s[k].slice(); n[i] = raw.replace(/[^0-9]/g, '').slice(-1);
+        const patch = { err: s.err === 'pin' ? 'none' : s.err }; patch[k] = n; go(patch);
+      }
+    }));
+    const c1 = s.p1.every((x) => x !== ''), c2 = s.p2.every((x) => x !== '');
+    const mismatch = c1 && c2 && s.p1.join('') !== s.p2.join('');
+    const EYE_OPEN = 'M2.5 12s3.5-6.5 9.5-6.5S21.5 12 21.5 12s-3.5 6.5-9.5 6.5S2.5 12 2.5 12zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6';
+    const EYE_SHUT = 'M9.9 5.8A9.6 9.6 0 0 1 12 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 0 1-2.6 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5c1.8 0 3.3-.5 4.6-1.2M9.9 9.9a3 3 0 0 0 4.2 4.2M4 4l16 16';
+
+    const SERVERS = [['connect', 'COINCUBE Connect'], ['public', 'Public Esplora (mempool.space)'], ['esplora', 'My Esplora server'], ['electrum', 'My Electrum server']];
+    const SERVER_CAP = {
+      connect: "Connect server: COINCUBE's authenticated Bitcoin proxy, with public fallback servers.",
+      public: 'Public server: mempool.space, with blockstream.info fallback. This reveals wallet addresses to those providers.'
+    };
+    const PURPOSES = [['bip84', "Native SegWit (BIP84, m/84'/0'/n')"], ['bip49', "Nested SegWit (BIP49, m/49'/0'/n')"], ['bip44', "Legacy (BIP44, m/44'/0'/n')"]];
+    const KIT = [
+      ['Household 2024', 'Household 2024 — kit available', true],
+      ['Travel fund', 'Travel fund — kit available', true],
+      ['Grandparents', 'Grandparents — no kit (disabled)', false],
+      ['Donations', 'Donations — no seed in kit (disabled)', false]
+    ];
+    const NODES = [
+      ['connect', 'Start with COINCUBE | Connect', 'Your Vault will use our hosted Esplora server immediately (backed by Bitcoin Knots). No setup required.'],
+      ['own', 'I already have a node', 'Select this option if you already have a Bitcoin node running locally or remotely. Tenshu will connect to it.'],
+      ['local', 'Install a node locally', 'Tenshu will install a pruned node on your computer. No local node required beforehand.']
+    ];
+
+    const is = (p, n) => path === p && step === n;
+    const pinStep = is('kit', 4) || is('phone', 2) || is('heir', 3);
+    const finStep = is('kit', 5) || is('phone', 3) || is('heir', 4);
+    const cubeStep = is('import', 1) || is('phrase', 1);
+    const approve = is('phone', 1) || is('heir', 2);
+    const restoredName = path === 'heir' ? 'Vault #1' : path === 'phone' ? 'Grandparents' : s.pick;
+
+    const PSBT_NOTICE = ['', 'PSBT saved. Open it in the original signing wallet, then load the signed file here.', 'Signed PSBT loaded and verified.', 'Ready to broadcast · Final transaction ID: [synthetic]'];
+    const ps = s.psbt;
+
+    const retryable = errHere && (path === 'import' ? step === 5 : (['network', 'mismatch', 'delayed', 'unavailable', 'invalid'].indexOf(s.err) >= 0 && !(path === 'kit' && s.err === 'invalid')));
+    const RETRY_LABEL = { import: 'Retry synchronization', kit: 'Try again', phone: 'Try again', heir: 'Try again', phrase: 'Try again' };
+
+    const FOOT = {
+      hub: 'Prototype · synthetic data · gates: Recover a Vault = RECOVER_VAULT_ENABLED (default off); phone = OWNER_KEYCHAIN_RECOVERY_ENABLED (default on); phrase restore has no entry point',
+      import: 'Prototype · synthetic data · step 1 continues through the Create Cube backup step before the wallet form',
+      kit: 'Prototype · synthetic data · Connect, node and finalize installer steps are summarised as Finish',
+      phone: 'Prototype · synthetic data · "Approved on phone" stands in for the Keychain approval',
+      heir: 'Prototype · synthetic data · "Approved on phone" stands in for the Keychain approval',
+      phrase: 'Prototype · synthetic data · the app reuses the Create Cube name and PIN for this restore'
+    };
+
+    return {
+      themeClass: theme === 'light' ? 'light' : '',
+      motionClass: P.reducedMotion ? 'reduced' : '',
+      floorCubes: [
+        { name: 'Everyday', edge: 'btc', coinCls: '', tag: '', walletPath: I.kit },
+        { name: 'Blake workspace', edge: 'b2b', coinCls: '', tag: 'Blake2b', walletPath: I.kit },
+        { name: 'Lab', edge: 'test', coinCls: 'tn', tag: 'Testnet4', walletPath: I.kit },
+        { name: 'Archive', edge: 'btc', coinCls: '', tag: '', walletPath: 'M13 3L5 13.5h6L10 21l8-10.5h-6z' }
+      ].map((c) => Object.assign(c, { hasTag: !!c.tag, isB2b: c.edge === 'b2b', notB2b: c.edge !== 'b2b' })),
+      navItems, hubPaths, remoteCubes, stepper,
+      pathTitle: (PATHS.find((p) => p.id === path) || {}).title || '',
+      gate: { on: !!GATE[path], title: (GATE[path] || {}).title || '', text: (GATE[path] || {}).text || '' },
+      v: {
+        hub: path === 'hub', path: path !== 'hub', choice: s.choice,
+        cubeStep,
+        imp2: is('import', 2), imp3: is('import', 3), imp4: is('import', 4), imp5: is('import', 5), imp6: is('import', 6),
+        keyWords: s.keySrc === 'words', keyHw: s.keySrc === 'hw', keyKc: s.keySrc === 'kc', keyOk: !!s.keyOk, keyPending: !s.keyOk,
+        srcDesc: s.src === 'desc', srcHw: s.src === 'hw', scanDate: s.scan === 'date',
+        serverUrl: s.server === 'esplora' || s.server === 'electrum', serverCap: !!SERVER_CAP[s.server],
+        details: s.details,
+        scanOk: !(errHere && path === 'import' && step === 5),
+        kit1: is('kit', 1), codeSent: s.codeSent, codeBad: s.codeBad,
+        kit2: is('kit', 2), kitList: !(errHere && s.err === 'unavailable'),
+        kit3: is('kit', 3), kitEntry: s.kitPhase === 'entry' && !(errHere && (s.err === 'mismatch' || s.err === 'delayed' || s.err === 'network')), kitBusy: s.kitPhase === 'busy', kitReady: s.kitPhase === 'ready',
+        approve, approving: !errHere,
+        heir1: is('heir', 1), heirList: !errHere,
+        pinStep, finStep,
+        pp2: is('phrase', 2), pp3: is('phrase', 3)
+      },
+      hasErr: errHere,
+      errText: errHere ? errPair[1] : '',
+      errRetry: retryable,
+      errRetryLabel: RETRY_LABEL[path] || 'Try again',
+      errSignIn: errHere && s.err === 'signedOut' && path !== 'import',
+      retry: () => go({ err: 'none', kitPhase: 'entry' }),
+
+      // create step
+      cubeHead: path === 'import' ? 'Create a Cube for your Bitcoin wallet' : 'Create a new Cube',
+      cubeLead: path === 'import'
+        ? 'Create and back up your Cube first, then import your existing Bitcoin wallet: its descriptor, then its keys. The wallet then works like any other wallet in this Cube.'
+        : 'Name the Cube and set its PIN, then enter the phrase.',
+      cubeName: s.name,
+      setName: (e) => go({ name: e && e.target ? String(e.target.value) : s.name }),
+      cubePinErr: 'PIN codes do not match',
+      pin1: mkPin('p1', 'PIN'), pin2: mkPin('p2', 'Confirm PIN'),
+      pinType: s.show ? 'text' : 'password',
+      showPressed: s.show ? 'true' : 'false',
+      eyePath: s.show ? EYE_SHUT : EYE_OPEN,
+      toggleShow: () => go({ show: !s.show }),
+      pinMismatch: mismatch,
+      pinBad: mismatch ? 'true' : 'false',
+      pinNotReady: !(c1 && c2) || mismatch,
+      next,
+      back: () => goStep(Math.max(1, step - 1)),
+      toHub: () => go({ path: 'hub', err: 'none' }),
+
+      // import source
+      src: { desc: s.src === 'desc' ? 'true' : 'false', hw: s.src === 'hw' ? 'true' : 'false' },
+      pickDesc: () => go({ src: 'desc' }), pickHw: () => go({ src: 'hw' }),
+      purposes: PURPOSES.map(([id, label]) => ({ label, on: s.purpose === id, pick: () => go({ purpose: id, hwRead: false }) })),
+      readAccount: () => go({ hwRead: true }),
+      hwStatus: s.hwRead
+        ? 'Ready to scan account 0 of wallet a1b2c3d4 (' + (PURPOSES.find((p) => p[0] === s.purpose) || PURPOSES[0])[1] + ').'
+        : "Reading shares only this account's public key. The device is never asked to sign, and nothing is saved.",
+      scan: { begin: s.scan === 'begin' ? 'true' : 'false', date: s.scan === 'date' ? 'true' : 'false' },
+      pickBegin: () => go({ scan: 'begin' }), pickDate: () => go({ scan: 'date' }),
+      scanCap: s.scan === 'begin'
+        ? "Starts at Bitcoin's first block. Choose this if you do not know when the wallet was created; it may take longer."
+        : "Choose the original wallet's creation date or an earlier date so older transactions are included.",
+      dateVal: s.date,
+      dateBad: errHere && s.err === 'invalid' ? 'true' : 'false',
+      setDate: (e) => go({ date: e && e.target ? String(e.target.value) : '' }),
+      servers: SERVERS.map(([id, label]) => ({ label, on: s.server === id, pick: () => go({ server: id, err: 'none' }) })),
+      serverCap: SERVER_CAP[s.server] || '',
+
+      // import review / scan / sign
+      copied: () => {},
+      noop: () => {},
+      hwOn: true,
+      alwaysOff: true,
+      detailsOpen: s.details ? 'true' : 'false',
+      detailsLabel: s.details ? 'Hide descriptor details' : 'Show descriptor details',
+      toggleDetails: () => go({ details: !s.details }),
+      scanHead: errHere && path === 'import' && step === 5 ? 'Bitcoin history needs attention' : 'Scanning your Bitcoin wallet history',
+      keySrc: { words: s.keySrc === 'words' ? 'true' : 'false', hw: s.keySrc === 'hw' ? 'true' : 'false', kc: s.keySrc === 'kc' ? 'true' : 'false' },
+      keySrcLabel: s.keySrc === 'words' ? 'recovery words' : s.keySrc === 'hw' ? 'hardware wallet' : 'Keychain phone',
+      pickKeyWords: () => go({ keySrc: 'words', keyOk: false }), pickKeyHw: () => go({ keySrc: 'hw', keyOk: false }), pickKeyKc: () => go({ keySrc: 'kc', keyOk: false }),
+      verifyKey: () => go({ keyOk: true }),
+      keysNotReady: !s.keyOk,
+
+      // kit
+      sendCode: () => go({ codeSent: true }),
+      codeVal: s.code,
+      setCode: (e) => go({ code: e && e.target ? String(e.target.value).replace(/[^0-9]/g, '').slice(0, 6) : '', codeBad: false }),
+      codeBad: s.codeBad ? 'true' : 'false',
+      codeOff: !s.codeSent,
+      verifyCode: () => s.code.length === 6 ? goStep(2) : go({ codeBad: true }),
+      kitCubes: KIT.map(([id, label, ok]) => ({ label, on: s.pick === id, off: !ok, cls: ok ? '' : 'dis', pick: () => go({ pick: id }) })),
+      kitListOff: errHere && s.err === 'unavailable',
+      kitName: s.pick,
+      pwBad: errHere && s.err === 'invalid' ? 'true' : 'false',
+      restoreKit: () => { go({ kitPhase: 'busy', err: 'none' }); later(1400, { kitPhase: 'ready' }); },
+
+      // phone / heir
+      approveText: path === 'heir'
+        ? 'Recovering this Vault — approve the decryption on your Keychain when prompted…'
+        : 'Recovering this Cube — approve the decryption on your phone when prompted…',
+
+      // finish
+      nodes: NODES.map(([id, label, desc]) => ({ label, desc, on: s.node === id, pick: () => go({ node: id }) })),
+      fin: { idle: s.fin === 'idle', busy: s.fin === 'busy', done: s.fin === 'done' },
+      finalize: () => { go({ fin: 'busy' }); later(1400, { fin: 'done' }); },
+      restoredName,
+
+      // phrase
+      words: s.words.map((val, i) => ({
+        val, ph: (i + 1) + '.', aria: 'Word ' + (i + 1),
+        set: (e) => { const n = s.words.slice(); n[i] = e && e.target ? String(e.target.value) : ''; go({ words: n, err: 'none' }); }
+      })),
+      wordsOff: !s.words.every((w) => w.trim() !== ''),
+
+      // recover choice
+      closeChoice: () => go({ choice: false }),
+      choosePassword: () => openPath('kit', 1),
+      choosePhone: () => openPath('phone', 1),
+
+      foot: FOOT[path] || ''
+    };
+  }
+}
+</script>
+</body>
+</html>

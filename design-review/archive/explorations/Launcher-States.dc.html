@@ -1,0 +1,335 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Launcher · State sheet</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+
+.tenshu{--floor:#1c1d1b;--face-t:#4a4b47;--face-l:#30312e;--face-r:#252623;--edge:#6a6b65;--shadow:rgba(0,0,0,.55);--on-accent:#201407;--grid:#242523}
+.tenshu.light{--floor:#f0ece5;--face-t:#e4ded3;--face-l:#cdc6ba;--face-r:#b6afa2;--edge:#ffffff;--shadow:rgba(70,52,30,.28);--grid:#e2dcd2}
+.tenshu button{font:inherit;color:inherit}
+.muted{color:var(--muted)}
+
+/* sheet */
+.head{flex:none;padding:20px 40px 14px;border-bottom:1px solid var(--line)}
+.head h1{margin:0;font-size:24px;font-weight:600}
+.head .why{margin:4px 0 0;font-size:14px}
+.head .meta{margin:2px 0 0;font-size:12px;color:var(--muted)}
+.sheet{flex:1;min-height:0;align-content:start;display:grid;grid-template-columns:1fr 1fr 1fr;grid-template-rows:auto auto auto}
+.spec{padding:14px 24px 16px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);min-width:0;box-sizing:border-box}
+.spec:nth-child(3n){border-right:0}
+.spec.w2{grid-column:span 2}
+.cap12{display:block;margin:0 0 10px;font-size:12px;color:var(--muted);font-weight:500}
+.cap12 b{color:var(--ink);font-weight:600}
+.sub{font-size:12px;color:var(--muted);margin-top:8px}
+
+/* shared label block */
+.nm{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;font-weight:600;font-size:14px;line-height:1.3;word-break:break-word}
+.net{display:flex;flex-wrap:wrap;align-items:center;gap:4px;font-size:12px}
+.bmark{display:inline-flex;align-items:center;justify-content:center;width:16px;height:16px;border-radius:4px;border:1px solid var(--line);font-size:11px;font-weight:600;line-height:1}
+.tb{display:inline-flex;align-items:center;height:16px;padding:0 5px;border-radius:4px;border:1px solid var(--muted);font-size:11px;font-weight:500;line-height:1}
+.tb.test{border-style:dashed}
+.ln{display:flex;align-items:flex-start;gap:5px;font-size:12px;color:var(--muted)}
+.ln svg{width:13px;height:13px;flex:none;margin-top:2px}
+.st{font-weight:500}
+.capl{font-size:12px;color:var(--muted)}
+.tone-good{color:var(--good)}
+.tone-warn{color:var(--warn)}
+.tone-muted{color:var(--muted)}
+.tone-neutral{color:var(--ink)}
+.lbl{display:flex;flex-direction:column;gap:3px;min-width:0}
+.lbl.c{align-items:center;text-align:center}
+.lbl.c .ln,.lbl.c .net{justify-content:center}
+
+/* (a) three presentations */
+.trio{display:grid;grid-template-columns:200px 200px 1fr;gap:24px;align-items:start}
+.pres{display:flex;flex-direction:column;align-items:center;gap:6px;min-width:0}
+.pres-t{font-size:12px;color:var(--muted);margin-top:4px;text-align:center}
+.stagebox{width:200px;height:124px;position:relative;background:var(--floor);border-radius:6px;display:flex;align-items:center;justify-content:center;overflow:hidden}
+.scene{position:relative;display:block;width:100px;height:120px;perspective:1000px;--s:62px}
+.shadow{position:absolute;left:50%;top:calc(50% + var(--s) * .33);width:calc(var(--s) * 1.3);height:calc(var(--s) * .34);margin-left:calc(var(--s) * -.65);border-radius:50%;background:var(--shadow);filter:blur(7px)}
+.lift{position:absolute;inset:0;transform-style:preserve-3d}
+.cube{position:absolute;left:50%;top:50%;width:var(--s);height:var(--s);margin:calc(var(--s) / -2) 0 0 calc(var(--s) / -2);transform-style:preserve-3d;transform:rotateX(-30deg) rotateY(45deg)}
+.f{position:absolute;left:0;top:0;width:var(--s);height:var(--s)}
+.f.t{background:var(--face-t);transform:rotateX(90deg) translateZ(calc(var(--s) / 2));box-shadow:inset 0 0 0 1px var(--edge)}
+.f.l{background:var(--face-l);transform:rotateY(-90deg) translateZ(calc(var(--s) / 2))}
+.f.r{background:var(--face-r);transform:translateZ(calc(var(--s) / 2))}
+.isobox{width:200px;height:124px;border-radius:6px;background:var(--floor);display:flex;align-items:center;justify-content:center;position:relative;overflow:hidden}
+.isobox .gridsvg{position:absolute;inset:0;width:100%;height:100%}
+.isobox .gridsvg path{stroke:var(--grid);stroke-width:1;fill:none}
+.iso{position:relative;width:76px;height:80px;display:block}
+.iso-t{fill:var(--face-t)}
+.iso-l{fill:var(--face-l)}
+.iso-r{fill:var(--face-r)}
+.iso-hl{fill:none;stroke:var(--edge);stroke-width:1;stroke-linejoin:round}
+.crow{display:grid;grid-template-columns:40px minmax(0,1fr) auto;gap:12px;align-items:center;height:56px;padding:0 12px;border-top:1px solid var(--line);border-bottom:1px solid var(--line);width:100%;box-sizing:border-box}
+.crow .glyph{width:40px;height:40px}
+.crow-meta{display:flex;flex-wrap:wrap;column-gap:10px;row-gap:0;font-size:12px;color:var(--muted)}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;height:36px;padding:0 16px;border-radius:6px;border:1px solid var(--line);background:none;cursor:pointer;font-size:14px;font-weight:500;text-decoration:none;color:var(--ink)}
+.btn.sm{height:30px;padding:0 14px;font-size:13px}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn svg{width:16px;height:16px}
+.btn[disabled]{opacity:.55;cursor:default}
+
+/* (b) network badges */
+.brow{display:flex;flex-wrap:wrap;gap:8px 18px;align-items:center;padding:10px 16px;border-radius:6px;background:var(--bg);color:var(--ink)}
+.brow + .brow{margin-top:10px}
+.bnet{display:inline-flex;align-items:center;gap:4px;font-size:13px}
+.rowlab{width:44px;font-size:12px;color:var(--muted)}
+
+/* (c) state badges */
+.slist{display:flex;flex-direction:column}
+.sitem{display:grid;grid-template-columns:18px minmax(0,1fr) auto;gap:8px;align-items:center;height:25px;border-bottom:1px solid var(--line);font-size:13px}
+.sitem:last-child{border-bottom:0}
+.sitem svg{width:15px;height:15px}
+.sitem .k{font-size:12px;color:var(--muted)}
+
+/* (d) chips */
+.chips{display:flex;flex-direction:column;gap:12px}
+.chiprow{display:flex;align-items:center;gap:12px;flex-wrap:wrap}
+.chiprow .k{width:96px;font-size:12px;color:var(--muted);flex:none}
+.chip{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 12px;border-radius:15px;border:1px solid var(--line);background:none;cursor:pointer;font-size:13px}
+.chip.on{background:var(--selected);border-color:var(--accent);font-weight:500}
+.chip svg{width:14px;height:14px}
+.count{font-size:13px;color:var(--muted)}
+.linkbtn{border:0;background:none;padding:2px 4px;color:var(--accent);text-decoration:underline;text-underline-offset:3px;cursor:pointer;font-size:13px}
+
+/* (e) empty states */
+.pair{display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.mini{border:1px solid var(--line);border-radius:6px;overflow:hidden;display:flex;flex-direction:column;height:186px}
+.mini-floor{flex:1;background:var(--floor);display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;padding:0 10px;text-align:center}
+.mini-floor h3{margin:0;font-size:14px;font-weight:600}
+.mini-floor p{margin:0;font-size:12px;color:var(--muted)}
+.mini-dock{display:flex;gap:6px;padding:8px;border-top:1px solid var(--line);background:var(--rail)}
+.mini-dock .btn{height:28px;padding:0 8px;font-size:12px;gap:4px}
+.mini-dock .btn svg{width:13px;height:13px}
+.mini-k{font-size:12px;color:var(--muted);padding:6px 8px;border-bottom:1px solid var(--line)}
+
+/* (f) unlock dialog */
+.dlg{position:static;margin:0;color:var(--ink);width:100%;max-width:400px;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.28);padding:16px 18px;box-sizing:border-box}
+.dlg h2{margin:0;font-size:20px;font-weight:600}
+.dlg .who{display:flex;align-items:center;gap:6px;margin-top:4px;font-size:13px;color:var(--muted)}
+.field{display:flex;flex-direction:column;gap:4px;margin-top:12px}
+.field label{font-size:13px;font-weight:500}
+.field input{height:36px;padding:0 10px;border-radius:6px;border:1px solid var(--line);background:var(--bg);color:var(--ink);font:inherit;letter-spacing:.3em}
+.steps{list-style:none;margin:12px 0 0;padding:10px 0 0;border-top:1px solid var(--line);display:flex;flex-direction:column;gap:8px}
+.steps li{display:grid;grid-template-columns:18px 1fr;gap:8px;align-items:start;font-size:13px}
+.steps svg{width:16px;height:16px;margin-top:1px}
+.steps .now{font-weight:600}
+.steps .todo{color:var(--muted)}
+.steps .k{display:block;font-size:12px;color:var(--muted);font-weight:400}
+.dlg-act{display:flex;justify-content:flex-end;gap:8px;margin-top:14px}
+
+/* (g) long name, (h) focus */
+.longs{display:flex;gap:20px;align-items:flex-start}
+.longbox{border:1px dashed var(--line);border-radius:6px;padding:8px}
+.focusbtn{display:flex;align-items:center;gap:12px;border:0;background:none;padding:8px;border-radius:8px;cursor:pointer;text-align:left;outline:2px solid var(--focus);outline-offset:2px}
+.focusbtn .iso{width:56px;height:58px;transform:translateY(-4px)}
+.hint{display:inline-block;align-self:flex-start;margin-top:4px;padding:1px 6px;border-radius:4px;background:var(--panel);border:1px solid var(--focus);font-size:12px;color:var(--ink)}
+.hgap{height:12px}
+.foot{flex:none;height:28px;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line)}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}}" style="width:1440px;height:1100px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="head">
+    <h1>Launcher state sheet</h1>
+    <p class="why">Text and badge carry meaning; color is secondary; one aura at most (selection).</p>
+    <p class="meta">Concept prototype · synthetic data · specimens shared by the 3D floor, isometric and catalog artboards</p>
+  </header>
+
+  <div class="sheet">
+
+    <!-- (a) -->
+    <section class="spec w2" aria-labelledby="sa">
+      <span class="cap12" id="sa"><b>(a) Cube object in three presentations</b> · same fixture: Blake workspace, locked, backup not confirmed</span>
+      <div class="trio">
+        <div class="pres">
+          <div class="stagebox" aria-hidden="true">
+            <span class="scene"><span class="shadow"></span><span class="lift"><span class="cube"><span class="f t"></span><span class="f l"></span><span class="f r"></span></span></span></span>
+          </div>
+          <div class="lbl c">
+            <span class="nm">Blake workspace</span>
+            <span class="net"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span><span>Bitcoin Blake2b mainnet</span></span>
+            <span class="ln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></svg><span>Locked</span></span>
+            <span class="ln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="tone-warn" aria-hidden="true"><path d="M12 4L21 19H3Z M12 10v4 M12 16.5v.5"></path></svg><span class="st tone-warn">Backup not confirmed</span></span>
+            <span class="capl">Vault only</span>
+          </div>
+          <span class="pres-t">3D floor · CSS 3D stand-in for an Iced shader scene</span>
+        </div>
+        <div class="pres">
+          <div class="isobox" aria-hidden="true">
+            <svg class="gridsvg"><defs><pattern id="tenshuStatesGrid" width="56" height="32.33" patternUnits="userSpaceOnUse"><path d="M0 0L56 32.33M56 0L0 32.33"></path></pattern></defs><rect width="100%" height="100%" fill="url(#tenshuStatesGrid)"></rect></svg>
+            <svg class="iso" viewBox="0 0 100 104"><path class="iso-t" d="M50 6L90 29L50 52L10 29Z"></path><path class="iso-l" d="M10 29L50 52L50 98L10 75Z"></path><path class="iso-r" d="M50 52L90 29L90 75L50 98Z"></path><path class="iso-hl" d="M10 29L50 52L90 29"></path></svg>
+          </div>
+          <div class="lbl c">
+            <span class="nm">Blake workspace</span>
+            <span class="net"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span><span>Bitcoin Blake2b mainnet</span></span>
+            <span class="ln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></svg><span>Locked</span></span>
+            <span class="ln"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" class="tone-warn" aria-hidden="true"><path d="M12 4L21 19H3Z M12 10v4 M12 16.5v.5"></path></svg><span class="st tone-warn">Backup not confirmed</span></span>
+            <span class="capl">Vault only</span>
+          </div>
+          <span class="pres-t">Isometric · static SVG / Canvas fallback</span>
+        </div>
+        <div class="pres">
+          <div style="height:34px"></div>
+          <div class="crow">
+            <span class="glyph" aria-hidden="true"><svg viewBox="0 0 100 104" width="40" height="40"><path class="iso-t" d="M50 6L90 29L50 52L10 29Z"></path><path class="iso-l" d="M10 29L50 52L50 98L10 75Z"></path><path class="iso-r" d="M50 52L90 29L90 75L50 98Z"></path><path class="iso-hl" d="M10 29L50 52L90 29"></path></svg></span>
+            <span class="lbl">
+              <span class="nm">Blake workspace</span>
+              <span class="crow-meta">
+                <span class="net"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span><span>Bitcoin Blake2b mainnet</span></span>
+                <span>Locked</span>
+                <span class="st tone-warn">Backup not confirmed</span>
+                <span>Vault only</span>
+              </span>
+            </span>
+            <a class="btn sm" href="Journey.dc.html" aria-label="Open Blake workspace">Open</a>
+          </div>
+          <span class="pres-t">Catalog row · 56px, 40px glyph</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- (f) -->
+    <section class="spec" aria-labelledby="sf">
+      <span class="cap12" id="sf"><b>(f) Unlock dialog</b> · checks run in order; animation never shortens them</span>
+      <dialog open class="dlg" aria-labelledby="dlgt">
+        <h2 id="dlgt">Open Everyday</h2>
+        <div class="who"><span class="bmark" aria-hidden="true">₿</span><span>Bitcoin mainnet</span></div>
+        <div class="field">
+          <label for="pin">PIN</label>
+          <input id="pin" type="password" value="246810" readonly autocomplete="off">
+        </div>
+        <ol class="steps" aria-label="Opening steps">
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" class="tone-good" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span>PIN accepted</span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle><circle cx="12" cy="12" r="3" fill="currentColor"></circle></svg><span class="now">Checking Bitcoin mainnet admission…<span class="k">Network checks · step 2 of 3</span></span></li>
+          <li><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" class="tone-muted" aria-hidden="true"><circle cx="12" cy="12" r="8"></circle></svg><span class="todo">Loading wallets</span></li>
+        </ol>
+        <div class="dlg-act">
+          <button type="button" class="btn">Use passkey</button>
+          <button type="button" class="btn">Cancel</button>
+        </div>
+      </dialog>
+    </section>
+
+    <!-- (b) -->
+    <section class="spec w2" aria-labelledby="sb">
+      <span class="cap12" id="sb"><b>(b) Network badges</b> · ₿ mark plus text; Blake2b is a text badge; test networks always carry a dashed text badge</span>
+      <div class="tenshu brow">
+        <span class="rowlab">Dark</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span>Bitcoin mainnet</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span>Bitcoin Blake2b mainnet</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb test">Testnet4</span>Bitcoin Testnet4</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb test">Signet</span>Bitcoin Signet</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb test">Regtest</span>Bitcoin Regtest</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span><span class="tb test">Testnet4</span>Bitcoin Blake2b Testnet4</span>
+      </div>
+      <div class="tenshu light brow" style="border:1px solid var(--line)">
+        <span class="rowlab">Light</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span>Bitcoin mainnet</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span>Bitcoin Blake2b mainnet</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb test">Testnet4</span>Bitcoin Testnet4</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb test">Signet</span>Bitcoin Signet</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb test">Regtest</span>Bitcoin Regtest</span>
+        <span class="bnet"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span><span class="tb test">Testnet4</span>Bitcoin Blake2b Testnet4</span>
+      </div>
+      <p class="sub">Live chains: Bitcoin mainnet and Bitcoin Blake2b mainnet. No invented Blake2b logo or ticker.</p>
+    </section>
+
+    <!-- (c) -->
+    <section class="spec" aria-labelledby="sc">
+      <span class="cap12" id="sc"><b>(c) Lock and protection badges</b> · icon shape + word; tone differs in lightness</span>
+      <div class="slist">
+        <div class="sitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 6.8-1.2"></path></svg><span>Open</span><span class="k">in a tab</span></div>
+        <div class="sitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M6 11h12v9H6Z M8.5 11V8a3.5 3.5 0 0 1 7 0v3"></path></svg><span>Locked</span><span class="k">PIN or passkey</span></div>
+        <div class="sitem tone-good"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg><span class="st">Backup confirmed</span><span class="k">verified</span></div>
+        <div class="sitem tone-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 4L21 19H3Z M12 10v4 M12 16.5v.5"></path></svg><span class="st">Backup not confirmed</span><span class="k">actionable</span></div>
+        <div class="sitem tone-muted"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M9.6 9.6a2.4 2.4 0 1 1 3.4 2.2c-.7.3-1 .8-1 1.5v.4 M12 16.5v.5"></path></svg><span class="st">Backup status unknown</span><span class="k">not verified</span></div>
+        <div class="sitem tone-warn"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M12 7v5l3 2"></path></svg><span class="st">Backup stale</span><span class="k">re-check</span></div>
+        <div class="sitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M8 12h8"></path></svg><span>No Vault configured · Spark only</span><span class="k">neutral</span></div>
+        <div class="sitem"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M12 3a9 9 0 1 0 0 18a9 9 0 1 0 0-18 M12 11v5 M12 8v.5"></path></svg><span>Imported Vault · no local keys</span><span class="k">neutral</span></div>
+      </div>
+    </section>
+
+    <!-- (d) -->
+    <section class="spec" aria-labelledby="sd">
+      <span class="cap12" id="sd"><b>(d) Filter chips</b> · visibility only; never changes a Cube's chain</span>
+      <div class="chips">
+        <div class="chiprow"><span class="k">Default</span><button type="button" class="chip" aria-pressed="false">Live chains</button><button type="button" class="chip" aria-pressed="false">Chain <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg></button></div>
+        <div class="chiprow"><span class="k">Active</span><button type="button" class="chip on" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>Live chains</button><button type="button" class="chip on" aria-pressed="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M5 12.5l4.5 4.5L19 7.5"></path></svg>Chain: Signet <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" aria-hidden="true"><path d="M7 10l5 5 5-5"></path></svg></button></div>
+        <div class="chiprow"><span class="k">Hidden count</span><span class="count">Showing 3 of 4 · 1 hidden by filters</span></div>
+        <div class="chiprow"><span class="k">Reset</span><button type="button" class="linkbtn">Clear filters</button><span class="count">only while a filter is active</span></div>
+      </div>
+    </section>
+
+    <!-- (e) -->
+    <section class="spec" aria-labelledby="se">
+      <span class="cap12" id="se"><b>(e) Empty states</b> · no Cubes vs no matches; create and import stay visible</span>
+      <div class="pair">
+        <div class="mini">
+          <span class="mini-k">0 Cubes</span>
+          <div class="mini-floor"><h3>No Cubes yet.</h3><p>Create your first Cube or import one.</p></div>
+          <div class="mini-dock"><button type="button" class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Create Cube</button><button type="button" class="btn">Import</button></div>
+        </div>
+        <div class="mini">
+          <span class="mini-k">1 Cube · Test networks</span>
+          <div class="mini-floor"><h3>No Cubes match these filters.</h3><p>1 hidden. <button type="button" class="linkbtn">Clear filters</button></p></div>
+          <div class="mini-dock"><button type="button" class="btn primary"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 5v14M5 12h14"></path></svg>Create Cube</button><button type="button" class="btn">Import</button></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- (g) + (h) -->
+    <section class="spec" aria-labelledby="sg">
+      <span class="cap12" id="sg"><b>(g) Long name</b> · 2 lines, then ellipsis; full name on hover and to AT</span>
+      <div class="longs">
+        <div class="longbox" style="width:150px">
+          <div class="lbl c"><span class="nm" title="A very long Cube name that keeps going to test wrapping behaviour">A very long Cube name that keeps going to test wrapping behaviour</span><span class="net"><span class="bmark" aria-hidden="true">₿</span><span>Bitcoin mainnet</span></span></div>
+        </div>
+        <div class="longbox" style="width:230px">
+          <div class="lbl"><span class="nm" title="A very long Cube name that keeps going to test wrapping behaviour">A very long Cube name that keeps going to test wrapping behaviour</span><span class="net"><span class="bmark" aria-hidden="true">₿</span><span>Bitcoin mainnet</span></span></div>
+        </div>
+      </div>
+      <div class="hgap"></div>
+      <span class="cap12" id="sh"><b>(h) Keyboard focus</b> · 2px ring, catalog order; Enter opens</span>
+      <button type="button" class="focusbtn" aria-labelledby="sh">
+        <svg class="iso" viewBox="0 0 100 104" aria-hidden="true"><path class="iso-t" d="M50 6L90 29L50 52L10 29Z"></path><path class="iso-l" d="M10 29L50 52L50 98L10 75Z"></path><path class="iso-r" d="M50 52L90 29L90 75L50 98Z"></path><path class="iso-hl" d="M10 29L50 52L90 29"></path></svg>
+        <span class="lbl">
+          <span class="nm">Blake workspace</span>
+          <span class="net"><span class="bmark" aria-hidden="true">₿</span><span class="tb">Blake2b</span><span>Bitcoin Blake2b mainnet</span></span>
+          <span class="hint">Press Enter to open</span>
+        </span>
+      </button>
+    </section>
+
+  </div>
+  <div class="foot">Concept prototype · synthetic data · static state sheet</div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"$preview":{"width":1440,"height":1100}}'>
+class Component extends DCLogic {
+  renderVals() {
+    const theme = this.props.theme ?? 'dark';
+    return {
+      themeClass: theme === 'light' ? 'light' : ''
+    };
+  }
+}
+</script>
+</body>
+</html>

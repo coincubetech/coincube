@@ -1,0 +1,420 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Cube workspace · Compact</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--shadow:rgba(0,0,0,.45)}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--shadow:rgba(60,40,10,.18)}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu button,.tenshu input,.tenshu select{font:inherit;color:inherit}
+.tenshu a{color:var(--acc-ink)}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p{margin:0}
+.muted{color:var(--muted)}.small{font-size:13px}.cap{font-size:12px;color:var(--muted)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:12.5px}
+.hdr{height:48px;flex:none;display:flex;align-items:center;gap:12px;padding:0 12px;background:var(--rail);border-bottom:1px solid var(--line);position:relative;z-index:5}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:22px;background:var(--line)}
+.switch{display:flex;align-items:center;gap:8px;height:34px;max-width:330px;min-width:0;padding:0 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer}
+.switch .nm{font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.bm{font-weight:600;color:var(--ink)}
+.menu{position:absolute;top:44px;left:110px;width:300px;background:var(--panel);border:1px solid var(--line);border-radius:8px;box-shadow:0 10px 28px var(--shadow);padding:6px;z-index:10}
+.menu .ml{font-size:12px;color:var(--muted);padding:6px 10px 4px}
+.mi{display:flex;align-items:center;justify-content:space-between;gap:8px;width:100%;padding:8px 10px;border:0;border-radius:5px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink)}
+.mi:hover,.mi.on{background:var(--selected)}
+.menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.chips{margin-left:auto;display:flex;gap:6px;align-items:center;flex:none}
+.chip{display:flex;align-items:center;gap:6px;height:28px;padding:0 10px;border:1px solid var(--line);border-radius:14px;font-size:12px;background:var(--panel);white-space:nowrap}
+.chip .k{color:var(--muted)}
+.chip .btn{height:22px;padding:0 8px;font-size:12px}
+.st{display:inline-flex;align-items:center;gap:6px;font-weight:500}
+.st::before{display:inline-grid;place-items:center;width:15px;height:15px;font-size:10px;line-height:1;border-radius:50%;flex:none;border:1.5px solid currentColor}
+.s-ok{color:var(--good)}.s-ok::before{content:"\2713"}
+.s-warn{color:var(--warn)}.s-warn::before{content:"!";border-radius:3px;font-weight:700}
+.s-bad{color:var(--bad)}.s-bad::before{content:"\2715"}
+.s-unk{color:var(--muted)}.s-unk::before{content:"?";border-style:dashed}
+.s-off{color:var(--muted)}.s-off::before{content:"\2013"}
+.body{flex:1;display:flex;min-height:0}
+.side{width:200px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.ident{padding:12px 12px 10px;border-bottom:1px solid var(--line)}
+.ident .cn{font-weight:600;font-size:14px;overflow-wrap:anywhere;line-height:1.3;margin:2px 0 4px}
+.nav{padding:6px;display:flex;flex-direction:column;gap:2px}
+.ni{display:flex;flex-direction:column;align-items:flex-start;justify-content:center;width:100%;min-height:32px;padding:5px 8px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;color:var(--ink);font-size:13.5px}
+.ni:hover{background:color-mix(in srgb,var(--ink) 7%,transparent)}
+.ni.on{background:var(--selected);box-shadow:inset 3px 0 0 var(--accent);font-weight:600}
+.ni .sub{font-size:12px;color:var(--muted);font-weight:400;overflow-wrap:anywhere}
+.ni .sub.w{color:var(--warn)}
+.mid{flex:1;min-height:0;overflow:auto;border-top:1px solid var(--line);padding:2px 6px 6px}
+.gl{font-size:12px;color:var(--muted);font-weight:500;padding:8px 8px 4px}
+.xbtn{display:flex;align-items:center;gap:8px;width:100%;min-height:32px;padding:5px 8px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;color:var(--ink);font-weight:500;font-size:13.5px}
+.xbtn .cnt{margin-left:auto;font-size:12px;color:var(--muted);font-weight:400}
+.chev{transition:transform .15s}
+.open .chev{transform:rotate(90deg)}
+.xlist{border-left:1px solid var(--line);margin-left:14px;padding:2px 0 2px 6px}
+.attn{display:flex;align-items:center;flex-wrap:wrap;gap:4px 8px;width:calc(100% - 12px);margin:0 6px 6px;padding:7px 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;text-align:left;font-size:12.5px}
+.attn .go{margin-left:auto;color:var(--acc-ink);font-weight:600}
+.foot{border-top:1px solid var(--line);padding:6px;display:flex;flex-direction:column;gap:2px}
+.main{flex:1;min-width:0;overflow:auto}
+.pg{padding:22px 24px 40px}
+.pg h1{font-size:22px;font-weight:600;line-height:1.25}
+.pg h1 .sc1{color:var(--muted);font-weight:400}
+.lede{color:var(--muted);margin-top:4px;font-size:13px}
+.pick{display:flex;gap:16px;margin-top:16px;padding-bottom:16px;border-bottom:1px solid var(--line);flex-wrap:wrap}
+.pick label{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted)}
+.pick select{height:34px;min-width:250px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--panel);color:var(--ink);font-size:14px}
+.pick select.kf{outline:2px solid var(--focus);outline-offset:2px}
+.grp{margin-top:22px}
+.grp h3{font-size:16px;font-weight:600}
+.grp .intro{color:var(--muted);font-size:13px;margin:4px 0 10px}
+.rows{border-bottom:1px solid var(--line)}
+.row{display:grid;grid-template-columns:minmax(0,1fr) 230px;column-gap:20px;padding:12px 0;border-top:1px solid var(--line);align-items:start}
+.row .lb{font-weight:500}
+.row .ds{color:var(--muted);font-size:13px;margin-top:2px}
+.row .ct{display:flex;flex-direction:column;align-items:flex-start;gap:6px}
+.row .ct .hint{font-size:12px;color:var(--muted)}
+.row .ct .btn{white-space:normal;height:auto;min-height:32px;padding:6px 12px;text-align:left;max-width:100%}
+.row .ct select{width:100%}
+.row .ct select,.row .ct .in{max-width:100%;min-width:0}
+.sc{display:inline-block;font-size:11px;line-height:16px;padding:0 6px;margin-left:6px;border:1px solid var(--line);border-radius:3px;color:var(--muted);font-weight:400;vertical-align:1px}
+.btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:6px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;color:var(--ink);text-decoration:none;white-space:nowrap}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:#1a1208}
+.btn[disabled]{opacity:.5;cursor:not-allowed}
+.lnk{background:none;border:0;padding:0;color:var(--acc-ink);cursor:pointer;text-decoration:underline;text-underline-offset:2px;font-size:13px}
+.in{height:32px;width:230px;padding:0 8px;border:1px solid var(--line);border-radius:6px;background:var(--bg)}
+.tog{display:inline-flex;align-items:center;gap:8px;height:30px;padding:0 10px 0 4px;border:1px solid var(--line);border-radius:15px;background:var(--panel);cursor:pointer;font-size:13px}
+.tog .kn{width:30px;height:18px;border-radius:9px;background:var(--line);position:relative;flex:none}
+.tog .kn::after{content:"";position:absolute;top:2px;left:2px;width:14px;height:14px;border-radius:50%;background:var(--ink);transition:left .15s}
+.tog[aria-pressed="true"] .kn{background:var(--accent)}
+.tog[aria-pressed="true"] .kn::after{left:14px;background:#1a1208}
+.seg{display:inline-flex;border:1px solid var(--line);border-radius:6px;overflow:hidden}
+.seg button{height:30px;padding:0 12px;border:0;background:transparent;cursor:pointer;font-size:13px;color:var(--ink)}
+.seg button+button{border-left:1px solid var(--line)}
+.seg button[aria-pressed="true"]{background:var(--selected);font-weight:600;box-shadow:inset 0 -2px 0 var(--accent)}
+.note{border-left:3px solid var(--warn);padding:10px 12px;margin:12px 0;background:color-mix(in srgb,var(--warn) 7%,transparent);font-size:13px}
+.note.info{border-left-color:var(--line);background:color-mix(in srgb,var(--ink) 4%,transparent)}
+.note .acts{display:flex;gap:8px;margin-top:8px;flex-wrap:wrap}
+.lead{padding:16px 0;border-top:2px solid var(--warn);border-bottom:1px solid var(--line);margin-top:16px;display:flex;gap:20px;align-items:center}
+.lead h2{font-size:18px;font-weight:600;margin-top:4px}
+.lead .ct{display:flex;flex-direction:column;gap:6px;flex:none}
+.dsc{display:flex;align-items:center;gap:8px;width:100%;padding:12px 0;border:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:none;cursor:pointer;text-align:left;font-weight:500;color:var(--ink)}
+.dsc .cap{margin-left:auto}
+.wal{display:grid;grid-template-columns:minmax(0,1fr) 180px auto;gap:16px;align-items:center;padding:14px 0;border-top:1px solid var(--line)}
+.wal .amt{font-size:18px;font-weight:600;font-variant-numeric:tabular-nums}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.tl{border-top:1px solid var(--line);font-size:13px}
+.tr{display:grid;column-gap:12px;padding:8px 0;border-bottom:1px solid var(--line);align-items:center}
+.tr.th{color:var(--muted);font-weight:500}
+.empty{padding:22px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);margin-top:20px}
+.empty h2{font-size:18px;font-weight:600;margin-bottom:6px}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1024px;height:768px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="hdr">
+    <div class="brand"><svg aria-hidden="true" width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M10 2 17 6v8l-7 4-7-4V6z"/><path d="M3 6l7 4 7-4M10 10v8"/></svg>Tenshu</div>
+    <div class="vsep"></div>
+    <button type="button" class="switch" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Switch Cube. Current: {{ cubeName }}, Bitcoin mainnet" onClick="{{ toggleMenu }}">
+      <span class="nm">{{ cubeName }}</span>
+      <span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin mainnet</span>
+      <svg aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m3 4.5 3 3 3-3"/></svg>
+    </button>
+    <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+      <div class="menu">
+        <p class="ml">Open Cube tabs</p>
+        <button type="button" class="mi on" aria-current="page" onClick="{{ toggleMenu }}"><span><b>{{ cubeName }}</b> <span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin mainnet</span></span><span class="cap">Current</span></button>
+        <button type="button" class="mi" onClick="{{ toggleMenu }}"><span><b>Lab</b> <span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin · Testnet4</span></span><span class="cap">Open</span></button>
+        <hr>
+        <a class="mi" href="Launcher-Catalog.dc.html"><span><b>All Cubes</b><br><span class="cap">Open Cubes stay open</span></span></a>
+      </div>
+    </sc-if>
+    <div class="chips">
+      <div class="chip"><span class="k">Account</span><span class="st {{ acct.cls }}">{{ acct.text }}</span><sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn pri">Sign in</button></sc-if></div>
+      <div class="chip"><span class="k">Cube connection</span><span class="st {{ conn.cls }}">{{ conn.text }}</span></div>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+      <div class="ident">
+        <p class="cap">Cube</p>
+        <p class="cn">{{ cubeName }}</p>
+        <span class="net"><span class="bm" aria-hidden="true">₿</span>Bitcoin mainnet</span>
+      </div>
+      <div class="nav">
+        <sc-for list="{{ navPrimary }}" as="n" hint-placeholder-count="3">
+          <button type="button" class="ni {{ n.cls }}" aria-current="{{ n.cur }}" onClick="{{ n.pick }}">{{ n.label }}</button>
+        </sc-for>
+      </div>
+      <div class="mid">
+        <p class="gl">Wallets</p>
+        <div class="nav" style="padding:0">
+          <sc-for list="{{ navWallets }}" as="w" hint-placeholder-count="3">
+            <button type="button" class="ni {{ w.cls }}" aria-current="{{ w.cur }}" onClick="{{ w.pick }}"><span>{{ w.label }}</span><span class="sub {{ w.subCls }}">{{ w.sub }}</span></button>
+          </sc-for>
+        </div>
+        <div class="{{ expertCls }}" style="margin-top:6px">
+          <button type="button" class="xbtn" aria-expanded="{{ expertOpen }}" onClick="{{ toggleExpert }}"><svg class="chev" aria-hidden="true" width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.5"><path d="m4.5 3 3 3-3 3"/></svg>Expert<span class="cnt">5 tools</span></button>
+          <sc-if value="{{ expertOpen }}" hint-placeholder-val="{{ false }}">
+            <div class="xlist nav">
+              <sc-for list="{{ navExpert }}" as="x" hint-placeholder-count="5">
+                <button type="button" class="ni {{ x.cls }}" aria-current="{{ x.cur }}" onClick="{{ x.pick }}">{{ x.label }}</button>
+              </sc-for>
+            </div>
+          </sc-if>
+        </div>
+      </div>
+      <button type="button" class="attn" onClick="{{ goBackup }}"><span class="st s-warn">Backup not confirmed</span><span class="go">Review</span></button>
+      <div class="foot">
+        <button type="button" class="ni {{ footSettings.cls }}" aria-current="{{ footSettings.cur }}" onClick="{{ footSettings.pick }}">Settings</button>
+        <button type="button" class="ni {{ footAccount.cls }}" aria-current="{{ footAccount.cur }}" onClick="{{ footAccount.pick }}"><span>Connect account</span><span class="sub">{{ footAccount.sub }}</span></button>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+
+      <sc-if value="{{ pg.overview }}" hint-placeholder-val="{{ false }}">
+        <h1>Overview</h1>
+        <p class="lede">Balances per wallet, never combined across networks · synthetic.</p>
+        <div style="margin-top:14px;border-bottom:1px solid var(--line)">
+          <sc-for list="{{ wallets }}" as="w" hint-placeholder-count="3">
+            <div class="wal"><div><p style="font-weight:600;overflow-wrap:anywhere">{{ w.name }}</p><p class="cap">{{ w.kind }}</p></div><p class="amt">{{ w.amt }}</p><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pg.activity }}" hint-placeholder-val="{{ false }}">
+        <h1>Activity</h1>
+        <p class="lede">All wallets in this Cube · synthetic records.</p>
+        <div class="tl" style="margin-top:14px">
+          <div class="tr th" style="grid-template-columns:90px 170px minmax(0,1fr) 140px"><span>Date</span><span>Wallet</span><span>Description</span><span style="text-align:right">Amount</span></div>
+          <sc-for list="{{ activity }}" as="a" hint-placeholder-count="4">
+            <div class="tr" style="grid-template-columns:90px 170px minmax(0,1fr) 140px"><span>{{ a.date }}</span><span>{{ a.wallet }}</span><span>{{ a.desc }}</span><span class="mono" style="text-align:right">{{ a.amt }}</span></div>
+          </sc-for>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ pg.wallet }}" hint-placeholder-val="{{ false }}">
+        <h1>{{ wal.title }}</h1>
+        <p class="lede">{{ wal.kind }} · <span class="bm">₿</span> {{ wal.net }}</p>
+        <div class="wal"><div><p class="cap">Balance · synthetic</p><p class="amt">{{ wal.amt }}</p></div><div></div><div class="acts"><button type="button" class="btn pri">Send</button><button type="button" class="btn">Receive</button></div></div>
+        <sc-if value="{{ wal.isVault }}" hint-placeholder-val="{{ false }}">
+          <div class="grp"><h3>Recovery path</h3><p class="intro">Time-locked spending, separate from backup. After 180 days without spending, 1-of-2 recovery keys can spend (synthetic policy).</p><button type="button" class="btn">View recovery path</button></div>
+        </sc-if>
+        <sc-if value="{{ wal.isSpark }}" hint-placeholder-val="{{ false }}">
+          <div class="note">This wallet holds USDB but Stable Balance is off on this device · <button type="button" class="lnk" onClick="{{ goSpark }}">Review</button></div>
+        </sc-if>
+        <sc-if value="{{ wal.isLiquid }}" hint-placeholder-val="{{ false }}">
+          <p class="cap" style="margin-top:14px">Liquid has no separate settings. Seed protection is shared in <button type="button" class="lnk" onClick="{{ goBackup }}">Backup &amp; protection</button>.</p>
+        </sc-if>
+      </sc-if>
+
+      <sc-if value="{{ pg.expert }}" hint-placeholder-val="{{ false }}">
+        <p class="cap">Expert · Vault · {{ vaultAlias }}</p><h1>{{ expertTool }}</h1>
+        <p class="lede">Specialist tool, reachable from one named Expert entry. Never placed next to Send or Receive.</p>
+      </sc-if>
+
+      <sc-if value="{{ pg.backupPage }}" hint-placeholder-val="{{ false }}">
+        <h1>Backup &amp; protection</h1>
+        <p class="lede">Applies to the whole Cube · {{ cubeName }}</p>
+      </sc-if>
+
+      <sc-if value="{{ pg.settings }}" hint-placeholder-val="{{ true }}">
+        <h1>Settings <span class="sc1">· {{ scopeTitle }}</span></h1>
+        <p class="lede">{{ scopeLine }}</p>
+        <div class="pick">
+          <label for="scope-sel">Scope<select id="scope-sel" value="{{ scope }}" onChange="{{ pickScope }}"><option value="cube">Cube · {{ cubeShort }}</option><option value="device">This device</option><option value="account">Connect account</option><option value="vault">Vault · {{ vaultShort }}</option><option value="spark">Spark · Daily spending</option></select></label>
+          <sc-if value="{{ is.cube }}" hint-placeholder-val="{{ true }}"><label for="sec-cube">Section<select id="sec-cube" class="kf" value="{{ tab }}" onChange="{{ pickTab }}"><option value="display">Display &amp; appearance</option><option value="backup">Backup &amp; protection</option><option value="payments">Payment checks</option><option value="data">Data &amp; exports</option></select></label></sc-if>
+          <sc-if value="{{ is.device }}" hint-placeholder-val="{{ false }}"><label for="sec-device">Section<select id="sec-device" class="kf" value="{{ tab }}" onChange="{{ pickTab }}"><option value="about">About &amp; app preferences</option><option value="spark">Spark</option></select></label></sc-if>
+          <sc-if value="{{ is.account }}" hint-placeholder-val="{{ false }}"><label for="sec-account">Section<select id="sec-account" class="kf" value="{{ tab }}" onChange="{{ pickTab }}"><option value="account">Account &amp; plan</option><option value="devices">Devices &amp; security</option><option value="connections">Connections</option></select></label></sc-if>
+          <sc-if value="{{ is.vault }}" hint-placeholder-val="{{ false }}"><label for="sec-vault">Section<select id="sec-vault" class="kf" value="{{ tab }}" onChange="{{ pickTab }}"><option value="wallet">Wallet &amp; signers</option><option value="pair">Pair with Keychain</option><option value="connections">Connections</option><option value="data">Data &amp; exports</option></select></label></sc-if>
+          <sc-if value="{{ is.spark }}" hint-placeholder-val="{{ false }}"><label for="sec-spark">Section<select id="sec-spark" class="kf" value="{{ tab }}" onChange="{{ pickTab }}"><option value="spark">Spark</option><option value="connections">Connections</option></select></label></sc-if>
+        </div>
+      </sc-if>
+
+      <!-- Backup & protection (Cube) -->
+      <sc-if value="{{ sec.backup }}" hint-placeholder-val="{{ true }}">
+        <div class="lead">
+          <div style="flex:1;min-width:0"><span class="st s-warn">Backup not confirmed</span><h2>Confirm your seed phrase</h2><p class="muted small">The seed phrase was shown at creation but never confirmed, and the Recovery Kit isn't set up.</p></div>
+          <div class="ct"><button type="button" class="btn pri">Confirm seed phrase backup</button><span class="cap">Opens the authenticated confirmation flow</span></div>
+        </div>
+        <div class="grp">
+          <h3>Backup methods</h3>
+          <div class="rows">
+            <div class="row"><div><p class="lb">Seed phrase <span class="st s-warn" style="font-size:12px;margin-left:6px">Not confirmed</span></p><p class="ds">12 words written down offline. Requires PIN or passkey re-authentication and private surroundings.</p></div><div class="ct"><button type="button" class="btn">Reveal seed phrase</button><span class="hint">Opens the authenticated reveal flow</span></div></div>
+            <div class="row"><div><p class="lb">Connect Recovery Kit <span class="st {{ kit.cls }}" style="font-size:12px;margin-left:6px">{{ kit.status }}</span></p><p class="ds">Encrypted seed and Vault descriptor with your Connect account. Password- or Keychain-encrypted. Requires sign-in and this Cube connected.</p></div><div class="ct"><button type="button" class="btn" disabled="{{ signedOut }}">Set up Recovery Kit</button><span class="hint">{{ kit.hint }}</span></div></div>
+          </div>
+        </div>
+        <div class="grp">
+          <h3>Vault recovery path</h3>
+          <p class="intro">Spending, not backup. A backup never unlocks this time lock.</p>
+          <div class="rows">
+            <div class="row"><div><p class="lb">Recovery path · Vault · {{ vaultAlias }}</p><p class="ds">After 180 days without spending, 1-of-2 recovery keys can spend (synthetic policy).</p></div><div class="ct"><button type="button" class="btn" onClick="{{ goVault }}">View recovery path</button></div></div>
+            <div class="row"><div><p class="lb">Recovery alerts <span class="st {{ alerts.cls }}" style="font-size:12px;margin-left:6px">{{ alerts.status }}</span></p><p class="ds">{{ alerts.text }}</p></div><div class="ct"><button type="button" class="btn">{{ alerts.action }}</button></div></div>
+          </div>
+        </div>
+      </sc-if>
+
+      <!-- Wallet & signers (Vault) -->
+      <sc-if value="{{ sec.wallet }}" hint-placeholder-val="{{ false }}">
+        <div class="grp">
+          <h3>Identity</h3>
+          <div class="rows">
+            <div class="row"><div><label class="lb" for="cva">Vault name</label><span class="sc">This Vault</span><p class="ds">Bitcoin mainnet · fixed for this Vault</p></div><div class="ct"><input id="cva" class="in" value="{{ vaultAlias }}" onChange="{{ noop }}"></div></div>
+            <div class="row"><div><p class="lb">Policy <span class="cap">· synthetic</span></p><p class="ds">Normal spending: any 2 of 3 signers. Recovery path: after 180 days without spending, 1-of-2 recovery keys.</p></div><div class="ct"><button type="button" class="btn" onClick="{{ goVault }}">View recovery path</button></div></div>
+          </div>
+        </div>
+        <div class="grp">
+          <h3>Signers</h3>
+          <div class="rows">
+            <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
+              <div class="row"><div><label class="lb" for="{{ g.id }}">Signer {{ g.n }} alias</label><p class="ds"><span class="mono">{{ g.fp }}</span> · {{ g.kind }}</p></div><div class="ct"><input id="{{ g.id }}" class="in" value="{{ g.alias }}" onChange="{{ noop }}"></div></div>
+            </sc-for>
+            <div class="row"><div><p class="lb">Pair with Keychain</p><p class="ds">Same Wi-Fi · no Connect account needed.</p></div><div class="ct"><button type="button" class="btn">Open Pair with Keychain</button></div></div>
+            <div class="row"><div><p class="lb">Members <span class="st s-off" style="font-size:12px;margin-left:6px">Not enabled</span></p><p class="ds">Available for eligible Connect Vaults · not enabled for this Vault.</p></div><div class="ct"></div></div>
+          </div>
+          <div style="display:flex;justify-content:flex-end;gap:8px;padding:12px 0"><button type="button" class="btn" disabled="true">Discard</button><button type="button" class="btn pri" disabled="true">Save names</button></div>
+          <button type="button" class="dsc" aria-expanded="false">Expert · descriptor, key details, hardware registration<span class="cap">Show</span></button>
+        </div>
+      </sc-if>
+
+      <!-- About & app preferences (This device) -->
+      <sc-if value="{{ sec.about }}" hint-placeholder-val="{{ false }}">
+        <div class="grp">
+          <h3>About Tenshu</h3>
+          <div class="rows">
+            <div class="row"><div><p class="lb">Version</p><p class="ds">COINCUBE | Tenshu [VERSION] · build [COMMIT] · provenance verified</p></div><div class="ct"><button type="button" class="btn">View Download Stats</button></div></div>
+          </div>
+        </div>
+        <div class="grp">
+          <h3>App preferences</h3>
+          <p class="intro">Installation-wide: every Cube on this computer.</p>
+          <div class="rows">
+            <div class="row"><div><p class="lb">Theme<span class="sc">Installation-wide</span></p><p class="ds">Applies immediately.</p></div><div class="ct"><div class="seg" aria-label="Theme"><button type="button" aria-pressed="{{ themeDark }}">Dark</button><button type="button" aria-pressed="{{ themeLight }}">Light</button></div></div></div>
+            <div class="row"><div><p class="lb">Developer mode<span class="sc">Installation-wide</span></p><p class="ds">Not needed for Expert tools.</p></div><div class="ct"><button type="button" class="tog" aria-pressed="false"><span class="kn"></span>Off</button></div></div>
+            <div class="row"><div><p class="lb">BTCB2 beta<span class="sc">Installation-wide · account-gated</span></p><p class="ds">Shows Bitcoin Blake2b Cubes when your account has access. Not a network switch.</p></div><div class="ct"><button type="button" class="tog" aria-pressed="false" disabled="{{ signedOut }}"><span class="kn"></span>Off</button></div></div>
+          </div>
+          <button type="button" class="dsc" aria-expanded="false" style="margin-top:12px">Diagnostics and repair device registration<span class="cap">Show</span></button>
+        </div>
+      </sc-if>
+
+      <!-- Devices & security (Connect account) -->
+      <sc-if value="{{ sec.devices }}" hint-placeholder-val="{{ false }}">
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><div class="empty"><h2>Sign in to review devices</h2><p class="muted">Device and login records belong to your Connect account.</p><div class="acts" style="margin-top:10px"><button type="button" class="btn pri">Sign in</button></div></div></sc-if>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}">
+          <div class="grp">
+            <h3>Devices</h3>
+            <div class="tl">
+              <sc-for list="{{ devices }}" as="d" hint-placeholder-count="3"><div class="tr" style="grid-template-columns:minmax(0,1fr) 90px 120px 90px"><b>{{ d.name }}</b><span>{{ d.plat }}</span><span>{{ d.last }}</span><span><sc-if value="{{ d.removable }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn">Remove</button></sc-if></span></div></sc-for>
+            </div>
+          </div>
+          <div class="grp">
+            <h3>Recent logins</h3>
+            <div class="tl">
+              <div class="tr" style="grid-template-columns:120px minmax(0,1fr) 170px"><span class="st s-ok">Successful</span><span>This Mac (current)</span><span>[DATE] [TIME]</span></div>
+              <div class="tr" style="grid-template-columns:120px minmax(0,1fr) 170px"><span class="st s-bad">Failed</span><span>Unrecognised device</span><span>[DATE] [TIME]</span></div>
+            </div>
+          </div>
+          <div class="grp"><div class="rows"><div class="row"><div><p class="lb">Duress <span class="st s-off" style="font-size:12px;margin-left:6px">Not available</span></p><p class="ds">Not available for this account.</p></div><div class="ct"></div></div></div></div>
+        </sc-if>
+      </sc-if>
+
+      <!-- Spark (Spark scope) -->
+      <sc-if value="{{ sec.spark }}" hint-placeholder-val="{{ false }}">
+        <div class="grp">
+          <h3>Stable Balance</h3>
+          <div class="note">This wallet holds USDB but Stable Balance is off on this device · Review. It's a device preference that didn't travel with the restored seed; nothing converts until you review.<div class="acts"><button type="button" class="btn pri">Review Stable Balance</button></div></div>
+        </div>
+        <div class="grp">
+          <h3>Lightning Address</h3>
+          <div class="rows">
+            <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><div class="row"><div><p class="lb">Your address</p><p class="ds"><span class="mono">alex@ln.example.test</span> · account signed in · this Cube's service ready</p></div><div class="ct"><button type="button" class="btn">Copy address</button></div></div></sc-if>
+            <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><div class="row"><div><p class="lb">Your address</p><p class="ds">Sign in to Connect to claim or manage a Lightning Address.</p></div><div class="ct"><button type="button" class="btn pri">Sign in</button></div></div></sc-if>
+          </div>
+        </div>
+      </sc-if>
+
+      <sc-if value="{{ sec.other }}" hint-placeholder-val="{{ false }}">
+        <div class="empty"><h2>{{ tabLabel }}</h2><p class="muted">Same rows as the 1440 workspace; at this width each row stacks label and description beside a 230px control column. Not drawn in this compact artboard.</p></div>
+      </sc-if>
+
+      </div>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"page":{"editor":"enum","options":["overview","activity","backup","wallet-spark","wallet-vault","wallet-liquid","settings"],"default":"settings","section":"Review"},"reviewState":{"editor":"enum","options":["normal","signedOut","longNames"],"default":"normal","section":"Review"},"$preview":{"width":1024,"height":768}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={nav:null,scope:'cube',tabs:{cube:'backup',device:'about',account:'devices',vault:'wallet',spark:'spark'},menu:false,expert:false,expertTool:'Coin control'};}
+  renderVals(){
+    const P=this.props,S=this.state,self=this;
+    const rs=P.reviewState||'normal', signedOut=rs==='signedOut', longN=rs==='longNames';
+    const propPage=P.page||'settings';
+    const page=(S.nav&&S.nav.for===propPage)?S.nav.page:propPage;
+    const cubeName=longN?'A very long Cube name that keeps going to test wrapping behaviour':'Everyday';
+    const vaultAlias=longN?'Family savings for the grandchildren and the house fund':'Family savings';
+    const navTo=(pg)=>()=>self.setState({nav:{for:propPage,page:pg},menu:false});
+    const setTo=(scope,tab)=>()=>{const t=Object.assign({},S.tabs);if(tab)t[scope]=tab;self.setState({nav:{for:propPage,page:'settings'},scope:scope,tabs:t});};
+    const SC={
+      cube:{title:'Cube · '+cubeName,line:'Applies to this Cube on Bitcoin mainnet.',tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['data','Data & exports']]},
+      device:{title:'This device',line:'Applies to this installation, for every Cube.',tabs:[['about','About & app preferences'],['spark','Spark']]},
+      account:{title:'Connect account',line:signedOut?'Signed out on this device.':'alex@example.test, across all Cubes and devices.',tabs:[['account','Account & plan'],['devices','Devices & security'],['connections','Connections']]},
+      vault:{title:'Vault · '+vaultAlias,line:'Applies to this Vault on Bitcoin mainnet only.',tabs:[['wallet','Wallet & signers'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
+      spark:{title:'Spark · Daily spending',line:'This Spark wallet. Stable Balance is a device preference.',tabs:[['spark','Spark'],['connections','Connections']]}
+    };
+    const scope=S.scope, tab=S.tabs[scope], cs=SC[scope];
+    const isSet=page==='settings';
+    const rep={cube:'backup',device:'about',account:'devices',vault:'wallet',spark:'spark'};
+    const sec={backup:(page==='backup')||(isSet&&scope==='cube'&&tab==='backup'),wallet:isSet&&scope==='vault'&&tab==='wallet',about:isSet&&scope==='device'&&tab==='about',devices:isSet&&scope==='account'&&tab==='devices',spark:isSet&&scope==='spark'&&tab==='spark'};
+    sec.other=isSet&&tab!==rep[scope];
+    const ni=(label,pg,extra)=>Object.assign({label:label,cur:page===pg?'page':'false',cls:page===pg?'on':''},extra||{},{pick:navTo(pg)});
+    const settingsOn=isSet&&scope!=='account', accountOn=isSet&&scope==='account';
+    const walletsData={'wallet-spark':{title:'Spark · Daily spending',kind:'Spark · Lightning',net:'Bitcoin mainnet',amt:'0.01240000 BTC',isSpark:true,isVault:false,isLiquid:false},'wallet-vault':{title:'Vault · '+vaultAlias,kind:'Vault · 2-of-3 synthetic policy',net:'Bitcoin mainnet',amt:'0.85000000 BTC',isSpark:false,isVault:true,isLiquid:false},'wallet-liquid':{title:'Liquid · Travel',kind:'Liquid wallet',net:'Liquid network',amt:'0.05000000 L-BTC',isSpark:false,isVault:false,isLiquid:true}};
+    const wal=walletsData[page]||walletsData['wallet-vault'];
+    return {
+      themeClass:(P.theme||'dark')==='light'?'light':'', motionClass:P.reducedMotion?'reduced':'',
+      themeDark:(P.theme||'dark')==='dark'?'true':'false', themeLight:(P.theme||'dark')==='light'?'true':'false',
+      cubeName:cubeName, cubeShort:longN?'A very long Cube name…':cubeName, vaultAlias:vaultAlias, vaultShort:longN?'Family savings for…':vaultAlias,
+      menuOpen:S.menu, toggleMenu:()=>self.setState({menu:!S.menu}),
+      acct:signedOut?{cls:'s-unk',text:'Signed out'}:{cls:'s-ok',text:'alex@example.test · Signed in'},
+      conn:signedOut?{cls:'s-unk',text:'Not checked'}:{cls:'s-ok',text:'Connected'},
+      signedOut:signedOut, signedIn:!signedOut,
+      navPrimary:[ni('Overview','overview'),ni('Activity','activity'),ni('Backup & protection','backup')],
+      navWallets:[ni('Spark · Daily spending','wallet-spark',{sub:'Stable Balance · review',subCls:'w'}),ni('Vault · '+vaultAlias,'wallet-vault',{sub:'2-of-3 · synthetic',subCls:''}),ni('Liquid · Travel','wallet-liquid',{sub:'Liquid network',subCls:''})],
+      navExpert:['Coin control','PSBT proposals','Descriptors & keys','Node resources','Maintenance'].map(t=>({label:t,cur:(page==='expert'&&S.expertTool===t)?'page':'false',cls:(page==='expert'&&S.expertTool===t)?'on':'',pick:()=>self.setState({nav:{for:propPage,page:'expert'},expertTool:t})})),
+      expertOpen:S.expert, expertCls:S.expert?'open':'', toggleExpert:()=>self.setState({expert:!S.expert}), expertTool:S.expertTool,
+      footSettings:{cls:settingsOn?'on':'',cur:settingsOn?'page':'false',pick:setTo('cube','backup')},
+      footAccount:{cls:accountOn?'on':'',cur:accountOn?'page':'false',pick:setTo('account'),sub:signedOut?'Signed out':'alex@example.test'},
+      goBackup:navTo('backup'), goVault:navTo('wallet-vault'), goSpark:setTo('spark','spark'), noop:()=>{},
+      pg:{overview:page==='overview',activity:page==='activity',wallet:page.indexOf('wallet-')===0,expert:page==='expert',backupPage:page==='backup',settings:isSet},
+      wal:wal,
+      wallets:[{name:'Spark · Daily spending',kind:'Spark · Lightning · Bitcoin mainnet',amt:'0.01240000 BTC'},{name:'Vault · '+vaultAlias,kind:'Vault · Bitcoin mainnet',amt:'0.85000000 BTC'},{name:'Liquid · Travel',kind:'Liquid network',amt:'0.05000000 L-BTC'}],
+      activity:[{date:'[DATE]',wallet:'Spark · Daily spending',desc:'Lightning payment received',amt:'+0.00050000 BTC'},{date:'[DATE]',wallet:'Vault · '+vaultAlias,desc:'Outgoing · 2 of 3 approved',amt:'−0.02000000 BTC'},{date:'[DATE]',wallet:'Liquid · Travel',desc:'Received',amt:'+0.05000000 L-BTC'}],
+      scope:scope, tab:tab, tabLabel:(cs.tabs.find(t=>t[0]===tab)||['',''])[1], scopeTitle:cs.title, scopeLine:cs.line,
+      is:{cube:scope==='cube',device:scope==='device',account:scope==='account',vault:scope==='vault',spark:scope==='spark'},
+      pickScope:(e)=>self.setState({scope:e.target.value}),
+      pickTab:(e)=>{const t=Object.assign({},S.tabs);t[scope]=e.target.value;self.setState({tabs:t});},
+      sec:sec,
+      kit:signedOut?{cls:'s-unk',status:'Sign in required',hint:'Sign in to Connect first'}:{cls:'s-off',status:'Not set up',hint:'Opens the Recovery Kit flow'},
+      alerts:signedOut?{cls:'s-unk',status:'Signed out',text:'Sign in to check whether recovery alerts are available for this Vault.',action:'Sign in'}:{cls:'s-ok',status:'Eligible · verified',text:'Connect can alert recovery contacts when the recovery path opens.',action:'Manage alerts'},
+      signers:[{n:1,id:'c0',alias:'This device',fp:'a1b2c3d4',kind:'Local key'},{n:2,id:'c1',alias:longN?'Keychain · Alex’s phone that sits in the kitchen drawer':'Keychain · Alex’s phone',fp:'e5f6a7b8',kind:'Keychain key'},{n:3,id:'c2',alias:'Hardware · Ledger-style device',fp:'c9d0e1f2',kind:'Hardware key'}],
+      devices:[{name:'This Mac (current)',plat:'macOS',last:'Active now',removable:false},{name:'Windows laptop',plat:'Windows',last:'[DATE]',removable:true},{name:'Linux desktop',plat:'Linux',last:'[DATE]',removable:true}]
+    };
+  }
+}
+</script>
+</body>
+</html>

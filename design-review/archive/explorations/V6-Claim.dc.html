@@ -1,0 +1,403 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>V6 · Claim BTCB2</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+body{margin:0}
+.tenshu{--bg:#161716;--panel:#202020;--rail:#111211;--ink:#f5f0e8;--muted:#b9bbb5;--line:#424242;--accent:#f3821d;--acc-ink:#f59a45;--selected:#36291e;--good:#8bdfab;--warn:#f3b465;--bad:#ffad9b;--focus:#8fc1ff;--hover:rgba(245,240,232,.06);--on-accent:#1a1208;--b2b:#d4a62a}
+.tenshu.light{--bg:#faf9f6;--panel:#ffffff;--rail:#ede8e0;--ink:#202020;--muted:#575a54;--line:#c4beb4;--acc-ink:#a14d00;--selected:#f7e3cc;--good:#23613b;--warn:#77450b;--bad:#8f2e1d;--focus:#1d5fb8;--hover:rgba(32,32,32,.05);--b2b:#8a6a10}
+.tenshu :focus-visible{outline:2px solid var(--focus);outline-offset:2px}
+@media (prefers-reduced-motion: reduce){.tenshu *{animation:none!important;transition:none!important}}
+.tenshu.reduced *{animation:none!important;transition:none!important}
+a{color:#f3821d}a:hover{color:#ffa54d}
+.tenshu *{box-sizing:border-box}
+.tenshu{font-variant-numeric:tabular-nums}
+.tenshu button,.tenshu input{font:inherit;color:inherit}
+.tenshu h1,.tenshu h2,.tenshu h3,.tenshu p,.tenshu ol,.tenshu ul,.tenshu dl,.tenshu dd{margin:0}
+.tenshu ol,.tenshu ul{padding:0;list-style:none}
+.tenshu a{color:var(--acc-ink)}
+.srl{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
+.ic{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none}
+.ic.s{width:16px;height:16px}
+.muted{color:var(--muted)}.cap{font-size:12px;color:var(--muted)}
+.ok{color:var(--good)}.warn{color:var(--warn)}.unk{color:var(--muted)}.bad{color:var(--bad)}
+.mono{font-family:'IBM Plex Mono',ui-monospace,monospace;font-size:13px}
+/* top bar */
+.top{height:56px;flex:none;display:flex;align-items:center;gap:14px;padding:0 16px;background:var(--panel);border-bottom:1px solid var(--line)}
+.brand{display:flex;align-items:center;gap:8px;font-weight:600;font-size:15px}
+.vsep{width:1px;height:24px;background:var(--line)}
+.cid{display:flex;align-items:center;gap:6px;white-space:nowrap}.cid b{font-weight:600}
+.net{display:inline-flex;align-items:center;gap:5px;font-size:13px;color:var(--muted);white-space:nowrap}
+.net>img,.idl>img{display:block;width:16px;height:16px}
+.tbtn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-size:13px;font-weight:500;text-decoration:none;white-space:nowrap;color:var(--ink)}
+.tenshu a.tbtn{color:var(--ink)}
+.tbtn:hover{background:var(--hover)}
+.chips{margin-left:auto;display:flex;gap:8px;align-items:center}
+.chip{display:flex;align-items:center;gap:8px;height:32px;padding:0 12px;border:1px solid var(--line);border-radius:16px;font-size:13px;white-space:nowrap}
+.st{display:inline-flex;align-items:center;gap:5px;font-weight:500}
+.eye{width:32px;height:32px;display:grid;place-items:center;border:0;border-radius:8px;background:transparent;color:var(--muted);cursor:pointer}
+.eye:hover{background:var(--hover);color:var(--ink)}
+.lockq{display:flex;align-items:center;gap:8px;font-size:13px;white-space:nowrap}
+.mini{height:24px;padding:0 10px;border-radius:12px;border:0;background:var(--accent);color:var(--on-accent);font-weight:600;font-size:12px;cursor:pointer}
+/* shell */
+.body{flex:1;display:flex;min-height:0}
+.side{width:248px;flex:none;display:flex;flex-direction:column;background:var(--rail);border-right:1px solid var(--line)}
+.navp{padding:12px 10px 0;display:flex;flex-direction:column;gap:2px}
+.mid{flex:1;min-height:0;overflow:auto;padding:0 10px 12px;display:flex;flex-direction:column;gap:2px}
+.gh{font-size:13px;font-weight:600;color:var(--muted);padding:22px 10px 6px}
+.ni{display:flex;align-items:center;gap:10px;width:100%;min-height:38px;padding:8px 10px;border:0;border-radius:8px;background:transparent;cursor:pointer;text-align:left;font-size:14px;line-height:1.3;text-decoration:none}
+.tenshu a.ni{color:var(--ink)}
+.ni .ic{color:var(--muted)}
+.ni:hover{background:var(--hover)}
+.ni.on{background:var(--selected);font-weight:600}
+.ni.on .ic{color:var(--acc-ink)}
+.sfoot{border-top:1px solid var(--line);padding:10px}
+.main{flex:1;min-width:0;overflow:auto;display:flex;flex-direction:column}
+.pg{flex:1;width:100%;max-width:900px;padding:28px 48px 28px}
+.back{display:inline-flex;align-items:center;gap:4px;font-size:13px;font-weight:500;text-decoration:none}
+.ttl{display:flex;align-items:center;gap:12px;margin-top:10px}
+.ttl img{width:32px;height:32px;display:block}
+.ph{font-size:24px;font-weight:600;line-height:1.25}
+.idl{color:var(--muted);font-size:13px;margin-top:4px;display:flex;align-items:center;gap:6px}
+.tag{display:inline-flex;align-items:center;height:18px;padding:0 6px;border-radius:4px;border:1px solid var(--b2b);font-size:12px;font-weight:500;color:var(--ink)}
+.pfoot{padding:0 0 12px;text-align:center}
+/* controls */
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:6px;height:36px;padding:0 16px;border:1px solid var(--line);border-radius:8px;background:transparent;cursor:pointer;font-weight:500;font-size:14px;color:var(--ink);white-space:nowrap;text-decoration:none}
+.tenshu a.btn{color:var(--ink)}
+.btn:hover{background:var(--hover)}
+.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent);font-weight:600}
+.tenshu a.btn.pri{color:var(--on-accent)}
+.btn.pri:hover{background:#ff9a3f}
+.btn.sm{height:30px;padding:0 12px;font-size:13px}
+.btn[disabled]{cursor:not-allowed;opacity:.55}
+.lbtn{border:0;background:none;padding:2px;color:var(--acc-ink);font-weight:500;cursor:pointer;border-radius:4px;font-size:13px}
+/* stepper */
+.stepper{display:flex;gap:4px;margin-top:22px;padding-bottom:14px;border-bottom:1px solid var(--line)}
+.stepper li{display:flex;align-items:center;gap:8px;flex:1;min-width:0;font-size:13px;color:var(--muted)}
+.stepper .n{width:22px;height:22px;flex:none;display:grid;place-items:center;border-radius:50%;border:1px solid var(--line);font-size:12px;font-weight:600}
+.stepper li.cur{color:var(--ink);font-weight:600}
+.stepper li.cur .n{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.stepper li.done .n{color:var(--good);border-color:var(--good)}
+/* page parts */
+.lead{margin-top:16px;color:var(--muted);max-width:64ch}
+.sec{margin-top:24px}
+.sec h2{font-size:16px;font-weight:600}
+.sec p.t{margin-top:4px;font-size:14px;color:var(--muted);max-width:66ch}
+.rows{margin-top:10px;border-top:1px solid var(--line)}
+.row{display:grid;grid-template-columns:180px minmax(0,1fr) auto;column-gap:16px;align-items:center;min-height:52px;padding:10px 0;border-bottom:1px solid var(--line)}
+.row dt,.row .k{color:var(--muted)}
+.row dd{overflow-wrap:anywhere}
+.dep{display:grid;grid-template-columns:24px minmax(0,1fr) auto;column-gap:12px;align-items:start;padding:14px 0;border-bottom:1px solid var(--line)}
+.dep img{width:22px;height:22px;display:block;margin-top:1px}
+.dep .nm{font-weight:600}
+.dep .addr{margin-top:6px;display:flex;align-items:center;gap:8px}
+.dep .addr .mono{padding:6px 10px;border:1px solid var(--line);border-radius:6px;background:var(--panel)}
+.dep .s{margin-top:6px;font-size:13px}
+.gate{margin-top:28px;padding:20px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
+.gate b{display:block;font-size:16px;font-weight:600}
+.gate p{margin:6px 0 14px;color:var(--muted);max-width:60ch}
+.status{display:flex;align-items:center;gap:8px;margin-top:16px;font-weight:500}
+.acts{display:flex;align-items:center;gap:10px;margin-top:20px;flex-wrap:wrap}
+.acts .sp{flex:1}
+.final{margin-top:20px;padding:14px 16px;border:1px solid var(--warn);border-radius:8px}
+.final b{display:block;font-weight:600}
+.final p{margin-top:4px;font-size:14px}
+.chain{margin-top:16px}
+.chain h3{display:flex;align-items:center;gap:8px;font-size:15px;font-weight:600}
+.chain h3 img{width:18px;height:18px;display:block}
+.prog{display:flex;gap:4px;margin-top:10px}
+.prog i{display:block;width:28px;height:6px;border-radius:3px;background:var(--line)}
+.prog i.on{background:var(--good)}
+.av{display:inline-grid;place-items:center;width:32px;height:32px;border-radius:50%;background:var(--panel);color:var(--ink);flex:none}
+.av svg{width:24px;height:24px}
+.cubeid{display:flex;align-items:center;gap:10px;padding:6px 10px 12px;margin-bottom:4px;border-bottom:1px solid var(--line)}
+.cubeid .av{width:36px;height:36px}
+.cubeidt{display:flex;flex-direction:column;min-width:0}
+.cubeidt b{font-weight:600;font-size:14px;line-height:1.3}
+.cubeidt span{font-size:12px;color:var(--muted)}
+.tenshu .side{position:relative}
+.side .cubeid{display:flex;align-items:center;gap:10px;width:100%;padding:6px 8px 10px;margin:0 0 4px;border:0;border-bottom:1px solid var(--line);border-radius:0;background:transparent;color:inherit;font:inherit;text-align:left;cursor:pointer}
+.side .cubeid:hover{background:var(--hover)}
+.side .cubeidt{flex:1;min-width:0}
+.side .cubeidt .net{display:inline-flex;align-items:center;gap:5px;font-size:12px;color:var(--muted);white-space:nowrap}
+.side .cubeidt .net img{width:14px;height:14px;border-radius:50%}
+.side .cv{color:var(--muted)}
+.side .menu{position:absolute;top:69px;left:4px;right:8px;width:auto;background:var(--panel);border:1px solid var(--line);border-radius:10px;box-shadow:0 12px 32px var(--shadow,rgba(0,0,0,.35));padding:6px;z-index:30}
+.side .menu .ml{font-size:12px;color:var(--muted);padding:8px 10px 4px}
+.side .mi{display:flex;align-items:center;gap:10px;width:100%;padding:9px 10px;border:0;border-radius:6px;background:transparent;cursor:pointer;text-align:left;text-decoration:none;color:var(--ink);font:inherit}
+.side a.mi{color:var(--ink)}.side .mi:hover{background:var(--hover)}.side .mi.on{background:var(--selected)}
+.side .mi .grow{flex:1;min-width:0}
+.side .menu hr{border:0;border-top:1px solid var(--line);margin:6px 0}
+.side .lockq,.side .lockask{display:flex;flex-wrap:wrap;align-items:center;gap:8px;padding:8px 10px;font-size:13px;white-space:normal;position:static}
+.side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
+.side .lockgrp{display:contents}
+</style>
+</helmet>
+<div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
+
+  <header class="top">
+    <div class="brand"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</div>
+    <div class="chips">
+      <div class="chip" title="{{ acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></sc-if>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span><a class="mini" href="V6-Connect-SignIn.dc.html" style="display:inline-flex;align-items:center;text-decoration:none">Sign in</a></sc-if>
+      </div>
+      <div class="chip" title="{{ connTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Connected</span></sc-if>
+        <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="st unk">Not checked</span></sc-if>
+      </div>
+      <button type="button" class="eye" aria-pressed="{{ hideP }}" aria-label="Hide balances" onClick="{{ toggleHide }}">
+        <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
+        <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
+      </button>
+    </div>
+  </header>
+
+  <div class="body">
+    <nav class="side" aria-label="Cube navigation">
+        <sc-if value="{{ menuOpen }}" hint-placeholder-val="{{ false }}">
+        <div class="menu">
+        <a class="mi" href="V3-Launcher-Spin.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span class="grow"><b>All Cubes</b></span></a>
+        <hr>
+        <sc-if value="{{ lockIdle }}" hint-placeholder-val="{{ true }}"><button type="button" class="mi" onClick="{{ askLock }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="3.5" y="8" width="11" height="7.5" rx="1.5"/><path d="M6 8V5.75a3 3 0 0 1 6 0V8"/></svg><span class="grow"><b>Lock Cube</b></span></button></sc-if>
+        <sc-if value="{{ lockAsk }}" hint-placeholder-val="{{ false }}"><div class="lockq" role="group" aria-labelledby="lockq-t"><p id="lockq-t">Lock Everyday and open the Launcher?</p><a class="btn pri sm" href="V3-Locking.dc.html" onMouseDown="{{ lockNow }}" onClick="{{ lockNow }}">Lock</a><button type="button" class="btn sm" onClick="{{ cancelLock }}">Cancel</button></div></sc-if>
+        </div>
+        </sc-if>
+      <div class="navp">
+        <button type="button" class="cubeid" aria-haspopup="true" aria-expanded="{{ menuOpen }}" aria-label="Cube menu. Current: Everyday · Bitcoin mainnet" onClick="{{ toggleMenu }}"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="M12 4.2c4.6-.4 7.9 3.1 7.6 7.4-.3 4.6-4.2 8.2-8.6 7.6-4.2-.6-6.9-4.4-6.3-8.5.5-3.3 3-5.9 6.2-6.4"></path></svg></span><span class="cubeidt"><b>Everyday</b><span class="net"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin mainnet</span></span><svg class="ic s cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m5 7 4 4 4-4"/></svg></button>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><rect x="2.5" y="2.5" width="5" height="5" rx="1"/><rect x="10.5" y="2.5" width="5" height="5" rx="1"/><rect x="2.5" y="10.5" width="5" height="5" rx="1"/><rect x="10.5" y="10.5" width="5" height="5" rx="1"/></svg><span>Overview</span></a>
+        <a class="ni" href="V3-Activity.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg><span>Activity</span></a>
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/><path d="m6.5 9 1.8 1.8 3.5-3.5"/></svg><span>Backup &amp; protection</span></a>
+      </div>
+      <div class="mid">
+        <h2 class="gh">Wallets</h2>
+        <a class="ni" href="V2-Cube-Overview.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg><span>Spark · Daily spending</span></a>
+        <a class="ni on" aria-current="page" href="V3-Vault-Advanced.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg><span>Vault · Family savings</span></a>
+        <a class="ni" href="V6-Liquid.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg><span>Liquid · Travel</span></a>
+      </div>
+      <div class="sfoot">
+        <a class="ni" href="P-Settings.dc.html"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="2.25"/><circle cx="9" cy="9" r="5"/><path d="M9 2v2M9 14v2M2 9h2M14 9h2M4.05 4.05l1.41 1.41M12.54 12.54l1.41 1.41M4.05 13.95l1.41-1.41M12.54 5.46l1.41-1.41"/></svg><span>Settings</span></a>
+      </div>
+    </nav>
+
+    <main class="main">
+      <div class="pg">
+        <a class="back" href="V3-Vault-Advanced.dc.html"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4.5 6.5 9l4.5 4.5"/></svg>Vault · Family savings</a>
+        <div class="ttl"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="Bitcoin Blake2b"><h1 class="ph">Claim Bitcoin Blake2b</h1></div>
+        <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Everyday · Bitcoin mainnet <span aria-hidden="true">→</span> <span class="tag">Blake2b</span> Family savings · Blake2b</p>
+
+        <!-- ===== Gates ===== -->
+        <sc-if value="{{ g.any }}" hint-placeholder-val="{{ false }}">
+          <div class="gate" role="status">
+            <b>{{ g.text }}</b>
+            <sc-if value="{{ g.signIn }}" hint-placeholder-val="{{ false }}"><a class="btn pri" style="margin-top:14px" href="V6-Connect-SignIn.dc.html">Sign in to Connect</a></sc-if>
+            <sc-if value="{{ g.backHome }}" hint-placeholder-val="{{ false }}"><a class="btn" style="margin-top:14px" href="V3-Launcher-Spin.dc.html">All Cubes</a></sc-if>
+            <sc-if value="{{ g.backVault }}" hint-placeholder-val="{{ false }}"><a class="btn" style="margin-top:14px" href="V3-Vault-Advanced.dc.html">Back to Vault</a></sc-if>
+          </div>
+        </sc-if>
+
+        <sc-if value="{{ g.none }}" hint-placeholder-val="{{ true }}">
+          <sc-if value="{{ notOverview }}" hint-placeholder-val="{{ true }}">
+            <ol class="stepper" aria-label="Claim steps">
+              <sc-for list="{{ steps }}" as="s" hint-placeholder-count="3">
+                <li class="{{ s.cls }}" aria-current="{{ s.cur }}"><span class="n">{{ s.num }}</span><span>{{ s.label }}</span><span class="srl">{{ s.sr }}</span></li>
+              </sc-for>
+            </ol>
+          </sc-if>
+
+          <!-- OVERVIEW (installer ClaimOverview) -->
+          <sc-if value="{{ is.overview }}" hint-placeholder-val="{{ false }}">
+            <p class="lead">Separate the coins in your Bitcoin Vault from their Bitcoin Blake2b counterparts. We’ll guide you through setup and two transactions, with a review before each submission.</p>
+            <section class="sec"><h2>Prepare your Blake2b Cube</h2><p class="t">A matching Blake2b Vault with this Cube’s keys and PIN. Creating the Cube does not move or split coins.</p></section>
+            <section class="sec"><h2>1. Split on Bitcoin</h2><p class="t">Check coins, fees and replay protection. Sign a transfer back to your Vault, then wait for 6 Bitcoin confirmations.</p></section>
+            <section class="sec"><h2>2. Claim on Bitcoin Blake2b</h2><p class="t">Sign the fork transfer in the paired Blake2b Cube. Both chains are checked again before submission.</p></section>
+            <p class="lead" style="font-size:13px">Both transactions require network fees. Eligibility depends on the coins and current chain conditions. You can leave and reopen Claim to continue a recorded transaction.</p>
+            <sc-if value="{{ ov.idle }}" hint-placeholder-val="{{ true }}"><div class="acts"><button type="button" class="btn pri" onClick="{{ ov.setup }}">Set up Blake2b Cube</button></div></sc-if>
+            <sc-if value="{{ ov.busy }}" hint-placeholder-val="{{ false }}"><p class="status" role="status"><svg class="ic s unk" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg>Creating the matching Blake2b Vault…</p><p class="cap" style="margin-top:6px">Setup does not submit a claim transaction. You’ll review the Bitcoin split and its network fee next.</p></sc-if>
+          </sc-if>
+
+          <!-- 1. DEPOSITS -->
+          <sc-if value="{{ is.deposits }}" hint-placeholder-val="{{ true }}">
+            <dl class="rows" aria-label="Claim checks">
+              <sc-for list="{{ pre }}" as="r" hint-placeholder-count="5"><div class="row"><dt>{{ r.k }}</dt><dd>{{ r.v }}</dd><span class="st {{ r.tone }}">{{ r.mark }}</span></div></sc-for>
+            </dl>
+            <sc-if value="{{ dp.loading }}" hint-placeholder-val="{{ false }}"><p class="status" role="status">Loading your deposit addresses…</p><div class="acts"><button type="button" class="btn sm" onClick="{{ dp.pause }}">Pause</button></div></sc-if>
+            <sc-if value="{{ dp.shown }}" hint-placeholder-val="{{ true }}">
+              <section class="sec" aria-labelledby="h-dep">
+                <div style="display:flex;align-items:center;gap:12px"><h2 id="h-dep" style="flex:1">Deposit addresses</h2><button type="button" class="lbtn" aria-expanded="{{ dp.openA }}" aria-controls="dep-list" onClick="{{ dp.toggle }}">{{ dp.toggleLabel }}</button></div>
+                <p class="t">Send BTC to the Bitcoin address and BTCB2 to the Blake2b address. Keep both Cubes open under the same Connect account.</p>
+                <sc-if value="{{ dp.open }}" hint-placeholder-val="{{ true }}">
+                  <div id="dep-list" style="margin-top:8px;border-top:1px solid var(--line)">
+                    <sc-for list="{{ dp.rows }}" as="d" hint-placeholder-count="2">
+                      <div class="dep"><img src="{{ d.logo }}" alt=""><div><p class="nm">{{ d.title }}</p><p class="addr"><span class="mono">{{ d.addr }}</span><button type="button" class="btn sm" aria-label="{{ d.copyLabel }}" onClick="{{ d.copy }}">{{ d.copyText }}</button></p><p class="s {{ d.tone }}">{{ d.status }}</p><sc-if value="{{ d.hasRp }}" hint-placeholder-val="{{ false }}"><p class="s {{ d.rpTone }}">{{ d.rp }}</p></sc-if></div><span></span></div>
+                    </sc-for>
+                  </div>
+                  <p class="cap" style="margin-top:10px">Minimums cover estimated fees at 4 sat/vB on Bitcoin and 2 sat/vB on BTCB2. Fees may change. Each deposit must be confirmed and verified as chain-specific.</p>
+                </sc-if>
+                <p class="status {{ dp.sumTone }}" role="status">{{ dp.summary }}</p>
+                <sc-if value="{{ dp.limited }}" hint-placeholder-val="{{ false }}"><p class="cap" style="margin-top:4px">Indexer rate limited. Retry verification after the cooldown.</p></sc-if>
+                <div class="acts">
+                  <sc-if value="{{ dp.verifying }}" hint-placeholder-val="{{ false }}"><button type="button" class="btn" onClick="{{ dp.pause }}">Pause checks</button></sc-if>
+                  <sc-if value="{{ dp.canRetry }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ dp.retry }}">Retry verification</button></sc-if>
+                  <span class="sp"></span>
+                  <button type="button" class="btn pri" disabled="{{ dp.notVerified }}" onClick="{{ go.review }}">Review and sign</button>
+                </div>
+              </section>
+            </sc-if>
+          </sc-if>
+
+          <!-- 2. REVIEW AND SIGN -->
+          <sc-if value="{{ is.review }}" hint-placeholder-val="{{ false }}">
+            <p class="lead">Review the coins, return addresses and fees. Both transfers return funds to your Vaults, minus network fees.</p>
+            <dl class="rows">
+              <div class="row"><dt>Coins to split</dt><dd>{{ rv.coins }}</dd><span></span></div>
+              <div class="row"><dt>Bitcoin — return to this Vault</dt><dd><span class="mono">bc1q…synthetic…4tx</span><span class="cap" style="display:block">Matches this Vault's change branch, index 14.</span></dd><span class="st ok">Verified</span></div>
+              <div class="row"><dt>Bitcoin Blake2b — return to the paired Vault</dt><dd><span class="mono">…synthetic…b2r</span><span class="cap" style="display:block">Family savings · Blake2b</span></dd><span></span></div>
+              <div class="row"><dt>Fee rate</dt><dd>4 sat/vB (about an hour).</dd><span></span></div>
+            </dl>
+            <p class="cap" style="margin-top:10px">For an independent check, compare the return address and change index in a separate watch-only copy of this Vault before signing.</p>
+            <sc-if value="{{ rv.disabled }}" hint-placeholder-val="{{ false }}"><div class="final" role="status"><b>Split signing is disabled for this launch. Restart Tenshu with --enable-btcb2-split to enable live testing.</b></div></sc-if>
+            <sc-if value="{{ rv.busy }}" hint-placeholder-val="{{ false }}"><p class="status" role="status">Checking both chains and recording the signed pair…</p></sc-if>
+            <div class="acts"><button type="button" class="btn" onClick="{{ go.deposits }}">Back</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ rv.cannot }}" onClick="{{ rv.sign }}">Sign with this Vault's keys</button></div>
+          </sc-if>
+
+          <!-- 3. BROADCAST AND CONFIRM -->
+          <sc-if value="{{ is.broadcast }}" hint-placeholder-val="{{ false }}">
+            <section class="sec"><h2>Review Bitcoin broadcast</h2><p class="t">Review the Bitcoin return address and fee. BTCB2 is broadcast separately after six Bitcoin confirmations.</p></section>
+            <div class="chain"><h3><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">Bitcoin — broadcast now</h3>
+              <dl class="rows"><div class="row"><dt>Txid</dt><dd class="mono">9b4e…synthetic…02fa</dd><span></span></div><div class="row"><dt>Fee</dt><dd>{{ bc.fee }}</dd><span></span></div><div class="row"><dt>Output</dt><dd>{{ bc.out }}</dd><span></span></div></dl></div>
+            <div class="chain"><h3><img src="/_blob/c39785504daaef5633099a8ae196c784" alt="">Bitcoin Blake2b — recorded, not sent now</h3></div>
+            <sc-if value="{{ bc.rechecking }}" hint-placeholder-val="{{ false }}"><p class="status" role="status">Rechecking both chains before broadcasting Bitcoin…</p></sc-if>
+            <div class="final"><b>Final review — this is the last step before broadcast</b><p>Broadcasting sends this transaction to the Bitcoin network. It cannot be taken back. The review above is what you are confirming; if the chains move first, you will be asked to review again.</p></div>
+            <div class="acts"><button type="button" class="btn" disabled="{{ bc.rechecking }}" onClick="{{ go.review }}">Back</button><span class="sp"></span><button type="button" class="btn pri" disabled="{{ bc.rechecking }}" onClick="{{ bc.send }}">Broadcast Transaction</button></div>
+          </sc-if>
+
+          <sc-if value="{{ is.confirm }}" hint-placeholder-val="{{ false }}">
+            <section class="sec"><h2>Submitted — tracking step 1 on both chains</h2></section>
+            <dl class="rows">
+              <div class="row"><dt>Transaction</dt><dd class="mono">9b4e…synthetic…02fa</dd><span></span></div>
+              <div class="row"><dt>Recorded as</dt><dd>broadcast (unconfirmed)</dd><span></span></div>
+              <div class="row"><dt>Progress</dt><dd><span class="{{ cf.tone }}">{{ cf.text }}</span><span class="prog" aria-hidden="true"><sc-for list="{{ cf.bars }}" as="b" hint-placeholder-count="6"><i class="{{ b.cls }}"></i></sc-for></span></dd><button type="button" class="btn sm" onClick="{{ cf.read }}">Read again</button></div>
+            </dl>
+            <sc-if value="{{ cf.reorg }}" hint-placeholder-val="{{ false }}">
+              <div class="final"><b>A reorganisation changed this transaction’s confirmation. Read again or review its new confirmation before continuing.</b><p>The same Bitcoin transaction has confirmed in a different block. Acknowledging this keeps its submission history and checks its confirmation depth again.</p></div>
+              <div class="acts"><button type="button" class="btn pri" onClick="{{ cf.ack }}">Acknowledge new confirmation</button></div>
+            </sc-if>
+            <sc-if value="{{ cf.done }}" hint-placeholder-val="{{ false }}"><div class="acts"><a class="btn pri" href="V6-Cube-Unlock.dc.html">Continue in Bitcoin Blake2b</a></div></sc-if>
+          </sc-if>
+        </sc-if>
+      </div>
+      <p class="cap pfoot">{{ foot }}</p>
+    </main>
+  </div>
+</div>
+</x-dc>
+<script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["overview","deposits","review","broadcast","confirm"],"default":"deposits","section":"Review"},"state":{"editor":"enum","options":["ready","loading","waiting","oneFunded","verifying","rateLimited","verified","splitDisabled","signing","rechecking","confirming","confirmed","reorg","signedOut","noAccess","passkeyCube","sessionChanged"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
+  renderVals(){
+    const P=this.props,self=this;
+    const L={step:P.step||'deposits',st:P.state||'ready'};
+    const key=L.step+'|'+L.st;
+    const st=L.st;
+    const DEP={ready:'waiting',waiting:'waiting',oneFunded:'one',verifying:'verifying',rateLimited:'limited',verified:'verified'};
+    const init={key:key,step:L.step,ov:'idle',dep:st==='loading'?'loading':(DEP[st]||'verified'),open:true,copied:'',
+      sign:st==='signing'?'busy':'idle',bc:st==='rechecking'?'busy':'idle',conf:st==='confirmed'?6:(st==='reorg'?6:3),reorg:st==='reorg'};
+    const S=(this.state.k&&this.state.k.key===key)?this.state.k:init;
+    const set=(patch)=>self.setState({k:Object.assign({},S,patch)});
+    const later=(ms,pred,patch)=>setTimeout(()=>{const c=self.state.k;if(c&&pred(c))self.setState({k:Object.assign({},c,patch)});},ms);
+    const hb=!!P.hideBalances;
+    const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
+    const H=(s)=>hide?'••••••':s;
+
+    // gates
+    const GATE={
+      signedOut:["Sign in to Connect to claim. Step 1 reads Bitcoin Blake2b's status through your account.",'signIn'],
+      noAccess:["Bitcoin Blake2b isn't enabled for this account.",'backVault'],
+      passkeyCube:["Bitcoin Blake2b Cubes unlock with a PIN, and this Cube uses a passkey. Claiming from a passkey Cube isn't supported yet.",'backVault'],
+      sessionChanged:['The Connect session changed. Open Claim BTCB2 from your imported wallet again.','backHome']
+    };
+    const gt=GATE[st];
+    const g={any:!!gt,none:!gt,text:gt?gt[0]:'',signIn:!!gt&&gt[1]==='signIn',backHome:!!gt&&gt[1]==='backHome',backVault:!!gt&&gt[1]==='backVault'};
+
+    const step=S.step;
+    const ORDER=['deposits','review','broadcast'];
+    const ix=step==='confirm'?2:ORDER.indexOf(step);
+    const LBL=['Deposits','Review & sign','Broadcast'];
+    const FULL=['1. Deposits','2. Review and sign','3. Broadcast and confirm'];
+    const steps=LBL.map((l,i)=>({num:String(i+1),label:l,cls:i<ix?'done':(i===ix?'cur':''),cur:i===ix?'step':'false',sr:' ('+FULL[i]+')'+(i<ix?', done':(i===ix?', current':''))}));
+
+    const ov={idle:S.ov==='idle',busy:S.ov==='busy',setup:()=>{set({ov:'busy'});later(1600,(c)=>c.ov==='busy',{ov:'idle',step:'deposits',dep:'waiting'});}};
+
+    const pre=[
+      {k:'Claim target',v:'A Bitcoin Blake2b Cube reuses this Vault on this device.',mark:'Ready',tone:'ok'},
+      {k:'Vault',v:'Native SegWit Vault.',mark:'Ready',tone:'ok'},
+      {k:'Node backend',v:'Bitcoin Vault identified; deposit checks available.',mark:'Ready',tone:'ok'},
+      {k:'Coins to split',v:H('3 shared coins · 0.00412 BTC'),mark:'',tone:''},
+      {k:'Fee rate',v:'4 sat/vB (about an hour).',mark:'',tone:''}];
+
+    const d=S.dep;
+    const btcStatus=d==='waiting'?'Waiting for a deposit at this address.':(d==='loading'?'':(d==='one'?H('30,000 sats')+' · 2 of 6 confirmations':H('30,000 sats')+' · 6+ confirmations'));
+    const b2bStatus=d==='one'||d==='waiting'?'Waiting for a deposit at this address.':(d==='loading'?'':H('28,000 sats')+' · 6+ confirmations');
+    const rp=d==='verifying'?['Verifying replay protection…','unk']:(d==='limited'?['Indexer rate limited. Retry verification after the cooldown.','warn']:(d==='verified'?['Bitcoin-only deposit — replay protected','ok']:['','']));
+    const rp2=d==='verified'?['BTCB2-only deposit — replay protected','ok']:rp;
+    const SUM={waiting:['Waiting for funds','unk'],one:['Funds received at one of two addresses','warn'],verifying:['Verifying deposits…','unk'],limited:['Funds received at both addresses','warn'],verified:['Both deposits verified for replay protection','ok'],loading:['','']};
+    const copy=(which)=>()=>{set({copied:which});later(1400,(c)=>c.copied===which,{copied:''});};
+    const dp={
+      loading:d==='loading',shown:d!=='loading',open:S.open,openA:S.open?'true':'false',toggleLabel:S.open?'Hide deposit addresses':'Deposit addresses',toggle:()=>set({open:!S.open}),
+      rows:[
+        {logo:'/_blob/dbbfc88f16f7cc27510d81f434c268ea',title:'Bitcoin · minimum 25,000 sats',addr:'bc1q…synthetic…d3p',status:btcStatus,tone:d==='waiting'?'unk':'',rp:rp[0],rpTone:rp[1],hasRp:!!rp[0],
+          copyLabel:'Copy Bitcoin deposit address',copyText:S.copied==='btc'?'Copied':'Copy address',copy:copy('btc')},
+        {logo:'/_blob/c39785504daaef5633099a8ae196c784',title:'Bitcoin Blake2b · minimum 25,000 sats',addr:'…synthetic…k8z',status:b2bStatus,tone:d==='waiting'||d==='one'?'unk':'',rp:rp2[0],rpTone:rp2[1],hasRp:!!rp2[0]&&d!=='one',
+          copyLabel:'Copy BTCB2 deposit address',copyText:S.copied==='b2b'?'Copied':'Copy address',copy:copy('b2b')}],
+      summary:(SUM[d]||['',''])[0],sumTone:(SUM[d]||['',''])[1],limited:d==='limited',
+      verifying:d==='verifying',canRetry:d==='limited'||d==='one'||d==='waiting',notVerified:d!=='verified',
+      pause:()=>set({dep:'waiting'}),
+      retry:()=>{set({dep:'verifying'});later(1600,(c)=>c.dep==='verifying',{dep:'verified'});}
+    };
+
+    const rv={coins:H('3 shared coins · 0.00412 BTC + 2 verified deposits'),disabled:st==='splitDisabled',busy:S.sign==='busy',cannot:st==='splitDisabled'||S.sign==='busy',
+      sign:()=>{set({sign:'busy'});later(1600,(c)=>c.sign==='busy',{sign:'idle',step:'broadcast'});}};
+    const bc={fee:H('1,140 sats'),out:H('469,860 sats')+' to bc1q…synthetic…4tx',rechecking:S.bc==='busy',
+      send:()=>{set({bc:'busy'});later(1600,(c)=>c.bc==='busy',{bc:'idle',step:'confirm',conf:1});}};
+    const n=S.conf;
+    const cf={
+      text:S.reorg?'Read again or review its new confirmation before continuing.':(n>=6?'Confirmed with 6 or more confirmations. Continue in the paired Bitcoin Blake2b Cube.':(n===0?'Waiting for the first confirmation.':n+' of 6 confirmations.')),
+      tone:S.reorg?'warn':(n>=6?'ok':''),
+      bars:[1,2,3,4,5,6].map((i)=>({cls:i<=n?'on':''})),
+      read:()=>set({conf:Math.min(6,S.conf+1)}),reorg:S.reorg,done:n>=6&&!S.reorg,ack:()=>set({reorg:false})
+    };
+
+    const FOOT={
+      overview:'Prototype · synthetic Vault and amounts · the installer’s Claim overview, shown here in the Cube for continuity',
+      deposits:'Prototype · synthetic addresses and minimums · gates: Connect sign-in, Blake2b account access and beta, PIN Cube',
+      review:'Prototype · synthetic coins · both transfers are rechecked before signing',
+      broadcast:'Prototype · Bitcoin first; BTCB2 only after six Bitcoin confirmations; never resent automatically',
+      confirm:'Prototype · Read again advances one confirmation in this prototype'
+    };
+    return {
+      menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
+      lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
+      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      lockIdle:!self.state.lockAsk,lockAsk:!!self.state.lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
+      signedIn:st!=='signedOut',signedOut:st==='signedOut',acctTitle:st==='signedOut'?'Connect account · Signed out':'alex@example.test · Signed in',connTitle:'Cube service · '+(st==='signedOut'?'Not checked':'Connected'),
+      hideP:hide?'true':'false',shown:!hide,hidden:hide,toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
+      g:g,steps:steps,notOverview:step!=='overview',
+      is:{overview:step==='overview',deposits:step==='deposits',review:step==='review',broadcast:step==='broadcast',confirm:step==='confirm'},
+      go:{review:()=>set({step:'review'}),deposits:()=>set({step:'deposits'})},
+      ov:ov,pre:pre,dp:dp,rv:rv,bc:bc,cf:cf,
+      foot:gt?'Prototype · gate state quoted from the app; Claim BTCB2 appears in the Vault only with the Blake2b grant and an eligible Vault':FOOT[step]
+    };
+  }
+}
+</script>
+</body>
+</html>
