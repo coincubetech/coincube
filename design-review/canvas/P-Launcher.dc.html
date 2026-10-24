@@ -222,7 +222,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* paging (2026-10-23) */
 .pgbtn{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid var(--muted);background:var(--panel);color:#fff;cursor:pointer;z-index:6;display:grid;place-items:center;box-shadow:0 6px 18px var(--shadow)}
 .tenshu.light .pgbtn{color:var(--ink)}
-.pgbtn .ic{width:22px;height:22px;stroke-width:2.4;color:inherit}
+.pgbtn svg{width:22px;height:22px;fill:none;stroke:#fff;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.tenshu.light .pgbtn svg{stroke:var(--ink)}
 .pgbtn.l{left:18px}.pgbtn.r{right:18px}
 .pgbtn:hover{background:var(--hover)}
 .pgbtn[disabled]{opacity:.3;cursor:default}
