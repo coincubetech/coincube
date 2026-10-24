@@ -410,10 +410,13 @@ mod protocol {
         });
         let client = ().serve(client_io).await.unwrap();
         let listed = client.list_all_tools().await.unwrap();
-        assert_eq!(listed.len(), 7);
+        assert_eq!(listed.len(), 8);
         assert!(listed.iter().all(|t| t.output_schema.is_some()
             && t.annotations.as_ref().unwrap().read_only_hint
-                == Some(t.name != "tenshu_prepare_wallet_proposal")));
+                == Some(
+                    t.name != "tenshu_prepare_wallet_proposal"
+                        && t.name != "tenshu_prepare_wallet_creation"
+                )));
         let result = client
             .call_tool(CallToolRequestParams::new("tenshu_list_wallets"))
             .await
@@ -452,7 +455,8 @@ mod protocol {
                 "tenshu_get_transactions",
                 "tenshu_get_wallet_policy_summary",
                 "tenshu_prepare_wallet_proposal",
-                "tenshu_get_wallet_proposal"
+                "tenshu_get_wallet_proposal",
+                "tenshu_prepare_wallet_creation"
             ]
         );
         for name in [
@@ -518,7 +522,7 @@ async fn capability_discovery_is_static_without_desktop_access() {
     if cfg!(feature = "native-proposals") {
         expected["proposal_support"] = serde_json::json!({"network":"regtest", "primary_threshold":3,
         "primary_key_count":5, "recovery_required":true, "max_recovery_keys":5,
-        "max_relative_delay_blocks":65535, "native_key_selection_required":true,
+        "max_relative_delay_blocks":65535, "native_key_selection_required":false, "public_key_assembly":true, "manual_key_verification_required":true,
         "native_creation_authorization_required":true, "key_or_backup_verification":"manual_required",
         "owner_recovery_key_is_vault_signer":false});
     }

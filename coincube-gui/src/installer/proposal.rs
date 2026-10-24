@@ -51,6 +51,19 @@ impl Session {
     pub(crate) fn topology(&self) -> Topology {
         self.proposal.topology
     }
+    /// Immutable public keys from the separately paired preparation scope.
+    pub(crate) fn creation_keys(
+        &self,
+    ) -> Result<Option<super::creation::Validated>, coincube_mcp::Error> {
+        if !self.active() {
+            return Err(coincube_mcp::Error::AccessDenied);
+        }
+        self.store
+            .creation_input(&self.proposal.proposal_id)?
+            .as_ref()
+            .map(super::creation::validate)
+            .transpose()
+    }
     pub(crate) fn unlocked(&self) -> bool {
         crate::app::session::generation_for(&self.cube_id) == Some(self.generation)
     }
@@ -97,6 +110,17 @@ impl Session {
             .descriptor
             .as_ref()
             .ok_or_else(|| failed("Select actual keys in Tenshu first."))?;
+        if let Some(input) = self
+            .store
+            .creation_input(&self.proposal.proposal_id)
+            .map_err(|_| failed("Wallet preparation is unavailable."))?
+        {
+            let prepared = super::creation::validate(&input)
+                .map_err(|_| failed("Wallet preparation public keys are invalid."))?;
+            if *descriptor != prepared.descriptor {
+                return Err(failed("Public keys differ from the assistant's immutable proposal. Prepare a fresh proposal before creating."));
+            }
+        }
         if descriptor.is_taproot() {
             return Err(failed("This demo requires P2WSH."));
         }

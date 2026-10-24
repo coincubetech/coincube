@@ -47,6 +47,7 @@ enum Scope {
         permissions: ReadPermissions,
     },
     Proposal,
+    Creation,
 }
 
 /// Memory-only bearer grant. Read and proposal scopes cannot upgrade each other.
@@ -120,6 +121,15 @@ impl Grant {
         grant.scope = Scope::Proposal;
         Ok(grant)
     }
+    /// Restore separately consented public-key wallet preparation, not creation authority.
+    pub fn paired_creation(
+        credential: String,
+        valid: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        let mut grant = Self::paired(String::new(), [false; 3], credential, valid)?;
+        grant.scope = Scope::Creation;
+        Ok(grant)
+    }
     async fn wait_expiry(&self) {
         if let Some(expiry) = self.expires {
             tokio::time::sleep_until(tokio::time::Instant::from_std(expiry)).await;
@@ -150,7 +160,7 @@ impl Grant {
             .native_admission
             .lock()
             .map_err(|_| Error::AccessDenied)?;
-        if !matches!(self.scope, Scope::Proposal)
+        if !matches!(self.scope, Scope::Proposal | Scope::Creation)
             || self.revoked.load(Ordering::SeqCst)
             || self.expires.is_some_and(|expiry| Instant::now() >= expiry)
         {
@@ -185,6 +195,7 @@ impl Grant {
         }
         match (&self.scope, request) {
             (Scope::Proposal, Request::PrepareProposal(_) | Request::Proposal(_)) => {}
+            (Scope::Creation, Request::PrepareCreation(_) | Request::Proposal(_)) => {}
             (Scope::Read { .. }, Request::List(_)) => {}
             (
                 Scope::Read {

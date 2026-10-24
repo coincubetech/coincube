@@ -50,6 +50,8 @@ pub enum Request {
     Policy(WalletInput),
     /// Prepare only a session-local topology draft; never install a wallet.
     PrepareProposal(proposal::PrepareInput),
+    /// Assemble public account keys; requires a separate creation-preparation grant.
+    PrepareCreation(proposal::CreationInput),
     /// Read the current preparation grant's topology draft.
     Proposal(proposal::ProposalInput),
 }
@@ -63,7 +65,7 @@ impl Request {
             Self::Summary(v) => Some((&v.wallet_id, ReadCapability::Balances)),
             Self::History(v) => Some((&v.wallet_id, ReadCapability::ConfirmedHistory)),
             Self::Policy(v) => Some((&v.wallet_id, ReadCapability::PolicySummary)),
-            Self::PrepareProposal(_) | Self::Proposal(_) => None,
+            Self::PrepareProposal(_) | Self::PrepareCreation(_) | Self::Proposal(_) => None,
         }
     }
     /// Validate wallet-ID byte length and the 1–50 history limit at runtime.
@@ -73,6 +75,7 @@ impl Request {
             && !matches!(self, Self::History(v) if v.limit == 0 || v.limit > 50)
             && match self {
                 Self::PrepareProposal(v) => v.valid(),
+                Self::PrepareCreation(v) => v.valid(),
                 Self::Proposal(v) => v.valid(),
                 _ => true,
             }

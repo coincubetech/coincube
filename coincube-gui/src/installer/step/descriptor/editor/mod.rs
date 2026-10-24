@@ -301,6 +301,18 @@ impl Step for DefineDescriptor {
                     recovery,
                 ];
                 self.descriptor_template = DescriptorTemplate::Custom;
+                match proposal.creation_keys() {
+                    Ok(Some(keys)) => {
+                        self.paths[0].keys = keys.primary.iter().cloned().map(Some).collect();
+                        self.paths[1].keys = keys.recovery.iter().cloned().map(Some).collect();
+                        for key in keys.primary.into_iter().chain(keys.recovery) {
+                            self.keys.insert(key.fingerprint, key);
+                        }
+                        self.check_setup();
+                    }
+                    Ok(None) => {},
+                    Err(_) => self.error = Some("Wallet preparation expired or its public keys are invalid. Prepare a fresh proposal.".into()),
+                }
             }
             self.use_taproot = false;
         } else {

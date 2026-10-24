@@ -530,3 +530,82 @@ fn native_validation_cannot_extend_expiration() {
     );
     assert!(!grant.active());
 }
+
+fn creation_input() -> CreationInput {
+    CreationInput {
+        request_id: "public-assignments".into(),
+        topology: input().topology,
+        keys: PublicKeys {
+            primary: vec!["public-key".into(); 5],
+            recovery: vec!["recovery-key".into()],
+        },
+    }
+}
+
+#[test]
+fn creation_preparation_is_immutable_bounded_and_requires_native_validation() {
+    let store = Store::default();
+    assert_eq!(
+        store.prepare_creation(creation_input(), |_| Err(Error::InvalidInput)),
+        Err(Error::InvalidInput)
+    );
+    assert!(store.pending().unwrap().is_none());
+    let first = store
+        .prepare_creation(creation_input(), |_| Ok(()))
+        .unwrap();
+    assert!(first.descriptor_validated);
+    assert_eq!(first.state, ProposalState::ReadyForNativeReview);
+    assert_eq!(
+        store.prepare_creation(creation_input(), |_| panic!(
+            "exact retry does not revalidate"
+        )),
+        Ok(first.clone())
+    );
+    let mut changed = creation_input();
+    changed.keys.primary[0] = "different-key".into();
+    assert_eq!(
+        store.prepare_creation(changed, |_| Ok(())),
+        Err(Error::ProposalConflict)
+    );
+    assert_eq!(store.prepare(input()), Err(Error::ProposalConflict));
+    assert!(store.creation_input("another-client").is_err());
+    let public = serde_json::to_string(&first).unwrap();
+    assert!(!public.contains("public-key"));
+    store.revoke();
+    assert!(store.creation_input(&first.proposal_id).is_err());
+    let mut oversized = creation_input();
+    oversized.keys.primary.push("extra".into());
+    assert!(!oversized.valid());
+    let mut oversized = creation_input();
+    oversized.keys.primary[0] = "x".repeat(257);
+    assert!(!oversized.valid());
+    let mut missing = creation_input();
+    missing.keys.recovery.clear();
+    assert!(!missing.valid());
+}
+
+#[test]
+fn creation_preparation_is_a_new_scope_not_an_upgrade_to_existing_grants() {
+    let read = Grant::new("wallet".into(), [true; 3], Duration::from_secs(60));
+    let topology = Grant::for_proposals(Duration::from_secs(60), || true);
+    let creation = Grant::paired_creation("c".repeat(64), || true).unwrap();
+    let request = Request::PrepareCreation(creation_input());
+    assert!(creation.authorize(creation.credential(), &request).is_ok());
+    assert!(read.authorize(read.credential(), &request).is_err());
+    assert!(topology.authorize(topology.credential(), &request).is_err());
+    assert!(
+        creation
+            .authorize(creation.credential(), &Request::PrepareProposal(input()))
+            .is_err()
+    );
+    assert!(
+        creation
+            .authorize(creation.credential(), &Request::List(Empty {}))
+            .is_err()
+    );
+    assert!(creation.authorize(topology.credential(), &request).is_err());
+    let locked = Grant::paired_creation("d".repeat(64), || false).unwrap();
+    assert!(locked.authorize(locked.credential(), &request).is_err());
+    creation.revoke();
+    assert!(creation.authorize(creation.credential(), &request).is_err());
+}

@@ -1,6 +1,8 @@
 mod claim;
 pub(crate) mod connect_vault;
 mod context;
+#[cfg(feature = "mcp-proposals")]
+pub(crate) mod creation;
 mod decrypt;
 mod descriptor;
 mod message;
