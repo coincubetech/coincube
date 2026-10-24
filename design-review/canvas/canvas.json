@@ -271,6 +271,348 @@
       "title": "Marketplace · P2P",
       "is_interactive": true,
       "page": "proto"
+    },
+    "P-AI-Access.dc.html": {
+      "x": 0,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI access · paired clients, pairing, permissions, revoke (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-AI-Setup.dc.html": {
+      "x": 1600,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI-led wallet setup · handoffs, states, final review",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-AI-Transaction.dc.html": {
+      "x": 3200,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI-prepared transaction · draft, review, signing states, failures",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Launcher-Light.dc.html": {
+      "x": 0,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Launcher · light · Cubes",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Launcher-Light-List.dc.html": {
+      "x": 1600,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Launcher · light · List",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Unlock.dc.html": {
+      "x": 3200,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "PIN / passkey unlock (standalone) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Opening.dc.html": {
+      "x": 4800,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Opening Cube (after checks / create / restore) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-AppPrefs.dc.html": {
+      "x": 6400,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "App preferences (from the Launcher) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Connect.dc.html": {
+      "x": 8000,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect (from the Launcher account entry) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-SignIn.dc.html": {
+      "x": 9600,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect sign-in / sign-up · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Create.dc.html": {
+      "x": 0,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Create Cube (from the Launcher) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Restore.dc.html": {
+      "x": 1600,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Import or restore (from the Launcher) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-GapsInstaller.dc.html": {
+      "x": 3200,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Installer gap screens (from Create) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-BorderWallet.dc.html": {
+      "x": 4800,
+      "y": 1200,
+      "w": 1440,
+      "h": 1100,
+      "title": "Border Wallet · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Delete.dc.html": {
+      "x": 6400,
+      "y": 1200,
+      "w": 1440,
+      "h": 900,
+      "title": "Delete Cube · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Overview.dc.html": {
+      "x": 0,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Overview hub (wallet pages, Send/Receive, Transfer, Tools) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Activity.dc.html": {
+      "x": 1600,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Activity (sidebar) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Send.dc.html": {
+      "x": 3200,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Send (from any Send pill) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Receive.dc.html": {
+      "x": 4800,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Receive(Bitcoin / Stablecoin selectors) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Transfer.dc.html": {
+      "x": 6400,
+      "y": 2400,
+      "w": 1440,
+      "h": 900,
+      "title": "Transfer / Blake2b copy (from the Transfer pill) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Liquid.dc.html": {
+      "x": 8000,
+      "y": 2400,
+      "w": 1440,
+      "h": 1100,
+      "title": "Liquid wallet · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Advanced.dc.html": {
+      "x": 0,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "Vault › Tools (from the Vault page) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Split.dc.html": {
+      "x": 1600,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "Split coins (from Tools) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Claim.dc.html": {
+      "x": 3200,
+      "y": 3600,
+      "w": 1440,
+      "h": 900,
+      "title": "Claim BTCB2 (from Tools) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Signing.dc.html": {
+      "x": 4800,
+      "y": 3600,
+      "w": 1440,
+      "h": 1100,
+      "title": "Signing, pairing, labels, export · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Settings.dc.html": {
+      "x": 0,
+      "y": 4800,
+      "w": 1440,
+      "h": 900,
+      "title": "Settings (sidebar foot) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Members.dc.html": {
+      "x": 1600,
+      "y": 4800,
+      "w": 1440,
+      "h": 900,
+      "title": "Members (from Settings) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-Duress.dc.html": {
+      "x": 3200,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Duress (from Connect) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-GapsAccount.dc.html": {
+      "x": 4800,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Account gap screens (from Settings) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-GapsWallets.dc.html": {
+      "x": 6400,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Wallet gap screens (from Tools / Settings) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-GapsDetails.dc.html": {
+      "x": 8000,
+      "y": 4800,
+      "w": 1440,
+      "h": 1100,
+      "title": "Detail gap screens (from Settings) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-BuySell.dc.html": {
+      "x": 0,
+      "y": 6000,
+      "w": 1440,
+      "h": 1100,
+      "title": "Marketplace · Buy/Sell · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-P2P.dc.html": {
+      "x": 1600,
+      "y": 6000,
+      "w": 1440,
+      "h": 1100,
+      "title": "Marketplace · P2P · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-AI-Access.dc.html": {
+      "x": 0,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI access · paired clients, pairing, permissions, revoke (from Settings) · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-AI-Setup.dc.html": {
+      "x": 1600,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI-led wallet setup · handoffs, states, final review · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-Light-AI-Transaction.dc.html": {
+      "x": 3200,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI-prepared transaction · draft, review, signing states, failures · light",
+      "is_interactive": true,
+      "page": "light"
+    },
+    "P-AppPrefs-InCube.dc.html": {
+      "x": 11200,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "App preferences · over an open Cube (from the Cube top bar)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-Connect-InCube.dc.html": {
+      "x": 12800,
+      "y": 0,
+      "w": 1440,
+      "h": 900,
+      "title": "Connect · over an open Cube (from the Cube top bar)",
+      "is_interactive": true,
+      "page": "proto"
     }
   },
   "createdOnFiles": {
@@ -289,7 +631,7 @@
       "x": 0,
       "y": -140,
       "w": 240,
-      "maxW": 11200
+      "maxW": 14400
     },
     "g2": {
       "kind": "title1",
@@ -330,6 +672,77 @@
       "y": 5860,
       "w": 240,
       "maxW": 3200
+    },
+    "g7": {
+      "kind": "title1",
+      "text": "AI access · pair once, AI-led wallet setup, AI-prepared transactions (planned extension; labels mark what exists today)",
+      "x": 0,
+      "y": 7060,
+      "w": 240,
+      "maxW": 4800
+    },
+    "lg1": {
+      "kind": "title1",
+      "text": "Launcher & account · light theme",
+      "x": 0,
+      "y": -140,
+      "w": 240,
+      "maxW": 11200,
+      "page": "light"
+    },
+    "lg2": {
+      "kind": "title1",
+      "text": "Create, restore, delete · light theme",
+      "x": 0,
+      "y": 1060,
+      "w": 240,
+      "maxW": 9600,
+      "page": "light"
+    },
+    "lg3": {
+      "kind": "title1",
+      "text": "Inside a Cube · light theme",
+      "x": 0,
+      "y": 2260,
+      "w": 240,
+      "maxW": 11200,
+      "page": "light"
+    },
+    "lg4": {
+      "kind": "title1",
+      "text": "Vault tools & signing · light theme",
+      "x": 0,
+      "y": 3460,
+      "w": 240,
+      "maxW": 8000,
+      "page": "light"
+    },
+    "lg5": {
+      "kind": "title1",
+      "text": "Settings & protection · light theme",
+      "x": 0,
+      "y": 4660,
+      "w": 240,
+      "maxW": 11200,
+      "page": "light"
+    },
+    "lg6": {
+      "kind": "title1",
+      "text": "Marketplace · light theme",
+      "x": 0,
+      "y": 5860,
+      "w": 240,
+      "maxW": 4800,
+      "page": "light"
+    },
+    "lg7": {
+      "kind": "title1",
+      "text": "AI access · light theme",
+      "x": 0,
+      "y": 7060,
+      "w": 240,
+      "maxW": 6400,
+      "page": "light"
     }
   },
   "order": [
@@ -362,12 +775,54 @@
     "P-GapsWallets.dc.html",
     "P-GapsDetails.dc.html",
     "P-BuySell.dc.html",
-    "P-P2P.dc.html"
+    "P-P2P.dc.html",
+    "P-AI-Access.dc.html",
+    "P-AI-Setup.dc.html",
+    "P-AI-Transaction.dc.html",
+    "P-Launcher-Light.dc.html",
+    "P-Launcher-Light-List.dc.html",
+    "P-Light-Unlock.dc.html",
+    "P-Light-Opening.dc.html",
+    "P-Light-AppPrefs.dc.html",
+    "P-Light-Connect.dc.html",
+    "P-Light-SignIn.dc.html",
+    "P-Light-Create.dc.html",
+    "P-Light-Restore.dc.html",
+    "P-Light-GapsInstaller.dc.html",
+    "P-Light-BorderWallet.dc.html",
+    "P-Light-Delete.dc.html",
+    "P-Light-Overview.dc.html",
+    "P-Light-Activity.dc.html",
+    "P-Light-Send.dc.html",
+    "P-Light-Receive.dc.html",
+    "P-Light-Transfer.dc.html",
+    "P-Light-Liquid.dc.html",
+    "P-Light-Advanced.dc.html",
+    "P-Light-Split.dc.html",
+    "P-Light-Claim.dc.html",
+    "P-Light-Signing.dc.html",
+    "P-Light-Settings.dc.html",
+    "P-Light-Members.dc.html",
+    "P-Light-Duress.dc.html",
+    "P-Light-GapsAccount.dc.html",
+    "P-Light-GapsWallets.dc.html",
+    "P-Light-GapsDetails.dc.html",
+    "P-Light-BuySell.dc.html",
+    "P-Light-P2P.dc.html",
+    "P-Light-AI-Access.dc.html",
+    "P-Light-AI-Setup.dc.html",
+    "P-Light-AI-Transaction.dc.html",
+    "P-AppPrefs-InCube.dc.html",
+    "P-Connect-InCube.dc.html"
   ],
   "pages": [
     {
       "id": "proto",
       "name": "Prototype (clickable)"
+    },
+    {
+      "id": "light",
+      "name": "Light theme (same prototype, forced light)"
     }
   ],
   "title": "Tenshu Launcher & Concept C"

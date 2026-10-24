@@ -199,6 +199,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9zM9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9zM9 6.75a2.25 2.25 0 1 0 0 4.5a2.25 2.25 0 1 0 0-4.5M3 3l12 12"/></svg></sc-if>
       </button>
+      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
     </div>
   </header>
 
@@ -408,10 +409,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["kitMode","alerts","avatar"],"default":"kitMode","section":"Review"},"state":{"editor":"enum","options":["auto","kitPhoneChecking","kitPhoneAbsent","kitPhoneFound","kitUpdate","kitOwnerOff","kitPassword","kitPasswordMismatch","kitEncrypting","kitSealing","alertsOn","alertsFullCubePin","alertsOff","alertsTurnOff","alertsNoKeyholders","alertsTierUnknown","alertsEstateGate","alertsPlanGate","alertsNoVault","avQuestionnaire","avLnGate","avSignedOut","avGenerating","avReady","avUnlimited","avQuotaOut","avLoading","avError","avRegistrationError"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p);
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { k: null, hide: false, lockAsk: false };
   }
   renderVals() {
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P = this.props, self = this;
     const SCR = {
       kitMode: ['kitPhoneFound', 'kitPhoneChecking', 'kitPhoneAbsent', 'kitUpdate', 'kitOwnerOff', 'kitPassword', 'kitPasswordMismatch', 'kitEncrypting', 'kitSealing'],
@@ -547,7 +550,7 @@ class Component extends DCLogic {
     return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       lockIdle: !self.state.lockAsk, lockAsk: !!self.state.lockAsk, askLock: () => self.setState({ lockAsk: true }), cancelLock: () => self.setState({ lockAsk: false }),
       hideP: String(hide), shown: !hide, hidden: hide, toggleHide: () => self.setState({ hide: !hide }),

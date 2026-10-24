@@ -210,7 +210,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   <header class="top">
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
-      <a class="chip" href="P-Connect.dc.html" title="{{ chip.acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
+      <a class="chip" href="P-Connect-InCube.dc.html" title="{{ chip.acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
         <sc-if value="{{ chip.in }}" hint-placeholder-val="{{ true }}"><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></sc-if>
         <sc-if value="{{ chip.out }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span></sc-if>
       </a>
@@ -222,6 +222,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
+      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
     </div>
   </header>
 
@@ -635,8 +636,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["location","signin","otp","mode","region","amount","address","quotes","checkout","complete","history","detail"],"default":"mode","section":"Review"},"provider":{"editor":"enum","options":["mavapay","meld"],"default":"mavapay","section":"Review"},"state":{"editor":"enum","options":["ready","loading","error","unsupported","networkGate"],"default":"ready","section":"Review"},"gate":{"editor":"enum","options":["on","marketplaceOff","buySellOff"],"default":"on","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,self=this;
     const prov=P.provider==='meld'?'meld':'mavapay',pst=P.state||'ready',gate=P.gate||'on',hb=!!P.hideBalances;
     const key=[prov,P.step||'mode',pst,gate,hb].join('|');
@@ -738,7 +741,7 @@ class Component extends DCLogic {
     return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       hideP:S.hide?'true':'false',shown:!S.hide,hidden:S.hide,toggleHide:()=>set({hide:!S.hide}),
       lockAsk:!!S.lockAsk,lockIdle:!S.lockAsk,askLock:()=>set({lockAsk:true}),cancelLock:()=>set({lockAsk:false}),
       cube:{name:netGate?'Lab':'Everyday',net:netGate?'Testnet4':'Bitcoin mainnet',main:!netGate,test:netGate},

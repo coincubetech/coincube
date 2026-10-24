@@ -88,7 +88,7 @@ select.ctl{padding-right:6px;cursor:pointer}
 .ferr{font-size:12px;color:var(--bad);margin-top:2px}
 .split{flex:1;display:flex;min-height:0}
 .lst{flex:1;min-width:0;overflow:auto;padding:0 16px 24px}
-.cols,.row{display:grid;grid-template-columns:44px 112px minmax(0,1fr) 116px 68px 132px;column-gap:12px;align-items:center;padding:0 12px}
+.cols,.row{display:grid;grid-template-columns:44px 112px minmax(0,1fr) 128px 132px;column-gap:12px;align-items:center;padding:0 12px}
 .cols{height:36px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
 .cols .r,.row .r{text-align:right}
 .day{display:flex;align-items:center;gap:12px;padding:20px 12px 8px;font-size:13px;font-weight:600;border-bottom:1px solid var(--line)}
@@ -201,6 +201,13 @@ select.ctl{padding-right:6px;cursor:pointer}
 .side .lockq p,.side .lockask>span{margin:0;flex:1 1 100%}
 .side .lockgrp{display:contents}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+/* declutter (Robert, 2026-10-23): one amount cell, lighter detail panel, prototype strip under the title */
+.amt .fx{display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:1px}
+.proto.strip{padding:0 24px 10px;margin-top:-6px}
+.cpy{height:28px;width:28px;padding:0;justify-content:center;border-radius:6px}
+.ids li{padding:8px 0}
+.dl>div{padding:8px 0}
+.det{padding:20px 22px 28px}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -208,7 +215,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   <header class="top">
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
-      <a class="chip" href="P-Connect.dc.html" title="alex@example.test · Signed in">
+      <a class="chip" href="P-Connect-InCube.dc.html" title="alex@example.test · Signed in">
         <svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
         <span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span>
       </a>
@@ -220,6 +227,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ shown }}" hint-placeholder-val="{{ true }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></sc-if>
         <sc-if value="{{ hidden }}" hint-placeholder-val="{{ false }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/><path d="M3 3l12 12"/></svg></sc-if>
       </button>
+      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
     </div>
   </header>
 
@@ -259,6 +267,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         </div>
         <p class="count" role="status">{{ countText }}</p>
       </div>
+      <div class="proto strip" role="group" aria-label="Prototype states">
+        <span class="pl">Prototype · Spark history</span>
+        <sc-for list="{{ shOpts }}" as="o" hint-placeholder-count="3"><button type="button" class="pb" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
+      </div>
       <sc-if value="{{ preNote.show }}" hint-placeholder-val="{{ false }}"><p class="pre">{{ preNote.text }}</p></sc-if>
 
       <form class="filters" aria-label="Filter activity" onSubmit="{{ noSubmit }}">
@@ -283,12 +295,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <input id="flt-q" class="ctl" type="search" autocomplete="off" placeholder="Label, txid, payment hash, swap ID" value="{{ f.q }}" onInput="{{ on.q }}">
         </div>
         <div class="fend">
-          <span class="fcount">{{ activeText }}</span>
-          <button type="button" class="lbtn" disabled="{{ noFilters }}" onClick="{{ clear }}">Clear filters</button>
-          <span class="proto" role="group" aria-label="Spark history (prototype)" style="margin-top:0">
-            <span class="pl">Spark history</span>
-            <sc-for list="{{ shOpts }}" as="o" hint-placeholder-count="3"><button type="button" class="pb" aria-pressed="{{ o.on }}" onClick="{{ o.pick }}">{{ o.label }}</button></sc-for>
-          </span>
+          <sc-if value="{{ hasFilters }}" hint-placeholder-val="{{ false }}">
+            <span class="fcount">{{ activeText }}</span>
+            <button type="button" class="lbtn" onClick="{{ clear }}">Clear filters</button>
+          </sc-if>
         </div>
       </form>
       <sc-if value="{{ dateErr }}" hint-placeholder-val="{{ false }}"><p class="ferr" id="flt-dates-err" style="padding:6px 24px 0">Use October 2026 days, like “Oct 15 – Oct 22”.</p></sc-if>
@@ -303,7 +313,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             </div>
           </sc-if>
           <sc-if value="{{ hasRows }}" hint-placeholder-val="{{ true }}">
-            <div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span class="r">Fiat</span><span>Status</span></div>
+            <div class="cols" aria-hidden="true"><span>Time</span><span>Wallet</span><span>Details</span><span class="r">Amount</span><span>Status</span></div>
             <sc-if value="{{ sparkLoadRow }}" hint-placeholder-val="{{ false }}">
               <div class="sload" role="status"><span class="spin" aria-hidden="true"></span><span>Loading payment history from the Spark bridge…</span></div>
             </sc-if>
@@ -326,8 +336,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                     <sc-if value="{{ it.dX }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 6.5h11.5M11.5 3.5l3 3-3 3M15 11.5H3.5M6.5 8.5l-3 3 3 3"/></svg></sc-if>
                     <span class="sr">{{ it.dirWord }}:</span><span class="ell">{{ it.text }}</span>
                   </span>
-                  <span class="amt r {{ it.amtCls }}">{{ it.amt }}<span class="u">{{ it.unit }}</span></span>
-                  <span class="fx r">{{ it.fiat }}</span>
+                  <span class="amt r {{ it.amtCls }}">{{ it.amt }}<span class="u">{{ it.unit }}</span><span class="fx">{{ it.fiat }}</span></span>
                   <span class="stc {{ it.stCls }}">
                     <sc-if value="{{ it.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
                     <sc-if value="{{ it.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
@@ -357,7 +366,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <h2 id="det-h"><span class="sr">{{ d.dirWord }}: </span>{{ d.title }}</h2>
               <button type="button" class="xbtn" aria-label="Close details" onClick="{{ d.close }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 4.5 9 9M13.5 4.5l-9 9"/></svg></button>
             </div>
-            <p class="dw">{{ d.wallet }} · Bitcoin mainnet</p>
+            <p class="dw">{{ d.wallet }} · {{ d.railShort }}</p>
             <p class="big {{ d.amtCls }}">{{ d.amt }}<span class="u">{{ d.unit }}</span></p>
             <p class="fxat">{{ d.fiatAt }}</p>
             <p class="dst {{ d.stCls }}">
@@ -365,15 +374,43 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <sc-if value="{{ d.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
               <sc-if value="{{ d.sSig }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M11.5 3.5l3 3-8 8h-3v-3z"/><path d="M10 5l3 3"/></svg></sc-if>
               <sc-if value="{{ d.sFail }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.75 6.75 4.5 4.5M11.25 6.75l-4.5 4.5"/></svg></sc-if>
-              <span>{{ d.stLong }}</span>
+              <span>{{ d.stShort }}</span>
             </p>
 
+            <sc-if value="{{ d.isPsbt }}" hint-placeholder-val="{{ true }}">
+            <div class="dsec" style="border-top:0">
+              <button type="button" class="disc" aria-expanded="{{ d.discOpen }}" aria-controls="det-disc-top" onClick="{{ d.toggleDisc }}">{{ d.discTitle }}<svg class="ic s chev" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 7 4.5 4.5L13.5 7"/></svg></button>
+              <sc-if value="{{ d.discShown }}" hint-placeholder-val="{{ true }}">
+                <div class="dbody" id="det-disc-top">
+                  <dl class="dl">
+                    <sc-for list="{{ d.discItems }}" as="k" hint-placeholder-count="3">
+                      <div><dt>{{ k.k }}</dt><dd>{{ k.v }}</dd></div>
+                    </sc-for>
+                  </dl>
+                  <sc-if value="{{ d.isPsbt }}" hint-placeholder-val="{{ true }}">
+                    <ul class="sg" aria-label="Signers, 2-of-3 synthetic policy">
+                      <sc-for list="{{ d.signers }}" as="g" hint-placeholder-count="3">
+                        <li>
+                          <sc-if value="{{ g.done }}" hint-placeholder-val="{{ true }}"><svg class="ic ok" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if>
+                          <sc-if value="{{ g.wait }}" hint-placeholder-val="{{ false }}"><svg class="ic warn" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2 1.5"/></svg></sc-if>
+                          <sc-if value="{{ g.idle }}" hint-placeholder-val="{{ false }}"><svg class="ic muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/></svg></sc-if>
+                          <span>{{ g.name }}<span class="fp mono">{{ g.fp }}</span></span>
+                          <span class="ss {{ g.cls }}">{{ g.st }}</span>
+                        </li>
+                      </sc-for>
+                    </ul>
+                    <div class="acts">
+                      <a class="btn pri" href="P-Send.dc.html">Continue signing</a>
+                    </div>
+                  </sc-if>
+                </div>
+              </sc-if>
+            </div>
+            </sc-if>
             <dl class="dl dsec">
+              <div><dt>Date</dt><dd title="{{ d.whenTz }}">{{ d.when }}</dd></div>
               <div><dt>Fee</dt><dd>{{ d.fee }}</dd></div>
               <sc-if value="{{ d.hasConf }}" hint-placeholder-val="{{ true }}"><div><dt>Confirmations</dt><dd>{{ d.conf }}</dd></div></sc-if>
-              <div><dt>Date and time</dt><dd>{{ d.when }}</dd></div>
-              <div><dt>Wallet</dt><dd>{{ d.wallet }}</dd></div>
-              <div><dt>Rail</dt><dd>{{ d.rail }}</dd></div>
               <div><dt>{{ d.peerK }}</dt><dd class="mono">{{ d.peer }}</dd></div>
             </dl>
 
@@ -389,13 +426,14 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                   <button type="button" class="cpy" aria-label="{{ x.aria }}" onClick="{{ x.copy }}">
                     <sc-if value="{{ x.notCopied }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="6.5" y="6.5" width="8.5" height="8.5" rx="1.5"/><path d="M11.5 6.5V4.25c0-.7-.55-1.25-1.25-1.25h-6c-.7 0-1.25.55-1.25 1.25v6c0 .7.55 1.25 1.25 1.25H6.5"/></svg></sc-if>
                     <sc-if value="{{ x.copied }}" hint-placeholder-val="{{ false }}"><svg class="ic s ok" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 9.25 3 3 6-6.5"/></svg></sc-if>
-                    {{ x.btn }}
+                    <span class="sr">{{ x.btn }}</span>
                   </button>
                 </li>
               </sc-for>
             </ul>
             <span class="sr" role="status">{{ d.copyMsg }}</span>
 
+            <sc-if value="{{ d.notPsbt }}" hint-placeholder-val="{{ false }}">
             <div class="dsec" style="border-top:0">
               <button type="button" class="disc" aria-expanded="{{ d.discOpen }}" aria-controls="det-disc" onClick="{{ d.toggleDisc }}">{{ d.discTitle }}<svg class="ic s chev" aria-hidden="true" viewBox="0 0 18 18"><path d="m4.5 7 4.5 4.5L13.5 7"/></svg></button>
               <sc-if value="{{ d.discShown }}" hint-placeholder-val="{{ true }}">
@@ -424,6 +462,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
                 </div>
               </sc-if>
             </div>
+            </sc-if>
           </aside>
         </sc-if>
       </div>
@@ -433,8 +472,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"presetWallet":{"editor":"enum","options":["all","spark","vault","liquid"],"default":"all","section":"Review"},"selectedRow":{"editor":"enum","options":["0","1","2","3","4","5","6","7","8","9","10","11","12","13","14"],"default":"3","section":"Review"},"sparkHistory":{"editor":"enum","options":["ready","loading","failed"],"default":"ready","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={f:null,sel:null,hide:null,labels:{},disc:null,copied:null,sh:null};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={f:null,sel:null,hide:null,labels:{},disc:null,copied:null,sh:null};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,self=this,D='••••••';
     const hb=!!P.hideBalances;
     const hide=(this.state.hide&&this.state.hide.for===hb)?this.state.hide.v:hb;
@@ -527,14 +568,14 @@ class Component extends DCLogic {
         wallet:WN[R.w][0]+' · '+WN[R.w][1],
         amt:hide?D:a.txt,unit:hide?'':a.unit,amtCls:R.st==='failed'?'void':'',
         fiatAt:hide?D:('$'+R.fx.toFixed(2)+' at the time'+((R.u==='USDt')?'':' · '+RATE)),
-        stLong:R.sl,stCls:R.st==='failed'?'bad':(R.st==='pending'?'warn':'ok'),
+        stLong:R.sl,stShort:R.sl.split('. ')[0].replace(/\.$/,''),stCls:R.st==='failed'?'bad':(R.st==='pending'?'warn':'ok'),
         sOk:R.st==='confirmed',sPend:R.st==='pending'&&!R.sig,sSig:!!R.sig,sFail:R.st==='failed',
-        fee:hide?D:R.fee,hasConf:!!R.conf,conf:R.conf,
-        when:DAYS[R.d][1]+', '+R.t+' · UTC+01:00 (device time zone)',
-        rail:R.rail,peerK:R.pk==='To'?'Destination':'Counterparty',peer:R.peer,
+        fee:hide?D:R.fee,hasConf:!!R.conf&&!R.sig,conf:R.conf,
+        when:DAYS[R.d][1]+', '+R.t,whenTz:'UTC+01:00 · device time zone',
+        rail:R.rail,railShort:String(R.rail).split(' · ')[0],notPsbt:!R.sig,peerK:R.pk==='To'?'Destination':'Counterparty',peer:R.peer,
         label:labelOf(R),
         onLabel:(e)=>{const v=(e&&e.target)?e.target.value:'';const nl=Object.assign({},self.state.labels||{});nl[R.id]=v;self.setState({labels:nl});},
-        ids:R.ids.map((x,i)=>{const key=R.id+':'+i,did=cp===key;return {name:x[0],val:x[1],aria:'Copy '+x[0],btn:did?'Copied':'Copy',copied:did,notCopied:!did,
+        ids:R.ids.filter((x)=>!(R.sig&&/^Txid/.test(x[0]))).map((x,i)=>{const key=R.id+':'+i,did=cp===key;return {name:x[0],val:x[1],aria:'Copy '+x[0],btn:did?'Copied':'Copy',copied:did,notCopied:!did,
           copy:()=>{try{if(navigator.clipboard)navigator.clipboard.writeText(x[1]).catch(()=>{});}catch(err){}
             self.setState({copied:key});setTimeout(()=>{if(self.state.copied===key)self.setState({copied:null});},1600);}};}),
         copyMsg:(cp&&cp.indexOf(R.id+':')===0)?(R.ids[parseInt(cp.split(':')[1],10)][0]+' copied'):'',
@@ -553,14 +594,14 @@ class Component extends DCLogic {
     return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       hideP:hide?'true':'false',shown:!hide,hidden:hide,
       lockAsk:lockAsk,lockIdle:!lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
       toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
       f:F,on:on,noSubmit:(e)=>{if(e&&e.preventDefault)e.preventDefault();},
       dateErr:dateErr,dateInvalid:dateErr?'true':'false',
       activeText:active===0?'No filters':(active===1?'1 filter active':active+' filters active'),
-      noFilters:active===0,
+      noFilters:active===0,hasFilters:active>0,
       clear:()=>setF({wallet:'all',dir:'all',status:'all',dates:'',q:''}),
       countText:'Showing '+shown.length+' of '+avail.length,
       preNote:{show:preset!=='all'&&F.wallet===preset,text:'From '+presetName+' › Recent activity'},
