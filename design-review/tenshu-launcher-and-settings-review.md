@@ -716,3 +716,42 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Robert:** the arrow icons were hard to see and should be white; the Launcher's List screen was missing from the prototype.
 
 **Applied (P-Launcher, P-AppPrefs):** the paging arrows are now white on the panel background with a heavier stroke and a lighter ring (ink-coloured in the light theme). The Launcher gains the List style the app already offers: App preferences › Launcher › Launcher style writes a device flag, and the Launcher also switches to List under reduced motion, matching the app's automatic fallback. The list shows every visible Cube in one scrolling column with avatar, name and lock state, network icon and tag, wallet icons, a short backup state and an Open / Go to Cube action. Selecting a row opens a 440 px side panel with the same details, PIN/passkey unlock and network-checks content the cube faces show, so the full Launcher journey works in both styles. Paging arrows and the floor are hidden in List. Review lever `launcherStyle` (auto · cubes · list); auto follows the device flag and reduced motion.
+
+## Launcher: light-theme examples for Cubes and List (2026-10-24, canvas v104)
+
+**Robert:** show a light version of the Launcher for the Cubes view and for the List view.
+
+**Applied:** two artboards at the end of the Launcher row, `P-Launcher-Light` and `P-Launcher-Light-List`, each mounting the real `P-Launcher` with `theme=light` (and `launcher-style=list` for the second). They share the Launcher's fixtures and behaviour, so the light tokens already defined on `.tenshu.light` (background, panel, rail, ink, muted, line, floor and face colours, test-network edge, shadow) are shown without a second copy of the screen. The Launcher's own theme lever gives the same result on the main board.
+
+## Appearance applies to every screen (2026-10-24, canvas v105)
+
+**Robert:** switching to Light in App preferences did not turn the Launcher light.
+
+**Applied:** App preferences › Appearance › Theme (System · Light · Dark) is now a device setting shared across the prototype, like Developer mode, Blake2b and Launcher style. Every screen's theme class follows it: Light or Dark win outright; System falls back to each board's review lever. App preferences announces the change, and every screen re-renders on it, so the Launcher and the Cube screens switch without a refresh. The two light-theme example boards stay light regardless of the device setting.
+
+## Connect and App preferences overlay the current screen (2026-10-24, canvas v107)
+
+**Robert:** Connect and App preferences must be reachable from anywhere, including inside an open Cube, and must not send the user back to the Launcher.
+
+**Applied:** both sheets now know whether a Cube is on screen. Inside a Cube they overlay the Cube (the Overview, dimmed, behind the sheet) and Close returns to the Cube; at the Launcher they keep the Launcher backdrop and return there. The Cube top bar gains an App preferences icon beside the Connect chip, so both overlays are one click away from every Cube screen. Prototype mechanics: Cube screens set `tenshu.proto.inCube` on render and the Launcher clears it; the sheets read it to pick backdrop and Close target.
+
+## Light theme page: a light twin of every screen (2026-10-24, canvas v109)
+
+**Robert:** add the remaining light-mode pages.
+
+**Applied:** a second canvas page, "Light theme (same prototype, forced light)", holds a twin of every prototype screen in the same six-row grouping plus the AI access row. Each twin mounts the real screen with `force-theme=light`, so it shares fixtures, links and behaviour and stays current with every change; every screen now honours that forced theme, and the device Appearance setting still governs the main prototype. Every screen was checked in Light before this: the token blocks were already complete, so the light page is a reference set rather than a fix.
+
+## Fix: setting changes propagate again; in-Cube overlays without shared state (2026-10-24, canvas v111)
+
+While exporting, two regressions of mine surfaced. (1) Removing the cross-tab listener in v108 also stopped one artboard hearing a setting change made in another, so the Launcher again needed a reload after App preferences changes. The listener is restored on every screen. (2) The "a Cube is on screen" marker was unreliable because the player keeps every artboard mounted and re-renders them all on a setting change, so hidden Cube screens re-set it. It is gone. The Cube top bar now links to two small boards, "App preferences · over an open Cube" and "Connect · over an open Cube", which mount the real sheets with `in-cube=1`; the Launcher links to the plain ones. Verified: Developer mode on and off reflects on the Launcher without a reload; App preferences and Connect from the Overview overlay the Cube and Close returns to it; from the Launcher they overlay the Launcher.
+
+## Fixes found while exporting screens (2026-10-24, canvas v112–v113)
+
+- **Import or restore:** the line "Bitcoin Blake2b supports Vault creation only." showed with Blake2b off. It now shows only when Blake2b is on for the device (v112).
+- **Opening a Cube, light twin:** after the "is open" beat, the board mounted a dark Overview. The light twin now passes the forced light theme to the Overview it opens into (v113).
+
+## Exported screens for the hand-off (2026-10-24)
+
+**Robert:** make a PR with the updated designs exported so Codex can work with them.
+
+**Applied:** `screens/dark/` (34 boards, device settings at their defaults) and `screens/light/` (the Light theme page, 33 boards including the Launcher List view), indexed in `screens/README.md`, and linked from `HANDOFF.md`. The canvas sources in `canvas/` match canvas v113.

@@ -273,7 +273,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <sc-if value="{{ v.hub }}" hint-placeholder-val="{{ true }}">
             <div class="sec">
               <h2>Choose what to bring in</h2>
-              <p class="lead">Bitcoin Blake2b supports Vault creation only.</p>
+              <sc-if value="{{ b2bOn }}" hint-placeholder-val="{{ false }}"><p class="lead">Bitcoin Blake2b supports Vault creation only.</p></sc-if>
               <ul class="list">
                 <sc-for list="{{ hubPaths }}" as="p" hint-placeholder-count="5">
                   <li class="li">
@@ -735,8 +735,11 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"path":{"editor":"enum","options":["hub","import","kit","phone","heir","phrase"],"default":"hub","section":"Review"},"step":{"editor":"enum","options":["1","2","3","4","5","6"],"default":"1","section":"Review"},"error":{"editor":"enum","options":["none","invalid","mismatch","signedOut","unavailable","delayed","network","pin"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
-  constructor(p) { super(p); this.state = { lv: null }; }
+  constructor(p) { super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {} this.state = { lv: null }; }
   renderVals() {
+    let B2B_ON = false; try { B2B_ON = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P = this.props, self = this;
     const theme = P.theme ?? 'dark';
     const L = { path: P.path || 'hub', step: Math.max(1, parseInt(P.step || '1', 10) || 1), err: P.error || 'none' };
@@ -921,7 +924,8 @@ class Component extends DCLogic {
     };
 
     return {
-      themeClass: theme === 'light' ? 'light' : '',
+      b2bOn: B2B_ON,
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && theme === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       floorCubes: [
         { name: 'Everyday', edge: 'btc', coinCls: '', tag: '', walletPath: I.kit },

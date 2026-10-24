@@ -222,7 +222,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 /* paging (2026-10-23) */
 .pgbtn{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid var(--muted);background:var(--panel);color:#fff;cursor:pointer;z-index:6;display:grid;place-items:center;box-shadow:0 6px 18px var(--shadow)}
 .tenshu.light .pgbtn{color:var(--ink)}
-.pgbtn .ic{width:22px;height:22px;stroke-width:2.4;color:inherit}
+.pgbtn svg{width:22px;height:22px;fill:none;stroke:#fff;stroke-width:2.4;stroke-linecap:round;stroke-linejoin:round}
+.tenshu.light .pgbtn svg{stroke:var(--ink)}
 .pgbtn.l{left:18px}.pgbtn.r{right:18px}
 .pgbtn:hover{background:var(--hover)}
 .pgbtn[disabled]{opacity:.3;cursor:default}
@@ -656,6 +657,8 @@ class Component extends DCLogic {
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
   }
   renderVals() {
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage
     let DEV = false; try { DEV = localStorage.getItem('tenshu.proto.dev') === '1'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
@@ -915,7 +918,7 @@ class Component extends DCLogic {
     const lsel = Object.assign({ on: !!lfound, p: EMPTY, name: '', state: '', stCls: '', edge: '', tag: '', hasTag: false, btcLogo: true, logo: false, coinCls: '', isOpen: false, notOpen: true, hint: '', showDetails: false, detailsOnly: false, showUnlock: false, showChecks: false, av: '' }, lfound || {});
     return {
       b2bOn: B2B,
-      themeClass: theme === 'light' ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && theme === 'light')) ? 'light' : ''),
       motionClass: this.props.reducedMotion ? 'reduced' : '',
       quietCls: browsing ? '' : 'quiet',
       signedIn: (this.props.accountState ?? 'signedIn') !== 'signedOut',

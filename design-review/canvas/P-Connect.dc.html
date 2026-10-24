@@ -157,12 +157,14 @@ a.linkbtn:hover{color:var(--ink)}
 .fnote{margin:12px 0 0;font-size:12px;color:var(--muted)}
 .foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+.cubebg{position:absolute;inset:0;opacity:.45;pointer-events:none;filter:saturate(.6)}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
 
+  <sc-if value="{{ atLauncher }}" hint-placeholder-val="{{ true }}">
   <header class="top">
-    <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher">
+    <a class="brand" href="{{ closeHref }}" title="{{ backTitle }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"></path><path d="M4 7.5l8 4.5 8-4.5M12 12v9"></path></svg>
       <span>Tenshu</span>
     </a>
@@ -181,8 +183,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       <span>App preferences</span>
     </a>
   </header>
+  </sc-if>
 
   <main class="stage">
+    <sc-if value="{{ inCube }}" hint-placeholder-val="{{ false }}">
+    <div class="cubebg" aria-hidden="true"><dc-import name="P-Overview" hint-size="1440px,900px"></dc-import></div>
+    </sc-if>
+    <sc-if value="{{ atLauncher }}" hint-placeholder-val="{{ true }}">
     <div class="backdrop" aria-hidden="true">
       <div class="bfield">
         <div class="floor"></div>
@@ -208,13 +215,14 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
       </div>
       <div class="bbar"><span class="btn">Create Cube</span><span class="btn">Import or restore a Cube</span></div>
     </div>
+    </sc-if>
 
     <section class="sheet" aria-labelledby="cx-title">
       <div class="shead">
         <h1 id="cx-title">{{ headTitle }}</h1>
         <span class="who">{{ headWho }}</span>
         <span class="grow"></span>
-        <a class="btn close" href="P-Launcher.dc.html" aria-label="Close Connect">
+        <a class="btn close" href="{{ closeHref }}" aria-label="Close Connect">
           <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18"></path></svg>
           <span>Close</span>
         </a>
@@ -447,10 +455,14 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["Account","Plan &amp; billing","Contacts","Devices &amp; security","Recovery services"],"default":"Account","section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut","loading","error"],"default":"signedIn","section":"Review"},"planState":{"editor":"enum","options":["active","cancelled"],"default":"active","section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p);
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { lv: null };
   }
   renderVals() {
+    // prototype-only: when a Cube is on screen this sheet overlays it and Close returns to it
+    const IN_CUBE = this.props.inCube === '1' || this.props.inCube === true;
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props;
@@ -570,7 +582,7 @@ class Component extends DCLogic {
     const acctState = signedIn ? 'Signed in' : signedOut ? '' : acct === 'loading' ? 'Checking…' : 'Not reachable';
     const EMAIL = 'alex@example.test';
     return {
-      themeClass: dark ? '' : 'light',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && !dark)) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       okPath: I.ok, offPath: I.off,
       // Hide balances is the one top-bar toggle (device-wide); theme lives in App preferences and follows the lever here
@@ -585,7 +597,7 @@ class Component extends DCLogic {
       acctAria: signedOut ? 'Connect, sign in' : 'Connect, ' + EMAIL + ', ' + acctState.toLowerCase(),
       headTitle: signedOut ? 'Connect' : 'Connect account',
       headWho: signedOut ? '' : EMAIL,
-      floorCubes, sections, secLabel: sec,
+      floorCubes, sections, inCube: IN_CUBE, atLauncher: !IN_CUBE, closeHref: IN_CUBE ? 'P-Overview.dc.html' : 'P-Launcher.dc.html', backTitle: IN_CUBE ? 'Back to the Cube' : 'Back to the Launcher', secLabel: sec,
       isLoading: acct === 'loading',
       isError: acct === 'error',
       skelRows: [70, 52, 64, 44, 58].map((w) => ({ a: 'width:' + w + '%;margin-bottom:8px', b: 'width:' + (w - 20) + '%;opacity:.6' })),

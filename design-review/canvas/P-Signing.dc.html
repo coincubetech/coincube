@@ -177,7 +177,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     <a class="brand" href="P-Launcher.dc.html" title="Back to the Launcher"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg>Tenshu</a>
     <div class="chips">
       <div class="chip" title="{{ acctTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="6.5" r="3"/><path d="M3.5 15.5c.8-2.8 2.9-4.25 5.5-4.25s4.7 1.45 5.5 4.25"/></svg>
-        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><a href="P-Connect.dc.html" style="color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:6px"><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a></sc-if>
+        <sc-if value="{{ signedIn }}" hint-placeholder-val="{{ true }}"><a href="P-Connect-InCube.dc.html" style="color:inherit;text-decoration:none;display:inline-flex;align-items:center;gap:6px"><span class="srl">Connect account alex@example.test:</span><span class="st ok"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg>Signed in</span></a></sc-if>
         <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="srl">Connect account:</span><span class="st unk"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M6 9h6"/></svg>Signed out</span><a class="mini" href="P-SignIn.dc.html" style="display:inline-flex;align-items:center;text-decoration:none">Sign in</a></sc-if>
       </div>
       <div class="chip" title="{{ connTitle }}"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M7.5 10.5a3 3 0 0 0 4.2 0l2.3-2.3a3 3 0 0 0-4.2-4.2l-.9.9"/><path d="M10.5 7.5a3 3 0 0 0-4.2 0L4 9.8A3 3 0 0 0 8.2 14l.9-.9"/></svg><span class="srl">Cube service:</span>
@@ -185,6 +185,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <sc-if value="{{ signedOut }}" hint-placeholder-val="{{ false }}"><span class="st unk">Not checked</span></sc-if>
       </div>
       <button type="button" class="eye" aria-pressed="false" aria-label="Hide balances"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M1.75 9S4.5 4 9 4s7.25 5 7.25 5S13.5 14 9 14 1.75 9 1.75 9z"/><circle cx="9" cy="9" r="2.25"/></svg></button>
+      <a class="chip" href="P-AppPrefs-InCube.dc.html" title="App preferences" aria-label="App preferences" style="padding:0 10px"><svg class="ic s muted" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5h12M3 9h12M3 13h12"/><circle cx="7" cy="5" r="1.6" fill="var(--panel)"/><circle cx="12" cy="9" r="1.6" fill="var(--panel)"/><circle cx="6" cy="13" r="1.6" fill="var(--panel)"/></svg></a>
     </div>
   </header>
 
@@ -399,8 +400,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["hardware","keychain","pair","labels","export","warnings","branta"],"default":"hardware","section":"Review"},"state":{"editor":"enum","options":["ready","processing","signed","connectionError","advisoryDismissed","requested","delivered","viewed","approved","signing","rejected","expired","lanFailed","signedOut","keyPick","discovering","pickPhone","offer","offerExpired","wrongWallet","qrUsed","verifyFailed","needsUpdate","networkError","noPaired","noKeys","editing","tooLong","choosePath","progress","timeout","canceled","success","labelsConflict","aliasesConflict","importAdvisory","coinSelection","backendDown","quoteStale","notIdentified","checksOff"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={k:null,lockAsk:false};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null,lockAsk:false};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,self=this;
     const L={sec:P.section||'hardware',st:P.state||'ready'};
     const key=L.sec+'|'+L.st;
@@ -552,7 +555,7 @@ class Component extends DCLogic {
     const vaultish=['hardware','keychain','labels','warnings'].indexOf(sec)>=0;
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       lockIdle:!self.state.lockAsk,lockAsk:!!self.state.lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
       signedIn:!out2,signedOut:out2,acctTitle:out2?'Connect account · Signed out':'alex@example.test · Signed in',connTitle:'Cube service · '+(out2?'Not checked':'Connected'),
       nav:{vault:vaultish?'on':'',vaultCur:vaultish?'page':'false',settings:(sec==='pair'||sec==='export')?'on':'',settingsCur:(sec==='pair'||sec==='export')?'page':'false'},
