@@ -423,6 +423,7 @@ async fn try_pair_once(
         xpub: reported.xpub.clone(),
         fingerprint,
         descriptor_sha256: reported.descriptor_sha256.clone(),
+        imported_scope: None,
     });
 
     let name = if complete.device_name.is_empty() {

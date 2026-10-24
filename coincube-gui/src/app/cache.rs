@@ -92,6 +92,10 @@ impl AppGeneration {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
+
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// Where an entanglement lookup was issued from: the `App` instance, and the

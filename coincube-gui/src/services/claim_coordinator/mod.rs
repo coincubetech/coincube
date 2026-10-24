@@ -525,6 +525,10 @@ struct Revocation {
     gate: Option<SubmissionRevoker>,
 }
 impl Revoker {
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self::new()
+    }
     pub fn revoke(&self) {
         let mut state = self.0.lock().unwrap_or_else(|e| e.into_inner());
         state.revoked = true;

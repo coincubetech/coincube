@@ -81,6 +81,11 @@ type StartedResult = Result<
     Error,
 >;
 
+/// A single-use counterpart PIN. Deliberately neither Clone nor Debug: the
+/// source Cube's process session remains untouched while the paired Vault is
+/// loaded, and retries must go through unlock again.
+pub struct ScopedSeedPassword(zeroize::Zeroizing<String>);
+
 pub struct Loader {
     pub datadir_path: CoincubeDirectory,
     pub network: bitcoin::Network,
@@ -93,7 +98,11 @@ pub struct Loader {
     pub cube_settings: CubeSettings,
     pub breez_client: Option<std::sync::Arc<BreezClient>>,
     pub connect_client: Option<crate::services::coincube::CoincubeClient>,
+    /// Account checked by fork PIN classification for a scoped Claim load.
+    pub(crate) claim_verified_account: Option<u32>,
     pub cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+    scoped_seed_password: Option<ScopedSeedPassword>,
+    restricted_claim: bool,
     /// Optional Spark backend loaded alongside `breez_client` in the PIN
     /// flow. `None` when the cube has no Spark signer or when the bridge
     /// subprocess failed to spawn — panels that depend on Spark surface a
@@ -444,6 +453,9 @@ impl Loader {
                 spark_backend,
                 connect_client,
                 cube_encryption_key,
+                scoped_seed_password: None,
+                restricted_claim: false,
+                claim_verified_account: None,
                 quote_provider,
                 current_quote,
                 current_image_handle,
@@ -547,6 +559,7 @@ impl Loader {
                     network: self.network,
                     internal_bitcoind: self.internal_bitcoind.clone(),
                     backup: self.backup.clone(),
+                    scoped_seed_password: self.scoped_seed_password.take(),
                 }),
                 Message::Synced,
             );
@@ -631,8 +644,16 @@ impl Loader {
 
     fn on_start(&mut self, res: StartedResult) -> Task<Message> {
         if self.cube_settings.network.is_blake2b() && self.fork_session_revoked {
-            if let Ok((daemon, _, _)) = res {
+            if let Ok((daemon, mut bitcoind, _)) = res {
                 daemon.invalidate_connect_session();
+                if daemon.backend().is_embedded() {
+                    if let Err(error) = Handle::current().block_on(daemon.stop()) {
+                        warn!("Revoked fork daemon failed to stop: {error}");
+                    }
+                }
+                if let Some(node) = bitcoind.node.take() {
+                    node.stop();
+                }
             }
             return Task::none();
         }
@@ -677,6 +698,7 @@ impl Loader {
                                     network: self.network,
                                     internal_bitcoind: self.internal_bitcoind.clone(),
                                     backup: self.backup.clone(),
+                                    scoped_seed_password: self.scoped_seed_password.take(),
                                 }),
                                 Message::Synced,
                             );
@@ -701,6 +723,9 @@ impl Loader {
         if !self.cube_settings.network.is_blake2b() {
             return;
         }
+        if self.restricted_claim {
+            self.stop();
+        }
         if let Step::Syncing { daemon, .. } = &self.step {
             daemon.invalidate_connect_session();
         }
@@ -711,6 +736,8 @@ impl Loader {
             node.stop();
         }
         self.fork_session_revoked = true;
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
         self.connect_client = None;
         self.cube_encryption_key = None;
         self.step = Step::Error(Box::new(Error::Unexpected(
@@ -719,6 +746,9 @@ impl Loader {
     }
 
     pub fn stop(&mut self) {
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
+        self.restricted_claim = false;
         if let Some(handle) = self.fork_task.take() {
             handle.abort();
         }
@@ -739,16 +769,36 @@ impl Loader {
         if let Some(bitcoind) = self.internal_bitcoind.take() {
             bitcoind.stop();
         }
-        // Stop the managed Tor daemon (if inbound-over-Tor was running).
-        if !self.cube_settings.network.is_blake2b() {
-            crate::node::tor::stop_managed_tor();
-        }
+    }
+
+    /// A restricted Claim load transfers its verified wallet/daemon payload
+    /// to the source App. Detach the loader's duplicate shutdown handles so
+    /// closing the temporary unlock tab cannot stop the new operation owner.
+    pub(crate) fn detach_claim_resources(&mut self) {
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
+        self.restricted_claim = false;
+        self.fork_task.take();
+        self.internal_bitcoind.take();
+        self.step = Step::Error(Box::new(Error::Unexpected(
+            "Claim resources transferred to the source Cube".into(),
+        )));
+    }
+
+    pub(crate) fn set_scoped_seed_password(&mut self, password: zeroize::Zeroizing<String>) {
+        self.scoped_seed_password = Some(ScopedSeedPassword(password));
+        self.restricted_claim = true;
     }
 
     /// Surface a refusal raised by the tab on this Loader's behalf (for
     /// example an installer the Cube's chain does not admit) without
     /// starting anything.
     pub(crate) fn fail(&mut self, error: Error) {
+        if self.restricted_claim {
+            self.stop();
+        }
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
         self.step = Step::Error(Box::new(error));
     }
 
@@ -913,6 +963,7 @@ pub struct LoadApplicationConfig {
     pub network: bitcoin::Network,
     pub internal_bitcoind: Option<Bitcoind>,
     pub backup: Option<Backup>,
+    pub scoped_seed_password: Option<ScopedSeedPassword>,
 }
 
 pub async fn load_application(
@@ -962,7 +1013,10 @@ pub async fn load_application(
     } else {
         // A Vault hot signer is encrypted under the same credential the Cube
         // unlocks with. Only a strict Vault descriptor may load those seeds.
-        let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
+        let seed_password = match config.scoped_seed_password {
+            Some(password) => Some(password.0),
+            None => crate::app::session::seed_file_password(&config.cube_settings),
+        };
         let descriptor = config
             .info
             .descriptors
@@ -2140,9 +2194,14 @@ mod tests {
                 bitcoin::Network::Bitcoin,
             ),
         ));
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
         loader.invalidate_fork_session();
         assert!(loader.connect_client.is_none());
         assert!(loader.cube_encryption_key.is_none());
+        assert!(loader.scoped_seed_password.is_none());
+        assert!(loader.claim_verified_account.is_none());
+        assert!(!loader.restricted_claim);
         let _ = loader.on_start(Err(Error::Unexpected("late startup".into())));
         assert!(
             matches!(&loader.step, Step::Error(error) if error.to_string().contains("session changed"))

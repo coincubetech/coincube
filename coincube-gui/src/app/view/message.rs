@@ -1635,6 +1635,9 @@ pub enum ConnectAccountMessage {
     },
     /// Refresh public Cube metadata for Account → Recovery services.
     RefreshRecoveryServices,
+    /// Ask the Launcher to resolve this server Cube to an exact local Cube
+    /// before opening its ordinary authenticated unlock path.
+    OpenRecoveryService(crate::app::state::connect::account::RecoveryServiceTarget),
     /// A session refresh failed for a reason that is *not* an auth rejection
     /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
     /// rather than a raw error string — see [`crate::user_error`].
