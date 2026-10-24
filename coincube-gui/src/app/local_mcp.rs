@@ -1477,7 +1477,16 @@ mod tests {
             assert_eq!(initialized["serverInfo"]["name"], "tenshu-mcp");
             stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\"}\n").await.unwrap();
             let discovered = response(&mut stdin, &mut stdout, json!({"jsonrpc":"2.0", "id":2, "method":"tools/list"})).await;
-            assert_eq!(discovered["tools"].as_array().unwrap().len(), 7);
+            let tools = discovered["tools"].as_array().unwrap();
+            let names: std::collections::BTreeSet<_> = tools.iter()
+                .map(|tool| tool["name"].as_str().unwrap()).collect();
+            assert_eq!(tools.len(), 8);
+            assert_eq!(names, std::collections::BTreeSet::from([
+                "tenshu_get_capabilities", "tenshu_list_wallets",
+                "tenshu_get_wallet_summary", "tenshu_get_transactions",
+                "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
+                "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
+            ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
             let id = listed["structuredContent"]["wallets"][0]["wallet_id"].as_str().unwrap();
@@ -1491,6 +1500,16 @@ mod tests {
             let denied = response(&mut stdin, &mut stdout, call(7, "tenshu_get_wallet_summary", json!({"wallet_id":"another-wallet"}))).await;
             assert_eq!(denied["isError"], true);
             assert_eq!(denied["structuredContent"]["error"]["code"], "access_denied");
+            let setup_denied = response(&mut stdin, &mut stdout, call(10, "tenshu_prepare_wallet_creation", json!({
+                "request_id":"read-grant-must-not-prepare",
+                "topology":{
+                    "primary":{"threshold":3,"key_count":5},
+                    "recovery":{"quorum":{"threshold":2,"key_count":3},"relative_delay_blocks":144}
+                },
+                "keys":{"primary":vec!["unverified";5],"recovery":vec!["unverified";3]}
+            }))).await;
+            assert_eq!(setup_denied["isError"], true);
+            assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");
