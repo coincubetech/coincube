@@ -184,8 +184,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"stage":{"editor":"enum","options":["connecting","starting","scanning","syncing","almost","error","done"],"default":"connecting","section":"Review"},"errorKind":{"editor":"enum","options":["daemon","sessionChanged","esplora","blake2bRetry"],"default":"daemon","section":"Review"},"cube":{"editor":"enum","options":["everyday","blake"],"default":"everyday","section":"Review"},"quoteIndex":{"editor":"enum","options":["0","1","2","3","4","5"],"default":"0","section":"Review"},"autoplay":{"editor":"boolean","default":true,"section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={};this._timer=null;}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={};this._timer=null;}
   renderVals() {
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P = this.props, self = this;
     const theme = P.theme ?? 'dark';
     const lever = P.stage || 'connecting', ek = P.errorKind || 'daemon', ck = P.cube || 'everyday';
@@ -247,7 +249,7 @@ class Component extends DCLogic {
     }
 
     return {
-      themeClass: theme === 'light' ? 'light' : '',
+      themeClass: (THEME === 'light' || (THEME !== 'dark' && theme === 'light')) ? 'light' : '',
       motionClass: P.reducedMotion ? 'reduced' : '',
       cube: cube,
       q: { text: q[0], author: q[1], source: q[2] },

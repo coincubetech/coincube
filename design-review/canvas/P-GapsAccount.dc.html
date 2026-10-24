@@ -408,10 +408,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["kitMode","alerts","avatar"],"default":"kitMode","section":"Review"},"state":{"editor":"enum","options":["auto","kitPhoneChecking","kitPhoneAbsent","kitPhoneFound","kitUpdate","kitOwnerOff","kitPassword","kitPasswordMismatch","kitEncrypting","kitSealing","alertsOn","alertsFullCubePin","alertsOff","alertsTurnOff","alertsNoKeyholders","alertsTierUnknown","alertsEstateGate","alertsPlanGate","alertsNoVault","avQuestionnaire","avLnGate","avSignedOut","avGenerating","avReady","avUnlimited","avQuotaOut","avLoading","avError","avRegistrationError"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p);
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { k: null, hide: false, lockAsk: false };
   }
   renderVals() {
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P = this.props, self = this;
     const SCR = {
       kitMode: ['kitPhoneFound', 'kitPhoneChecking', 'kitPhoneAbsent', 'kitUpdate', 'kitOwnerOff', 'kitPassword', 'kitPasswordMismatch', 'kitEncrypting', 'kitSealing'],
@@ -547,7 +549,7 @@ class Component extends DCLogic {
     return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      themeClass: (THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : '',
       motionClass: P.reducedMotion ? 'reduced' : '',
       lockIdle: !self.state.lockAsk, lockAsk: !!self.state.lockAsk, askLock: () => self.setState({ lockAsk: true }), cancelLock: () => self.setState({ lockAsk: false }),
       hideP: String(hide), shown: !hide, hidden: hide, toggleHide: () => self.setState({ hide: !hide }),

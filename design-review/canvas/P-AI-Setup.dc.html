@@ -420,8 +420,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"theme": {"editor": "enum", "options": ["dark", "light"], "default": "dark", "section": "Review"}, "reducedMotion": {"editor": "boolean", "default": false, "section": "Review"}, "statusLabels": {"editor": "boolean", "default": true, "section": "Review"}, "stage": {"editor": "enum", "options": ["aiWorking", "waitingYou", "waitingDevice", "validation", "ready", "creating", "created", "failed"], "default": "ready", "section": "Review"}, "$preview": {"width": 1440, "height": 900}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,self=this;
     const lockAsk=!!this.state.lockAsk;
     const ann=this.state.ann==null?P.statusLabels!==false:this.state.ann;
@@ -454,7 +456,7 @@ class Component extends DCLogic {
     return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
       hideP:'false',shown:true,hidden:false,toggleHide:()=>{},
       lockAsk:lockAsk,lockIdle:!lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
       picks,pickLabel:'stage',annP:ann?'true':'false',toggleAnn:()=>self.setState({ann:!ann}),annStyle:ann?'':'display:none',
