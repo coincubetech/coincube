@@ -2,9 +2,13 @@ use std::collections::HashMap;
 use std::time::Duration;
 
 use iced::{
+    advanced::widget::Id,
     alignment,
-    widget::{checkbox, scrollable, tooltip, Column, Container, Row, Space},
-    Alignment, Length,
+    widget::{
+        button::{Status as ButtonStatus, Style as ButtonStyle},
+        checkbox, scrollable, tooltip, Column, Container, Row, Space,
+    },
+    Alignment, Background, Border, Color, Length,
 };
 
 use coincube_core::{
@@ -15,9 +19,10 @@ use coincube_core::{
 use coincube_ui::{
     color,
     component::{amount::*, badge, button, form, spinner, text::*},
+    font,
     icon::{self},
     theme,
-    widget::{Button, ColumnExt, Element, RowExt},
+    widget::{action::Action, Button, ColumnExt, Element, RowExt},
 };
 
 use crate::{
@@ -151,26 +156,195 @@ pub fn spend_view<'a>(
     )
 }
 
-/// A Fast/Normal/Slow feerate preset button. Renders with an orange outline
-/// when its estimate currently fills the feerate field, and is disabled while
-/// its own estimate is being fetched.
+/// Stable focus identities for the compose actions. They are fixed so focus
+/// survives re-rendering; fee presets are keyed by block target instead.
+const ADD_RECIPIENT_ID: &str = "tenshu.vault.send.add-recipient";
+const BACK_ID: &str = "tenshu.vault.send.back";
+const CLEAR_ID: &str = "tenshu.vault.send.clear";
+const PREPARE_ID: &str = "tenshu.vault.send.prepare";
+
+/// Fee presets in display order, each with the block target whose estimate it
+/// fetches. The target, never the label or position, is the preset's identity.
+const FEERATE_PRESETS: [(&str, usize); 3] =
+    [("Slow (~4h)", 24), ("Normal (~1h)", 6), ("Fast (~10m)", 1)];
+
+fn feerate_preset_id(block_target: usize) -> Id {
+    Id::from(format!("tenshu.vault.send.feerate-preset.{block_target}"))
+}
+
+/// A Slow/Normal/Fast feerate preset in the fee segment. It shows as selected
+/// while its estimate fills the feerate field. While its own estimate is being
+/// fetched it is disabled and shows a loading indicator, keeping its block
+/// target identity. A disabled Action leaves the focus order, so focus on the
+/// preset being fetched is not retained.
 fn feerate_preset_button<'a>(
     label: &'static str,
     block_target: usize,
     loading_fee_estimate: Option<usize>,
     selected_feerate_target: Option<usize>,
 ) -> Element<'a, Message> {
-    let btn = button::secondary(None, label)
-        .width(Length::Fixed(130.0))
-        .on_press_maybe(
-            (loading_fee_estimate != Some(block_target))
-                .then(|| Message::CreateSpend(CreateSpendMessage::FetchFeeEstimate(block_target))),
-        );
-    if selected_feerate_target == Some(block_target) {
-        btn.style(theme::button::orange_outline).into()
+    let id = feerate_preset_id(block_target);
+    let loading = loading_fee_estimate == Some(block_target);
+    let selected = selected_feerate_target == Some(block_target);
+    let label = text(label).size(P2_SIZE).font(if selected {
+        font::SEMIBOLD
     } else {
-        btn.into()
+        font::MEDIUM
+    });
+    let content: Element<'a, Message> = if loading {
+        Row::new()
+            .align_y(Alignment::Center)
+            .push(label)
+            .push(spinner::typing_text_carousel(
+                "...",
+                true,
+                Duration::from_millis(400),
+                |dots| text(dots).size(P2_SIZE),
+            ))
+            .into()
+    } else {
+        label.into()
+    };
+    Action::new(id, content, Message::FocusAction)
+        .padding([4, 12])
+        .style(move |theme, status| preset_style(theme, status, selected))
+        .on_press_maybe((!loading).then_some(Message::CreateSpend(
+            CreateSpendMessage::FetchFeeEstimate(block_target),
+        )))
+        .into()
+}
+
+fn preset_style(theme: &theme::Theme, status: ButtonStatus, selected: bool) -> ButtonStyle {
+    let shell = &theme.colors.shell;
+    let background = if selected {
+        shell.selected
+    } else if matches!(status, ButtonStatus::Hovered | ButtonStatus::Pressed) {
+        shell.hover
+    } else {
+        Color::TRANSPARENT
+    };
+    ButtonStyle {
+        background: Some(Background::Color(background)),
+        text_color: if selected { shell.ink } else { shell.muted },
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
     }
+}
+
+/// Bordered secondary control for Add recipient, Back and Clear.
+fn quiet_action<'a>(
+    id: &'static str,
+    icon: Option<coincube_ui::widget::Text<'a>>,
+    label: &'static str,
+    press: Message,
+) -> Element<'a, Message> {
+    Action::new(
+        id,
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push_maybe(icon.map(|icon| icon.size(P2_SIZE)))
+            .push(text(label).size(P2_SIZE).font(font::MEDIUM)),
+        Message::FocusAction,
+    )
+    .padding([6, 12])
+    .style(quiet_button_style)
+    .on_press(press)
+    .into()
+}
+
+fn quiet_button_style(theme: &theme::Theme, status: ButtonStatus) -> ButtonStyle {
+    let shell = &theme.colors.shell;
+    ButtonStyle {
+        background: Some(Background::Color(match status {
+            ButtonStatus::Hovered | ButtonStatus::Pressed => shell.hover,
+            _ => shell.panel,
+        })),
+        text_color: if matches!(status, ButtonStatus::Disabled) {
+            shell.muted
+        } else {
+            shell.ink
+        },
+        border: Border {
+            color: shell.line,
+            width: 1.0,
+            radius: 8.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+/// The footer's primary action. It only dispatches `Generate` when the draft
+/// can proceed and no generation is already in flight; otherwise it is
+/// disabled, which also removes it from keyboard focus.
+fn prepare_action<'a>(can_proceed: bool, generating: bool) -> Element<'a, Message> {
+    let label = text("Prepare").size(P1_SIZE).font(font::MEDIUM);
+    let content: Element<'a, Message> = if generating {
+        Row::new()
+            .spacing(2)
+            .align_y(Alignment::Center)
+            .push(label)
+            .push(spinner::typing_text_carousel(
+                "...",
+                true,
+                Duration::from_millis(400),
+                |dots| text(dots).size(P1_SIZE).font(font::MEDIUM),
+            ))
+            .into()
+    } else {
+        label.into()
+    };
+    let style: fn(&theme::Theme, ButtonStatus) -> ButtonStyle = if can_proceed || generating {
+        theme::button::primary
+    } else {
+        theme::button::secondary
+    };
+    Action::new(PREPARE_ID, content, Message::FocusAction)
+        .padding([10, 22])
+        .focus_radius(20.0)
+        .style(style)
+        .on_press_maybe(
+            (can_proceed && !generating)
+                .then_some(Message::CreateSpend(CreateSpendMessage::Generate)),
+        )
+        .into()
+}
+
+fn compose_card_style(theme: &theme::Theme) -> iced::widget::container::Style {
+    iced::widget::container::Style {
+        background: Some(Background::Color(theme.colors.shell.panel)),
+        border: Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 16.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+fn compose_divider<'a>() -> Element<'a, Message> {
+    Container::new(Space::new().height(Length::Fixed(1.0)))
+        .width(Length::Fill)
+        .height(Length::Fixed(1.0))
+        .style(|theme: &theme::Theme| iced::widget::container::Style {
+            background: Some(Background::Color(theme.colors.shell.line)),
+            ..Default::default()
+        })
+        .into()
+}
+
+fn compose_section<'a>(content: impl Into<Element<'a, Message>>) -> Element<'a, Message> {
+    Container::new(content)
+        .padding([20, 24])
+        .width(Length::Fill)
+        .into()
+}
+
+fn section_label<'a>(label: &'static str) -> coincube_ui::widget::Text<'a> {
+    text(label).size(P2_SIZE).font(font::SEMIBOLD)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -201,6 +375,7 @@ pub fn create_spend_tx<'a>(
     max_under_dust: bool,
 ) -> Element<'a, Message> {
     let is_self_send = recipients.is_empty();
+    let is_batch = recipients.len() > 1;
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
     let fiat_unconfirmed = fiat_converter.map(|c| c.convert(*unconfirmed_balance));
 
@@ -237,335 +412,402 @@ pub fn create_spend_tx<'a>(
         None
     };
 
-    dashboard(
-        menu,
-        cache,
-        Column::new()
-            .push(balance_header_card(
-                Column::new()
-                    .spacing(8)
-                    .push(h4_bold("Balance"))
-                    .push(
-                        if sync_status.is_synced() {
-                            Column::new()
-                                .spacing(5)
-                                .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
-                                .push_maybe(fiat_balance.map(|fiat| {
-                                    fiat.to_text().size(P2_SIZE).style(theme::text::secondary)
-                                }))
-                        } else {
-                            Column::new().push(Row::new().push(spinner::Carousel::new(
-                                Duration::from_millis(1000),
-                                vec![
-                                    amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit),
-                                    amount_with_size_colors_and_unit(
-                                        balance,
-                                        H2_SIZE,
-                                        color::GREY_3,
-                                        Some(color::GREY_3),
-                                        bitcoin_unit,
+    let title = if recovery_timelock.is_some() {
+        "Recovery"
+    } else if is_self_send {
+        "Self-transfer"
+    } else {
+        "Send"
+    };
+    let heading = Column::new()
+        .spacing(4)
+        .push(text(title).size(H3_SIZE).font(font::SEMIBOLD))
+        .push(
+            text(if cache.cube_name.is_empty() {
+                "Vault".to_string()
+            } else {
+                format!("{} · Vault", cache.cube_name)
+            })
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .wrapping(iced::widget::text::Wrapping::WordOrGlyph),
+        );
+
+    // The balance context keeps its existing production inputs. Privacy-aware
+    // display of these amounts belongs to the shared display context (R04b).
+    let balance_context = Column::new()
+        .spacing(10)
+        .push(balance_header_card(
+            Column::new()
+                .spacing(8)
+                .push(h4_bold("Balance"))
+                .push(
+                    if sync_status.is_synced() {
+                        Column::new()
+                            .spacing(5)
+                            .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
+                            .push_maybe(fiat_balance.map(|fiat| {
+                                fiat.to_text().size(P2_SIZE).style(theme::text::secondary)
+                            }))
+                    } else {
+                        Column::new().push(Row::new().push(spinner::Carousel::new(
+                            Duration::from_millis(1000),
+                            vec![
+                                amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit),
+                                amount_with_size_colors_and_unit(
+                                    balance,
+                                    H2_SIZE,
+                                    color::GREY_3,
+                                    Some(color::GREY_3),
+                                    bitcoin_unit,
+                                ),
+                            ],
+                        )))
+                    }
+                    .wrap(),
+                )
+                .push_maybe(if !sync_status.is_synced() {
+                    Some(
+                        Row::new()
+                            .push(
+                                match sync_status {
+                                    SyncStatus::BlockchainSync(progress) => text(format!(
+                                        "Syncing blockchain ({:.2}%)",
+                                        100.0 * *progress
+                                    )),
+                                    SyncStatus::WalletFullScan { .. } => text("Syncing"),
+                                    SyncStatus::SyncFailing { .. } => text(
+                                        "Wallet sync is failing; the balance may be out of date",
                                     ),
-                                ],
-                            )))
-                        }
-                        .wrap(),
+                                    _ => text("Checking for new transactions"),
+                                }
+                                .style(theme::text::secondary),
+                            )
+                            .push(spinner::typing_text_carousel(
+                                "...",
+                                true,
+                                Duration::from_millis(2000),
+                                |content| text(content).style(theme::text::secondary),
+                            )),
                     )
-                    .push_maybe(if !sync_status.is_synced() {
-                        Some(
-                            Row::new()
-                                .push(
-                                    match sync_status {
-                                        SyncStatus::BlockchainSync(progress) => text(format!(
-                                            "Syncing blockchain ({:.2}%)",
-                                            100.0 * *progress
-                                        )),
-                                        SyncStatus::WalletFullScan { .. } => text("Syncing"),
-                                        SyncStatus::SyncFailing { .. } => text(
-                                            "Wallet sync is failing; the balance may be out of date",
-                                        ),
-                                        _ => text("Checking for new transactions"),
-                                    }
-                                    .style(theme::text::secondary),
-                                )
-                                .push(spinner::typing_text_carousel(
-                                    "...",
-                                    true,
-                                    Duration::from_millis(2000),
-                                    |content| text(content).style(theme::text::secondary),
-                                )),
+                } else {
+                    None
+                }),
+        ))
+        .push_maybe(
+            if unconfirmed_balance.to_sat() != 0 && sync_status.is_synced() {
+                Some(
+                    Row::new()
+                        .spacing(10)
+                        .align_y(Alignment::Center)
+                        .push(text("+").size(H3_SIZE).style(theme::text::secondary))
+                        .push(unconfirmed_amount_with_size_and_unit(
+                            unconfirmed_balance,
+                            H3_SIZE,
+                            bitcoin_unit,
+                        ))
+                        .push(
+                            text("unconfirmed")
+                                .size(H3_SIZE)
+                                .style(theme::text::secondary),
                         )
-                    } else {
-                        None
-                    }),
-            ))
-            .push(
+                        .push_maybe(fiat_unconfirmed.map(|fiat| {
+                            Row::new()
+                                .align_y(Alignment::Center)
+                                .push(Space::new().width(10)) // total spacing = 20 including row spacing
+                                .push(fiat.to_text().size(H4_SIZE).color(color::GREY_3))
+                        }))
+                        .wrap(),
+                )
+            } else {
+                None
+            },
+        );
+
+    // Every slot below is always present, so a warning or batch label
+    // appearing does not shift the widget state (focus, text cursor) of the
+    // controls that follow it.
+    let recipients_block: Element<'a, Message> = if is_self_send {
+        Space::new().height(Length::Fixed(0.0)).into()
+    } else {
+        Column::new()
+            .push(compose_divider())
+            .push(compose_section(
                 Column::new()
-                    .spacing(10)
-                    .push(h3(if recovery_timelock.is_some() {
-                        "Recovery"
-                    } else if is_self_send {
-                        "Self-transfer"
+                    .spacing(12)
+                    .push(section_label(if recovery_timelock.is_some() {
+                        "Recipient"
                     } else {
-                        "Send"
+                        "Recipients"
                     }))
-                    .push_maybe(if recipients.len() > 1 {
-                        Some(
+                    .push(if is_batch {
+                        Element::from(
                             form::Form::new("Batch label", batch_label, |s| {
                                 Message::CreateSpend(CreateSpendMessage::BatchLabelEdited(s))
                             })
                             .warning("Invalid label length, cannot be superior to 100")
-                            .size(30)
-                            .padding(10),
-                        )
-                    } else {
-                        None
-                    })
-                    .push_maybe(
-                        if unconfirmed_balance.to_sat() != 0 && sync_status.is_synced() {
-                            Some(
-                                Row::new()
-                                    .spacing(10)
-                                    .align_y(Alignment::Center)
-                                    .push(text("+").size(H3_SIZE).style(theme::text::secondary))
-                                    .push(unconfirmed_amount_with_size_and_unit(
-                                        unconfirmed_balance,
-                                        H3_SIZE,
-                                        bitcoin_unit,
-                                    ))
-                                    .push(
-                                        text("unconfirmed")
-                                            .size(H3_SIZE)
-                                            .style(theme::text::secondary),
-                                    )
-                                    .push_maybe(fiat_unconfirmed.map(|fiat| {
-                                        Row::new()
-                                            .align_y(Alignment::Center)
-                                            .push(Space::new().width(10)) // total spacing = 20 including row spacing
-                                            .push(fiat.to_text().size(H4_SIZE).color(color::GREY_3))
-                                    }))
-                                    .wrap(),
-                            )
-                        } else {
-                            None
-                        },
-                    ),
-            )
-            .push(
-                Column::new()
-                    .push(Column::with_children(recipients).spacing(10))
-                    .push(
-                        Row::new()
-                            .push(if duplicate {
-                                Some(
-                                    Container::new(
-                                        text("Two payment addresses are the same")
-                                            .style(theme::text::warning),
-                                    )
-                                    .padding(10),
-                                )
-                            } else {
-                                None
-                            })
-                            .push(Space::new().width(Length::Fill))
-                            .push(if is_self_send || recovery_timelock.is_some() {
-                                // Recipients cannot be added for self-send (zero recipients) and recovery (exactly one recipient).
-                                None
-                            } else {
-                                Some(
-                                    button::secondary(Some(icon::plus_icon()), "Add payment")
-                                        .on_press(Message::CreateSpend(
-                                            CreateSpendMessage::AddRecipient,
-                                        )),
-                                )
-                            }),
-                    )
-                    .spacing(20),
-            )
-            .push(
-                Row::new()
-                    .spacing(10)
-                    .align_y(Alignment::Center)
-                    .push(Container::new(p1_bold("Feerate:")).padding(10))
-                    .push(feerate_preset_button(
-                        "Fast (~10m)",
-                        1,
-                        loading_fee_estimate,
-                        selected_feerate_target,
-                    ))
-                    .push(feerate_preset_button(
-                        "Normal (~1h)",
-                        6,
-                        loading_fee_estimate,
-                        selected_feerate_target,
-                    ))
-                    .push(feerate_preset_button(
-                        "Slow (~4h)",
-                        24,
-                        loading_fee_estimate,
-                        selected_feerate_target,
-                    ))
-                    .push(
-                        Container::new(
-                            form::Form::new_trimmed("42 (in sats/vbyte)", feerate, move |msg| {
-                                Message::CreateSpend(CreateSpendMessage::FeerateEdited(msg))
-                            })
-                            .warning(
-                                "Feerate must be an integer less than or equal to 1000 sats/vbyte",
-                            )
                             .size(P1_SIZE)
                             .padding(10),
                         )
-                        .width(Length::Fixed(150.0)),
-                    )
-                    .push(fee_amount.map(|fee| {
+                    } else {
+                        Space::new().height(Length::Fixed(0.0)).into()
+                    })
+                    .push(Column::with_children(recipients).spacing(10))
+                    .push(
                         Row::new()
-                            .spacing(10)
+                            .spacing(12)
                             .align_y(Alignment::Center)
-                            .push(p1_regular("Fee:").style(theme::text::secondary))
-                            .push(amount_with_size(fee, P1_SIZE))
-                            .push(fiat_converter.map(|conv| {
-                                Row::new().spacing(10).align_y(Alignment::Center).push(
-                                    conv.convert(*fee)
-                                        .to_text()
+                            .push(if duplicate {
+                                Element::from(
+                                    text("Two payment addresses are the same")
                                         .size(P2_SIZE)
-                                        .style(theme::text::secondary),
+                                        .style(theme::text::warning),
                                 )
-                            }))
-                    }))
-                    .wrap(),
+                            } else {
+                                Space::new().width(Length::Fixed(0.0)).into()
+                            })
+                            .push(Space::new().width(Length::Fill))
+                            // Recipients cannot be added for recovery (exactly one recipient).
+                            .push_maybe(recovery_timelock.is_none().then(|| {
+                                quiet_action(
+                                    ADD_RECIPIENT_ID,
+                                    Some(icon::plus_icon()),
+                                    "Add recipient",
+                                    Message::CreateSpend(CreateSpendMessage::AddRecipient),
+                                )
+                            })),
+                    ),
+            ))
+            .into()
+    };
+
+    let fee_section = Column::new()
+        .spacing(10)
+        .push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(section_label("Fee rate (sat/vB)").width(Length::Fill))
+                .push(
+                    Container::new(
+                        Row::with_children(FEERATE_PRESETS.iter().map(|&(label, block_target)| {
+                            feerate_preset_button(
+                                label,
+                                block_target,
+                                loading_fee_estimate,
+                                selected_feerate_target,
+                            )
+                        }))
+                        .spacing(2),
+                    )
+                    .padding(2)
+                    .style(|theme: &theme::Theme| {
+                        iced::widget::container::Style {
+                            background: Some(Background::Color(theme.colors.shell.background)),
+                            border: Border {
+                                color: theme.colors.shell.line,
+                                width: 1.0,
+                                radius: 10.0.into(),
+                            },
+                            ..Default::default()
+                        }
+                    }),
+                ),
+        )
+        .push(
+            Container::new(
+                form::Form::new_trimmed("42 (in sats/vbyte)", feerate, move |msg| {
+                    Message::CreateSpend(CreateSpendMessage::FeerateEdited(msg))
+                })
+                .warning("Feerate must be an integer less than or equal to 1000 sats/vbyte")
+                .size(P1_SIZE)
+                .padding(10),
             )
+            .width(Length::Fixed(240.0)),
+        )
+        .push_maybe(fee_amount.map(|fee| {
+            Row::new()
+                .spacing(10)
+                .align_y(Alignment::Center)
+                .push(p2_regular("Fee for this transaction").style(theme::text::secondary))
+                .push(amount_with_size(fee, P1_SIZE))
+                .push(fiat_converter.map(|conv| {
+                    conv.convert(*fee)
+                        .to_text()
+                        .size(P2_SIZE)
+                        .style(theme::text::secondary)
+                }))
+                .wrap()
+        }));
+
+    let coins_section = Column::new()
+        .spacing(10)
+        .push(
+            Row::new()
+                .spacing(12)
+                .align_y(Alignment::Center)
+                .push(section_label("Coin selection").width(Length::Fill))
+                .push(if is_self_send || recovery_timelock.is_some() {
+                    Row::new()
+                        .spacing(5)
+                        .push(amount_with_size(
+                            &Amount::from_sat(
+                                coins
+                                    .iter()
+                                    .filter_map(|(coin, selected)| {
+                                        if *selected {
+                                            Some(coin.amount.to_sat())
+                                        } else {
+                                            None
+                                        }
+                                    })
+                                    .sum(),
+                            ),
+                            P2_SIZE,
+                        ))
+                        .push(p2_regular("selected").style(theme::text::secondary))
+                } else if let Some(amount_left) = amount_left {
+                    if amount_left.to_sat() == 0 && !is_valid {
+                        // If amount left is set, the current configuration must be redraftable.
+                        // If it's not valid, either no coins are selected or there's a recipient
+                        // with max selected and invalid amount.
+                        if coins.iter().all(|(_, selected)| !selected) {
+                            // This can happen if we have a single recipient
+                            // and it has the max selected.
+                            Row::new().push(
+                                text("Select at least one coin.").style(theme::text::secondary),
+                            )
+                        } else {
+                            // There must be a recipient with max selected and value 0.
+                            Row::new().push(
+                                text("Check max amount for recipient.")
+                                    .style(theme::text::secondary),
+                            )
+                        }
+                    } else {
+                        Row::new()
+                            .spacing(5)
+                            .push(amount_with_size(amount_left, P2_SIZE))
+                            .push(p2_regular("left to select").style(theme::text::secondary))
+                    }
+                } else {
+                    Row::new().push(
+                        text(if feerate.value.is_empty() || !feerate.valid {
+                            "Feerate needs to be set."
+                        } else if !max_under_dust {
+                            "Add recipient details."
+                        } else {
+                            "Select or add more funds."
+                        })
+                        .style(theme::text::secondary),
+                    )
+                }),
+        )
+        .push(
+            Container::new(scrollable(coins.iter().enumerate().fold(
+                Column::new().spacing(10),
+                |col, (i, (coin, selected))| {
+                    col.push(coin_list_view(
+                        i,
+                        coin,
+                        coins_labels,
+                        timelock,
+                        cache.blockheight() as u32,
+                        *selected,
+                        bitcoin_unit,
+                    ))
+                },
+            )))
+            .max_height(300),
+        );
+
+    let hint: Element<'a, Message> = if let Some(hint) = disabled_hint {
+        Row::new()
+            .spacing(6)
+            .align_y(Alignment::Center)
+            .push(
+                icon::warning_icon()
+                    .size(P2_SIZE)
+                    .style(theme::text::warning),
+            )
+            .push(text(hint).size(P2_SIZE).style(theme::text::warning))
+            .into()
+    } else if generating {
+        text("Preparing the unsigned transaction.")
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .into()
+    } else {
+        text("Builds an unsigned transaction to review.")
+            .size(P2_SIZE)
+            .style(theme::text::secondary)
+            .into()
+    };
+
+    let footer = Container::new(
+        Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
+            .push_maybe((!is_first_step).then(|| {
+                quiet_action(
+                    BACK_ID,
+                    Some(icon::previous_icon()),
+                    "Back",
+                    Message::Previous,
+                )
+            }))
+            .push(Container::new(hint).width(Length::Fill))
+            .push(quiet_action(
+                CLEAR_ID,
+                None,
+                "Clear",
+                Message::CreateSpend(CreateSpendMessage::Clear),
+            ))
+            .push(prepare_action(can_proceed, generating)),
+    )
+    .padding([16, 24])
+    .width(Length::Fill);
+
+    let compose_card = Container::new(
+        Column::new()
             .push(
                 Container::new(
-                    Column::new()
-                        .spacing(10)
-                        .push(
-                            Row::new()
-                                .align_y(Alignment::Center)
-                                .push(p1_bold("Coins selection").width(Length::Fill))
-                                .push(if is_self_send || recovery_timelock.is_some() {
-                                    Row::new()
-                                        .spacing(5)
-                                        .push(amount_with_size(
-                                            &Amount::from_sat(
-                                                coins
-                                                    .iter()
-                                                    .filter_map(|(coin, selected)| {
-                                                        if *selected {
-                                                            Some(coin.amount.to_sat())
-                                                        } else {
-                                                            None
-                                                        }
-                                                    })
-                                                    .sum(),
-                                            ),
-                                            P2_SIZE,
-                                        ))
-                                        .push(p2_regular("selected").style(theme::text::secondary))
-                                } else if let Some(amount_left) = amount_left {
-                                    if amount_left.to_sat() == 0 && !is_valid {
-                                        // If amount left is set, the current configuration must be redraftable.
-                                        // If it's not valid, either no coins are selected or there's a recipient
-                                        // with max selected and invalid amount.
-                                        if coins.iter().all(|(_, selected)| !selected) {
-                                            // This can happen if we have a single recipient
-                                            // and it has the max selected.
-                                            Row::new().push(
-                                                text("Select at least one coin.")
-                                                    .style(theme::text::secondary),
-                                            )
-                                        } else {
-                                            // There must be a recipient with max selected and value 0.
-                                            Row::new().push(
-                                                text("Check max amount for recipient.")
-                                                    .style(theme::text::secondary),
-                                            )
-                                        }
-                                    } else {
-                                        Row::new()
-                                            .spacing(5)
-                                            .push(amount_with_size(amount_left, P2_SIZE))
-                                            .push(
-                                                p2_regular("left to select")
-                                                    .style(theme::text::secondary),
-                                            )
-                                    }
-                                } else {
-                                    Row::new().push(
-                                        text(if feerate.value.is_empty() || !feerate.valid {
-                                            "Feerate needs to be set."
-                                        } else if !max_under_dust {
-                                            "Add recipient details."
-                                        } else {
-                                            "Select or add more funds."
-                                        })
-                                        .style(theme::text::secondary),
-                                    )
-                                })
-                                .width(Length::Fill),
-                        )
-                        .push(
-                            Container::new(scrollable(coins.iter().enumerate().fold(
-                                Column::new().spacing(10),
-                                |col, (i, (coin, selected))| {
-                                    col.push(coin_list_view(
-                                        i,
-                                        coin,
-                                        coins_labels,
-                                        timelock,
-                                        cache.blockheight() as u32,
-                                        *selected,
-                                        bitcoin_unit,
-                                    ))
-                                },
-                            )))
-                            .max_height(300),
-                        ),
-                )
-                .padding(20)
-                .style(theme::card::simple),
-            )
-            .push(
-                Row::new()
-                    .spacing(20)
-                    .align_y(Alignment::Center)
-                    .push(disabled_hint.map(|hint| {
-                        Container::new(
-                            Row::new()
-                                .spacing(5)
-                                .align_y(Alignment::Center)
-                                .push(icon::warning_icon())
-                                .push(text(hint)),
-                        )
-                        .padding(10)
-                        .style(theme::card::warning)
-                    }))
-                    .push(
-                        (!is_first_step).then_some(
-                            button::secondary(None, "< Back")
-                                .width(Length::Fixed(150.0))
-                                .on_press(Message::Previous),
-                        ),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::secondary(None, "Clear")
-                            .on_press(Message::CreateSpend(CreateSpendMessage::Clear))
-                            .width(Length::Fixed(100.0)),
-                    )
-                    .push(if can_proceed || generating {
-                        button::primary_loading(
-                            None,
-                            "Next",
-                            generating,
-                            Some(Message::CreateSpend(CreateSpendMessage::Generate)),
-                        )
-                        .width(Length::Fixed(100.0))
+                    text(if recovery_timelock.is_some() {
+                        "Recovery details"
+                    } else if is_self_send {
+                        "Transfer details"
                     } else {
-                        button::secondary(None, "Next").width(Length::Fixed(100.0))
-                    }),
+                        "Payment details"
+                    })
+                    .size(H5_SIZE)
+                    .font(font::SEMIBOLD),
+                )
+                .padding([18, 24])
+                .width(Length::Fill),
             )
-            .push(Space::new().height(Length::Fixed(20.0)))
-            .spacing(20),
+            .push(recipients_block)
+            .push(compose_divider())
+            .push(compose_section(fee_section))
+            .push(compose_divider())
+            .push(compose_section(coins_section))
+            .push(compose_divider())
+            .push(footer),
+    )
+    .width(Length::Fill)
+    .style(compose_card_style);
+
+    dashboard(
+        menu,
+        cache,
+        Container::new(
+            Column::new()
+                .spacing(20)
+                .max_width(720)
+                .push(heading)
+                .push(balance_context)
+                .push(compose_card),
+        )
+        .center_x(Length::Fill),
     )
 }
 
@@ -849,4 +1091,1119 @@ fn coin_list_view<'a>(
         .align_y(Alignment::Center)
         .spacing(20)
         .into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::menu::VaultSubMenu;
+    use coincube_core::miniscript::bitcoin::{bip32::ChildNumber, Address, OutPoint, Txid};
+    use coincube_ui::theme::palette::ThemeMode;
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{
+            operation::{self, focusable, Focusable, Scrollable, TextInput},
+            Operation, Tree,
+        },
+        Layout,
+    };
+    use iced::{keyboard, mouse, Event, Rectangle, Size, Vector};
+    use std::str::FromStr;
+
+    // BIP-173 test vectors: synthetic, not anyone's wallet.
+    const ADDRESS_A: &str = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4";
+    const ADDRESS_B: &str = "bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3";
+    const WIDE: (u32, u32) = (1440, 900);
+    const COMPACT: (u32, u32) = (1024, 768);
+    /// Tall enough that every control is inside the shell's content viewport,
+    /// so a pointer press lands on the control rather than the scroll edge.
+    const TALL: (u32, u32) = (1440, 2400);
+
+    fn value(value: &str, valid: bool) -> form::Value<String> {
+        form::Value {
+            value: value.to_string(),
+            warning: None,
+            valid,
+        }
+    }
+
+    fn coin(index: u32, sats: u64) -> Coin {
+        Coin {
+            amount: Amount::from_sat(sats),
+            outpoint: OutPoint::new(Txid::from_str(&format!("{:064x}", index + 1)).unwrap(), 0),
+            address: Address::from_str(ADDRESS_A).unwrap().assume_checked(),
+            block_height: Some(100),
+            derivation_index: ChildNumber::from_normal_idx(index).unwrap(),
+            spend_info: None,
+            is_immature: false,
+            is_change: false,
+            is_from_self: false,
+        }
+    }
+
+    struct Fixture {
+        balance: Amount,
+        unconfirmed: Amount,
+        menu: Menu,
+        cache: Cache,
+        coins: Vec<Coin>,
+        coins_labels: HashMap<String, String>,
+        batch_label: form::Value<String>,
+        addresses: Vec<form::Value<String>>,
+        amounts: Vec<form::Value<String>>,
+        labels: Vec<form::Value<String>>,
+        dust_warning: Option<String>,
+        fee: Amount,
+        sync_status: SyncStatus,
+    }
+
+    impl Fixture {
+        fn new(theme_mode: ThemeMode, coin_count: u32) -> Self {
+            Self {
+                balance: Amount::from_sat(250_000),
+                unconfirmed: Amount::from_sat(0),
+                menu: Menu::Vault(VaultSubMenu::Send),
+                cache: Cache {
+                    cube_name: "Synthetic Cube".into(),
+                    has_vault: true,
+                    theme_mode,
+                    ..Default::default()
+                },
+                coins: (0..coin_count)
+                    .map(|i| coin(i, 50_000 + i as u64))
+                    .collect(),
+                coins_labels: HashMap::new(),
+                batch_label: value("", true),
+                addresses: vec![value(ADDRESS_A, true), value(ADDRESS_B, true)],
+                amounts: vec![value("40000", true), value("20000", true)],
+                labels: vec![value("", true), value("", true)],
+                dust_warning: None,
+                fee: Amount::from_sat(1_234),
+                sync_status: SyncStatus::Synced,
+            }
+        }
+    }
+
+    /// Inputs that vary between compose states. Everything else comes from
+    /// the synthetic fixture.
+    #[derive(Clone)]
+    struct Scenario {
+        recipients: usize,
+        is_valid: bool,
+        duplicate: bool,
+        recovery: bool,
+        amount_left: Option<u64>,
+        draft_warning: Option<&'static str>,
+        feerate: (&'static str, bool),
+        fee: bool,
+        first_step: bool,
+        loading: Option<usize>,
+        selected: Option<usize>,
+        generating: bool,
+        max_under_dust: bool,
+        coins_selected: bool,
+    }
+
+    impl Scenario {
+        fn valid_send() -> Self {
+            Self {
+                recipients: 1,
+                is_valid: true,
+                duplicate: false,
+                recovery: false,
+                amount_left: Some(0),
+                draft_warning: None,
+                feerate: ("5", true),
+                fee: false,
+                first_step: true,
+                loading: None,
+                selected: None,
+                generating: false,
+                max_under_dust: false,
+                coins_selected: true,
+            }
+        }
+    }
+
+    /// The production presenter, fed the same way `step.rs` feeds it: real
+    /// `recipient_view` rows mapped into `Message::CreateSpend`.
+    fn compose<'a>(fixture: &'a Fixture, s: &Scenario) -> Element<'a, Message> {
+        let coins: Vec<(Coin, bool)> = fixture
+            .coins
+            .iter()
+            .map(|coin| (coin.clone(), s.coins_selected))
+            .collect();
+        let feerate = value(s.feerate.0, s.feerate.1);
+        let amount_left = s.amount_left.map(Amount::from_sat);
+        let recipients = (0..s.recipients)
+            .map(|i| {
+                // A duplicate pair reuses the first address.
+                let address = if s.duplicate { 0 } else { i };
+                recipient_view(
+                    i,
+                    &fixture.addresses[address],
+                    &fixture.amounts[i],
+                    None,
+                    None,
+                    &fixture.labels[i],
+                    false,
+                    s.recovery,
+                    &fixture.dust_warning,
+                    None,
+                    BitcoinDisplayUnit::Sats,
+                    false,
+                )
+                .map(Message::CreateSpend)
+            })
+            .collect();
+        create_spend_tx(
+            &fixture.balance,
+            &fixture.unconfirmed,
+            &fixture.menu,
+            &fixture.cache,
+            None,
+            recipients,
+            s.is_valid,
+            s.duplicate,
+            144,
+            s.recovery.then_some(52_560),
+            &coins,
+            &fixture.coins_labels,
+            &fixture.batch_label,
+            amount_left.as_ref(),
+            s.draft_warning.map(String::from),
+            &feerate,
+            s.fee.then_some(&fixture.fee),
+            &fixture.sync_status,
+            s.first_step,
+            s.loading,
+            s.selected,
+            s.generating,
+            BitcoinDisplayUnit::Sats,
+            s.max_under_dust,
+        )
+    }
+
+    #[derive(Debug, Clone)]
+    struct FocusEntry {
+        id: Option<Id>,
+        bounds: Rectangle,
+        focused: bool,
+        /// Visible text (value or placeholder) when the target is a text input.
+        input: Option<String>,
+    }
+
+    #[derive(Default)]
+    struct Probe {
+        text: Vec<(String, Rectangle)>,
+        focus: Vec<FocusEntry>,
+        /// Text inputs as reported, joined to `focus` by ID and bounds after
+        /// traversal: Iced's own TextInput reports `text_input` before
+        /// `focusable`, the coincube-ui input used by `form::Form` the reverse.
+        text_inputs: Vec<(Option<Id>, Rectangle, String)>,
+        /// (viewport height, content height) of every scrollable.
+        scrollables: Vec<(f32, f32)>,
+    }
+
+    impl Operation for Probe {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, value: &str) {
+            self.text.push((value.to_owned(), bounds));
+        }
+
+        fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn Focusable) {
+            self.focus.push(FocusEntry {
+                id: id.cloned(),
+                bounds,
+                focused: state.is_focused(),
+                input: None,
+            });
+        }
+
+        fn text_input(&mut self, id: Option<&Id>, bounds: Rectangle, state: &mut dyn TextInput) {
+            self.text_inputs
+                .push((id.cloned(), bounds, state.text().to_owned()));
+        }
+
+        fn scrollable(
+            &mut self,
+            _id: Option<&Id>,
+            bounds: Rectangle,
+            content_bounds: Rectangle,
+            _translation: Vector,
+            _state: &mut dyn Scrollable,
+        ) {
+            self.scrollables
+                .push((bounds.height, content_bounds.height));
+        }
+    }
+
+    impl Probe {
+        /// Attach every reported text input to its focus target, whichever
+        /// callback the widget made first.
+        fn join_inputs(mut self) -> Self {
+            for (id, bounds, text) in std::mem::take(&mut self.text_inputs) {
+                let entry = self
+                    .focus
+                    .iter_mut()
+                    .find(|entry| entry.input.is_none() && entry.id == id && entry.bounds == bounds)
+                    .unwrap_or_else(|| panic!("text input at {:?} has no focus target", bounds));
+                entry.input = Some(text);
+            }
+            self
+        }
+
+        fn contains(&self, needle: &str) -> bool {
+            self.text.iter().any(|(value, _)| value.contains(needle))
+        }
+
+        fn has_focus(&self, id: &Id) -> bool {
+            self.focus.iter().any(|entry| entry.id.as_ref() == Some(id))
+        }
+
+        fn focused(&self) -> Option<&FocusEntry> {
+            self.focus.iter().find(|entry| entry.focused)
+        }
+
+        fn inputs(&self) -> Vec<&str> {
+            self.focus
+                .iter()
+                .filter_map(|entry| entry.input.as_deref())
+                .collect()
+        }
+    }
+
+    fn load_fonts() {
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+    }
+
+    /// The returned production element at a full window size, inside the
+    /// real dashboard shell. No App, wallet, daemon or OS window exists.
+    struct Harness<'a> {
+        element: Element<'a, Message>,
+        tree: Tree,
+        node: layout::Node,
+        renderer: iced::Renderer,
+        size: Size,
+    }
+
+    impl<'a> Harness<'a> {
+        fn new(mut element: Element<'a, Message>, (width, height): (u32, u32)) -> Self {
+            load_fonts();
+            let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+                font::REGULAR,
+                iced::Pixels(14.0),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            let size = Size::new(width as f32, height as f32);
+            let mut tree = Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            Self {
+                element,
+                tree,
+                node,
+                renderer,
+                size,
+            }
+        }
+
+        /// Re-render with new inputs, keeping widget state as the runtime does.
+        fn rebuild(&mut self, element: Element<'a, Message>) {
+            self.element = element;
+            self.tree.diff(self.element.as_widget());
+            self.node = self.element.as_widget_mut().layout(
+                &mut self.tree,
+                &self.renderer,
+                &layout::Limits::new(Size::ZERO, self.size),
+            );
+        }
+
+        fn run<T: 'static>(&mut self, operation: impl Operation<T> + 'static) {
+            let mut operation: Box<dyn Operation<T>> = Box::new(operation);
+            loop {
+                self.element.as_widget_mut().operate(
+                    &mut self.tree,
+                    Layout::new(&self.node),
+                    &self.renderer,
+                    &mut operation::black_box(operation.as_mut()),
+                );
+                match operation.finish() {
+                    operation::Outcome::Chain(next) => operation = next,
+                    _ => break,
+                }
+            }
+        }
+
+        fn probe(&mut self) -> Probe {
+            let mut probe = Probe::default();
+            self.element.as_widget_mut().operate(
+                &mut self.tree,
+                Layout::new(&self.node),
+                &self.renderer,
+                &mut probe,
+            );
+            probe.join_inputs()
+        }
+
+        fn focus(&mut self, id: Id) {
+            self.run(focusable::focus::<()>(id));
+        }
+
+        /// Tab and Shift-Tab, as `gui/mod.rs` maps them.
+        fn tab(&mut self) -> FocusEntry {
+            self.run(focusable::focus_next::<()>());
+            self.probe()
+                .focused()
+                .cloned()
+                .expect("Tab focuses a target")
+        }
+
+        /// Tab without assuming a target remains: Iced's `focus_next` leaves
+        /// nothing focused after the last enabled target instead of wrapping.
+        fn tab_raw(&mut self) -> Option<FocusEntry> {
+            self.run(focusable::focus_next::<()>());
+            self.probe().focused().cloned()
+        }
+
+        fn shift_tab(&mut self) -> FocusEntry {
+            self.run(focusable::focus_previous::<()>());
+            self.probe()
+                .focused()
+                .cloned()
+                .expect("Shift-Tab focuses a target")
+        }
+
+        fn focused_id(&mut self) -> Option<Id> {
+            self.probe().focused().and_then(|entry| entry.id.clone())
+        }
+
+        fn send(&mut self, event: Event, cursor: mouse::Cursor) -> Vec<Message> {
+            let mut messages = Vec::new();
+            self.element.as_widget_mut().update(
+                &mut self.tree,
+                &event,
+                Layout::new(&self.node),
+                cursor,
+                &self.renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::with_size(self.size),
+            );
+            messages
+        }
+
+        fn key(
+            &mut self,
+            named: keyboard::key::Named,
+            repeat: bool,
+            pressed: bool,
+        ) -> Vec<Message> {
+            let key = keyboard::Key::Named(named);
+            let physical_key =
+                keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+            let event = if pressed {
+                keyboard::Event::KeyPressed {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key,
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::empty(),
+                    text: None,
+                    repeat,
+                }
+            } else {
+                keyboard::Event::KeyReleased {
+                    key: key.clone(),
+                    modified_key: key,
+                    physical_key,
+                    location: keyboard::Location::Standard,
+                    modifiers: keyboard::Modifiers::empty(),
+                }
+            };
+            self.send(Event::Keyboard(event), mouse::Cursor::Unavailable)
+        }
+
+        fn press_at(&mut self, point: iced::Point) -> Vec<Message> {
+            self.send(
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                mouse::Cursor::Available(point),
+            )
+        }
+
+        fn release_at(&mut self, point: iced::Point) -> Vec<Message> {
+            self.send(
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                mouse::Cursor::Available(point),
+            )
+        }
+
+        fn click_at(&mut self, bounds: Rectangle) -> Vec<Message> {
+            let mut messages = self.press_at(bounds.center());
+            messages.extend(self.release_at(bounds.center()));
+            messages
+        }
+
+        /// Bounds of the rendered text exactly equal to `label`.
+        fn label_bounds(&mut self, label: &str) -> Rectangle {
+            self.probe()
+                .text
+                .iter()
+                .find(|(text, _)| text == label)
+                .map(|(_, bounds)| *bounds)
+                .unwrap_or_else(|| panic!("{:?} is not rendered", label))
+        }
+
+        fn click(&mut self, id: &Id) -> Vec<Message> {
+            let bounds = self
+                .probe()
+                .focus
+                .iter()
+                .find(|entry| entry.id.as_ref() == Some(id))
+                .map(|entry| entry.bounds)
+                .unwrap_or_else(|| panic!("{:?} is not a focus target", id));
+            self.click_at(bounds)
+        }
+
+        /// Optional synthetic capture for root's visual review; off by default.
+        fn capture(&mut self, scenario: &str, appearance: &str, theme: &theme::Theme) {
+            let Ok(directory) = std::env::var("R07A_CAPTURE_DIR") else {
+                return;
+            };
+            let viewport = Rectangle::with_size(self.size);
+            self.send(
+                Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                )),
+                mouse::Cursor::Unavailable,
+            );
+            self.element.as_widget().draw(
+                &self.tree,
+                &mut self.renderer,
+                theme,
+                &iced::advanced::renderer::Style {
+                    text_color: theme.colors.text.primary,
+                },
+                Layout::new(&self.node),
+                mouse::Cursor::Unavailable,
+                &viewport,
+            );
+            let (width, height) = (self.size.width as u32, self.size.height as u32);
+            let pixels = self.renderer.screenshot(
+                Size::new(width, height),
+                1.0,
+                theme.colors.general.background,
+            );
+            std::fs::create_dir_all(&directory).expect("create disposable capture directory");
+            image::save_buffer(
+                std::path::Path::new(&directory).join(format!(
+                    "r07a-{scenario}-{appearance}-{width}x{height}-synthetic.png"
+                )),
+                &pixels,
+                width,
+                height,
+                image::ColorType::Rgba8,
+            )
+            .expect("save synthetic R07a capture");
+        }
+    }
+
+    fn preset(block_target: usize) -> Id {
+        feerate_preset_id(block_target)
+    }
+
+    fn themes() -> [(&'static str, ThemeMode, theme::Theme); 2] {
+        [
+            ("dark", ThemeMode::Dark, theme::Theme::dark()),
+            ("light", ThemeMode::Light, theme::Theme::light()),
+        ]
+    }
+
+    struct Case {
+        name: &'static str,
+        scenario: Scenario,
+        /// Text that must be present in the rendered tree.
+        present: &'static [&'static str],
+        absent: &'static [&'static str],
+        prepare_enabled: bool,
+        add_shown: bool,
+    }
+
+    #[test]
+    fn compose_states_keep_production_rules_hints_and_actions() {
+        let add = Id::new(ADD_RECIPIENT_ID);
+        let back = Id::new(BACK_ID);
+        let clear = Id::new(CLEAR_ID);
+        let prepare = Id::new(PREPARE_ID);
+        let base = Scenario::valid_send();
+        let cases = [
+            Case {
+                name: "valid",
+                scenario: base.clone(),
+                present: &[
+                    "Send",
+                    "Synthetic Cube · Vault",
+                    "Payment details",
+                    "Recipients",
+                    "Fee rate (sat/vB)",
+                    "Coin selection",
+                    "Builds an unsigned transaction to review.",
+                ],
+                absent: &["Self-transfer", "Transfer details", "Recovery details"],
+                prepare_enabled: true,
+                add_shown: true,
+            },
+            Case {
+                name: "missing-fee",
+                scenario: Scenario {
+                    is_valid: false,
+                    amount_left: None,
+                    feerate: ("", true),
+                    ..base.clone()
+                },
+                present: &["Please set a feerate.", "Feerate needs to be set."],
+                absent: &["Builds an unsigned transaction"],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "invalid-fee",
+                scenario: Scenario {
+                    is_valid: false,
+                    amount_left: None,
+                    feerate: ("0", false),
+                    ..base.clone()
+                },
+                present: &["Invalid feerate.", "Feerate needs to be set."],
+                absent: &[],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "duplicate",
+                scenario: Scenario {
+                    recipients: 2,
+                    duplicate: true,
+                    amount_left: None,
+                    ..base.clone()
+                },
+                present: &[
+                    "Duplicate recipient address.",
+                    "Two payment addresses are the same",
+                ],
+                absent: &[],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "no-coins",
+                scenario: Scenario {
+                    is_valid: false,
+                    coins_selected: false,
+                    ..base.clone()
+                },
+                present: &[
+                    "Please select at least one coin.",
+                    "Select at least one coin.",
+                ],
+                absent: &[],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "max-under-dust",
+                scenario: Scenario {
+                    is_valid: false,
+                    amount_left: None,
+                    max_under_dust: true,
+                    ..base.clone()
+                },
+                present: &[
+                    "Enter recipient address and amount.",
+                    "Select or add more funds.",
+                ],
+                absent: &[],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "draft-warning",
+                scenario: Scenario {
+                    amount_left: None,
+                    draft_warning: Some("Synthetic draft failure"),
+                    ..base.clone()
+                },
+                present: &["Synthetic draft failure", "Add recipient details."],
+                absent: &["Enter recipient address and amount."],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "insufficient",
+                scenario: Scenario {
+                    amount_left: Some(1_000),
+                    ..base.clone()
+                },
+                present: &["Insufficient funds.", "left to select"],
+                absent: &[],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "generating",
+                scenario: Scenario {
+                    generating: true,
+                    ..base.clone()
+                },
+                present: &["Prepare", "Preparing the unsigned transaction."],
+                absent: &[],
+                prepare_enabled: false,
+                add_shown: true,
+            },
+            Case {
+                name: "self-transfer",
+                scenario: Scenario {
+                    recipients: 0,
+                    amount_left: None,
+                    ..base.clone()
+                },
+                present: &["Self-transfer", "Transfer details", "selected"],
+                absent: &["Recipients", "Payment details"],
+                prepare_enabled: true,
+                add_shown: false,
+            },
+            Case {
+                name: "recovery",
+                scenario: Scenario {
+                    recovery: true,
+                    first_step: false,
+                    amount_left: None,
+                    ..base.clone()
+                },
+                present: &["Recovery", "Recovery details", "Recipient", "selected"],
+                absent: &["Recipients", "Payment details"],
+                prepare_enabled: true,
+                add_shown: false,
+            },
+            Case {
+                name: "batch",
+                scenario: Scenario {
+                    recipients: 2,
+                    fee: true,
+                    ..base.clone()
+                },
+                present: &["Recipients", "Fee for this transaction"],
+                absent: &["Two payment addresses are the same"],
+                prepare_enabled: true,
+                add_shown: true,
+            },
+        ];
+        for (appearance, mode, theme) in themes() {
+            let fixture = Fixture::new(mode, 3);
+            for outer in [COMPACT, WIDE] {
+                for Case {
+                    name,
+                    scenario,
+                    present,
+                    absent,
+                    prepare_enabled,
+                    add_shown,
+                } in &cases
+                {
+                    let mut harness = Harness::new(compose(&fixture, scenario), outer);
+                    let probe = harness.probe();
+                    let context = format!("{name} {appearance} {outer:?}");
+                    for text in present.iter() {
+                        assert!(probe.contains(text), "{}: missing {:?}", context, text);
+                    }
+                    for text in absent.iter() {
+                        assert!(!probe.contains(text), "{}: unexpected {:?}", context, text);
+                    }
+                    for (text, bounds) in &probe.text {
+                        assert!(
+                            bounds.x >= -1.0 && bounds.x + bounds.width <= outer.0 as f32 + 1.0,
+                            "{}: {:?} at {:?} leaves the window",
+                            context,
+                            text,
+                            bounds
+                        );
+                    }
+                    assert_eq!(probe.has_focus(&prepare), *prepare_enabled, "{context}");
+                    assert_eq!(probe.has_focus(&add), *add_shown, "{context}");
+                    assert_eq!(probe.has_focus(&back), !scenario.first_step, "{context}");
+                    assert!(probe.has_focus(&clear), "{}", context);
+                    for (_, block_target) in FEERATE_PRESETS {
+                        assert!(probe.has_focus(&preset(block_target)), "{}", context);
+                    }
+                    // Native editing stays native: the fee form, every passed
+                    // recipient form, and the batch label for 2+ recipients.
+                    let inputs = probe.inputs();
+                    assert!(
+                        inputs.contains(&scenario.feerate.0)
+                            || (scenario.feerate.0.is_empty()
+                                && inputs.contains(&"42 (in sats/vbyte)")),
+                        "{}: fee input {:?}",
+                        context,
+                        inputs
+                    );
+                    assert_eq!(
+                        inputs.contains(&"Batch label"),
+                        scenario.recipients > 1,
+                        "{context}: {inputs:?}"
+                    );
+                    assert_eq!(
+                        inputs.len(),
+                        1 + 3 * scenario.recipients + usize::from(scenario.recipients > 1),
+                        "{context}: {inputs:?}"
+                    );
+                    harness.capture(name, appearance, &theme);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn compose_actions_follow_visual_order_and_activate_existing_intents_once() {
+        use keyboard::key::Named;
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        let scenario = Scenario {
+            first_step: false,
+            ..Scenario::valid_send()
+        };
+        let cases: [(Id, fn(&Message) -> bool); 7] = [
+            (Id::new(ADD_RECIPIENT_ID), |m| {
+                matches!(m, Message::CreateSpend(CreateSpendMessage::AddRecipient))
+            }),
+            (preset(24), |m| {
+                matches!(
+                    m,
+                    Message::CreateSpend(CreateSpendMessage::FetchFeeEstimate(24))
+                )
+            }),
+            (preset(6), |m| {
+                matches!(
+                    m,
+                    Message::CreateSpend(CreateSpendMessage::FetchFeeEstimate(6))
+                )
+            }),
+            (preset(1), |m| {
+                matches!(
+                    m,
+                    Message::CreateSpend(CreateSpendMessage::FetchFeeEstimate(1))
+                )
+            }),
+            (Id::new(BACK_ID), |m| matches!(m, Message::Previous)),
+            (Id::new(CLEAR_ID), |m| {
+                matches!(m, Message::CreateSpend(CreateSpendMessage::Clear))
+            }),
+            (Id::new(PREPARE_ID), |m| {
+                matches!(m, Message::CreateSpend(CreateSpendMessage::Generate))
+            }),
+        ];
+        for outer in [COMPACT, WIDE] {
+            let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+            let order = [Id::new(ADD_RECIPIENT_ID), preset(24), preset(6), preset(1)];
+            harness.focus(order[0].clone());
+            assert_eq!(harness.focused_id(), Some(order[0].clone()));
+            for expected in &order[1..] {
+                assert_eq!(harness.tab().id.as_ref(), Some(expected), "{outer:?}");
+            }
+            let fee_input = harness.tab();
+            assert_eq!(fee_input.id, None);
+            assert_eq!(
+                fee_input.input.as_deref(),
+                Some("5"),
+                "Tab reaches the fee form"
+            );
+            for expected in [BACK_ID, CLEAR_ID, PREPARE_ID] {
+                assert_eq!(harness.tab().id, Some(Id::new(expected)), "{outer:?}");
+            }
+            for expected in [CLEAR_ID, BACK_ID] {
+                assert_eq!(harness.shift_tab().id, Some(Id::new(expected)), "{outer:?}");
+            }
+            assert_eq!(harness.shift_tab().input.as_deref(), Some("5"));
+            for expected in order.iter().rev() {
+                assert_eq!(harness.shift_tab().id.as_ref(), Some(expected), "{outer:?}");
+            }
+            let recipient_field = harness.shift_tab();
+            assert_eq!(recipient_field.id, None);
+            assert!(
+                recipient_field.input.is_some(),
+                "Shift-Tab from Add recipient reaches the passed recipient form"
+            );
+
+            for (id, expected) in cases.iter().cloned() {
+                harness.focus(id.clone());
+                assert_eq!(harness.focused_id(), Some(id.clone()));
+                for key in [Named::Enter, Named::Space] {
+                    let pressed = harness.key(key, false, true);
+                    assert!(
+                        matches!(pressed.as_slice(), [m] if expected(m)),
+                        "{:?} {:?}: {:?}",
+                        id,
+                        key,
+                        pressed
+                    );
+                    assert!(harness.key(key, true, true).is_empty(), "{:?} repeat", id);
+                    assert!(
+                        harness.key(key, false, false).is_empty(),
+                        "{:?} release",
+                        id
+                    );
+                }
+            }
+        }
+        let mut harness = Harness::new(compose(&fixture, &scenario), TALL);
+        for (id, expected) in cases {
+            let clicked = harness.click(&id);
+            assert!(
+                matches!(
+                    clicked.as_slice(),
+                    [Message::FocusAction(focus), m] if focus == &id && expected(m)
+                ),
+                "{:?} click: {:?}",
+                id,
+                clicked
+            );
+        }
+    }
+
+    #[test]
+    fn unavailable_prepare_is_skipped_by_focus_and_inert() {
+        use keyboard::key::Named;
+        let fixture = Fixture::new(ThemeMode::Light, 3);
+        let prepare = Id::new(PREPARE_ID);
+        for scenario in [
+            Scenario {
+                is_valid: false,
+                amount_left: None,
+                feerate: ("", true),
+                ..Scenario::valid_send()
+            },
+            Scenario {
+                generating: true,
+                ..Scenario::valid_send()
+            },
+        ] {
+            for outer in [COMPACT, WIDE, TALL] {
+                let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+                assert!(!harness.probe().has_focus(&prepare));
+                harness.focus(Id::new(CLEAR_ID));
+                assert_eq!(harness.focused_id(), Some(Id::new(CLEAR_ID)));
+                // Clear is the last enabled target in the dashboard. Tab past
+                // it leaves nothing focused; it never lands on Prepare.
+                let after_clear = harness.tab_raw();
+                assert!(
+                    after_clear.is_none(),
+                    "Tab after Clear focused {:?}",
+                    after_clear
+                );
+                harness.focus(prepare.clone());
+                assert_eq!(harness.focused_id(), None);
+                for key in [Named::Enter, Named::Space] {
+                    let messages = harness.key(key, false, true);
+                    assert!(messages.is_empty(), "{:?}: {:?}", key, messages);
+                    harness.key(key, false, false);
+                }
+                // Only the tall window guarantees Prepare is inside the
+                // shell's content viewport, so the press really lands on it.
+                if outer == TALL {
+                    let label = harness.label_bounds("Prepare");
+                    assert!(label.y + label.height <= TALL.1 as f32);
+                    let clicked = harness.click_at(label);
+                    assert!(clicked.is_empty(), "{:?}", clicked);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn preset_identity_is_the_block_target_and_its_own_fetch_disables_it() {
+        use keyboard::key::Named::Enter;
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        let base = Scenario::valid_send();
+        let state = |loading: Option<usize>, selected: Option<usize>| Scenario {
+            loading,
+            selected,
+            ..base.clone()
+        };
+        let normal = preset(6);
+        let label = "Normal (~1h)";
+        let mut harness = Harness::new(compose(&fixture, &base), TALL);
+
+        // Focus on a preset survives other presets loading and selection
+        // changes, because its ID is its block target.
+        harness.focus(normal.clone());
+        for (loading, selected) in [
+            (Some(1), None),
+            (None, Some(1)),
+            (Some(24), Some(1)),
+            (None, Some(6)),
+        ] {
+            harness.rebuild(compose(&fixture, &state(loading, selected)));
+            assert_eq!(
+                harness.focused_id(),
+                Some(normal.clone()),
+                "loading {:?} selected {:?}",
+                loading,
+                selected
+            );
+            let pressed = harness.key(Enter, false, true);
+            harness.key(Enter, false, false);
+            assert!(
+                matches!(
+                    pressed.as_slice(),
+                    [Message::CreateSpend(CreateSpendMessage::FetchFeeEstimate(
+                        6
+                    ))]
+                ),
+                "{:?}",
+                pressed
+            );
+        }
+
+        // Its own fetch disables it. It stays visible with the same ID but
+        // leaves the focus order and keyboard activation. Keeping focus
+        // through its own loading would need a shared Action capability; that
+        // is an integration dependency, not something this presenter fakes.
+        harness.rebuild(compose(&fixture, &state(Some(6), None)));
+        let probe = harness.probe();
+        assert!(!probe.has_focus(&normal));
+        assert!(probe.has_focus(&preset(24)) && probe.has_focus(&preset(1)));
+        assert!(probe.contains(label));
+        assert_eq!(harness.focused_id(), None);
+        assert!(harness.key(Enter, false, true).is_empty());
+        harness.key(Enter, false, false);
+        harness.focus(normal.clone());
+        assert_eq!(harness.focused_id(), None);
+        harness.focus(preset(24));
+        assert_eq!(
+            harness.tab().id,
+            Some(preset(1)),
+            "Tab skips the loading preset"
+        );
+        let busy = harness.label_bounds(label);
+        assert!(harness.click_at(busy).is_empty());
+
+        // Pressed while loading, estimate arrives, released: no fetch.
+        let point = busy.center();
+        let down = harness.press_at(point);
+        harness.rebuild(compose(&fixture, &state(None, Some(6))));
+        assert!(harness.label_bounds(label).contains(point));
+        let up = harness.release_at(point);
+        assert!(down.is_empty() && up.is_empty(), "{:?} {:?}", down, up);
+
+        // Pressed while ready, its fetch starts, released: the stale press
+        // must not dispatch a second fetch.
+        let point = harness.label_bounds(label).center();
+        let down = harness.press_at(point);
+        assert!(
+            matches!(down.as_slice(), [Message::FocusAction(id)] if id == &normal),
+            "{:?}",
+            down
+        );
+        harness.rebuild(compose(&fixture, &state(Some(6), Some(6))));
+        assert!(harness.label_bounds(label).contains(point));
+        let up = harness.release_at(point);
+        assert!(up.is_empty(), "{:?}", up);
+    }
+
+    /// Iced's TextInput reports `text_input` before `focusable`; the
+    /// coincube-ui input inside `form::Form` reports them the other way round.
+    /// The probe must see both as native inputs.
+    #[test]
+    fn input_probe_joins_either_operation_order() {
+        let form_value = value("", true);
+        let element: Element<'_, Message> = Column::new()
+            .push(
+                iced::widget::text_input("Iced placeholder", "iced value")
+                    .on_input(|_| Message::Reload),
+            )
+            .push(form::Form::new("Form placeholder", &form_value, |_| {
+                Message::Reload
+            }))
+            .into();
+        let mut harness = Harness::new(element, WIDE);
+        assert_eq!(
+            harness.probe().inputs(),
+            vec!["iced value", "Form placeholder"]
+        );
+    }
+
+    #[test]
+    fn actions_stay_reachable_around_the_nested_coin_scroll() {
+        let fixture = Fixture::new(ThemeMode::Light, 40);
+        let scenario = Scenario {
+            first_step: false,
+            ..Scenario::valid_send()
+        };
+        let mut harness = Harness::new(compose(&fixture, &scenario), COMPACT);
+        let probe = harness.probe();
+        assert!(
+            probe
+                .scrollables
+                .iter()
+                .any(|(viewport, content)| *viewport <= 300.5 && content > viewport),
+            "40 coins overflow the coin list's own scroll: {:?}",
+            probe.scrollables
+        );
+        harness.focus(preset(1));
+        assert_eq!(harness.tab().input.as_deref(), Some("5"));
+        for expected in [BACK_ID, CLEAR_ID, PREPARE_ID] {
+            assert_eq!(harness.tab().id, Some(Id::new(expected)));
+        }
+        for _ in 0..2 {
+            harness.shift_tab();
+        }
+        assert_eq!(harness.shift_tab().input.as_deref(), Some("5"));
+        assert_eq!(harness.shift_tab().id, Some(preset(1)));
+    }
+
+    #[test]
+    fn rendering_and_pointer_motion_emit_no_intents() {
+        let fixture = Fixture::new(ThemeMode::Dark, 3);
+        for scenario in [
+            Scenario::valid_send(),
+            Scenario {
+                generating: true,
+                ..Scenario::valid_send()
+            },
+            Scenario {
+                loading: Some(6),
+                ..Scenario::valid_send()
+            },
+        ] {
+            let mut harness = Harness::new(compose(&fixture, &scenario), WIDE);
+            assert!(harness
+                .send(
+                    Event::Window(iced::window::Event::RedrawRequested(
+                        std::time::Instant::now()
+                    )),
+                    mouse::Cursor::Unavailable,
+                )
+                .is_empty());
+            let bounds = harness.probe().focus[0].bounds;
+            assert!(harness
+                .send(
+                    Event::Mouse(mouse::Event::CursorMoved {
+                        position: bounds.center()
+                    }),
+                    mouse::Cursor::Available(bounds.center()),
+                )
+                .is_empty());
+        }
+    }
 }
