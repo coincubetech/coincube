@@ -26,9 +26,10 @@ use coincube_ui::{
     },
     icon::warning_icon,
     theme,
-    widget::{Column, ColumnExt, Element, Row, RowExt},
+    widget::{action::Action, Column, ColumnExt, Element, Row, RowExt},
 };
 use iced::{
+    advanced::widget::Id,
     mouse,
     widget::{mouse_area, Space},
     Alignment, Length,
@@ -86,6 +87,9 @@ pub struct UnconfirmedBalance {
     pub fiat: Option<FiatAmount>,
 }
 
+/// Focus target and focus intent for an interactive balance header.
+pub type HeaderFocusIntent<M> = (Id, fn(Id) -> M);
+
 pub struct WalletHeaderProps<M> {
     pub sats: Amount,
     pub fiat: Option<FiatAmount>,
@@ -105,6 +109,8 @@ pub struct WalletHeaderProps<M> {
     /// affordance. `None` for non-interactive renders (e.g. read-only
     /// embeddings, screenshot tests).
     pub on_swap: Option<M>,
+    /// Landing-only focus path; legacy payment headers keep their prior layout.
+    pub on_swap_focus: Option<HeaderFocusIntent<M>>,
 }
 
 impl<M> WalletHeaderProps<M> {
@@ -130,7 +136,13 @@ impl<M> WalletHeaderProps<M> {
             pending_receive_sats: 0,
             display_mode,
             on_swap,
+            on_swap_focus: None,
         }
+    }
+
+    pub fn with_swap_focus(mut self, id: Id, focus: fn(Id) -> M) -> Self {
+        self.on_swap_focus = Some((id, focus));
+        self
     }
 }
 
@@ -139,7 +151,7 @@ impl<M> WalletHeaderProps<M> {
 /// is fiat or bitcoin is governed by `display_mode`. Callers compose
 /// the wallet-title row and surrounding chrome themselves — this helper
 /// only unifies the balance hierarchy.
-pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'a, M> {
+pub fn wallet_header<'a, M: Clone + 'static>(props: WalletHeaderProps<M>) -> Column<'a, M> {
     let WalletHeaderProps {
         sats,
         fiat,
@@ -152,6 +164,7 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
         pending_receive_sats,
         display_mode,
         on_swap,
+        on_swap_focus,
     } = props;
 
     let primary_size = match variant {
@@ -240,19 +253,34 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
                 fiat_secondary.unwrap_or_else(|| Space::new().into()),
             ),
         },
-        DisplayMode::BitcoinNative => {
-            (bitcoin_primary, fiat_secondary.unwrap_or(bitcoin_secondary))
-        }
+        DisplayMode::BitcoinNative => (
+            bitcoin_primary,
+            fiat_secondary.unwrap_or_else(|| {
+                if matches!(variant, HeaderVariant::Landing) {
+                    Space::new().into()
+                } else {
+                    bitcoin_secondary
+                }
+            }),
+        ),
     };
 
     // Wrap the primary in a click-to-swap mouse_area when `on_swap` is
     // provided. Pointer cursor on hover is the only discoverability cue
     // — no adjacent glyph, per design feedback.
     let primary_row: Element<'a, M> = if let Some(swap) = on_swap {
-        mouse_area(primary)
-            .interaction(mouse::Interaction::Pointer)
-            .on_press(swap)
-            .into()
+        if let Some((id, focus)) = on_swap_focus {
+            Action::new(id, primary, focus)
+                .style(theme::button::transparent)
+                .padding(0)
+                .on_press(swap)
+                .into()
+        } else {
+            mouse_area(primary)
+                .interaction(mouse::Interaction::Pointer)
+                .on_press(swap)
+                .into()
+        }
     } else {
         primary
     };

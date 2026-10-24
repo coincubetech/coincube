@@ -627,6 +627,7 @@ impl State for GlobalHome {
             menu,
             cache,
             view::global_home::global_home_view(GlobalViewConfig {
+                cube_id: &self.cube_id,
                 liquid_balance,
                 spark_balance: self.spark_balance,
                 spark_btc_balance: self.spark_btc_balance,
@@ -3394,6 +3395,80 @@ mod tests {
             None,
             &Cache::default(),
             Message::View(view::Message::Home(msg)),
+        );
+    }
+
+    #[test]
+    fn r06a_presync_spark_holding_stays_untrusted_until_postsync_response() {
+        // This is only the inert state adapter: no wallet, Liquid client,
+        // Spark bridge, seed, session, or configured data directory exists.
+        // `send` drops returned Tasks without running them.
+        let directory = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("r06a-synthetic-state-{}", std::process::id())),
+        );
+        let mut home = GlobalHome::new_without_wallet(
+            None::<Arc<LiquidBackend>>,
+            None,
+            directory,
+            coincube_core::miniscript::bitcoin::Network::Bitcoin,
+            "synthetic-cube".into(),
+            false,
+        );
+        let stale = coincube_spark_protocol::StableBalanceSnapshot {
+            balance: 2_500_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        send(
+            &mut home,
+            HomeMessage::SparkBalanceUpdated {
+                btc: Amount::from_sat(10_000),
+                stable_balance: Some(stale.clone()),
+            },
+        );
+        assert_eq!(
+            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            Some(2_500_000)
+        );
+        assert!(!home.spark_balance_loaded);
+        assert!(home.spark_balance_received);
+
+        send(&mut home, HomeMessage::SparkLoadFailed);
+        assert!(home.spark_balance_error);
+        assert!(!home.spark_balance_loaded);
+        assert_eq!(
+            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            Some(stale.balance)
+        );
+
+        send(&mut home, HomeMessage::SparkSyncedObserved);
+        assert!(home.spark_synced_seen);
+        assert!(!home.spark_balance_loaded);
+        let fresh = coincube_spark_protocol::StableBalanceSnapshot {
+            balance: 3_750_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        send(
+            &mut home,
+            HomeMessage::SparkBalanceUpdated {
+                btc: Amount::from_sat(12_000),
+                stable_balance: Some(fresh.clone()),
+            },
+        );
+        assert!(home.spark_balance_loaded);
+        assert!(!home.spark_balance_error);
+        assert_eq!(
+            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            Some(3_750_000)
+        );
+
+        send(&mut home, HomeMessage::SparkLoadFailed);
+        assert!(home.spark_balance_loaded);
+        assert!(home.spark_balance_error);
+        assert_eq!(
+            home.spark_stable_balance.as_ref().map(|s| s.balance),
+            Some(fresh.balance)
         );
     }
 

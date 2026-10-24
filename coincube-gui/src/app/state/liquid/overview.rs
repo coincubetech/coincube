@@ -243,6 +243,9 @@ impl State for LiquidOverview {
                         ]);
                     }
                 }
+                view::LiquidOverviewMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id.clone());
+                }
                 view::LiquidOverviewMessage::DataLoaded {
                     balance,
                     usdt_balance,

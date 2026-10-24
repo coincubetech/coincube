@@ -922,6 +922,8 @@ pub enum LiquidOverviewMessage {
     Swap,
     History,
     SelectTransaction(crate::app::wallets::types::DomainPaymentIdentity),
+    /// Request whole-tree focus after a pointer interaction with a landing action.
+    FocusAction(iced::advanced::widget::Id),
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,

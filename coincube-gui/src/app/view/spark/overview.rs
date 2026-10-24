@@ -14,13 +14,13 @@ use crate::app::wallets::DomainPaymentStatus;
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
-    component::{amount::*, button, text::*},
-    icon::{self, receipt_icon},
+    component::{amount::*, text::*},
+    icon::receipt_icon,
     theme,
     widget::*,
 };
 use iced::{
-    widget::{button as iced_button, container, Column, Container, Row},
+    widget::{container, Column, Container, Row},
     Alignment, Background, Length,
 };
 
@@ -29,7 +29,10 @@ use crate::app::state::spark::overview::SparkBalanceSnapshot;
 use crate::app::view::shared::activity_row::{
     activity_row, ActivityDirection, ActivityIdentity, ActivityRow,
 };
-use crate::app::view::shared::landing::{amount_cell, AmountCell, AmountTier};
+use crate::app::view::shared::landing::{
+    amount_cell, landing_balance_section, landing_button, landing_control_id,
+    landing_subtle_button_style, AmountCell, AmountTier,
+};
 use crate::app::view::vault::fiat::FiatAmount;
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
 use crate::app::view::{FiatAmountConverter, SparkOverviewMessage};
@@ -222,6 +225,10 @@ fn connected_view<'a>(
                 pending_receive_sats: pending_incoming_sats,
                 display_mode,
                 on_swap: Some(SparkOverviewMessage::FlipDisplayMode),
+                on_swap_focus: Some((
+                    landing_control_id(cube_id, "Spark", "flip-balance"),
+                    SparkOverviewMessage::FocusAction,
+                )),
             })
             .into()
         });
@@ -243,21 +250,37 @@ fn connected_view<'a>(
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
         .push(amount_cell::<SparkOverviewMessage>(
             AmountCell::shown(
-                btc_row_amount.to_formatted_string_with_unit(bitcoin_unit),
+                format!(
+                    "{} {}",
+                    btc_row_amount.to_formatted_string_with_unit(bitcoin_unit),
+                    bitcoin_unit.label()
+                ),
                 (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
             ),
             AmountTier::Row,
         ))
         .push(iced::widget::Space::new().width(Length::Fill))
         .push(
-            button::primary(None, "Send")
-                .on_press(SparkOverviewMessage::SendBtc)
-                .width(Length::Fixed(90.0)),
+            landing_button(
+                landing_control_id(cube_id, "Spark", "send-btc"),
+                "Send",
+                None,
+                SparkOverviewMessage::FocusAction,
+                Some(SparkOverviewMessage::SendBtc),
+                theme::button::primary,
+            )
+            .width(Length::Fixed(90.0)),
         )
         .push(
-            button::orange_outline(None, "Receive")
-                .on_press(SparkOverviewMessage::ReceiveBtc)
-                .width(Length::Fixed(90.0)),
+            landing_button(
+                landing_control_id(cube_id, "Spark", "receive-btc"),
+                "Receive",
+                None,
+                SparkOverviewMessage::FocusAction,
+                Some(SparkOverviewMessage::ReceiveBtc),
+                theme::button::orange_outline,
+            )
+            .width(Length::Fixed(90.0)),
         );
 
     let usdb_row = stable_balance.as_ref().map(|sb| {
@@ -274,10 +297,11 @@ fn connected_view<'a>(
                 AmountTier::Row,
             ))
     });
-    let portfolio_card = Container::new(
+    let balance_section = landing_balance_section(
         Column::new()
             .spacing(16)
             .push(total_col)
+            .push(iced::widget::rule::horizontal(1))
             .push(btc_row)
             .push_maybe(usdb_row)
             .push_maybe((stable_balance_active.is_none()).then(|| {
@@ -294,20 +318,9 @@ fn connected_view<'a>(
                         .style(theme::text::warning)
                 }),
             ),
-    )
-    .padding(20)
-    .width(Length::Fill)
-    .style(|t| container::Style {
-        background: Some(Background::Color(t.colors.cards.simple.background)),
-        border: iced::Border {
-            color: color::ORANGE,
-            width: 0.2,
-            radius: 25.0.into(),
-        },
-        ..Default::default()
-    });
+    );
 
-    content = content.push(portfolio_card);
+    content = content.push(balance_section);
     if let Some(error) = last_error {
         content = content.push(
             text(format!(
@@ -327,8 +340,17 @@ fn connected_view<'a>(
                 && recent.iter().filter(|other| other.id == tx.id).count() == 1)
                 .then(|| SparkOverviewMessage::SelectTransaction(tx.id.clone()));
             let amount = tx.token_display.clone().unwrap_or_else(|| {
-                row_display_amount(tx).to_formatted_string_with_unit(bitcoin_unit)
+                format!(
+                    "{} {}",
+                    row_display_amount(tx).to_formatted_string_with_unit(bitcoin_unit),
+                    bitcoin_unit.label()
+                )
             });
+            let amount = if tx.is_incoming {
+                format!("+{amount}")
+            } else {
+                format!("−{amount}")
+            };
             let secondary = tx
                 .fiat_amount
                 .as_ref()
@@ -378,6 +400,7 @@ fn connected_view<'a>(
                 },
                 false,
                 open,
+                SparkOverviewMessage::FocusAction,
             ));
         }
     } else {
@@ -388,47 +411,14 @@ fn connected_view<'a>(
         ));
     }
 
-    let view_transactions_button = {
-        let btn_icon = icon::history_icon()
-            .size(18)
-            .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(color::ORANGE),
-            });
-
-        let label = text("View All Transactions")
-            .size(15)
-            .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                color: Some(color::ORANGE),
-            });
-
-        let button_content = Row::new()
-            .spacing(8)
-            .align_y(iced::alignment::Vertical::Center)
-            .push(btn_icon)
-            .push(label);
-
-        iced_button(Container::new(button_content).padding([10, 20]).style(
-            |_theme: &theme::Theme| container::Style {
-                background: Some(Background::Color(color::TRANSPARENT)),
-                border: iced::Border {
-                    color: color::ORANGE,
-                    width: 1.5,
-                    radius: 20.0.into(),
-                },
-                ..Default::default()
-            },
-        ))
-        .style(|_theme: &theme::Theme, _| iced_button::Style {
-            background: Some(Background::Color(color::TRANSPARENT)),
-            text_color: color::ORANGE,
-            border: iced::Border {
-                radius: 20.0.into(),
-                ..Default::default()
-            },
-            ..Default::default()
-        })
-        .on_press(SparkOverviewMessage::History)
-    };
+    let view_transactions_button = landing_button(
+        landing_control_id(cube_id, "Spark", "history"),
+        "View All Transactions",
+        None,
+        SparkOverviewMessage::FocusAction,
+        Some(SparkOverviewMessage::History),
+        landing_subtle_button_style,
+    );
 
     content = content
         .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
@@ -439,7 +429,7 @@ fn connected_view<'a>(
         )
         .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
 
-    content.into()
+    Container::new(content).padding([0, 16]).into()
 }
 
 fn pending_btc_sats(recent: &[SparkRecentTransaction]) -> (u64, u64) {
@@ -529,6 +519,7 @@ fn placeholder<'a, T: Into<Element<'a, SparkOverviewMessage>>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
 
     fn tx(
         id: &str,
@@ -639,5 +630,168 @@ mod tests {
             .to_sat(),
             109
         );
+    }
+
+    fn synthetic_overview<'a>(
+        status: SparkStatus,
+        rows: &'a [SparkRecentTransaction],
+        active: Option<bool>,
+        price: Option<f64>,
+        last_error: Option<&'a str>,
+    ) -> Element<'a, SparkOverviewMessage> {
+        SparkOverviewView {
+            status,
+            recent_transactions: rows,
+            cube_id: "synthetic-cube",
+            last_error,
+            fiat_converter: None,
+            bitcoin_unit: BitcoinDisplayUnit::Sats,
+            show_direction_badges: true,
+            stable_balance_active: active,
+            btc_usd_price: price,
+            display_mode: DisplayMode::BitcoinNative,
+        }
+        .render()
+    }
+
+    #[test]
+    fn r06a_spark_headless_content_matrix() {
+        let stable = coincube_spark_protocol::StableBalanceSnapshot {
+            balance: 2_500_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        let snapshot = SparkBalanceSnapshot {
+            balance_sats: 125_000,
+            stable_balance: Some(stable),
+        };
+        let rows = vec![
+            tx(
+                "payment-a",
+                true,
+                DomainPaymentStatus::Complete,
+                5_000,
+                0,
+                None,
+            ),
+            tx(
+                "payment-b",
+                false,
+                DomainPaymentStatus::Pending,
+                7_000,
+                15,
+                None,
+            ),
+        ];
+        let adverse = [
+            DomainPaymentStatus::Created,
+            DomainPaymentStatus::Pending,
+            DomainPaymentStatus::Complete,
+            DomainPaymentStatus::Failed,
+            DomainPaymentStatus::TimedOut,
+            DomainPaymentStatus::Refundable,
+            DomainPaymentStatus::RefundPending,
+            DomainPaymentStatus::WaitingFeeAcceptance,
+        ]
+        .iter()
+        .enumerate()
+        .map(|(index, status)| {
+            let mut payment = tx(
+                &format!("payment-{index}"),
+                index % 2 == 0,
+                *status,
+                99_999_999_999,
+                1,
+                None,
+            );
+            payment.description = "A long Spark payment description with a beneficiary name and contextual details that should wrap safely in compact mode".into();
+            payment
+        })
+        .collect::<Vec<_>>();
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let normal = capture::inspect(
+                    "spark-normal",
+                    synthetic_overview(
+                        SparkStatus::Connected(snapshot.clone()),
+                        &rows,
+                        Some(true),
+                        Some(50_000.0),
+                        None,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(normal.contains("Last transactions"));
+                assert!(normal.contains("2.50 USDB"));
+                for control in ["flip-balance", "send-btc", "receive-btc", "history"] {
+                    assert!(normal.has_focus(landing_control_id(
+                        "synthetic-cube",
+                        "Spark",
+                        control
+                    )));
+                }
+                let missing_quote = capture::inspect(
+                    "spark-missing-quote-held-off",
+                    synthetic_overview(
+                        SparkStatus::Connected(snapshot.clone()),
+                        &rows,
+                        Some(false),
+                        None,
+                        Some("bridge refresh failed"),
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(missing_quote.contains("2.50 USDB"));
+                assert!(missing_quote.contains("needs a BTC/USD quote"));
+                assert!(missing_quote.contains("held while Stable Balance is off"));
+                assert!(missing_quote.contains("Last known balance"));
+                let unknown_setting = capture::inspect(
+                    "spark-setting-unknown-loaded-empty",
+                    synthetic_overview(
+                        SparkStatus::Connected(snapshot.clone()),
+                        &[],
+                        None,
+                        Some(50_000.0),
+                        None,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(unknown_setting.contains("setting is still unknown"));
+                assert!(unknown_setting.contains("No transactions yet"));
+                assert!(unknown_setting.contains("View All Transactions"));
+                let unavailable = capture::inspect(
+                    "spark-bridge-unavailable",
+                    synthetic_overview(SparkStatus::Unavailable, &[], None, None, None),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(unavailable.contains("not configured"));
+                let statuses = capture::inspect(
+                    "spark-all-statuses-long-labels",
+                    synthetic_overview(
+                        SparkStatus::Connected(snapshot.clone()),
+                        &adverse,
+                        Some(true),
+                        Some(50_000.0),
+                        None,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(statuses.contains("Refund available"));
+                assert!(statuses.contains("Review fee"));
+            }
+        }
     }
 }

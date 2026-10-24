@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
-use coincube_ui::widget::{ColumnExt, Element};
+use coincube_ui::{
+    theme,
+    widget::{ColumnExt, Element},
+};
 use iced::Task;
 
 use crate::app::cache::Cache;
@@ -125,10 +128,19 @@ impl State for SparkOverview {
         let content = iced::widget::Column::new()
             .push(overview)
             .push_maybe(held_while_off.then(|| {
-                coincube_ui::component::button::secondary(None, "Review Stable Balance").on_press(
-                    view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(Some(
-                        crate::app::menu::SparkSettingsOption::General,
+                view::shared::landing::landing_button(
+                    view::shared::landing::landing_control_id(
+                        &cache.cube_id,
+                        "Spark",
+                        "review-stable-balance",
+                    ),
+                    "Review Stable Balance",
+                    None,
+                    view::Message::FocusAction,
+                    Some(view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(
+                        Some(crate::app::menu::SparkSettingsOption::General),
                     )))),
+                    theme::button::secondary,
                 )
             }));
 
@@ -241,6 +253,9 @@ impl State for SparkOverview {
                             ))),
                         ]);
                     }
+                }
+                view::SparkOverviewMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id);
                 }
                 view::SparkOverviewMessage::FlipDisplayMode => {
                     return Task::done(Message::View(view::Message::FlipDisplayMode));

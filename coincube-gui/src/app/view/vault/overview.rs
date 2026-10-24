@@ -2,7 +2,6 @@ use chrono::{DateTime, Local, Utc};
 use std::{collections::HashMap, time::Duration, vec};
 
 use iced::{
-    alignment,
     widget::{Container, Row, Space},
     Alignment::{self, Center},
     Length,
@@ -10,7 +9,6 @@ use iced::{
 
 use coincube_core::miniscript::bitcoin;
 use coincube_ui::{
-    color,
     component::{amount::*, button, card, form, spinner, text::*},
     icon::{self, cross_icon},
     theme,
@@ -23,12 +21,15 @@ use crate::{
         menu::{self, Menu, VaultSubMenu},
         settings::display::DisplayMode,
         view::{
-            balance_header_card, dashboard, loading_placeholder,
+            dashboard, loading_placeholder,
             message::Message,
             shared::activity_row::{
                 activity_row, ActivityDirection, ActivityIdentity, ActivityRow, ActivityStatus,
             },
-            shared::landing::{amount_cell, AmountCell, AmountTier},
+            shared::landing::{
+                amount_cell, landing_balance_section, landing_button, landing_control_id,
+                landing_subtle_button_style, AmountCell, AmountTier,
+            },
             vault::coins,
             vault::label,
             wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps},
@@ -41,7 +42,7 @@ use crate::{
 
 const RESCAN_DATE_PROMPT: &str = "This Vault was restored from a Recovery Kit that doesn't record when the wallet was created, so its past transactions can't be found without a start date. Pick one to scan the blockchain from.";
 
-fn rescan_date_prompt<'a>() -> Element<'a, Message> {
+fn rescan_date_prompt<'a>(cube_id: &str) -> Element<'a, Message> {
     Container::new(
         Column::new()
             .spacing(10)
@@ -56,17 +57,24 @@ fn rescan_date_prompt<'a>() -> Element<'a, Message> {
                 Row::new()
                     .spacing(5)
                     .push(Space::new().width(Length::Fill))
-                    .push(
-                        button::secondary(None, "Pick a date").on_press(Message::Menu(
-                            Menu::Vault(menu::VaultSubMenu::Settings(Some(
-                                menu::SettingsOption::Node,
-                            ))),
-                        )),
-                    )
-                    .push(
-                        button::secondary(Some(cross_icon()), "Dismiss")
-                            .on_press(Message::HideRescanPrompt),
-                    ),
+                    .push(landing_button(
+                        landing_control_id(cube_id, "Vault", "rescan-pick-date"),
+                        "Pick a date",
+                        None,
+                        Message::FocusAction,
+                        Some(Message::Menu(Menu::Vault(menu::VaultSubMenu::Settings(
+                            Some(menu::SettingsOption::Node),
+                        )))),
+                        theme::button::secondary,
+                    ))
+                    .push(landing_button(
+                        landing_control_id(cube_id, "Vault", "rescan-dismiss"),
+                        "Dismiss",
+                        Some(cross_icon()),
+                        Message::FocusAction,
+                        Some(Message::HideRescanPrompt),
+                        theme::button::secondary,
+                    )),
             ),
     )
     .padding(25)
@@ -229,7 +237,11 @@ pub fn vault_overview_view<'a>(
                 AmountCell::unknown("Vault history has not loaded")
             } else {
                 AmountCell::shown(
-                    total_balance.to_formatted_string_with_unit(bitcoin_unit),
+                    format!(
+                        "{} {}",
+                        total_balance.to_formatted_string_with_unit(bitcoin_unit),
+                        bitcoin_unit.label()
+                    ),
                     (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
                 )
             },
@@ -237,239 +249,226 @@ pub fn vault_overview_view<'a>(
         ))
         .push(Space::new().width(Length::Fill))
         .push(
-            button::primary(None, "Send")
-                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Send)))
-                .width(Length::Fixed(90.0)),
+            landing_button(
+                landing_control_id(cube_id, "Vault", "send-btc"),
+                "Send",
+                None,
+                Message::FocusAction,
+                Some(Message::Menu(Menu::Vault(VaultSubMenu::Send))),
+                theme::button::primary,
+            )
+            .width(Length::Fixed(90.0)),
         )
         .push(
-            button::orange_outline(None, "Receive")
-                .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Receive)))
-                .width(Length::Fixed(90.0)),
-        );
-    Column::new()
-        .push(balance_header_card(
-            Column::new()
-                .spacing(16)
-                .push(
-                    Column::new().spacing(8).push(h4_bold("Balance")).push(
-                        wallet_header::<Message>(WalletHeaderProps {
-                            sats: total_balance,
-                            fiat: fiat_balance,
-                            balance_masked: false,
-                            bitcoin_unit,
-                            variant: HeaderVariant::Landing,
-                            sync,
-                            unconfirmed: None,
-                            pending_send_sats: 0,
-                            pending_receive_sats: 0,
-                            display_mode,
-                            on_swap: Some(Message::FlipDisplayMode),
-                        }),
-                    ),
-                )
-                .push(vault_btc_row),
-        ))
-        .push(show_rescan_prompt.then_some(rescan_date_prompt()))
-        .push(match (node_bitcoind_ibd, node_bitcoind_sync_progress) {
-            (Some(true), Some(progress)) => Some(
-                Container::new(
-                    Row::new()
-                        .spacing(10)
-                        .align_y(Alignment::Center)
-                        .push(
-                            text(format!(
-                                "Your local node is syncing — {:.1}% complete",
-                                100.0 * progress
-                            ))
-                            .style(theme::text::secondary)
-                            .width(Length::Fill),
-                        )
-                        .push(spinner::typing_text_carousel(
-                            "...",
-                            true,
-                            Duration::from_millis(2000),
-                            |content| text(content).style(theme::text::secondary),
-                        ))
-                        .width(Length::Fill),
-                )
-                .padding(15)
-                .style(theme::card::border),
-            ),
-            _ => None,
-        })
-        .push(if expiring_coins.is_empty() {
-            remaining_sequence.map(|sequence| {
-                Container::new(
-                    Row::new()
-                        .spacing(15)
-                        .align_y(Alignment::Center)
-                        .push(
-                            h4_regular(format!(
-                                "≈ {} left before first recovery path becomes available.",
-                                coins::expire_message_units(sequence).join(", ")
-                            ))
-                            .width(Length::Fill),
-                        )
-                        .push(
-                            icon::tooltip_icon()
-                                .size(20)
-                                .style(theme::text::secondary)
-                                .width(Length::Fixed(20.0)),
-                        )
-                        .width(Length::Fill),
-                )
-                .padding(25)
-                .style(theme::card::border)
-            })
-        } else {
-            Some(
-                Container::new(
-                    Row::new()
-                        .spacing(15)
-                        .align_y(Alignment::Center)
-                        .push(
-                            h4_regular(format!(
-                                "Recovery path is or will soon be available for {} coin(s).",
-                                expiring_coins.len(),
-                            ))
-                            .width(Length::Fill),
-                        )
-                        .push(
-                            button::primary(Some(icon::arrow_repeat()), "Refresh coins").on_press(
-                                Message::Menu(Menu::Vault(crate::app::menu::VaultSubMenu::Coins(
-                                    Some(expiring_coins.to_owned()),
-                                ))),
-                            ),
-                        ),
-                )
-                .padding(25)
-                .style(theme::card::invalid),
+            landing_button(
+                landing_control_id(cube_id, "Vault", "receive-btc"),
+                "Receive",
+                None,
+                Message::FocusAction,
+                Some(Message::Menu(Menu::Vault(VaultSubMenu::Receive))),
+                theme::button::orange_outline,
             )
-        })
-        .push(
-            Column::new()
-                .spacing(10)
-                .push(h4_bold("Recent activity"))
-                .push_maybe(history_error.map(|error| {
-                    text(if history_loaded {
-                        format!("Last known activity · {error}")
-                    } else {
-                        error.to_owned()
-                    })
-                    .size(P2_SIZE)
-                    .style(theme::text::warning)
-                }))
-                .push_maybe(loading.then(|| {
-                    loading_placeholder(
-                        icon::receipt_icon().size(48),
-                        if history_unknown {
-                            // Nothing is loading yet: the list is read once the
-                            // history is in, and saying "Loading" until then is
-                            // what made an unfinished scan look like a slow page.
-                            "Transactions appear once the Vault's history has loaded"
-                        } else {
-                            "Loading transactions"
-                        },
+            .width(Length::Fixed(90.0)),
+        );
+    Container::new(
+        Column::new()
+            .push(landing_balance_section(
+                Column::new()
+                    .spacing(16)
+                    .push(
+                        Column::new()
+                            .spacing(8)
+                            .push(h4_bold("Balance"))
+                            .push(wallet_header::<Message>(WalletHeaderProps {
+                                sats: total_balance,
+                                fiat: fiat_balance,
+                                balance_masked: false,
+                                bitcoin_unit,
+                                variant: HeaderVariant::Landing,
+                                sync,
+                                unconfirmed: None,
+                                pending_send_sats: 0,
+                                pending_receive_sats: 0,
+                                display_mode,
+                                on_swap: Some(Message::FlipDisplayMode),
+                                on_swap_focus: Some((
+                                    landing_control_id(cube_id, "Vault", "flip-balance"),
+                                    Message::FocusAction,
+                                )),
+                            })),
                     )
-                }))
-                .push(events.iter().fold(Column::new().spacing(10), |col, event| {
-                    // Change outputs are skipped — their transaction is already
-                    // listed as the outgoing payment. A self-transfer has no
-                    // such counterpart row, so it stays.
-                    if event.kind != PaymentKind::SendToSelf {
-                        col.push(event_list_view(
-                            event,
-                            cube_id,
-                            bitcoin_unit,
-                            fiat_converter,
-                        ))
-                    } else {
-                        col
-                    }
-                }))
-                .push(if !is_last_page && !events.is_empty() {
-                    Some(
-                        Container::new(
-                            Button::new(
-                                text(if processing {
-                                    "Fetching ..."
-                                } else {
-                                    "See more"
-                                })
+                    .push(iced::widget::rule::horizontal(1))
+                    .push(vault_btc_row),
+            ))
+            .push(show_rescan_prompt.then_some(rescan_date_prompt(cube_id)))
+            .push(match (node_bitcoind_ibd, node_bitcoind_sync_progress) {
+                (Some(true), Some(progress)) => Some(
+                    Container::new(
+                        Row::new()
+                            .spacing(10)
+                            .align_y(Alignment::Center)
+                            .push(
+                                text(format!(
+                                    "Your local node is syncing — {:.1}% complete",
+                                    100.0 * progress
+                                ))
+                                .style(theme::text::secondary)
+                                .width(Length::Fill),
+                            )
+                            .push(spinner::typing_text_carousel(
+                                "...",
+                                true,
+                                Duration::from_millis(2000),
+                                |content| text(content).style(theme::text::secondary),
+                            ))
+                            .width(Length::Fill),
+                    )
+                    .padding(15)
+                    .style(theme::card::border),
+                ),
+                _ => None,
+            })
+            .push(if expiring_coins.is_empty() {
+                remaining_sequence.map(|sequence| {
+                    Container::new(
+                        Row::new()
+                            .spacing(15)
+                            .align_y(Alignment::Center)
+                            .push(
+                                h4_regular(format!(
+                                    "≈ {} left before first recovery path becomes available.",
+                                    coins::expire_message_units(sequence).join(", ")
+                                ))
+                                .width(Length::Fill),
+                            )
+                            .push(
+                                icon::tooltip_icon()
+                                    .size(20)
+                                    .style(theme::text::secondary)
+                                    .width(Length::Fixed(20.0)),
+                            )
+                            .width(Length::Fill),
+                    )
+                    .padding(25)
+                    .style(theme::card::border)
+                })
+            } else {
+                Some(
+                    Container::new(
+                        Row::new()
+                            .spacing(15)
+                            .align_y(Alignment::Center)
+                            .push(
+                                h4_regular(format!(
+                                    "Recovery path is or will soon be available for {} coin(s).",
+                                    expiring_coins.len(),
+                                ))
+                                .width(Length::Fill),
+                            )
+                            .push(landing_button(
+                                landing_control_id(cube_id, "Vault", "refresh-coins"),
+                                "Refresh coins",
+                                Some(icon::arrow_repeat()),
+                                Message::FocusAction,
+                                Some(Message::Menu(Menu::Vault(
+                                    crate::app::menu::VaultSubMenu::Coins(Some(
+                                        expiring_coins.to_owned(),
+                                    )),
+                                ))),
+                                theme::button::primary,
+                            )),
+                    )
+                    .padding(25)
+                    .style(theme::card::invalid),
+                )
+            })
+            .push(
+                Column::new()
+                    .spacing(10)
+                    .push(h4_bold("Recent activity"))
+                    .push_maybe(history_error.map(|error| {
+                        text(if history_loaded {
+                            format!("Last known activity · {error}")
+                        } else {
+                            error.to_owned()
+                        })
+                        .size(P2_SIZE)
+                        .style(theme::text::warning)
+                    }))
+                    .push_maybe(loading.then(|| {
+                        loading_placeholder(
+                            icon::receipt_icon().size(48),
+                            if history_unknown {
+                                // Nothing is loading yet: the list is read once the
+                                // history is in, and saying "Loading" until then is
+                                // what made an unfinished scan look like a slow page.
+                                "Transactions appear once the Vault's history has loaded"
+                            } else {
+                                "Loading transactions"
+                            },
+                        )
+                    }))
+                    .push(events.iter().fold(Column::new().spacing(10), |col, event| {
+                        // Change outputs are skipped — their transaction is already
+                        // listed as the outgoing payment. A self-transfer has no
+                        // such counterpart row, so it stays.
+                        if event.kind != PaymentKind::SendToSelf {
+                            col.push(event_list_view(
+                                event,
+                                cube_id,
+                                bitcoin_unit,
+                                fiat_converter,
+                            ))
+                        } else {
+                            col
+                        }
+                    }))
+                    .push(if !is_last_page && !events.is_empty() {
+                        Some(
+                            Container::new(
+                                landing_button(
+                                    landing_control_id(cube_id, "Vault", "see-more"),
+                                    if processing {
+                                        "Fetching ..."
+                                    } else {
+                                        "See more"
+                                    },
+                                    None,
+                                    Message::FocusAction,
+                                    (!processing).then_some(Message::Next),
+                                    theme::button::transparent_border,
+                                )
                                 .width(Length::Fill)
-                                .align_x(alignment::Horizontal::Center),
+                                .padding(15),
                             )
                             .width(Length::Fill)
-                            .padding(15)
-                            .style(theme::button::transparent_border)
-                            .on_press_maybe(if !processing {
-                                Some(Message::Next)
-                            } else {
-                                None
-                            }),
+                            .style(theme::card::simple),
                         )
-                        .width(Length::Fill)
-                        .style(theme::card::simple),
-                    )
-                } else {
-                    None
-                }),
-        )
-        .push_maybe(if history_loaded {
-            Some(
-                Container::new({
-                    let tx_icon = icon::history_icon()
-                        .size(18)
-                        .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                            color: Some(color::ORANGE),
-                        });
-                    let tx_label =
-                        text("View All Transactions")
-                            .size(15)
-                            .style(|_theme: &theme::Theme| iced::widget::text::Style {
-                                color: Some(color::ORANGE),
-                            });
-                    iced::widget::button(
-                        Container::new(
-                            Row::new()
-                                .spacing(8)
-                                .align_y(iced::Alignment::Center)
-                                .push(tx_icon)
-                                .push(tx_label),
-                        )
-                        .padding([10, 20])
-                        .style(|_theme: &theme::Theme| {
-                            iced::widget::container::Style {
-                                background: Some(iced::Background::Color(color::TRANSPARENT)),
-                                border: iced::Border {
-                                    color: color::ORANGE,
-                                    width: 1.5,
-                                    radius: 20.0.into(),
-                                },
-                                ..Default::default()
-                            }
-                        }),
-                    )
-                    .style(|_theme: &theme::Theme, _| iced::widget::button::Style {
-                        background: Some(iced::Background::Color(color::TRANSPARENT)),
-                        text_color: color::ORANGE,
-                        border: iced::Border {
-                            radius: 20.0.into(),
-                            ..Default::default()
-                        },
-                        ..Default::default()
-                    })
-                    .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Transactions(None))))
-                })
-                .width(Length::Fill)
-                .center_x(Length::Fill),
+                    } else {
+                        None
+                    }),
             )
-        } else {
-            None
-        })
-        .push(Space::new().height(Length::Fixed(40.0)))
-        .spacing(20)
-        .into()
+            .push_maybe(if history_loaded {
+                Some(
+                    Container::new(landing_button(
+                        landing_control_id(cube_id, "Vault", "history"),
+                        "View All Transactions",
+                        None,
+                        Message::FocusAction,
+                        Some(Message::Menu(Menu::Vault(VaultSubMenu::Transactions(None)))),
+                        landing_subtle_button_style,
+                    ))
+                    .width(Length::Fill)
+                    .center_x(Length::Fill),
+                )
+            } else {
+                None
+            })
+            .push(Space::new().height(Length::Fixed(40.0)))
+            .spacing(20),
+    )
+    .padding([0, 16])
+    .into()
 }
 
 fn event_list_view(
@@ -498,7 +497,11 @@ fn event_list_view(
             ActivityDirection::Outgoing => "Sent".into(),
             ActivityDirection::SelfTransfer => "Self-transfer".into(),
         });
-    let amount = event.amount.to_formatted_string_with_unit(bitcoin_unit);
+    let amount = format!(
+        "{} {}",
+        event.amount.to_formatted_string_with_unit(bitcoin_unit),
+        bitcoin_unit.label()
+    );
     let amount = match direction {
         ActivityDirection::Outgoing => format!("−{amount}"),
         ActivityDirection::Incoming => format!("+{amount}"),
@@ -542,6 +545,7 @@ fn event_list_view(
         },
         false,
         Some(Message::SelectPayment(event.outpoint)),
+        Message::FocusAction,
     )
 }
 
@@ -810,5 +814,143 @@ mod balance_state_tests {
         assert_eq!(detail.chars().count(), 161);
         assert!(detail.ends_with('…'));
         assert_eq!(failure_detail("  short  "), "short");
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    use super::*;
+    use crate::app::view::shared::landing::capture;
+    use coincube_core::miniscript::bitcoin::{OutPoint, Txid};
+    use std::str::FromStr;
+
+    fn event(known_time: bool) -> Payment {
+        Payment {
+            label: Some("Long Vault beneficiary label that should wrap safely on a compact landing while the amount remains right aligned".into()),
+            address: None,
+            address_label: None,
+            amount: bitcoin::Amount::from_sat(99_999_999_999),
+            outpoint: OutPoint {
+                txid: Txid::from_str(&"1".repeat(64)).unwrap(),
+                vout: 0,
+            },
+            time: known_time.then(|| DateTime::<Utc>::from_timestamp(1_722_000_000, 0).unwrap()),
+            kind: PaymentKind::Incoming,
+        }
+    }
+
+    #[test]
+    fn r06a_vault_headless_content_matrix() {
+        let normal_events = vec![event(true), event(false)];
+        let balance = bitcoin::Amount::from_sat(250_000);
+        let zero = bitcoin::Amount::ZERO;
+        let none_sequence = None;
+        let failing = SyncStatus::SyncFailing {
+            message: "Esplora refresh failed".into(),
+            since: 1_722_000_000,
+            retry_progress: Some(0.5),
+        };
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                macro_rules! render {
+                    ($balance:expr, $events:expr, $sync:expr, $history_loaded:expr, $rescan:expr, $error:expr $(,)?) => {
+                        vault_overview_view(
+                            $balance,
+                            &zero,
+                            &none_sequence,
+                            None,
+                            &[],
+                            $events,
+                            "synthetic-cube",
+                            true,
+                            false,
+                            false,
+                            $history_loaded,
+                            $error,
+                            $sync,
+                            $rescan,
+                            $rescan,
+                            BitcoinDisplayUnit::Sats,
+                            None,
+                            None,
+                            true,
+                            DisplayMode::BitcoinNative,
+                        )
+                    };
+                }
+                let normal = capture::inspect(
+                    "vault-normal",
+                    render!(
+                        &balance,
+                        &normal_events,
+                        &SyncStatus::Synced,
+                        true,
+                        false,
+                        None,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(normal.contains("Recent activity"));
+                assert!(normal.contains("View All Transactions"));
+                assert!(normal.contains("Unconfirmed"));
+                for control in ["flip-balance", "send-btc", "receive-btc", "history"] {
+                    assert!(normal.has_focus(landing_control_id(
+                        "synthetic-cube",
+                        "Vault",
+                        control
+                    )));
+                }
+
+                let empty = capture::inspect(
+                    "vault-known-zero-loaded-empty",
+                    render!(&zero, &[], &SyncStatus::Synced, true, false, None),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(empty.contains("View All Transactions"));
+
+                let unfinished = capture::inspect(
+                    "vault-rescan-date-unknown",
+                    render!(
+                        &zero,
+                        &[],
+                        &SyncStatus::WalletFullScan {
+                            progress: Some(0.25),
+                        },
+                        false,
+                        true,
+                        None,
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(unfinished.contains("Pick a date"));
+                assert!(unfinished.contains("Vault history has not loaded"));
+
+                let stale = capture::inspect(
+                    "vault-retained-success-error",
+                    render!(
+                        &balance,
+                        &normal_events,
+                        &failing,
+                        true,
+                        false,
+                        Some("history refresh failed"),
+                    ),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(stale.contains("Last known balance"));
+                assert!(stale.contains("Last known activity"));
+            }
+        }
     }
 }
