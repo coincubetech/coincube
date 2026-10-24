@@ -651,13 +651,13 @@ class Component extends DCLogic {
   constructor(p) {
     super(p);
     // prototype-only: the player keeps this artboard mounted; re-render when App preferences changes a device setting
-    try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); window.addEventListener('focus', bump); document.addEventListener('visibilitychange', bump); } catch (e) {}
+    try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('focus', bump); document.addEventListener('visibilitychange', bump); } catch (e) {}
     const lever = (this.props && this.props.startPhase) || 'browse';
     // lever = the startPhase value the current state was made under; when the lever changes, it wins (Everyday selected)
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
   }
   renderVals() {
-    try { localStorage.setItem('tenshu.proto.inCube', '0'); } catch (e) {}
+    try { if (document.visibilityState === 'visible') localStorage.setItem('tenshu.proto.inCube', '0'); } catch (e) {}
     // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
     let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage
