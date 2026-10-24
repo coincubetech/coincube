@@ -8045,15 +8045,7 @@ impl App {
                             self.cache.clear_btcb2_fiat();
                             self.cache.btcb2_price_request = None;
                         }
-                        // Keep the "backed up" banner state in sync with
-                        // whatever was persisted — the backup flow saves
-                        // cube.backed_up = true via this same path. If the
-                        // backed-up state transitions back to false, also
-                        // clear the session dismissal so the banner
-                        // resurfaces for the new state.
-                        if self.cache.current_cube_backed_up && !cube.backed_up {
-                            self.cache.backup_warning_dismissed = false;
-                        }
+                        // The backup attention row follows persisted state.
                         self.cache.current_cube_backed_up = cube.backed_up;
                         self.cube_settings.backed_up = cube.backed_up;
                         // Mirror the drift fingerprint cache (W12). Refreshing
@@ -8799,6 +8791,9 @@ impl App {
             // here; `enter_claim` decides between the target installer and
             // the step-1 panel from what is on disk.
             Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim))) => {
+                self.cache.cube_switcher_open = false;
+                self.cache.cube_lock_confirmation = false;
+                self.cache.vault_tools_open = true;
                 return self.enter_claim();
             }
             // Claim step 1's own results go to the claim panel whether or not
@@ -9169,9 +9164,6 @@ impl App {
                         Message::View(view::Message::DismissReceivedCelebration),
                     );
                 }
-            }
-            Message::View(view::Message::DismissBackupWarning) => {
-                self.cache.backup_warning_dismissed = true;
             }
             Message::View(view::Message::DismissSparkNotice) => {
                 // Dismissing "USDB held but off" is an answer — keep it off
@@ -14962,7 +14954,7 @@ pub(crate) mod claim_step1_tests {
 
     /// A Bitcoin Cube with a Vault and an embedded (unstarted) daemon,
     /// with the account grant on so the claim entry is available.
-    pub(super) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
+    pub(crate) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let wallet = Arc::new(Wallet::new(descriptor.clone()));
         let cfg: coincubed::config::Config = toml::from_str(&format!(
@@ -15002,6 +14994,13 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    pub(crate) fn bitcoin_app_with_id(root: &std::path::Path, id: &str) -> App {
+        let (mut app, _) = bitcoin_app(root);
+        app.cube_settings.id = id.to_owned();
+        app.cache.cube_id = id.to_owned();
+        app
     }
 
     #[test]
@@ -15820,8 +15819,13 @@ pub(crate) mod claim_step1_tests {
         let entry = || Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim)));
 
         // Control: nothing on disk — the installer, and no panel switch.
+        app.cache.cube_switcher_open = true;
+        app.cache.cube_lock_confirmation = true;
         let before = app.panels.current.clone();
         let produced = outputs(app.update(entry())).await;
+        assert!(!app.cache.cube_switcher_open);
+        assert!(!app.cache.cube_lock_confirmation);
+        assert!(app.cache.vault_tools_open);
         assert!(
             starts_installer(&produced),
             "no target: the installer starts"
@@ -15832,7 +15836,11 @@ pub(crate) mod claim_step1_tests {
         // Another App instance creates the target; this one's cache is stale.
         write_claim_target(&root, &wallet);
         assert!(!app.cache.btcb2_already_claimed, "stale by construction");
+        app.cache.cube_switcher_open = true;
+        app.cache.cube_lock_confirmation = true;
         let produced = outputs(app.update(entry())).await;
+        assert!(!app.cache.cube_switcher_open);
+        assert!(!app.cache.cube_lock_confirmation);
         assert!(
             !starts_installer(&produced),
             "a second installer must not start"
