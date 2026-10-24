@@ -1136,6 +1136,65 @@ impl GUI {
                 }
                 Task::none()
             }
+            // A Cube can still be open in another tab or split pane in this
+            // intermediate shell release. Lock is a Cube-wide action: stop
+            // every sibling App with the same on-disk identity before the
+            // originating tab wipes the session and returns to Home.
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(inner.as_ref(), tab::Message::LockCubeToLauncher) =>
+            {
+                let identity = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::App(app) => Some((
+                            app.datadir().clone(),
+                            app.cube_settings().network,
+                            app.cube_settings().id.clone(),
+                        )),
+                        _ => None,
+                    });
+                let Some((root, chain, cube_id)) = identity else {
+                    return Task::none();
+                };
+                let mut empty_panes = Vec::new();
+                for (&other_pane_id, pane) in self.panes.iter_mut() {
+                    let mut index = pane.tabs.len();
+                    while index > 0 {
+                        index -= 1;
+                        let sibling = &pane.tabs[index];
+                        if other_pane_id == pane_id && sibling.id == tab_id {
+                            continue;
+                        }
+                        let same_cube = matches!(&sibling.state, tab::State::App(app)
+                            if crate::chain::same_path(root.path(), app.datadir().path())
+                                && app.cube_settings().network == chain
+                                && app.cube_settings().id == cube_id);
+                        if same_cube {
+                            pane.close_tab(index);
+                        }
+                    }
+                    if pane.tabs.is_empty() {
+                        empty_panes.push(other_pane_id);
+                    }
+                }
+                for empty in empty_panes {
+                    self.panes.close(empty);
+                    if self.focus == Some(empty) {
+                        self.focus = Some(pane_id);
+                    }
+                }
+                if let Some(pane) = self.panes.get_mut(pane_id) {
+                    pane.update(
+                        pane::Message::tab(tab_id, tab::Message::LockCubeToLauncher),
+                        &self.config,
+                    )
+                    .map(move |message| Message::Pane(pane_id, message))
+                } else {
+                    Task::none()
+                }
+            }
             // In case of cube deletion, remove any tab where the cube/wallet is currently running.
             Message::Pane(p, pane::Message::Tab(t, inner))
                 if matches!(inner.as_ref(), tab::Message::Launch(_)) =>
