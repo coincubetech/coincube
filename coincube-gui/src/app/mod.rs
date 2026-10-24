@@ -3374,6 +3374,16 @@ impl App {
         &self.panels.current
     }
 
+    #[cfg(test)]
+    pub(crate) fn connect_user_id_for_test(&self) -> Option<u32> {
+        self.panels
+            .connect
+            .account
+            .user
+            .as_ref()
+            .map(|user| user.id)
+    }
+
     /// Identifies a harmless shell dismissal for the GUI's sole Escape
     /// dispatcher. This does not handle the key or mutate the App.
     pub fn shell_escape_intent(&self) -> Option<view::Message> {

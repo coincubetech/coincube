@@ -77,9 +77,10 @@ pub struct GUI {
     theme_mode: coincube_ui::theme::palette::ThemeMode,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub enum Key {
     Tab(bool),
+    Escape,
 }
 
 #[derive(Debug)]
@@ -147,6 +148,27 @@ fn is_user_input(event: &Event) -> bool {
         event,
         Event::Keyboard(_) | Event::Mouse(_) | Event::Touch(_)
     )
+}
+
+/// Only keys the focused widget declined belong to the GUI shell. Captured
+/// Escape remains with text fields and modal content.
+fn ignored_shell_key(event: &Event, status: event::Status) -> Option<Key> {
+    if !matches!(status, event::Status::Ignored) {
+        return None;
+    }
+    match event {
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Tab),
+            modifiers,
+            ..
+        }) => Some(Key::Tab(modifiers.shift())),
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: keyboard::Key::Named(keyboard::key::Named::Escape),
+            repeat: false,
+            ..
+        }) => Some(Key::Escape),
+        _ => None,
+    }
 }
 
 fn connect_account_message(
@@ -381,16 +403,22 @@ impl GUI {
                     .get_mut(origin_pane)
                     .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin_tab))
                 {
+                    let app_generation = tab.app_generation_token();
                     let adopted = match &mut tab.state {
                         tab::State::Home(home)
                             if home.connect_account.can_adopt_shared_session() =>
                         {
                             Some(home.adopt_connect_client(client).map(tab::Message::Launch))
                         }
-                        tab::State::App(app) if app.can_adopt_shared_connect_session() => Some(
-                            app.adopt_shared_connect_client(client)
-                                .map(tab::Message::Run),
-                        ),
+                        tab::State::App(app) if app.can_adopt_shared_connect_session() => {
+                            let generation = app_generation.expect("adopting App has a generation");
+                            Some(app.adopt_shared_connect_client(client).map(move |message| {
+                                tab::Message::AppAsync(
+                                    generation,
+                                    Box::new(tab::Message::Run(message)),
+                                )
+                            }))
+                        }
                         _ => None,
                     };
                     if let Some(task) = adopted {
@@ -770,6 +798,33 @@ impl GUI {
                 } else {
                     action::focus_next_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
                 }
+            }
+            Message::KeyPressed(Key::Escape) => {
+                let Some((pane_id, tab_id, generation, intent)) = self.focus.and_then(|pane_id| {
+                    let pane = self.panes.get(pane_id)?;
+                    let tab = pane.tabs.get(pane.focused_tab)?;
+                    let tab::State::App(app) = &tab.state else {
+                        return None;
+                    };
+                    Some((
+                        pane_id,
+                        tab.id,
+                        tab.app_generation_token()?,
+                        app.shell_escape_intent()?,
+                    ))
+                }) else {
+                    return Task::none();
+                };
+                self.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        tab_id,
+                        tab::Message::AppAsync(
+                            generation,
+                            Box::new(tab::Message::Run(AppMessage::View(intent))),
+                        ),
+                    ),
+                ))
             }
             Message::Fiat(FiatMessage::GetPriceResult(price)) => {
                 if price.request.origin.is_some() {
@@ -1771,15 +1826,10 @@ impl GUI {
                 if is_user_input(&event) {
                     crate::app::session::touch();
                 }
+                if let Some(key) = ignored_shell_key(&event, status) {
+                    return Some(Message::KeyPressed(key));
+                }
                 match (&event, status) {
-                    (
-                        Event::Keyboard(keyboard::Event::KeyPressed {
-                            key: iced::keyboard::Key::Named(iced::keyboard::key::Named::Tab),
-                            modifiers,
-                            ..
-                        }),
-                        event::Status::Ignored,
-                    ) => Some(Message::KeyPressed(Key::Tab(modifiers.shift()))),
                     (
                         iced::Event::Window(iced::window::Event::CloseRequested),
                         event::Status::Ignored,
@@ -2941,6 +2991,354 @@ mod fork_auth_revocation_tests {
             }
         }
         app::session::close();
+    }
+}
+
+#[cfg(test)]
+mod shared_adoption_generation_tests {
+    use super::*;
+    use crate::{app, loader};
+    use iced::futures::StreamExt;
+    use std::sync::Arc;
+
+    async fn first_output(task: Task<Message>) -> Message {
+        let mut stream =
+            iced_runtime::task::into_stream(task).expect("a real shared-client request");
+        while let Some(action) = stream.next().await {
+            if let iced_runtime::Action::Output(message) = action {
+                return message;
+            }
+        }
+        panic!("shared-client Init produced no account result");
+    }
+
+    #[test]
+    fn held_shared_client_success_or_auth_refusal_cannot_cross_same_tab_reopen() {
+        std::thread::Builder::new()
+            .name("shared-app-generation".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(run_held_shared_client_reopen)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn run_held_shared_client_reopen() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        for old_status in [200, 401] {
+            let root_path = std::env::temp_dir().join(format!(
+                "shared-app-generation-{old_status}-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let root = CoincubeDirectory::new(root_path.clone());
+            let old_server = httpmock::MockServer::start();
+            let old_request = old_server.mock(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/user")
+                    .header("authorization", "Bearer old-session");
+                then.status(old_status).json_body(serde_json::json!({
+                    "id":11,"email":"old@example.invalid","email_verified":true
+                }));
+            });
+            let current_server = httpmock::MockServer::start();
+            let current_request = current_server.mock(|when, then| {
+                when.method(httpmock::Method::GET)
+                    .path("/api/v1/user")
+                    .header("authorization", "Bearer current-session");
+                then.status(200).json_body(serde_json::json!({
+                    "id":22,"email":"current@example.invalid","email_verified":true
+                }));
+            });
+            let client = |url: String, token: &str| {
+                let mut client = crate::services::coincube::CoincubeClient::for_test(url);
+                client.set_token(token);
+                client
+            };
+            let (source, wallet) = app::claim_step1_tests::bitcoin_app(&root_path);
+            let cache = source.cache().clone();
+            let settings = source.cube_settings().clone();
+            let daemon = app::claim_step1_tests::fixture_daemon(&source);
+            let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+            drop(startup);
+            drop(home.adopt_connect_client(client(old_server.base_url(), "old-session")));
+            let mut pane = pane::Pane::new_with_tab(tab::State::App(source));
+            pane.tabs.push(tab::Tab::new(2, tab::State::Home(home)));
+            pane.focused_tab = 0;
+            let (panes, pane_id) = pane_grid::State::new(pane);
+            let mut gui = GUI {
+                panes,
+                focus: Some(pane_id),
+                config: Config::new(root.clone(), None),
+                window_id: None,
+                window_init: None,
+                window_config: None,
+                global_cache: GlobalCache::default(),
+                theme_mode: Default::default(),
+            };
+            let init = || {
+                Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::ConnectAccount(
+                                crate::app::view::ConnectAccountMessage::Init,
+                            ),
+                        )),
+                    ),
+                )
+            };
+            let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                .app_generation_token()
+                .unwrap();
+            let old_result = runtime.block_on(first_output(gui.update(init())));
+            old_request.assert();
+            let Message::Pane(_, pane::Message::Tab(1, old_inner)) = &old_result else {
+                panic!("the actual adoption task must route to the originating tab");
+            };
+            let tab::Message::AppAsync(generation, result) = old_inner.as_ref() else {
+                panic!("the actual adoption task must capture its App generation");
+            };
+            assert_eq!(*generation, old_generation);
+            assert!(
+                matches!(result.as_ref(), tab::Message::Run(AppMessage::View(
+                crate::app::view::Message::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::AdmittedUserLoaded { user, .. }
+                )
+            )) if (old_status == 200 && user.as_ref().is_ok_and(|u| u.id == 11))
+                || (old_status == 401 && user.as_ref().is_err_and(|(_, auth)| *auth)))
+            );
+
+            // The ordinary same-tab lock invalidates the old App. A synthetic
+            // successful Loader completion admits a new App without PIN,
+            // keyring, node, or payment work in this disposable fixture.
+            drop(gui.update(Message::Pane(
+                pane_id,
+                pane::Message::tab(1, tab::Message::LockCube),
+            )));
+            assert!(matches!(
+                gui.panes.get(pane_id).unwrap().tabs[0].state,
+                tab::State::Home(_)
+            ));
+            let breez = Arc::new(app::breez_liquid::BreezClient::disconnected(
+                settings.network.bitcoin_network(),
+            ));
+            let (loader, startup) = loader::Loader::new(
+                root.clone(),
+                app::Config::new(false),
+                settings.network.bitcoin_network(),
+                None,
+                None,
+                None,
+                settings.clone(),
+                Some(breez.clone()),
+                None,
+            );
+            drop(startup);
+            {
+                let pane = gui.panes.get_mut(pane_id).unwrap();
+                let tab::State::Home(home) = &mut pane.tabs[1].state else {
+                    unreachable!()
+                };
+                home.connect_account
+                    .install_shared_client(client(current_server.base_url(), "current-session"));
+                pane.tabs[0].state = tab::State::Loader(loader);
+            }
+            drop(gui.update(Message::Pane(
+                pane_id,
+                pane::Message::tab(
+                    1,
+                    tab::Message::Load(loader::Message::BreezLoaded {
+                        breez,
+                        spark_backend: None,
+                        cache,
+                        wallet,
+                        config: app::Config::new(false),
+                        daemon,
+                        datadir: root.clone(),
+                        bitcoind: None,
+                        cube_settings: settings,
+                    }),
+                ),
+            )));
+            let current_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                .app_generation_token()
+                .unwrap();
+            assert_ne!(old_generation, current_generation);
+            let current_result = runtime.block_on(first_output(gui.update(init())));
+            current_request.assert();
+            assert!(matches!(&current_result,
+                Message::Pane(_, pane::Message::Tab(1, inner))
+                    if matches!(inner.as_ref(), tab::Message::AppAsync(generation, _)
+                        if *generation == current_generation)));
+            drop(gui.update(current_result));
+            assert_eq!(gui.reviewer_app_mut(0).connect_user_id_for_test(), Some(22));
+            let menu = gui.reviewer_app_mut(0).current_menu_for_test().clone();
+            let had_claim_context = gui.reviewer_app_mut(0).has_claim_pair_context();
+            assert_eq!(gui.update(old_result).units(), 0);
+            let app = gui.reviewer_app_mut(0);
+            assert_eq!(app.connect_user_id_for_test(), Some(22));
+            assert_eq!(app.current_menu_for_test(), &menu);
+            assert_eq!(app.has_claim_pair_context(), had_claim_context);
+            drop(gui);
+            std::fs::remove_dir_all(root_path).ok();
+        }
+    }
+}
+
+#[cfg(test)]
+mod shell_escape_dispatch_tests {
+    use super::*;
+    use crate::app::{self, view};
+
+    fn escape_event(repeat: bool) -> Event {
+        let key = keyboard::Key::Named(keyboard::key::Named::Escape);
+        Event::Keyboard(keyboard::Event::KeyPressed {
+            key: key.clone(),
+            modified_key: key,
+            physical_key: keyboard::key::Physical::Code(keyboard::key::Code::Escape),
+            location: keyboard::Location::Standard,
+            modifiers: keyboard::Modifiers::empty(),
+            text: None,
+            repeat,
+        })
+    }
+
+    #[test]
+    fn only_ignored_nonrepeating_escape_reaches_the_shell_listener() {
+        assert_eq!(
+            ignored_shell_key(&escape_event(false), event::Status::Ignored),
+            Some(Key::Escape)
+        );
+        assert_eq!(
+            ignored_shell_key(&escape_event(false), event::Status::Captured),
+            None
+        );
+        assert_eq!(
+            ignored_shell_key(&escape_event(true), event::Status::Ignored),
+            None
+        );
+    }
+
+    #[test]
+    fn real_gui_escape_dismisses_only_the_focused_app_shell() {
+        std::thread::Builder::new()
+            .name("gui-shell-escape".into())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(run_gui_shell_escape)
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+
+    fn run_gui_shell_escape() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("cube-escape-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let cube_id = source.cube_settings().id.clone();
+        let owner = source.cache().app_generation;
+        app::session::open_without_pin(cube_id.clone());
+        let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        home.set_claim_owner(owner);
+        let mut pane = pane::Pane::new_with_tab(tab::State::App(source));
+        pane.tabs.push(tab::Tab::new(2, tab::State::Home(home)));
+        let handoff =
+            app::claim_intent::ForkHandoff::new(&root, cube_id.clone(), "paired-fixture".into())
+                .unwrap();
+        pane.tabs[1].set_claim_open(home::ClaimOpenIntent::new(
+            owner,
+            &root,
+            cube_id.clone(),
+            "paired-fixture".into(),
+            home::ClaimRoute::Begin(handoff),
+        ));
+        pane.focused_tab = 0;
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        let mut gui = GUI {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root, None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        };
+        let route = |intent| {
+            Message::Pane(
+                pane_id,
+                pane::Message::tab(1, tab::Message::Run(AppMessage::View(intent))),
+            )
+        };
+        for intent in [
+            view::Message::ToggleVaultTools,
+            view::Message::ToggleCubeSwitcher,
+            view::Message::AskCubeLock,
+        ] {
+            drop(gui.update(route(intent)));
+        }
+        let menu = gui.reviewer_app_mut(0).current_menu_for_test().clone();
+        let shell = |gui: &mut GUI| {
+            let cache = gui.reviewer_app_mut(0).cache();
+            (
+                cache.cube_lock_confirmation,
+                cache.cube_switcher_open,
+                cache.vault_tools_open,
+            )
+        };
+        assert_eq!(shell(&mut gui), (true, true, true));
+        for expected in [
+            (false, true, true),
+            (false, false, true),
+            (false, false, false),
+        ] {
+            let focus = gui.update(Message::KeyPressed(Key::Escape));
+            assert!(
+                focus.units() > 0,
+                "dismissal returns its trigger focus task"
+            );
+            drop(focus);
+            assert_eq!(shell(&mut gui), expected);
+            assert_eq!(gui.reviewer_app_mut(0).current_menu_for_test(), &menu);
+            assert_eq!(
+                app::session::current_cube_id().as_deref(),
+                Some(cube_id.as_str())
+            );
+            assert_eq!(
+                gui.panes.get(pane_id).unwrap().tabs[1].claim_open_owner(),
+                Some(owner)
+            );
+        }
+        assert_eq!(gui.update(Message::KeyPressed(Key::Escape)).units(), 0);
+        {
+            let pane = gui.panes.get_mut(pane_id).unwrap();
+            let tab::State::App(app) = &mut pane.tabs[0].state else {
+                unreachable!()
+            };
+            app.cache_mut().vault_tools_open = true;
+            pane.focused_tab = 1;
+        }
+        assert_eq!(gui.update(Message::KeyPressed(Key::Escape)).units(), 0);
+        assert!(gui.reviewer_app_mut(0).cache().vault_tools_open);
+        assert_eq!(
+            app::session::current_cube_id().as_deref(),
+            Some(cube_id.as_str())
+        );
+        app::session::close();
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
     }
 }
 
