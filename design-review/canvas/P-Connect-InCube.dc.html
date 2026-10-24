@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Connect · over an open Cube</title>
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>body{margin:0}</style>
+</helmet>
+<div style="width:1440px;height:900px;overflow:hidden">
+  <dc-import name="P-Connect" hint-size="1440px,900px" in-cube="1"></dc-import>
+</div>
+<script type="text/x-dc" data-dc-script data-props='{}'>
+class Component extends DCLogic {
+  constructor(p){super(p);this.state={};}
+  renderVals() {
+    // Prototype mechanics: the Cube top bar links here so P-Connect overlays the open Cube and Close returns to it.
+    return {};
+  }
+}
+</script>
+</x-dc>
+</body>
+</html>

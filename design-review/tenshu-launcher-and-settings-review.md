@@ -678,3 +678,80 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Prototype (P-Restore, path "import"):** steps are Cube → Source → Keys → Review → Scan → Done. Keys lists each signer from the descriptor with its fingerprint and path, offers Recovery words / Hardware wallet / Keychain phone as the source, and "Review wallet" stays disabled until the key verifies against the fingerprint. Review shows "Keys: 1 of 1 provided · recovery words · verified against the fingerprint". Done summarises the wallet, where its keys live, and that the Recovery Kit now includes it, with "Open Cube". Copy that described a watch-only import was rewritten on the hub, the Cube step and the Source step. Importing a wallet is not Blake2b-specific; only the later Split tool is.
 
 **Verified live in Chrome (v90):** Launcher › Import or restore › Import Bitcoin wallet, through Cube (PIN), Source, Keys (verify), Review, Scan, Done.
+
+## Activity declutter; recent-activity rows share one grammar (2026-10-23, canvas v93)
+
+**Robert:** "The activity page is a bit crowded, especially the side details screen", and the Vault/Spark "Recent activity" rows should match the Activity rows.
+
+**Activity page (P-Activity):**
+- Filter bar is one row: Wallet, Direction, Status, Date range, Search. The filter count and "Clear filters" appear only while a filter is active. The prototype-only Spark-history pickers moved to a small dashed "Prototype · Spark history" strip under the page title, out of the product bar.
+- Table: Amount and Fiat merged into one right-aligned cell, sats on top and fiat as a caption. Columns: Time, Wallet, Details, Amount, Status.
+- Detail panel: header is title, "Vault · Family savings · Bitcoin on-chain", amount with fiat beneath, one short status line ("Awaiting a second signature · 1 of 2 collected"). For a transaction that still needs signatures, "PSBT and signers" sits directly under the status with "Continue signing"; for other transactions it stays collapsed at the bottom. Detail rows cut to Date (time zone in a tooltip), Fee, Confirmations (only after broadcast) and Destination; the Wallet and Rail rows are gone because the header carries them. Txid is hidden until broadcast. Identifier rows use a small copy icon instead of a button.
+
+**Recent activity on the Overview pages (P-Overview, Vault, Spark and the hub list):** the same row as Activity minus the Wallet column: date, direction glyph with the label, amount with fiat caption, status chip. Rows link to Activity. Vault now has the same "View all transactions" link as Spark. The hub list keeps a small wallet name under the label.
+
+**Verified live in Chrome (v92/v93):** Activity filter row, merged amount cell, detail panel order for the 1-of-2 PSBT; Vault and Spark recent-activity rows.
+
+## AI access revised: pair once, AI-led setup, AI-prepared transactions (2026-10-23, canvas v95)
+
+**Brief (Robert):** replace the read-only / topology-proposal direction with AI-led wallet setup and transaction preparation through Tenshu's local MCP server. Tenshu stays the wallet engine; seeds, keys, PINs, passwords and passkeys never enter the conversation.
+
+**What exists today (`mcp` branch, docs/mcp/README.md and docs/architecture/local-mcp.md):** Cube › Settings › AI access with a per-session opt-in, one client grant per unlocked Cube that expires after one hour and ends on lock/close, a private configuration copied by hand into the host, three read capabilities (balances, confirmed history, policy summary), and an experimental Regtest build where a client stages one 3-of-5 proposal with a chosen recovery that hands into Tenshu's native key selection and review. No transaction tools.
+
+**New screens (row 7 on the canvas; entry from Cube › Settings › AI access):**
+- **AI access (P-AI-Access).** Paired clients with name, scoped Cubes and wallets, permission chips, availability (Available / Paused · Cube was locked / Not connected), last activity, Edit permissions and Revoke. "Pair a client" in four steps: client (Claude Desktop, Maple AI Desktop, other MCP host), wallet scope with "wallets created later" off by default, permissions (Read wallet information · Manage wallet setup · Prepare unsigned transactions; none granted automatically), one-time pairing code; manual configuration stays under Advanced with the credential masked and a "never paste into chat" warning. Revoke explains that access ends now, that already-read data may be with the provider, and that created wallets stay. A dashed card states that paired is not available: locking pauses protected operations, pairing survives, the client reconnects after a normal unlock or relaunch, and can never unlock a Cube. The disclosure that a local connection can still send data to the AI provider sits at the top.
+- **AI wallet setup (P-AI-Setup).** The native progress page for "Help me set up a 3-of-5 Bitcoin multisig wallet with inheritance": assistant quote, status pill, a handoff card per state (AI working · waiting for you: create a PIN · waiting for device: approve on the hardware wallet · validation issue: descriptor differs from the plan · ready for final review · creating · created · recoverable failure), a progress list with who acts on each step, and the plan (3-of-5, 2-of-3 after 144 relative blocks, P2WSH, Regtest clearly labelled, loopback node). The final native review reads the real descriptor: spending and recovery, network and node, five signers with provenance, and four distinct checks (descriptor validated, devices verified, backup recorded, recovery tested) with the note that none implies another and that distinct fingerprints do not prove independent custody. Any change invalidates the review. After creation, pairing stays and access to the new Vault follows the chosen permissions. Cancelling keeps pairing; failure states what exists and what does not.
+- **AI-prepared transaction (P-AI-Transaction).** "Prepare a transaction sending $100 worth of bitcoin": status pill (Draft · Ready to review and sign · Waiting for signatures · Signed · Broadcast), the draft with recipient and network check, exact sats and requested fiat, Tenshu's rate source and timestamp with validity, fee rate and fee ("added on top; the recipient receives the full amount"), total, change, signatures, checks (Branta, coin age); failure and resume states for insufficient funds, wrong-network address, stale quote (refresh shows changes before signing), unavailable signer, and changed inputs (a what-changed list). "Review and sign in Tenshu" leads to Send; nothing here spends.
+
+**Status labels:** every screen carries Today / Planned badges (toggle "Status labels" in the prototype strip) and an implementation-status legend: today is read-only with hourly grants and the Regtest experiment; persistent pairing, setup orchestration and transaction preparation are planned.
+
+## Launcher: pages of four Cubes, arrows, swipe and keys; row centred (2026-10-23, canvas v97)
+
+**Robert:** with more than four Cubes, show left and right arrows at the middle of the screen edges so the user knows there is more; let them move between pages with the mouse, trackpad or keyboard as in other apps; and move the row down so it sits more centrally.
+
+**Applied (P-Launcher):** one Cube size, four per page, no more medium or dense grids. When there are more than four Cubes, round arrow buttons appear mid-left and mid-right (the first and last pages disable one side), with page dots and "Page n of m · swipe, scroll sideways or use the arrow keys" under the row. Paging responds to a horizontal trackpad swipe or sideways scroll (shift + wheel too), to Left/Right and Page Up/Down keys when focus is not in a text field, and to clicking a dot. Changing page returns the Launcher to browse so a selected Cube is never left on a hidden page. The row's top padding moved from 84 to 168 px and the floor plane starts at 40% so the cubes sit in the floor rather than against the header; the spin target maths uses the same constant. The review lever gains a 9-Cube case and the prototype now defaults to nine Cubes so the paging is visible without a lever.
+
+## Launcher: brighter paging arrows; List view added (2026-10-23, canvas v98)
+
+**Robert:** the arrow icons were hard to see and should be white; the Launcher's List screen was missing from the prototype.
+
+**Applied (P-Launcher, P-AppPrefs):** the paging arrows are now white on the panel background with a heavier stroke and a lighter ring (ink-coloured in the light theme). The Launcher gains the List style the app already offers: App preferences › Launcher › Launcher style writes a device flag, and the Launcher also switches to List under reduced motion, matching the app's automatic fallback. The list shows every visible Cube in one scrolling column with avatar, name and lock state, network icon and tag, wallet icons, a short backup state and an Open / Go to Cube action. Selecting a row opens a 440 px side panel with the same details, PIN/passkey unlock and network-checks content the cube faces show, so the full Launcher journey works in both styles. Paging arrows and the floor are hidden in List. Review lever `launcherStyle` (auto · cubes · list); auto follows the device flag and reduced motion.
+
+## Launcher: light-theme examples for Cubes and List (2026-10-24, canvas v104)
+
+**Robert:** show a light version of the Launcher for the Cubes view and for the List view.
+
+**Applied:** two artboards at the end of the Launcher row, `P-Launcher-Light` and `P-Launcher-Light-List`, each mounting the real `P-Launcher` with `theme=light` (and `launcher-style=list` for the second). They share the Launcher's fixtures and behaviour, so the light tokens already defined on `.tenshu.light` (background, panel, rail, ink, muted, line, floor and face colours, test-network edge, shadow) are shown without a second copy of the screen. The Launcher's own theme lever gives the same result on the main board.
+
+## Appearance applies to every screen (2026-10-24, canvas v105)
+
+**Robert:** switching to Light in App preferences did not turn the Launcher light.
+
+**Applied:** App preferences › Appearance › Theme (System · Light · Dark) is now a device setting shared across the prototype, like Developer mode, Blake2b and Launcher style. Every screen's theme class follows it: Light or Dark win outright; System falls back to each board's review lever. App preferences announces the change, and every screen re-renders on it, so the Launcher and the Cube screens switch without a refresh. The two light-theme example boards stay light regardless of the device setting.
+
+## Connect and App preferences overlay the current screen (2026-10-24, canvas v107)
+
+**Robert:** Connect and App preferences must be reachable from anywhere, including inside an open Cube, and must not send the user back to the Launcher.
+
+**Applied:** both sheets now know whether a Cube is on screen. Inside a Cube they overlay the Cube (the Overview, dimmed, behind the sheet) and Close returns to the Cube; at the Launcher they keep the Launcher backdrop and return there. The Cube top bar gains an App preferences icon beside the Connect chip, so both overlays are one click away from every Cube screen. Prototype mechanics: Cube screens set `tenshu.proto.inCube` on render and the Launcher clears it; the sheets read it to pick backdrop and Close target.
+
+## Light theme page: a light twin of every screen (2026-10-24, canvas v109)
+
+**Robert:** add the remaining light-mode pages.
+
+**Applied:** a second canvas page, "Light theme (same prototype, forced light)", holds a twin of every prototype screen in the same six-row grouping plus the AI access row. Each twin mounts the real screen with `force-theme=light`, so it shares fixtures, links and behaviour and stays current with every change; every screen now honours that forced theme, and the device Appearance setting still governs the main prototype. Every screen was checked in Light before this: the token blocks were already complete, so the light page is a reference set rather than a fix.
+
+## Fix: setting changes propagate again; in-Cube overlays without shared state (2026-10-24, canvas v111)
+
+While exporting, two regressions of mine surfaced. (1) Removing the cross-tab listener in v108 also stopped one artboard hearing a setting change made in another, so the Launcher again needed a reload after App preferences changes. The listener is restored on every screen. (2) The "a Cube is on screen" marker was unreliable because the player keeps every artboard mounted and re-renders them all on a setting change, so hidden Cube screens re-set it. It is gone. The Cube top bar now links to two small boards, "App preferences · over an open Cube" and "Connect · over an open Cube", which mount the real sheets with `in-cube=1`; the Launcher links to the plain ones. Verified: Developer mode on and off reflects on the Launcher without a reload; App preferences and Connect from the Overview overlay the Cube and Close returns to it; from the Launcher they overlay the Launcher.
+
+## Fixes found while exporting screens (2026-10-24, canvas v112–v113)
+
+- **Import or restore:** the line "Bitcoin Blake2b supports Vault creation only." showed with Blake2b off. It now shows only when Blake2b is on for the device (v112).
+- **Opening a Cube, light twin:** after the "is open" beat, the board mounted a dark Overview. The light twin now passes the forced light theme to the Overview it opens into (v113).
+
+## Exported screens for the hand-off (2026-10-24)
+
+**Robert:** make a PR with the updated designs exported so Codex can work with them.
+
+**Applied:** `screens/dark/` (34 boards, device settings at their defaults) and `screens/light/` (the Light theme page, 33 boards including the Launcher List view), indexed in `screens/README.md`, and linked from `HANDOFF.md`. The canvas sources in `canvas/` match canvas v113.
