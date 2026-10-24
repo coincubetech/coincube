@@ -562,7 +562,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["register","chainUnavailable","blake2bMode","split","keySource","connectStep","importExtras","legacyLogin"],"default":"register","section":"Review"},"state":{"editor":"enum","options":["auto","backupDescriptor","backupAcked","registerDevices","registerFailed","registerAcked","b2bList","b2bCreate","b2bBlocked","splitReady","splitScanning","splitFound","splitIncomplete","splitNothing","splitTaproot","splitSignedOut","splitNoVault","hwNone","hwMixed","hwSelected","hwError","connectCreate","connectCode","connectCodeInvalid","connectSignIn","connectBlake2b","sharedToken","sharedInvalid","sharedAccept","bedDecrypt","bedUnsafe","bedUnsupported","loginEmail","loginToken","loginInvalid","loginExpired","loginFailed","walletDeleted","backendChoose","backendEmail","backendToken"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); } catch (e) {}
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { k: null };
   }
   renderVals() {

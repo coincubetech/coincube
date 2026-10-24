@@ -455,12 +455,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["Account","Plan &amp; billing","Contacts","Devices &amp; security","Recovery services"],"default":"Account","section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut","loading","error"],"default":"signedIn","section":"Review"},"planState":{"editor":"enum","options":["active","cancelled"],"default":"active","section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); } catch (e) {}
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { lv: null };
   }
   renderVals() {
     // prototype-only: when a Cube is on screen this sheet overlays it and Close returns to it
-    let IN_CUBE = false; try { IN_CUBE = localStorage.getItem('tenshu.proto.inCube') === '1'; } catch (e) {}
+    const IN_CUBE = this.props.inCube === '1' || this.props.inCube === true;
     // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
     let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
