@@ -2065,7 +2065,10 @@ fn split_entry_point_guard_rejects_gate_regressions() {
                 .unwrap_or("non-string panic");
             assert!(
                 message.contains(expected),
-                "{checkout_name} {name} failed for the wrong reason: {message}"
+                "{} {} failed for the wrong reason: {}",
+                checkout_name,
+                name,
+                message
             );
         }
     }
@@ -2219,7 +2222,8 @@ fn assert_split_start_is_gated_with_app(
     ] {
         assert!(
             refusal[owns..].contains(binding),
-            "refusal lacks owned-context binding: {binding}"
+            "refusal lacks owned-context binding: {}",
+            binding
         );
     }
     let revoke = refusal
