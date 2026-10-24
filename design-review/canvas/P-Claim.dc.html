@@ -313,7 +313,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["overview","deposits","review","broadcast","confirm"],"default":"deposits","section":"Review"},"state":{"editor":"enum","options":["ready","loading","waiting","oneFunded","verifying","rateLimited","verified","splitDisabled","signing","rechecking","confirming","confirmed","reorg","signedOut","noAccess","passkeyCube","sessionChanged"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
-  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null,hide:null,lockAsk:false};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); } catch (e) {}this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
     // prototype-only: remember that a Cube is on screen, so Connect and App preferences overlay it and return here
     try { localStorage.setItem('tenshu.proto.inCube', '1'); } catch (e) {}
