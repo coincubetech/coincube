@@ -8,7 +8,7 @@ use rmcp::{
 use serde_json::Value;
 use std::path::PathBuf;
 
-/// Official-SDK handler for public build metadata and four closed desktop reads.
+/// Official-SDK handler for public metadata, closed reads and scoped preparation.
 #[derive(Clone)]
 pub struct Adapter {
     /// Authenticated local endpoint supplied by trusted host configuration.
@@ -69,6 +69,14 @@ pub fn tools() -> Vec<Tool> {
             "tenshu_prepare_wallet_creation",
             "Assemble one immutable Regtest 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. Requires separate wallet-preparation pairing. Tenshu validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in Tenshu. Never supply seeds, private keys or PINs; never creates a wallet itself.",
         ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+        tool::<transaction::PrepareInput, transaction::Prepared>(
+            "tenshu_prepare_transaction",
+            "Prepare an unsigned Regtest Vault transaction from exact satoshi recipients, explicit fee rate and total-fee ceiling. Requires a separate transaction-preparation pairing. Repeated identical request_id returns the same draft; changed input conflicts. The PSBT stays in Tenshu for native review and user signing. Never signs, saves a spend or broadcasts; no fiat quotes, send-max, recovery selection or caller change address.",
+        ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
+        tool::<transaction::DraftInput, transaction::Prepared>(
+            "tenshu_get_prepared_transaction",
+            "Read only this transaction pairing's unsigned session draft summary. No raw PSBT, input identities, change address, keys or signing material. Drafts end on lock/close/revocation.",
+        ),
     ]
 }
 /// Decode typed arguments while withholding raw serialization error details.
@@ -101,6 +109,8 @@ impl Adapter {
             "tenshu_prepare_wallet_proposal" => crate::Request::PrepareProposal(parse(arguments)?),
             "tenshu_prepare_wallet_creation" => crate::Request::PrepareCreation(parse(arguments)?),
             "tenshu_get_wallet_proposal" => crate::Request::Proposal(parse(arguments)?),
+            "tenshu_prepare_transaction" => crate::Request::PrepareTransaction(parse(arguments)?),
+            "tenshu_get_prepared_transaction" => crate::Request::Transaction(parse(arguments)?),
             _ => return Err(ErrorData::invalid_params("unknown_tool", None)),
         };
         if !request.valid() {
@@ -127,6 +137,7 @@ impl Adapter {
                     Response::History(v) => serde_json::to_value(v),
                     Response::Policy(v) => serde_json::to_value(v),
                     Response::Proposal(v) => serde_json::to_value(v),
+                    Response::Transaction(v) => serde_json::to_value(v),
                 }
                 .map_err(|_| ErrorData::internal_error("serialization_failed", None))?;
                 Ok(CallToolResult::structured(value))

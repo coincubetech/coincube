@@ -6576,6 +6576,34 @@ impl App {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         self.refresh_mcp_pairings();
         if let Message::View(view::Message::LocalMcp(message)) = message {
+            #[cfg(feature = "mcp-transactions")]
+            if let local_mcp::Message::ReviewTransaction {
+                client_id,
+                draft_id,
+            } = &message
+            {
+                if self.mcp_supported()
+                    && self.cube_settings.network == crate::chain::ChainId::Regtest
+                {
+                    if let Some(wallet) = &self.wallet {
+                        if let Some(native) = self
+                            .local_mcp
+                            .prepared_transaction(client_id, draft_id, wallet)
+                        {
+                            if let Some(panel) = self.panels.current_mut() {
+                                panel.interrupt();
+                            }
+                            self.panels.create_spend = Some(CreateSpendPanel::from_mcp_prepared(
+                                wallet.clone(),
+                                native,
+                                self.cache.blockheight(),
+                            ));
+                            self.panels.current = Menu::Vault(menu::VaultSubMenu::Send);
+                        }
+                    }
+                }
+                return Task::none();
+            }
             let supported = self.mcp_supported() || self.mcp_proposals_supported();
             let config = self.local_mcp.update(
                 message,

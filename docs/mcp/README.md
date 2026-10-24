@@ -158,6 +158,9 @@ and scoped inside Tenshu, regardless of what the adapter or host claims.
 | `tenshu_get_wallet_policy_summary` | `{"wallet_id":"…"}` | Deterministic script type, thresholds, key counts, relative recovery delays in blocks. |
 | `tenshu_prepare_wallet_proposal` | Explicit 3-of-5 primary, recovery quorum/delay, bounded retry ID | Requires separate proposal consent in the opt-in Regtest native build. Produces an in-memory topology draft; keys, actual descriptor validation and creation approval are native-only. |
 | `tenshu_get_wallet_proposal` | `{"proposal_id":"…"}` | Only the current proposal grant's draft. Existing read grants cannot access proposals, and proposal grants cannot access wallet reads. |
+| `tenshu_prepare_wallet_creation` | Public account keys and explicit topology | Separate setup pairing, actual descriptor validation and native builder; creation approval remains native. |
+| `tenshu_prepare_transaction` | Opaque wallet/request IDs, recipients in sats, fee rate and fee ceiling | Separate transaction pairing; unsigned Regtest PSBT stays in Tenshu, only a summary is returned. |
+| `tenshu_get_prepared_transaction` | Opaque wallet and draft IDs | Current transaction pairing/session summary only; no PSBT or input/change-address export. |
 
 Ordinary builds report `wallet_proposals:false`. The opt-in native demo reports
 its Regtest bounds in `proposal_support`; this static metadata is not permission.
@@ -167,7 +170,7 @@ approve/install/sign/broadcast tool. See the experimental demo below.
 The initial proposal shape is deliberately limited to a 3-of-5 primary and one
 explicitly chosen recovery path (1–5 slots, valid threshold, positive block delay)
 for Bitcoin Regtest P2WSH. No recovery values are silently selected by Tenshu.
-No model input accepts keys, descriptors, paths, networks, labels or credentials.
+The topology-only tool accepts no keys, descriptors, paths, networks, labels or credentials. Separately scoped public-key wallet assembly is described below.
 Only one draft per proposal grant is retained. An exact retry returns that draft;
 changed content or a second request returns `proposal_conflict`. Revocation clears
 access, and native setup must independently verify the live session before using
@@ -186,9 +189,13 @@ reported as Vault spending.
 Key counts count policy keys, not independently verified people/devices. Recovery
 conditions do not mean recovery can be performed now.
 
-No seeds, private keys, passwords, credentials, descriptors, xpubs, addresses,
-scripts, labels, PSBTs, signing or wallet-mutating tools are exposed. Preparation
-changes only bounded session memory and is annotated as state-changing. Signing-session
+No seeds, private keys, passwords, credentials, descriptors, wallet xpubs, raw
+scripts, labels or PSBTs are exported. Read tools omit addresses. A separately
+authorized transaction tool echoes only its caller-supplied recipient addresses
+and amounts; the AI provider may receive those results. Topology/wallet drafts
+change bounded session memory. Transaction preparation also reserves an internal
+change index through the existing engine, without saving a spend, signing or
+broadcasting. Preparation tools are annotated as state-changing. Signing-session
 status is deferred because the existing remote and LAN workflows do not share a
 single authoritative read API.
 
@@ -360,3 +367,58 @@ Creation consumes the proposal session and does not grant read access to the new
 Vault. Wallet reads require their own explicit pairing scope. This experimental
 acceptance is separate from hardware-device, named-client and production-release
 validation; it does not enable production wallet creation.
+
+
+## Experimental unsigned transaction preparation
+
+Build the desktop with `--features mcp-transactions` and its companion with
+`--features adapter,native-transactions` (add the existing proposal features when
+also testing wallet setup). This feature is off by default and restricted to a
+Bitcoin Regtest Vault on an embedded daemon. It does not enable production wallets,
+Liquid/Spark, imported policies, external daemons, signing or broadcasting.
+
+In **Cube → Settings → AI access**, select the Vault and **Prepare unsigned
+Regtest transactions**, then explicitly pair the new client. This is separate
+from all read and wallet-setup scopes: existing clients are not upgraded, and a
+transaction client cannot read balances/history/policy. It can list only its
+paired Vault to obtain its opaque wallet ID. Pairing persists until revoked;
+unsigned drafts last only for that unlocked session.
+
+`tenshu_prepare_transaction` accepts:
+
+```json
+{
+  "wallet_id": "OPAQUE_ID_FROM_THIS_CLIENTS_WALLET_LIST",
+  "request_id": "payment-1",
+  "recipients": [{"address": "BARE_REGTEST_ADDRESS", "amount_sats": 10000}],
+  "fee_rate_sat_vb": 2,
+  "max_fee_sats": 1000
+}
+```
+
+The first slice uses exact integer satoshis and an explicit fee ceiling, with
+1–8 distinct recipient addresses and 1–1000 sat/vB. Fiat conversion, payment URIs,
+send-max, self-send, recovery-path selection, caller-supplied change addresses,
+raw scripts/PSBTs and signing/broadcast arguments are excluded. The existing
+engine selects eligible coins on the primary path and constructs the unsigned
+PSBT. Preparation may reserve an internal change index; it does not reserve the
+coins, save a spend, sign, broadcast, or guarantee future input availability.
+
+Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
+unsigned state and total fee before returning a minimized summary. The raw PSBT,
+input identities and change address stay inside Tenshu. Request IDs are immutable
+after successful construction: exact retries return the same draft without a new
+change reservation, and changed input conflicts. At most eight successful drafts
+are retained per client/unlock. Use `tenshu_get_prepared_transaction` with the
+returned draft ID and same opaque wallet ID to reread the summary; foreign IDs
+and other scopes are denied.
+
+The paired client's native row offers **Review prepared transaction in Tenshu**.
+It opens the exact unsigned construction in the existing review/signing screen,
+without saving a spend or requesting a signature. Check every recipient address,
+amount, total fee, change and recipient verification status there. Hardware, PIN,
+passkey, signing and any later broadcast are user actions under the existing
+native flow. Back/cancel returns to AI access. No tool claims recipient identity,
+hardware possession or backup verification. Lock/close/revocation clears access
+to the session drafts; ordinary unlock restores only the separately approved
+pairing, not old draft identities.

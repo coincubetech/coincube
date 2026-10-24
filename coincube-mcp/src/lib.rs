@@ -1,4 +1,4 @@
-//! Closed wallet reads and session-only topology drafts. No signing or wallet engine.
+//! Closed wallet reads and bounded unsigned preparation. No signing or wallet engine.
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::{future::Future, pin::Pin};
@@ -7,6 +7,7 @@ pub mod capabilities;
 pub mod pairing;
 pub use capabilities::{Capabilities, ReadCapability, ReadPermissions};
 pub mod proposal;
+pub mod transaction;
 
 #[cfg(feature = "adapter")]
 pub mod adapter;
@@ -54,6 +55,10 @@ pub enum Request {
     PrepareCreation(proposal::CreationInput),
     /// Read the current preparation grant's topology draft.
     Proposal(proposal::ProposalInput),
+    /// Build an unsigned transaction under separate preparation consent.
+    PrepareTransaction(transaction::PrepareInput),
+    /// Read only this transaction pairing's session-local draft.
+    Transaction(transaction::DraftInput),
 }
 impl Request {
     /// Return wallet scope and its explicitly named read capability.
@@ -65,7 +70,11 @@ impl Request {
             Self::Summary(v) => Some((&v.wallet_id, ReadCapability::Balances)),
             Self::History(v) => Some((&v.wallet_id, ReadCapability::ConfirmedHistory)),
             Self::Policy(v) => Some((&v.wallet_id, ReadCapability::PolicySummary)),
-            Self::PrepareProposal(_) | Self::PrepareCreation(_) | Self::Proposal(_) => None,
+            Self::PrepareProposal(_)
+            | Self::PrepareCreation(_)
+            | Self::Proposal(_)
+            | Self::PrepareTransaction(_)
+            | Self::Transaction(_) => None,
         }
     }
     /// Validate wallet-ID byte length and the 1–50 history limit at runtime.
@@ -77,6 +86,8 @@ impl Request {
                 Self::PrepareProposal(v) => v.valid(),
                 Self::PrepareCreation(v) => v.valid(),
                 Self::Proposal(v) => v.valid(),
+                Self::PrepareTransaction(v) => v.valid(),
+                Self::Transaction(v) => v.valid(),
                 _ => true,
             }
     }
@@ -178,6 +189,8 @@ pub enum Response {
     Policy(Policy),
     /// Session-only topology proposal, not a descriptor or created wallet.
     Proposal(proposal::Proposal),
+    /// Unsigned native transaction summary, never the complete PSBT.
+    Transaction(transaction::Prepared),
 }
 /// Sanitized boundary errors that never carry raw daemon or credential details.
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -190,6 +203,12 @@ pub enum Error {
     InvalidInput,
     /// This session already holds a different proposal; no second draft was made.
     ProposalConflict,
+    /// A successful request identity cannot be reused for different transaction input.
+    TransactionConflict,
+    /// The wallet cannot fund the requested recipients and fee.
+    InsufficientFunds,
+    /// Actual total fee exceeds the explicitly supplied ceiling.
+    FeeLimitExceeded,
 }
 impl Error {
     /// Return the stable machine-readable code exposed in MCP tool errors.
@@ -199,12 +218,16 @@ impl Error {
             Self::Unavailable => "wallet_unavailable",
             Self::InvalidInput => "invalid_input",
             Self::ProposalConflict => "proposal_conflict",
+            Self::TransactionConflict => "transaction_conflict",
+            Self::InsufficientFunds => "insufficient_funds",
+            Self::FeeLimitExceeded => "fee_limit_exceeded",
         }
     }
 }
 /// The desktop supplies this closed service; credentials never reach it.
-/// The historical name includes read operations and bounded in-memory drafts,
-/// not wallet mutation. IPC authorization distinguishes these scopes explicitly.
+/// The historical name includes reads and bounded unsigned preparation. A
+/// separately authorized transaction service may reserve a change index through
+/// the wallet engine; it cannot save, sign or broadcast. IPC distinguishes scopes.
 pub trait Reader: Send + Sync + 'static {
     /// Handle an already-authorized typed read or session-only draft request.
     ///

@@ -87,6 +87,14 @@ impl TransactionDraft {
         }
     }
 
+    #[cfg(feature = "mcp-transactions")]
+    pub(super) fn from_mcp(native: crate::app::local_mcp::transactions::NativeDraft) -> Self {
+        let mut draft = Self::new(Network::Regtest, None);
+        draft.inputs = native.coins;
+        draft.generated = Some((native.psbt, native.warnings));
+        draft
+    }
+
     pub fn is_recovery(&self) -> bool {
         self.recovery_timelock.is_some()
     }
