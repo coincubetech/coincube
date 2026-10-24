@@ -3365,6 +3365,107 @@ impl GlobalHome {
     }
 }
 
+/// Inert adapter output used to exercise the real Hub Transfer presenter.
+/// `has_spark` is a synthetic installed-wallet flag: constructing a real
+/// Spark backend would start a bridge and is intentionally excluded here.
+#[cfg(test)]
+pub(crate) struct R06ATransferSnapshot {
+    pub name: &'static str,
+    pub has_spark: bool,
+    pub total_balance_loading: bool,
+    pub spark_balance_loaded: bool,
+    pub spark_balance_error: bool,
+    pub spark_balance: Amount,
+}
+
+#[cfg(test)]
+impl GlobalHome {
+    pub(crate) fn r06a_transfer_snapshots() -> Vec<R06ATransferSnapshot> {
+        fn inert_home() -> GlobalHome {
+            GlobalHome::new_without_wallet(
+                None::<Arc<LiquidBackend>>,
+                None,
+                CoincubeDirectory::new(
+                    std::env::temp_dir().join(format!("r06a-transfer-{}", std::process::id())),
+                ),
+                coincube_core::miniscript::bitcoin::Network::Bitcoin,
+                "synthetic-cube".into(),
+                false,
+            )
+        }
+
+        fn send(home: &mut GlobalHome, msg: HomeMessage) {
+            // Never poll the returned task: no bridge, network, or persistence.
+            let _ = home.update(
+                None,
+                &Cache::default(),
+                Message::View(view::Message::Home(msg)),
+            );
+        }
+
+        fn snapshot(
+            name: &'static str,
+            home: &GlobalHome,
+            has_spark: bool,
+        ) -> R06ATransferSnapshot {
+            let total_balance_loading = total_balance_pending(BalanceReadiness {
+                has_spark,
+                // The real aggregate intentionally settles after a first error.
+                spark_loaded: home.spark_balance_loaded || home.spark_balance_error,
+                has_liquid: false,
+                liquid_loaded: false,
+                usdt_loaded: false,
+                vault_pending: false,
+            });
+            R06ATransferSnapshot {
+                name,
+                has_spark,
+                total_balance_loading,
+                spark_balance_loaded: home.spark_balance_loaded,
+                spark_balance_error: home.spark_balance_error,
+                spark_balance: home.spark_balance,
+            }
+        }
+
+        let mut home = inert_home();
+        send(
+            &mut home,
+            HomeMessage::SparkBalanceUpdated {
+                btc: Amount::from_sat(10_000),
+                stable_balance: None,
+            },
+        );
+        let presync = snapshot("presync-nonzero", &home, true);
+        send(&mut home, HomeMessage::SparkLoadFailed);
+        let first_failure = snapshot("first-failure-retained-raw", &home, true);
+
+        let mut no_snapshot = inert_home();
+        send(&mut no_snapshot, HomeMessage::SparkLoadFailed);
+        let empty_failure = snapshot("first-failure-no-snapshot", &no_snapshot, true);
+
+        send(&mut home, HomeMessage::SparkSyncedObserved);
+        send(
+            &mut home,
+            HomeMessage::SparkBalanceUpdated {
+                btc: Amount::from_sat(12_000),
+                stable_balance: None,
+            },
+        );
+        let trusted = snapshot("trusted-postsync", &home, true);
+        send(&mut home, HomeMessage::SparkLoadFailed);
+        let retained = snapshot("trusted-refresh-error", &home, true);
+
+        vec![
+            presync,
+            first_failure,
+            empty_failure,
+            trusted,
+            retained,
+            snapshot("no-spark", &inert_home(), false),
+        ]
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
