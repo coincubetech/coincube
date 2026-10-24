@@ -847,7 +847,9 @@ pub(crate) struct ClaimPairRequest {
 }
 
 pub struct App {
-    local_mcp: local_mcp::Settings,
+    // Pairing records grow independently of the tab's by-value state. Keep them
+    // on the heap so debug GUI transitions fit the Windows test-thread stack.
+    local_mcp: Box<local_mcp::Settings>,
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
     imported_kit_metadata: imported_kit_metadata::ImportedKitMetadata,
@@ -10322,7 +10324,7 @@ impl App {
                 .paired_proposal_session(&self.cube_settings.id, id)?,
             None => self.local_mcp.proposal_session(&self.cube_settings.id)?,
         };
-        Some((std::mem::take(&mut self.local_mcp), proposal))
+        Some((*std::mem::take(&mut self.local_mcp), proposal))
     }
 
     fn mcp_supported(&self) -> bool {
