@@ -17,6 +17,9 @@ account origin. An older pairing without that scope cannot sign this wallet
 and requires a new pairing confirmation. Imported signing reloads the pairing
 store when a session starts, so a removed, replaced, or newly ambiguous row
 cannot keep signing through a cached device handle.
+Each new pairing transaction also gives imported scope a fresh durable revision.
+The response is checked against that revision before merge, so removing and
+re-pairing the same TLS/key identity within one second revokes an old request.
 
 This service slice verifies an imported pairing and its signature response.
 The pairing flow that obtains fresh user confirmation and writes that scope is
@@ -53,5 +56,14 @@ canonical transport descriptor and pinned full SHA-256
 for either sortedmulti order, rather than either raw vector's display ID.
 The raw native results demonstrate offline script and signature compatibility;
 the exact canonical request, pairing commitment, frozen review and native
-signing replay remains a separate supplemental proof. No fixture represents a
-physical phone or network test.
+signing replay is captured by [Keychain PR #183](https://github.com/coincubetech/keychain-app/pull/183)
+at `68e6579bdec33a4639543327d8cd8baa12394035`. Its two exported requests
+retain Tenshu's original descriptor string and share full SHA-256
+`6c2d38811a23ff93af86b81c84667591e674884d804843ddf35c5b9995cc1219`.
+The request fixture SHA-256 is
+`71bf8c42cce0c9725b641da66d321a9ea6894b5a783ea5725c2100bfdd57c23f`;
+the actual native signed-result fixture SHA-256 is
+`944753d442cad41affbddf424069b08f2a51990ab6148ec645f0d42fa7fb9a31`.
+Desktop tests require the published request bytes to equal the current Tenshu
+exporter and independently verify both returned partial signatures with Bitcoin
+0.32.8. No fixture represents a physical phone or network test.

@@ -955,6 +955,7 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                                         &state.datadir_path,
                                         &signer.paired_phone.cert_pin,
                                         signer.paired_phone.paired_at_unix,
+                                        signer.paired_phone.imported_pairing_revision(),
                                     )
                                 {
                                     warn!(
@@ -988,8 +989,21 @@ fn refresh(mut state: State) -> impl Stream<Item = HardwareWalletMessage> {
                         //       the consumer would keep a stale
                         //       handle and every sign attempt would
                         //       hit `Disconnected`.
-                        let prior_alive =
-                            state.phone_signers.get(&id).is_some_and(|s| s.is_alive());
+                        //   (c) for imported wallets, its captured policy and
+                        //       exact pairing revision still matching the
+                        //       current store. A live socket to a re-paired
+                        //       phone is not a current signing handle.
+                        let prior_alive = state.phone_signers.get(&id).is_some_and(|s| {
+                            s.is_alive()
+                                && (matches!(
+                                    policy.kind(),
+                                    crate::phone_signer::policy::PhonePolicyKind::Vault(_)
+                                ) || store.cached_imported_matches(
+                                    &s.paired_phone,
+                                    &s.policy,
+                                    policy,
+                                ))
+                        });
                         if state.connected_supported_hws.contains(&id)
                             && target.is_some()
                             && prior_alive

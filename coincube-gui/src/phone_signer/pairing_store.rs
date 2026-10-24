@@ -119,6 +119,11 @@ pub struct ImportedPairingScope {
     pub chain: ChainId,
     pub wallet_id: WalletId,
     pub account_origin: DerivationPath,
+    /// Fresh admission identity. The pairing transaction overwrites this with
+    /// its unique ID before publication, so same-second re-pairing revokes an
+    /// old pending response even when all cryptographic fields are identical.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_revision: Option<String>,
 }
 
 impl ImportedPairingScope {
@@ -156,11 +161,19 @@ impl ImportedPairingScope {
             chain: wallet.chain(),
             wallet_id: wallet_id.clone(),
             account_origin: origins.remove(0),
+            pairing_revision: Some(uuid::Uuid::new_v4().to_string()),
         })
     }
 }
 
 impl PairedPhone {
+    pub fn imported_pairing_revision(&self) -> Option<&str> {
+        self.signer_binding
+            .as_ref()
+            .and_then(|binding| binding.imported_scope.as_ref())
+            .and_then(|scope| scope.pairing_revision.as_deref())
+    }
+
     pub fn exact_signer_for(&self, policy: &PhonePolicy) -> Result<&SignerBinding, String> {
         match policy.kind() {
             PhonePolicyKind::Vault(_) => self.exact_signer(policy.descriptor()),
@@ -291,6 +304,19 @@ pub struct PairingStoreFile {
 }
 
 impl PairingStoreFile {
+    /// Decides whether a live hardware-list handle may be reused for the
+    /// current imported wallet. A valid newly paired row is not sufficient:
+    /// the handle captured the old row and old policy when it was dialled.
+    pub fn cached_imported_matches(
+        &self,
+        captured: &PairedPhone,
+        captured_policy: &PhonePolicy,
+        current_policy: &PhonePolicy,
+    ) -> bool {
+        captured_policy.same_imported_authority(current_policy)
+            && self.unique_signer_for(captured, current_policy).is_ok()
+    }
+
     /// A hand-edited or partially migrated store with duplicate TLS identities
     /// has no unambiguous current row. Never choose whichever entry appears
     /// first when deciding imported signing authority.
@@ -309,7 +335,20 @@ impl PairingStoreFile {
         let current = matching
             .next()
             .ok_or("This Keychain is no longer paired; pair it again.")?;
+        let revision = phone
+            .signer_binding
+            .as_ref()
+            .and_then(|binding| binding.imported_scope.as_ref())
+            .and_then(|scope| scope.pairing_revision.as_deref())
+            .filter(|revision| !revision.is_empty())
+            .ok_or("This imported Keychain pairing predates exact admission; pair it again.")?;
         if matching.next().is_some()
+            || current
+                .signer_binding
+                .as_ref()
+                .and_then(|binding| binding.imported_scope.as_ref())
+                .and_then(|scope| scope.pairing_revision.as_deref())
+                != Some(revision)
             || current.vault_fingerprint != phone.vault_fingerprint
             || current.transport_pubkey != phone.transport_pubkey
             || current.signer_binding != phone.signer_binding
@@ -527,16 +566,27 @@ pub fn unpair(dir: &CoincubeDirectory, cert_pin: &[u8; 32]) -> std::io::Result<P
 /// the user removing the phone here, so like [`unpair`] it supersedes any
 /// pairing journal for the phone, including one stuck after a lost final
 /// acknowledgement, which would otherwise keep the row dialled forever. Only
-/// the row that connection was made for is removed (`paired_at_unix` tells a
-/// later re-pairing of the same phone apart); for any other row nothing is
-/// touched. Returns whether a row was removed.
+/// the row that connection was made for is removed (the imported pairing's
+/// revision disambiguates even same-second re-pairing; Vault retains its
+/// existing display-time guard); for any other row nothing is touched.
+/// Returns whether a row was removed.
 pub fn remove_unpaired_by_peer(
     dir: &CoincubeDirectory,
     cert_pin: &[u8; 32],
     paired_at_unix: u64,
+    pairing_revision: Option<&str>,
 ) -> std::io::Result<bool> {
     let _guard = super::pairing_transaction::WRITER.lock().unwrap();
-    let dialled = |p: &PairedPhone| &p.cert_pin == cert_pin && p.paired_at_unix == paired_at_unix;
+    let dialled = |p: &PairedPhone| {
+        &p.cert_pin == cert_pin
+            && p.paired_at_unix == paired_at_unix
+            && (p
+                .signer_binding
+                .as_ref()
+                .and_then(|binding| binding.imported_scope.as_ref())
+                .is_none()
+                || pairing_revision.is_some() && p.imported_pairing_revision() == pairing_revision)
+    };
     if !load_visible(dir)?.phones.iter().any(dialled) {
         return Ok(false);
     }
@@ -743,10 +793,15 @@ mod tests {
         let phone = sample_phone(4);
         upsert(&dir, phone.clone()).unwrap();
         // A connection from an earlier pairing of the same phone.
-        assert!(!remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix - 1).unwrap());
+        assert!(
+            !remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix - 1, None)
+                .unwrap()
+        );
         assert_eq!(load(&dir).unwrap().phones.len(), 1);
 
-        assert!(remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix).unwrap());
+        assert!(
+            remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix, None).unwrap()
+        );
         assert!(load(&dir).unwrap().phones.is_empty());
     }
 
@@ -773,7 +828,9 @@ mod tests {
             "the earlier pairing is what stays visible and dialled",
         );
 
-        assert!(remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix).unwrap());
+        assert!(
+            remove_unpaired_by_peer(&dir, &phone.cert_pin, phone.paired_at_unix, None).unwrap()
+        );
         assert!(load(&dir).unwrap().phones.is_empty());
         assert!(
             load_raw(&dir).unwrap().phones.is_empty(),

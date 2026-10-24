@@ -13,6 +13,12 @@ const INPUT: &str = include_str!("fixtures/imported_signing.json");
 const SIGNED: &str = include_str!("fixtures/imported_signing_signed.json");
 const INPUT_SHA256: &str = "ef14b201a02d3c0f2f21e9a8ef98b88251a478863d9e63982654ec1798585b30";
 const SIGNED_SHA256: &str = "075e261fa5433603746c7462890c14ea99ac7309da06e288449b46c54e20146b";
+const CANONICAL_REQUEST: &str = include_str!("fixtures/imported_canonical_requests.json");
+const CANONICAL_SIGNED: &str = include_str!("fixtures/imported_canonical_signed.json");
+const CANONICAL_REQUEST_SHA256: &str =
+    "71bf8c42cce0c9725b641da66d321a9ea6894b5a783ea5725c2100bfdd57c23f";
+const CANONICAL_SIGNED_SHA256: &str =
+    "944753d442cad41affbddf424069b08f2a51990ab6148ec645f0d42fa7fb9a31";
 
 fn fixture() -> (Value, Value) {
     assert_eq!(hex::encode(Sha256::digest(INPUT.as_bytes())), INPUT_SHA256);
@@ -50,10 +56,14 @@ fn policy(vector: &Value) -> PhonePolicy {
 }
 
 fn phone(input: &Value, policy: &PhonePolicy) -> pairing_store::PairedPhone {
+    phone_for_key(input, policy, 0)
+}
+
+fn phone_for_key(input: &Value, policy: &PhonePolicy, index: usize) -> pairing_store::PairedPhone {
     let policy::PhonePolicyKind::Imported { wallet, wallet_id } = policy.kind() else {
         panic!("imported fixture");
     };
-    let key = &input["keys"][0];
+    let key = &input["keys"][index];
     let fingerprint = key["fingerprint"].as_str().unwrap().parse().unwrap();
     let binding = pairing_store::SignerBinding {
         key_id: key["backend_key_id"].as_u64().unwrap().to_string(),
@@ -82,10 +92,9 @@ fn phone(input: &Value, policy: &PhonePolicy) -> pairing_store::PairedPhone {
     }
 }
 
-/// Optional public-only export for replaying the actual desktop LAN policy on
-/// Keychain. The frozen M1 inputs are never rewritten by this test.
-#[test]
-fn export_canonical_sortedmulti_requests() {
+/// Public-only export from the real desktop policy constructor. The frozen M1
+/// inputs are never rewritten.
+fn canonical_sortedmulti_requests() -> Value {
     let (input, _) = fixture();
     let vectors: Vec<_> = ["sortedmulti_first", "sortedmulti_nonfirst"]
         .iter()
@@ -126,10 +135,82 @@ fn export_canonical_sortedmulti_requests() {
         .collect();
     let export =
         serde_json::json!({"schema": 1, "keys": keys, "network": "testnet", "vectors": vectors});
+    export
+}
+
+#[test]
+fn export_canonical_sortedmulti_requests() {
+    let export = canonical_sortedmulti_requests();
     if let Ok(path) = std::env::var("COINCUBE_CANONICAL_IMPORT_EXPORT_PATH") {
         std::fs::write(path, serde_json::to_vec_pretty(&export).unwrap()).unwrap();
     }
     assert_eq!(export["vectors"].as_array().unwrap().len(), 2);
+}
+
+#[test]
+fn actual_canonical_phone_results_verify_against_unchanged_tenshu_request() {
+    assert_eq!(
+        hex::encode(Sha256::digest(CANONICAL_REQUEST.as_bytes())),
+        CANONICAL_REQUEST_SHA256
+    );
+    assert_eq!(
+        hex::encode(Sha256::digest(CANONICAL_SIGNED.as_bytes())),
+        CANONICAL_SIGNED_SHA256
+    );
+    let export = canonical_sortedmulti_requests();
+    assert_eq!(
+        serde_json::to_vec_pretty(&export).unwrap(),
+        CANONICAL_REQUEST.as_bytes(),
+        "published mobile request bytes must be the current Tenshu serializer export"
+    );
+    let signed: Value = serde_json::from_str(CANONICAL_SIGNED).unwrap();
+    let (raw, _) = fixture();
+    assert_eq!(signed["vectors"].as_array().unwrap().len(), 2);
+    for request in export["vectors"].as_array().unwrap() {
+        let name = request["name"].as_str().unwrap();
+        let original_vector = case(&raw, name);
+        let policy = policy(original_vector);
+        assert_eq!(request["descriptor"], policy.descriptor());
+        let original = psbt(&request["psbt"]);
+        assert_eq!(original, psbt(&original_vector["psbt"]));
+        let returned = psbt(&case(&signed, name)["signed_psbt"]);
+        let phone = phone(&raw, &policy);
+        let binding = phone.exact_signer_for(&policy).unwrap();
+        let policy::PhonePolicyKind::Imported { wallet, .. } = policy.kind() else {
+            unreachable!()
+        };
+        let mut merged = original.clone();
+        signatures::merge_imported_verified(&mut merged, &returned, wallet, binding).unwrap();
+        assert_eq!(merged.unsigned_tx, original.unsigned_tx);
+        assert_eq!(merged.outputs, original.outputs);
+        assert_eq!(merged.inputs[0].partial_sigs.len(), 1);
+        assert_eq!(
+            merged.inputs[0].final_script_sig,
+            original.inputs[0].final_script_sig
+        );
+        assert_eq!(
+            merged.inputs[0].final_script_witness,
+            original.inputs[0].final_script_witness
+        );
+        assert_eq!(
+            verify_imported_signatures(wallet, &original, &merged, &Secp256k1::verification_only())
+                .unwrap(),
+            vec![1]
+        );
+        let mut tampered = returned.clone();
+        tampered.unsigned_tx.output[0].value =
+            coincube_core::miniscript::bitcoin::Amount::from_sat(1);
+        let before = original.serialize();
+        let mut rejected = original.clone();
+        assert!(
+            signatures::merge_imported_verified(&mut rejected, &tampered, wallet, binding).is_err()
+        );
+        assert_eq!(
+            rejected.serialize(),
+            before,
+            "{name}: failed merge mutated original"
+        );
+    }
 }
 
 #[test]
@@ -342,6 +423,164 @@ fn imported_pairing_requires_exact_account_origin_chain_wallet_and_full_hash() {
     let mut zero = phone;
     zero.signer_binding.as_mut().unwrap().key_id = "0".into();
     assert!(zero.exact_signer_for(&policy).is_err());
+}
+
+#[test]
+fn imported_pairing_revision_revokes_same_second_pending_response_and_cached_handle() {
+    use super::pairing_transaction::PairingTransaction;
+    let (input, signed) = fixture();
+    let vector = case(&input, "sortedmulti_first");
+    let policy = policy(vector);
+    let first = phone(&input, &policy);
+    let dir = crate::dir::CoincubeDirectory::new(
+        std::env::temp_dir().join(format!("imported-revision-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(dir.path()).unwrap();
+    let first_id = uuid::Uuid::new_v4().to_string();
+    let transaction = PairingTransaction::prepare(&dir, first_id.clone(), first.clone()).unwrap();
+    transaction.write_candidate().unwrap();
+    transaction.decide().unwrap();
+    transaction.finish().unwrap();
+    let store = pairing_store::load(&dir).unwrap();
+    let captured = store.phones[0].clone();
+    let revision = |row: &pairing_store::PairedPhone| {
+        row.signer_binding
+            .as_ref()
+            .unwrap()
+            .imported_scope
+            .as_ref()
+            .unwrap()
+            .pairing_revision
+            .as_deref()
+            .unwrap()
+            .to_owned()
+    };
+    assert_eq!(revision(&captured), first_id);
+    assert!(store.unique_signer_for(&captured, &policy).is_ok());
+    assert!(store.cached_imported_matches(&captured, &policy, &policy));
+
+    // Rename and fallback edits do not create a new admission or retire a
+    // connected handle. Removal does, even before a replacement appears.
+    pairing_store::update_user_fields(
+        &dir,
+        &captured.cert_pin,
+        "Renamed".into(),
+        Some("127.0.0.1:1234".into()),
+    )
+    .unwrap();
+    assert!(pairing_store::load(&dir)
+        .unwrap()
+        .cached_imported_matches(&captured, &policy, &policy));
+    pairing_store::unpair(&dir, &captured.cert_pin).unwrap();
+    assert!(pairing_store::load(&dir)
+        .unwrap()
+        .unique_signer_for(&captured, &policy)
+        .is_err());
+
+    let second_id = uuid::Uuid::new_v4().to_string();
+    let mut re_pair = first;
+    re_pair.paired_at_unix = captured.paired_at_unix;
+    let transaction = PairingTransaction::prepare(&dir, second_id.clone(), re_pair).unwrap();
+    transaction.write_candidate().unwrap();
+    transaction.decide().unwrap();
+    transaction.finish().unwrap();
+    let store = pairing_store::load(&dir).unwrap();
+    let current = &store.phones[0];
+    assert_eq!(captured.paired_at_unix, current.paired_at_unix);
+    assert_eq!(revision(current), second_id);
+    assert_ne!(revision(&captured), revision(current));
+    let persisted = serde_json::to_vec(&store).unwrap();
+    let restored: pairing_store::PairingStoreFile = serde_json::from_slice(&persisted).unwrap();
+    assert_eq!(revision(&restored.phones[0]), second_id);
+    assert!(!pairing_store::remove_unpaired_by_peer(
+        &dir,
+        &captured.cert_pin,
+        captured.paired_at_unix,
+        captured.imported_pairing_revision(),
+    )
+    .unwrap());
+    assert!(store.unique_signer_for(&captured, &policy).is_err());
+    assert!(!store.cached_imported_matches(&captured, &policy, &policy));
+    assert!(store.cached_imported_matches(current, &policy, &policy));
+
+    // The late response from the old review cannot reach the PSBT merge.
+    let mut pending = psbt(&vector["psbt"]);
+    let before = pending.serialize();
+    let returned = psbt(&case(&signed, "sortedmulti_first")["signed_psbt"]);
+    let policy::PhonePolicyKind::Imported { wallet, .. } = policy.kind() else {
+        unreachable!()
+    };
+    let result = store
+        .unique_signer_for(&captured, &policy)
+        .and_then(|binding| {
+            signatures::merge_imported_verified(&mut pending, &returned, wallet, binding)
+        });
+    assert!(result.is_err());
+    assert_eq!(pending.serialize(), before);
+    let current_binding = store.unique_signer_for(current, &policy).unwrap();
+    signatures::merge_imported_verified(&mut pending, &returned, wallet, current_binding).unwrap();
+    assert_eq!(pending.inputs[0].partial_sigs.len(), 1);
+
+    let mut legacy = current.clone();
+    legacy
+        .signer_binding
+        .as_mut()
+        .unwrap()
+        .imported_scope
+        .as_mut()
+        .unwrap()
+        .pairing_revision = None;
+    let legacy_store = pairing_store::PairingStoreFile {
+        phones: vec![legacy.clone()],
+        pending_unpairs: Vec::new(),
+    };
+    let legacy_bytes = serde_json::to_vec(&legacy_store).unwrap();
+    assert!(!String::from_utf8_lossy(&legacy_bytes).contains("pairing_revision"));
+    let restored_legacy: pairing_store::PairingStoreFile =
+        serde_json::from_slice(&legacy_bytes).unwrap();
+    assert!(restored_legacy.unique_signer_for(&legacy, &policy).is_err());
+}
+
+#[test]
+fn cached_live_imported_handle_is_replaced_for_another_valid_account() {
+    let (input, _) = fixture();
+    let vector = case(&input, "sortedmulti_first");
+    let policy = policy(vector);
+    let captured = phone(&input, &policy);
+    let unchanged = pairing_store::PairingStoreFile {
+        phones: vec![captured.clone()],
+        pending_unpairs: Vec::new(),
+    };
+    assert!(unchanged.cached_imported_matches(&captured, &policy, &policy));
+
+    let mut replacement = phone_for_key(&input, &policy, 1);
+    replacement.cert_pin = captured.cert_pin;
+    replacement.paired_at_unix = captured.paired_at_unix;
+    replacement.transport_pubkey = captured.transport_pubkey.clone();
+    let replacement_store = pairing_store::PairingStoreFile {
+        phones: vec![replacement.clone()],
+        pending_unpairs: Vec::new(),
+    };
+    assert!(replacement_store
+        .unique_signer_for(&replacement, &policy)
+        .is_ok());
+    assert!(!replacement_store.cached_imported_matches(&captured, &policy, &policy));
+    assert!(replacement_store.cached_imported_matches(&replacement, &policy, &policy));
+
+    let wrong_policy = self::policy(case(&input, "wpkh_receive"));
+    assert!(!replacement_store.cached_imported_matches(&replacement, &policy, &wrong_policy));
+    assert!(
+        !pairing_store::PairingStoreFile::default().cached_imported_matches(
+            &replacement,
+            &policy,
+            &policy
+        )
+    );
+    let ambiguous = pairing_store::PairingStoreFile {
+        phones: vec![replacement.clone(), replacement],
+        pending_unpairs: Vec::new(),
+    };
+    assert!(!ambiguous.cached_imported_matches(&captured, &policy, &policy));
 }
 
 #[test]

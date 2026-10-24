@@ -86,6 +86,26 @@ impl PhonePolicy {
         self.chain
     }
 
+    /// A cached LAN handle must still represent the same imported wallet,
+    /// beyond merely sharing the short descriptor routing ID.
+    pub fn same_imported_authority(&self, other: &Self) -> bool {
+        match (&self.kind, &other.kind) {
+            (
+                PhonePolicyKind::Imported {
+                    wallet_id: left, ..
+                },
+                PhonePolicyKind::Imported {
+                    wallet_id: right, ..
+                },
+            ) => {
+                self.chain == other.chain
+                    && self.transport_descriptor == other.transport_descriptor
+                    && left == right
+            }
+            _ => false,
+        }
+    }
+
     pub fn transport_id(&self) -> coincube_core::miniscript::bitcoin::bip32::Fingerprint {
         crate::app::wallet::descriptor_id_fingerprint_of_bytes(self.transport_descriptor.as_bytes())
     }

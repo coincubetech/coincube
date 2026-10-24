@@ -1,0 +1,106 @@
+{
+  "keys": [
+    {
+      "backend_key_id": 10,
+      "fingerprint": "73c5da0a",
+      "path": "m/48'/1'/0'/2'",
+      "xpub": "tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ"
+    },
+    {
+      "backend_key_id": 11,
+      "fingerprint": "f3783b52",
+      "path": "m/48'/1'/0'/2'",
+      "xpub": "tpubDEoky8jvKeniSTHSLvjEmXFfj9cRtdf9m5ZvBoGgzYsfv6PGEPKh2ES3P9Una6FbnNG5irQX6bRijbnQZr9aeuS4WyU9eS7QxMnc4m5wT5e"
+    },
+    {
+      "backend_key_id": 12,
+      "fingerprint": "753adf1c",
+      "path": "m/48'/1'/0'/2'",
+      "xpub": "tpubDE9P47N6WUBrVzQqw3pt92XAkdQZFuK1K8xE2AQ83resS1nHhN1g4YF9raun8n98LJbTFQPB7GmVbq9tBXdEiSzuga6kCmeeE3MuBWEkbZz"
+    },
+    {
+      "backend_key_id": 13,
+      "fingerprint": "73c5da0a",
+      "path": "m/48'/1'/1'/2'",
+      "xpub": "tpubDEYM1BmQ5rp2PWKvCgvQxNeUrEv8gu5819xRdmu6S23fYpS8x2icwAeoVaBTLyN3fGWJQcWoaiKMduTXWKtG9bXNpVrZPRF7XVxrANtAEcR"
+    }
+  ],
+  "network": "testnet",
+  "schema": 1,
+  "vectors": [
+    {
+      "branch": 0,
+      "descriptor": "wsh(sortedmulti(2,[753adf1c/48'/1'/0'/2']tpubDE9P47N6WUBrVzQqw3pt92XAkdQZFuK1K8xE2AQ83resS1nHhN1g4YF9raun8n98LJbTFQPB7GmVbq9tBXdEiSzuga6kCmeeE3MuBWEkbZz/<0;1>/*,[f3783b52/48'/1'/0'/2']tpubDEoky8jvKeniSTHSLvjEmXFfj9cRtdf9m5ZvBoGgzYsfv6PGEPKh2ES3P9Una6FbnNG5irQX6bRijbnQZr9aeuS4WyU9eS7QxMnc4m5wT5e/<0;1>/*,[73c5da0a/48'/1'/0'/2']tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*))#slsxmyf5",
+      "descriptor_id": "6c2d3881",
+      "descriptor_sha256": "6c2d38811a23ff93af86b81c84667591e674884d804843ddf35c5b9995cc1219",
+      "index": 0,
+      "name": "sortedmulti_first",
+      "previous_tx": "02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff020109ffffffff01400d030000000000220020d7b4dcc5da88d08124de42a1c8fcbb963609c9d6a1c486fbbdafe408f7a80b0800000000",
+      "prevout_script": "0020d7b4dcc5da88d08124de42a1c8fcbb963609c9d6a1c486fbbdafe408f7a80b08",
+      "prevout_value_sats": 200000,
+      "psbt": "cHNidP8BAFICAAAAAUapRIljUDeMA86Sagq+sLrBBZdSoxK4z37Ns0/CM7rlAAAAAAD/////Abj5AgAAAAAAFgAUQkJCQkJCQkJCQkJCQkJCQkJCQkIAAAAAAAEAYAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AgEJ/////wFADQMAAAAAACIAINe03MXaiNCBJN5Cocj8u5Y2CcnWocSG+72v5Aj3qAsIAAAAAAEBK0ANAwAAAAAAIgAg17TcxdqI0IEk3kKhyPy7ljYJydahxIb7va/kCPeoCwgBBWlSIQMLkO0uhrrX8qT+l2m7QX17qcqhEkgH2/s2Lfvutl5+ASEDJKDabjmOyFWvJD4Mdwoql2VEwmKFlLEqfl0t7lnVzzohA7nXoZ0hDsyPUnm/yGMKfkquMT7aFc+FR2kagxEgw1C3U64iBgMLkO0uhrrX8qT+l2m7QX17qcqhEkgH2/s2Lfvutl5+ARxzxdoKMAAAgAEAAIAAAACAAgAAgAAAAAAAAAAAIgYDJKDabjmOyFWvJD4Mdwoql2VEwmKFlLEqfl0t7lnVzzocdTrfHDAAAIABAACAAAAAgAIAAIAAAAAAAAAAACIGA7nXoZ0hDsyPUnm/yGMKfkquMT7aFc+FR2kagxEgw1C3HPN4O1IwAACAAQAAgAAAAIACAACAAAAAAAAAAAAAAA==",
+      "scripts": [
+        {
+          "change": "002098bc19800255ea757337612853e2e65c6d6157213d9ec3e23f7424d2e1707396",
+          "index": 0,
+          "phone_sorted_change_rank": 1,
+          "phone_sorted_receive_rank": 0,
+          "receive": "0020d7b4dcc5da88d08124de42a1c8fcbb963609c9d6a1c486fbbdafe408f7a80b08"
+        },
+        {
+          "change": "00208fa6099e366dad2980af6dbdbbd156517af1e386a1df763c7b40ba79cafcfc14",
+          "index": 1,
+          "phone_sorted_change_rank": 2,
+          "phone_sorted_receive_rank": 2,
+          "receive": "002093144dad9d93099e1c871fbf323cb6ba87dc57feee875e55006056b0f29fcf81"
+        },
+        {
+          "change": "00200483a77bf723db7fd0eb98aa3ff75570275ebc86853e44f0995111825c728410",
+          "index": 7,
+          "phone_sorted_change_rank": 0,
+          "phone_sorted_receive_rank": 2,
+          "receive": "00203619bd168620fb9aeecbc7b3e1b2c966c064de57b137e313a6aa4f1f389e1451"
+        }
+      ],
+      "signer_key_id": 10,
+      "signer_key_index": 0
+    },
+    {
+      "branch": 1,
+      "descriptor": "wsh(sortedmulti(2,[753adf1c/48'/1'/0'/2']tpubDE9P47N6WUBrVzQqw3pt92XAkdQZFuK1K8xE2AQ83resS1nHhN1g4YF9raun8n98LJbTFQPB7GmVbq9tBXdEiSzuga6kCmeeE3MuBWEkbZz/<0;1>/*,[f3783b52/48'/1'/0'/2']tpubDEoky8jvKeniSTHSLvjEmXFfj9cRtdf9m5ZvBoGgzYsfv6PGEPKh2ES3P9Una6FbnNG5irQX6bRijbnQZr9aeuS4WyU9eS7QxMnc4m5wT5e/<0;1>/*,[73c5da0a/48'/1'/0'/2']tpubDFH9dgzveyD8zTbPUFuLrGmCydNvxehyNdUXKJAQN8x4aZ4j6UZqGfnqFrD4NqyaTVGKbvEW54tsvPTK2UoSbCC1PJY8iCNiwTL3RWZEheQ/<0;1>/*))#slsxmyf5",
+      "descriptor_id": "6c2d3881",
+      "descriptor_sha256": "6c2d38811a23ff93af86b81c84667591e674884d804843ddf35c5b9995cc1219",
+      "index": 0,
+      "name": "sortedmulti_nonfirst",
+      "previous_tx": "02000000010000000000000000000000000000000000000000000000000000000000000000ffffffff02010affffffff01400d03000000000022002098bc19800255ea757337612853e2e65c6d6157213d9ec3e23f7424d2e170739600000000",
+      "prevout_script": "002098bc19800255ea757337612853e2e65c6d6157213d9ec3e23f7424d2e1707396",
+      "prevout_value_sats": 200000,
+      "psbt": "cHNidP8BAFICAAAAAcfcy/m+vUrDexIoFfd01R1NMQcryBwQHnuHQNCQir27AAAAAAD/////Abj5AgAAAAAAFgAUQkJCQkJCQkJCQkJCQkJCQkJCQkIAAAAAAAEAYAIAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD/////AgEK/////wFADQMAAAAAACIAIJi8GYACVep1czdhKFPi5lxtYVchPZ7D4j90JNLhcHOWAAAAAAEBK0ANAwAAAAAAIgAgmLwZgAJV6nVzN2EoU+LmXG1hVyE9nsPiP3Qk0uFwc5YBBWlSIQMQNaJMyiJry+oSCB3clvhQbymw+aj+vglSTkNEElYoRiEDoH074LrWPIA10hyXtBCJDT06GdLkA6+z/PxoJqomPHYhA/2KepByf6nD1U/B3daTv9AO46Rjd2Jdb/Ecr5aGQtzxU64iBgMQNaJMyiJry+oSCB3clvhQbymw+aj+vglSTkNEElYoRhx1Ot8cMAAAgAEAAIAAAACAAgAAgAEAAAAAAAAAIgYDoH074LrWPIA10hyXtBCJDT06GdLkA6+z/PxoJqomPHYcc8XaCjAAAIABAACAAAAAgAIAAIABAAAAAAAAACIGA/2KepByf6nD1U/B3daTv9AO46Rjd2Jdb/Ecr5aGQtzxHPN4O1IwAACAAQAAgAAAAIACAACAAQAAAAAAAAAAAA==",
+      "scripts": [
+        {
+          "change": "002098bc19800255ea757337612853e2e65c6d6157213d9ec3e23f7424d2e1707396",
+          "index": 0,
+          "phone_sorted_change_rank": 1,
+          "phone_sorted_receive_rank": 0,
+          "receive": "0020d7b4dcc5da88d08124de42a1c8fcbb963609c9d6a1c486fbbdafe408f7a80b08"
+        },
+        {
+          "change": "00208fa6099e366dad2980af6dbdbbd156517af1e386a1df763c7b40ba79cafcfc14",
+          "index": 1,
+          "phone_sorted_change_rank": 2,
+          "phone_sorted_receive_rank": 2,
+          "receive": "002093144dad9d93099e1c871fbf323cb6ba87dc57feee875e55006056b0f29fcf81"
+        },
+        {
+          "change": "00200483a77bf723db7fd0eb98aa3ff75570275ebc86853e44f0995111825c728410",
+          "index": 7,
+          "phone_sorted_change_rank": 0,
+          "phone_sorted_receive_rank": 2,
+          "receive": "00203619bd168620fb9aeecbc7b3e1b2c966c064de57b137e313a6aa4f1f389e1451"
+        }
+      ],
+      "signer_key_id": 10,
+      "signer_key_index": 0
+    }
+  ]
+}
