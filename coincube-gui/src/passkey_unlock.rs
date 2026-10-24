@@ -443,7 +443,10 @@ impl PasskeyUnlock {
             .spacing(30)
             .width(Length::Fill)
             .align_x(Alignment::Center)
-            .push(h3(format!("Unlock {}", self.cube.name)));
+            .push(h3(format!(
+                "Unlock {}",
+                crate::cube_display::name(&self.cube.name)
+            )));
 
         match &self.phase {
             Phase::Authenticating => {

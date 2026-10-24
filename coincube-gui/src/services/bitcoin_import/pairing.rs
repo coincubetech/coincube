@@ -512,9 +512,9 @@ pub async fn install_pair(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
-    fn pair() -> (CubeSettings, CubeSettings) {
+    pub(crate) fn pair() -> (CubeSettings, CubeSettings) {
         let (mut source, _, _) = crate::imported_claim::tests::fixture();
         source.master_signer_fingerprint = Some([1, 2, 3, 4].into());
         source.backed_up = true;

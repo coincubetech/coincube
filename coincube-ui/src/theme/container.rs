@@ -116,3 +116,52 @@ pub fn sidebar_tertiary(theme: &Theme) -> Style {
         ..Default::default()
     }
 }
+
+/// Surface tokens for the new single-sidebar Tenshu shell.
+pub fn shell_top(theme: &Theme) -> Style {
+    Style {
+        background: Some(Background::Color(theme.colors.shell.panel)),
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub fn shell_rail(theme: &Theme) -> Style {
+    Style {
+        background: Some(Background::Color(theme.colors.shell.rail)),
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub fn shell_menu(theme: &Theme) -> Style {
+    Style {
+        background: Some(Background::Color(theme.colors.shell.panel)),
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 10.0.into(),
+        },
+        ..Default::default()
+    }
+}
+
+pub fn shell_chip(theme: &Theme) -> Style {
+    Style {
+        background: Some(Background::Color(theme.colors.shell.panel)),
+        border: iced::Border {
+            color: theme.colors.shell.line,
+            width: 1.0,
+            radius: 16.0.into(),
+        },
+        ..Default::default()
+    }
+}

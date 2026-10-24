@@ -161,6 +161,55 @@ pub fn tab(theme: &Theme, status: Status) -> Style {
     style
 }
 
+/// Text-first rows of the Tenshu sidebar and Cube switcher.
+pub fn shell_nav(theme: &Theme, status: Status) -> Style {
+    shell_nav_with_state(theme, status, false)
+}
+
+pub fn shell_nav_active(theme: &Theme, status: Status) -> Style {
+    shell_nav_with_state(theme, status, true)
+}
+
+fn shell_nav_with_state(theme: &Theme, status: Status, selected: bool) -> Style {
+    let colors = &theme.colors.shell;
+    let background = if matches!(status, Status::Hovered | Status::Pressed) {
+        colors.hover
+    } else if selected {
+        colors.selected
+    } else {
+        Color::TRANSPARENT
+    };
+    Style {
+        background: Some(Background::Color(background)),
+        text_color: if matches!(status, Status::Disabled) {
+            colors.muted
+        } else {
+            colors.ink
+        },
+        border: Border {
+            radius: 8.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
+pub fn shell_brand(theme: &Theme, status: Status) -> Style {
+    Style {
+        background: Some(Background::Color(Color::TRANSPARENT)),
+        text_color: if matches!(status, Status::Hovered | Status::Pressed) {
+            theme.colors.shell.accent_ink
+        } else {
+            theme.colors.shell.ink
+        },
+        border: Border {
+            radius: 6.0.into(),
+            ..Default::default()
+        },
+        ..Default::default()
+    }
+}
+
 /// Inactive primary-rail item. Square corners, no border, transparent
 /// background with the standard menu text color — hover darkens the
 /// background to the content-area tone to give click feedback.

@@ -781,14 +781,16 @@ pub fn recovery_services_ux<'a>(
                 col = col.push(
                     container(
                         Column::new()
-                            .push(text::p1_bold(&row.name).style(theme::text::primary))
+                            .push(
+                                text::p1_bold(crate::cube_display::name(&row.name))
+                                    .style(theme::text::primary),
+                            )
                             .push(text::p2_regular(network).style(theme::text::secondary))
                             .push(text::p2_regular(kit).style(theme::text::primary))
                             .push(text::p2_regular(eligibility).style(theme::text::secondary))
-                            .push(
-                                text::p2_regular("Open Cube to manage")
-                                    .style(theme::text::secondary),
-                            )
+                            .push(button::secondary(None, "Open Cube to manage").on_press(
+                                ConnectAccountMessage::OpenRecoveryService(row.target.clone()),
+                            ))
                             .spacing(5)
                             .padding(14),
                     )
