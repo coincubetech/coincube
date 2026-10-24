@@ -63,64 +63,6 @@ pub fn balance_header_card<'a, Msg: 'a>(content: impl Into<Element<'a, Msg>>) ->
         .into()
 }
 
-/// A compact "master seed not backed up" warning strip, rendered at the
-/// top of every page by the `dashboard` wrapper when
-/// `cache.current_cube_backed_up` is false and the user hasn't dismissed
-/// it this session.
-///
-/// Constrained to the same width as the main content column so it lines
-/// up with the page content below it. Clicking "Back Up Now" routes to
-/// General Settings; clicking the × dismisses for the session — it
-/// returns on app restart until the user actually backs up.
-pub fn backup_warning_banner<'a>() -> Element<'a, Message> {
-    let body = container(
-        row![
-            coincube_ui::icon::warning_icon().color(color::BLACK),
-            text::p2_regular(
-                "Your master seed phrase is not backed up. Back it up to avoid \
-                 losing access to your Cube."
-            )
-            .color(color::BLACK)
-            // See `spark_notice_banner` for why this is `Fill`.
-            .width(Length::Fill),
-            button::secondary(None, "Back Up Now")
-                .padding([6, 14])
-                .width(Length::Fixed(140.0))
-                .on_press(Message::Menu(Menu::Cube(
-                    crate::app::menu::CubeSubMenu::Settings(
-                        crate::app::menu::CubeSettingsOption::Recovery,
-                    ),
-                ))),
-            iced::widget::Button::new(
-                cross_icon()
-                    .align_x(Alignment::Center)
-                    .align_y(Alignment::Center),
-            )
-            .padding([8, 10])
-            .style(theme::button::secondary)
-            .on_press(Message::DismissBackupWarning),
-        ]
-        .spacing(10)
-        .align_y(Alignment::Center),
-    )
-    .padding([8, 16])
-    .width(Length::Fill)
-    .style(theme::notification::warning);
-
-    // Constrain to the same FillPortion(1/8/1) layout used by the
-    // dashboard content column so the banner lines up horizontally.
-    container(row![
-        Space::new().width(Length::FillPortion(1)),
-        container(body)
-            .width(Length::FillPortion(8))
-            .max_width(1500),
-        Space::new().width(Length::FillPortion(1)),
-    ])
-    .padding([8, 0])
-    .width(Length::Fill)
-    .into()
-}
-
 /// The user-facing sentence for a [`SparkNotice`]. Split out so the copy
 /// is testable without rendering.
 pub fn spark_notice_text(notice: &SparkNotice) -> String {
@@ -139,9 +81,8 @@ pub fn spark_notice_text(notice: &SparkNotice) -> String {
 }
 
 /// A warning strip for a Spark Stable Balance condition, rendered by the
-/// `dashboard` wrapper under the backup banner when
-/// `cache.spark_notice` is set. Same width and style as
-/// [`backup_warning_banner`]. "Spark Settings" routes to the page with the
+/// `dashboard` wrapper when `cache.spark_notice` is set.
+/// "Spark Settings" routes to the page with the
 /// toggle; × dismisses for the session.
 pub fn spark_notice_banner(notice: &SparkNotice) -> Element<'_, Message> {
     let body = container(
@@ -211,34 +152,8 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
     avatar_handle: Option<&'a iced::widget::image::Handle>,
     lightning_address: Option<&'a str>,
 ) -> Element<'a, Message> {
-    let has_vault = cache.has_vault;
-    let has_p2p = cache.has_p2p;
-    // Passkey Cubes used to be exempt from this banner, because there was no
-    // way for one to back its seed up. There is now (**I11**), so an
-    // un-backed-up passkey Cube gets the same nudge as any other — it is the
-    // Cube that most needs it.
-    let show_backup_warning = !cache.current_cube_backed_up && !cache.backup_warning_dismissed;
-    let nav_ctx = nav::NavContext {
-        has_vault,
-        has_imported_bitcoin: cache.has_imported_bitcoin,
-        has_p2p,
-        network: cache.chain(),
-        p2p_test_coordinator: cache.p2p_test_coordinator,
-        marketplace_flags: cache.marketplace_flags,
-        liquid_gate: cache.liquid_gate,
-        btcb2_server_enabled: cache.btcb2_server_enabled,
-        btcb2_already_claimed: cache.btcb2_already_claimed,
-        btcb2_claim_resume: cache.btcb2_claim_resume,
-        cube_name,
-        lightning_address,
-        avatar: avatar_handle,
-        theme_mode: cache.theme_mode,
-        connect_authenticated: cache.sidebar_connect_signed_in,
-        connect_stream_status: &cache.connect_stream_status,
-    };
     let content_column: Element<'_, Message> = Column::new()
         .push(warn(None))
-        .push_maybe(show_backup_warning.then(backup_warning_banner))
         .push_maybe(cache.spark_notice.as_ref().map(spark_notice_banner))
         .push(
             Container::new(
@@ -265,25 +180,78 @@ pub fn dashboard_with_info<'a, T: Into<Element<'a, Message>>>(
         .width(Length::Fill)
         .into();
 
-    // Tertiary rail is overlaid on the content area at the left edge,
-    // y-aligned with the sidebar's rails row. The content layout stays
-    // 100% fixed — when the tertiary rail opens it "slides out" on top
-    // of the content's (usually empty) left padding without the content
-    // column itself shifting right.
-    let content_with_overlay: Element<'_, Message> = match nav::tertiary_rail(menu, &nav_ctx) {
-        Some(tert) => {
-            let overlay: Element<'_, Message> = Column::new()
-                .push(Space::new().height(Length::Fixed(nav::TERTIARY_TOP_OFFSET)))
-                .push(Row::new().push(tert).push(Space::new().width(Length::Fill)))
-                .into();
-            iced::widget::stack![content_column, overlay].into()
-        }
-        None => content_column,
+    dashboard_shell_with_info(
+        menu,
+        cache,
+        content_column,
+        cube_name,
+        avatar_handle,
+        lightning_address,
+    )
+}
+
+/// Use the same shell for panels with their own scroll handling, such as P2P
+/// chat. `body` owns its content and warnings; the shell owns all navigation.
+pub fn dashboard_shell<'a, T: Into<Element<'a, Message>>>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    body: T,
+) -> Element<'a, Message> {
+    dashboard_shell_with_info(
+        menu,
+        cache,
+        body.into(),
+        &cache.cube_name,
+        cache.avatar_handle.as_ref(),
+        cache.lightning_address.as_deref(),
+    )
+}
+
+fn dashboard_shell_with_info<'a>(
+    menu: &'a Menu,
+    cache: &'a Cache,
+    content_column: Element<'a, Message>,
+    cube_name: &'a str,
+    avatar_handle: Option<&'a iced::widget::image::Handle>,
+    lightning_address: Option<&'a str>,
+) -> Element<'a, Message> {
+    // Passkey Cubes used to be exempt from this banner, because there was no
+    // way for one to back its seed up. There is now (**I11**), so an
+    // un-backed-up passkey Cube gets the same nudge as any other — it is the
+    // Cube that most needs it.
+    let show_backup_warning = !cache.current_cube_backed_up;
+    let nav_ctx = nav::NavContext {
+        has_vault: cache.has_vault,
+        has_imported_bitcoin: cache.has_imported_bitcoin,
+        has_p2p: cache.has_p2p,
+        network: cache.chain(),
+        p2p_test_coordinator: cache.p2p_test_coordinator,
+        marketplace_flags: cache.marketplace_flags,
+        liquid_gate: cache.liquid_gate,
+        btcb2_server_enabled: cache.btcb2_server_enabled,
+        btcb2_already_claimed: cache.btcb2_already_claimed,
+        btcb2_claim_resume: cache.btcb2_claim_resume,
+        cube_name,
+        lightning_address,
+        avatar: avatar_handle,
+        theme_mode: cache.theme_mode,
+        connect_authenticated: cache.sidebar_connect_signed_in,
+        connect_email: cache.connect_email.as_deref(),
+        connect_stream_status: &cache.connect_stream_status,
     };
 
-    Row::new()
-        .push(nav::sidebar(menu, &nav_ctx))
-        .push(content_with_overlay)
+    let shell_state = nav::shell::ShellState {
+        switcher_open: cache.cube_switcher_open,
+        lock_confirmation: cache.cube_lock_confirmation,
+        tools_open: cache.vault_tools_open,
+        backup_attention: show_backup_warning,
+    };
+    Column::new()
+        .push(nav::shell::top_bar(&nav_ctx))
+        .push(nav::split::ShellSplit::new(
+            nav::shell::sidebar(menu, &nav_ctx, shell_state),
+            content_column,
+        ))
         .width(Length::Fill)
         .height(Length::Fill)
         .into()
@@ -500,8 +468,8 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, &'a str)>>(
     };
 
     let centered = iced::widget::row![
-        // offset the toast past the two-rail nav sidebar
-        iced::widget::Space::new().width(nav::SIDEBAR_BASE_WIDTH),
+        // Offset notifications past the full-width Cube shell.
+        iced::widget::Space::new().width(nav::shell::FULL_WIDTH),
         // center toasts horizontally
         iced::widget::Space::new().width(iced::Length::Fill),
         iced::widget::Column::from_iter(

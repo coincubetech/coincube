@@ -921,6 +921,65 @@ impl GUI {
                 }
                 Task::none()
             }
+            // A Cube can still be open in another tab or split pane in this
+            // intermediate shell release. Lock is a Cube-wide action: stop
+            // every sibling App with the same on-disk identity before the
+            // originating tab wipes the session and returns to Home.
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(inner.as_ref(), tab::Message::LockCubeToLauncher) =>
+            {
+                let identity = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::App(app) => Some((
+                            app.datadir().clone(),
+                            app.cube_settings().network,
+                            app.cube_settings().id.clone(),
+                        )),
+                        _ => None,
+                    });
+                let Some((root, chain, cube_id)) = identity else {
+                    return Task::none();
+                };
+                let mut empty_panes = Vec::new();
+                for (&other_pane_id, pane) in self.panes.iter_mut() {
+                    let mut index = pane.tabs.len();
+                    while index > 0 {
+                        index -= 1;
+                        let sibling = &pane.tabs[index];
+                        if other_pane_id == pane_id && sibling.id == tab_id {
+                            continue;
+                        }
+                        let same_cube = matches!(&sibling.state, tab::State::App(app)
+                            if crate::chain::same_path(root.path(), app.datadir().path())
+                                && app.cube_settings().network == chain
+                                && app.cube_settings().id == cube_id);
+                        if same_cube {
+                            pane.close_tab(index);
+                        }
+                    }
+                    if pane.tabs.is_empty() {
+                        empty_panes.push(other_pane_id);
+                    }
+                }
+                for empty in empty_panes {
+                    self.panes.close(empty);
+                    if self.focus == Some(empty) {
+                        self.focus = Some(pane_id);
+                    }
+                }
+                if let Some(pane) = self.panes.get_mut(pane_id) {
+                    pane.update(
+                        pane::Message::tab(tab_id, tab::Message::LockCubeToLauncher),
+                        &self.config,
+                    )
+                    .map(move |message| Message::Pane(pane_id, message))
+                } else {
+                    Task::none()
+                }
+            }
             // In case of cube deletion, remove any tab where the cube/wallet is currently running.
             Message::Pane(p, pane::Message::Tab(t, inner))
                 if matches!(inner.as_ref(), tab::Message::Launch(_)) =>
@@ -2473,6 +2532,75 @@ mod fork_auth_revocation_tests {
             }
         }
         app::session::close();
+    }
+}
+
+#[cfg(test)]
+mod lock_cube_dispatch_tests {
+    use super::*;
+
+    #[test]
+    fn lock_closes_same_cube_across_panes_but_preserves_an_unrelated_cube() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let root_path =
+            std::env::temp_dir().join(format!("cube-lock-siblings-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let (first, _) = crate::app::claim_step1_tests::bitcoin_app(&root_path);
+        let same_cube_id = first.cube_settings().id.clone();
+        let sibling = crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
+        let same_pane_sibling =
+            crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
+        let (unrelated, _) = crate::app::claim_step1_tests::bitcoin_app(&root_path);
+        let unrelated_id = unrelated.cube_settings().id.clone();
+        let mut first_pane = pane::Pane::new_with_tab(tab::State::App(first));
+        first_pane
+            .tabs
+            .push(tab::Tab::new(2, tab::State::App(unrelated)));
+        first_pane
+            .tabs
+            .push(tab::Tab::new(3, tab::State::App(same_pane_sibling)));
+        let (mut panes, origin) = pane_grid::State::new(first_pane);
+        let (other, _) = panes
+            .split(
+                pane_grid::Axis::Vertical,
+                origin,
+                pane::Pane::new_with_tab(tab::State::App(sibling)),
+            )
+            .unwrap();
+        let mut gui = GUI {
+            panes,
+            focus: Some(origin),
+            config: Config::new(root, None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        };
+
+        drop(gui.update(Message::Pane(
+            origin,
+            pane::Message::tab(1, tab::Message::LockCubeToLauncher),
+        )));
+        let pane = gui.panes.get(origin).expect("origin remains on Launcher");
+        assert!(matches!(pane.tabs[0].state, tab::State::Home(_)));
+        assert_eq!(
+            pane.tabs.len(),
+            2,
+            "same-pane sibling was stopped and removed"
+        );
+        assert!(matches!(&pane.tabs[1].state, tab::State::App(app)
+            if app.cube_settings().id == unrelated_id));
+        assert!(gui.panes.get(other).is_none(), "empty sibling pane closed");
+        assert_eq!(gui.focus, Some(origin));
+
+        drop(gui);
+        let _ = std::fs::remove_dir_all(root_path);
     }
 }
 
