@@ -249,6 +249,7 @@ httpmock = "0.7"
 [features]
 # Experimental native-consent wallet proposal demo. Never enabled by default.
 mcp-proposals = ["coincube-mcp/native-proposals"]
+mcp-transactions = ["coincube-mcp/native-transactions"]
 # Explicit opt-in for disposable loopback regtest integration.
 regtest-harness = ["coincubed/regtest-harness"]
 # Opt-in tests that hit a real `coincube-api` dev endpoint. Requires

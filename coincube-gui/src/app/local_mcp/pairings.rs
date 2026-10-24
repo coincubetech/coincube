@@ -96,6 +96,12 @@ pub(super) enum Scope {
     Proposal,
     /// Separately consented public-key assembly; never native creation approval.
     WalletCreation,
+    /// Separate unsigned transaction permission; does not include reads/signing.
+    TransactionPreparation {
+        wallet: String,
+        descriptor: String,
+        opaque: String,
+    },
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]

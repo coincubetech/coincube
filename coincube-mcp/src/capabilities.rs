@@ -74,6 +74,11 @@ pub struct Capabilities {
     pub proposal_support: Option<ProposalSupport>,
     /// Whether an MCP call can create a wallet. Always false for this design.
     pub wallet_creation_via_mcp: bool,
+    /// Unsigned native transaction preparation is implemented in this build.
+    pub transaction_preparation: bool,
+    /// Explicit first-slice limits, not current client permission.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_support: Option<TransactionSupport>,
     /// Whether the MCP surface exports public keys or descriptors.
     pub public_key_material: bool,
     /// Whether the MCP surface exports secrets or offers signing/broadcast.
@@ -109,6 +114,25 @@ pub struct ProposalSupport {
     /// The owner's Cube Recovery Kit encryption key is never a Vault signer.
     pub owner_recovery_key_is_vault_signer: bool,
 }
+/// Regtest unsigned-payment constraints; signing and broadcasting stay native.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct TransactionSupport {
+    /// Only Bitcoin Regtest is eligible.
+    pub network: String,
+    /// Exact integer satoshis only; no implicit fiat conversion.
+    pub amount_unit: String,
+    /// Bounded memory per paired client and unlock.
+    pub max_drafts_per_session: usize,
+    /// Bounded recipient count; self-send is excluded.
+    pub max_recipients: usize,
+    /// Caller must supply a total-fee ceiling.
+    pub explicit_fee_limit_required: bool,
+    /// Complete unsigned PSBT stays in Tenshu.
+    pub psbt_export_via_mcp: bool,
+    /// Native review and user signing are required.
+    pub native_signing_required: bool,
+}
 impl Capabilities {
     /// Describe only operations actually implemented in this build.
     pub fn current() -> Self {
@@ -135,6 +159,18 @@ impl Capabilities {
                 owner_recovery_key_is_vault_signer: false,
             }),
             wallet_creation_via_mcp: false,
+            transaction_preparation: cfg!(feature = "native-transactions"),
+            transaction_support: cfg!(feature = "native-transactions").then(|| {
+                TransactionSupport {
+                    network: "regtest".into(),
+                    amount_unit: "sats".into(),
+                    max_drafts_per_session: crate::transaction::MAX_DRAFTS,
+                    max_recipients: crate::transaction::MAX_RECIPIENTS,
+                    explicit_fee_limit_required: true,
+                    psbt_export_via_mcp: false,
+                    native_signing_required: true,
+                }
+            }),
             public_key_material: false,
             secrets_or_signing: false,
         }

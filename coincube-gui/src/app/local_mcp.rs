@@ -12,6 +12,8 @@ use std::sync::Arc;
 #[cfg(any(unix, windows))]
 use std::time::Duration;
 mod pairings;
+#[cfg(feature = "mcp-transactions")]
+pub(crate) mod transactions;
 
 /// Remove only the selected Cube's pairing files, never its keystore/seed.
 pub(crate) fn remove_cube_pairings(
@@ -28,11 +30,17 @@ struct PairedRuntime {
     #[cfg(feature = "mcp-proposals")]
     proposals: Option<Arc<wire::proposal::Store>>,
     // Last field: ownership outlives locator cleanup and server teardown.
+    #[cfg(feature = "mcp-transactions")]
+    transactions: Option<Arc<transactions::Service>>,
     _registry_owner: Arc<std::fs::File>,
 }
 impl Drop for PairedRuntime {
     fn drop(&mut self) {
         self.server.grant.revoke();
+        #[cfg(feature = "mcp-transactions")]
+        if let Some(service) = &self.transactions {
+            service.revoke();
+        }
         #[cfg(feature = "mcp-proposals")]
         if let Some(store) = &self.proposals {
             store.revoke();
@@ -60,6 +68,12 @@ pub enum Message {
     CopyConfig,
     /// Pair this client persistently with exactly the displayed scope.
     Pair,
+    /// Separate consent for unsigned Regtest transaction preparation.
+    #[cfg(feature = "mcp-transactions")]
+    Transactions(bool),
+    /// Native-only opening of the exact prepared unsigned PSBT.
+    #[cfg(feature = "mcp-transactions")]
+    ReviewTransaction { client_id: String, draft_id: String },
     /// Revoke one stored client; ordinary locks never perform this action.
     RevokePair(String),
     /// Copy a stable private configuration for a stored client.
@@ -94,6 +108,8 @@ pub struct Settings {
     proposals: Option<Arc<wire::proposal::Store>>,
     #[cfg(any(unix, windows))]
     server: Option<wire::ipc::Server>,
+    #[cfg(feature = "mcp-transactions")]
+    transactions_allowed: bool,
     pairing_location: Option<pairings::Location>,
     pairing_store: Option<pairings::Store>,
     paired: Vec<PairedRuntime>,
@@ -109,6 +125,8 @@ pub(crate) struct PairingContext<'a> {
     pub daemon: Option<Arc<dyn Daemon + Send + Sync>>,
     pub supported: bool,
     pub proposal_supported: bool,
+    #[cfg(feature = "mcp-transactions")]
+    pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
     fn paired_clients_view(&self) -> Element<'_, view::Message> {
@@ -133,6 +151,7 @@ impl Settings {
                         .collect::<Vec<_>>()
                         .join(", ")
                 }
+                pairings::Scope::TransactionPreparation { .. } => "Unsigned Regtest transaction preparation only; native review and user signing required".into(),
                 pairings::Scope::Proposal => "Regtest wallet proposals only".into(),
                 pairings::Scope::WalletCreation => {
                     "Regtest wallet preparation with public keys; native creation approval required"
@@ -166,6 +185,16 @@ impl Settings {
                 ]
                 .spacing(8),
             );
+            #[cfg(feature = "mcp-transactions")]
+            if let Some(service) = runtime
+                .filter(|_| available)
+                .and_then(|v| v.transactions.as_ref())
+            {
+                for draft in service.summaries() {
+                    content = content.push(text(format!("Unsigned transaction: {} sats to {} recipient(s), fee {} sats. Review every address and amount before signing.", draft.amount_sats, draft.recipients.len(), draft.fee_sats)))
+                        .push(button("Review prepared transaction in Tenshu").on_press(msg(Message::ReviewTransaction { client_id: client.id.clone(), draft_id: draft.draft_id })));
+                }
+            }
             #[cfg(feature = "mcp-proposals")]
             if let Some(proposal) = runtime
                 .filter(|_| available)
@@ -236,6 +265,8 @@ impl Settings {
             daemon,
             supported,
             proposal_supported,
+            #[cfg(feature = "mcp-transactions")]
+            last_poll_at_startup,
         } = context;
         if super::session::generation_for(cube_id).is_none() || self.pairing_poisoned {
             return;
@@ -299,6 +330,8 @@ impl Settings {
                 pairings::Scope::Proposal | pairings::Scope::WalletCreation
             )
             .then(|| Arc::new(wire::proposal::Store::default()));
+            #[cfg(feature = "mcp-transactions")]
+            let mut transactions = None;
             let built: Option<(Arc<dyn wire::Reader>, wire::ipc::Grant)> = match &client.scope {
                 pairings::Scope::Read {
                     wallet: expected_wallet,
@@ -337,6 +370,45 @@ impl Settings {
                     }
                     _ => None,
                 },
+                #[cfg(feature = "mcp-transactions")]
+                pairings::Scope::TransactionPreparation {
+                    wallet: expected_wallet,
+                    descriptor,
+                    opaque,
+                } if supported && chain == crate::chain::ChainId::Regtest => {
+                    match (&wallet, &daemon) {
+                        (Some(wallet), Some(daemon))
+                            if wallet.id().to_string() == *expected_wallet
+                                && pairings::descriptor_identity(wallet) == *descriptor
+                                && wallet.chain == chain
+                                && wallet.main_descriptor.as_vault().is_some()
+                                && daemon.backend().is_embedded() =>
+                        {
+                            wire::ipc::Grant::paired_transactions(
+                                opaque.clone(),
+                                client.credential.clone(),
+                                guard,
+                            )
+                            .ok()
+                            .map(|grant| {
+                                let service = Arc::new(transactions::Service::new(
+                                    wallet
+                                        .main_descriptor
+                                        .as_vault()
+                                        .expect("checked Vault")
+                                        .clone(),
+                                    daemon.clone(),
+                                    opaque.clone(),
+                                    last_poll_at_startup,
+                                ));
+                                let reader: Arc<dyn wire::Reader> = service.clone();
+                                transactions = Some(service);
+                                (reader, grant)
+                            })
+                        }
+                        _ => None,
+                    }
+                }
                 pairings::Scope::Proposal if proposal_supported => {
                     #[cfg(feature = "mcp-proposals")]
                     {
@@ -391,6 +463,8 @@ impl Settings {
                         server,
                         #[cfg(feature = "mcp-proposals")]
                         proposals,
+                        #[cfg(feature = "mcp-transactions")]
+                        transactions,
                         _registry_owner: store.owner(),
                     });
                 }
@@ -416,6 +490,25 @@ impl Settings {
             return;
         }
         let scope = match (&wallet, &daemon) {
+            #[cfg(feature = "mcp-transactions")]
+            (Some(wallet), Some(daemon))
+                if self.transactions_allowed
+                    && self.wallet_allowed
+                    && !self.capabilities.iter().any(|v| *v)
+                    && wallet.chain == crate::chain::ChainId::Regtest
+                    && wallet.main_descriptor.as_vault().is_some()
+                    && daemon.backend().is_embedded()
+                    && self
+                        .pairing_location
+                        .as_ref()
+                        .is_some_and(|v| v.chain_matches(wallet.chain)) =>
+            {
+                pairings::Scope::TransactionPreparation {
+                    wallet: wallet.id().to_string(),
+                    descriptor: pairings::descriptor_identity(wallet),
+                    opaque: uuid::Uuid::new_v4().to_string(),
+                }
+            }
             (Some(wallet), Some(daemon))
                 if self.wallet_allowed
                     && self.capabilities.iter().any(|v| *v)
@@ -508,6 +601,8 @@ impl Settings {
         cube_id: &str,
     ) -> Option<String> {
         match message {
+            #[cfg(feature = "mcp-transactions")]
+            Message::ReviewTransaction { .. } => return None,
             Message::Enable(value) => {
                 self.revoke();
                 self.enabled = value && cfg!(any(unix, windows));
@@ -524,6 +619,10 @@ impl Settings {
             Message::Capability(index, value) if index < 3 => {
                 self.revoke_legacy();
                 self.capabilities[index] = value;
+                #[cfg(feature = "mcp-transactions")]
+                if value {
+                    self.transactions_allowed = false;
+                }
             }
             Message::ClientName(value) => {
                 self.revoke_legacy();
@@ -543,6 +642,14 @@ impl Settings {
                 self.creation_allowed = value;
                 if value {
                     self.proposals_allowed = false;
+                }
+            }
+            #[cfg(feature = "mcp-transactions")]
+            Message::Transactions(value) => {
+                self.revoke_legacy();
+                self.transactions_allowed = value;
+                if value {
+                    self.capabilities = [false; 3];
                 }
             }
             Message::Revoke => self.revoke(),
@@ -702,6 +809,51 @@ impl Settings {
         ))
     }
 
+    #[cfg(feature = "mcp-transactions")]
+    pub(crate) fn prepared_transaction(
+        &self,
+        client_id: &str,
+        draft_id: &str,
+        wallet: &Wallet,
+    ) -> Option<transactions::NativeDraft> {
+        if wallet.chain != crate::chain::ChainId::Regtest {
+            return None;
+        }
+        let client = self
+            .pairing_store
+            .as_ref()?
+            .clients()
+            .iter()
+            .find(|c| c.id == client_id)?;
+        match &client.scope {
+            pairings::Scope::TransactionPreparation {
+                wallet: expected,
+                descriptor,
+                ..
+            } if *expected == wallet.id().to_string()
+                && *descriptor == pairings::descriptor_identity(wallet) => {}
+            _ => return None,
+        }
+        let runtime = self
+            .paired
+            .iter()
+            .find(|v| v.id == client_id && v.server.grant.active())?;
+        let native = runtime.transactions.as_ref()?.native(draft_id)?;
+        runtime.server.grant.active().then_some(native)
+    }
+
+    fn transaction_selection(&self) -> bool {
+        #[cfg(feature = "mcp-transactions")]
+        {
+            self.transactions_allowed
+                && self
+                    .pairing_location
+                    .as_ref()
+                    .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest))
+        }
+        #[cfg(not(feature = "mcp-transactions"))]
+        false
+    }
     /// Render consent controls and warn that the configured AI provider may receive data.
     pub fn view_for_cube(
         &self,
@@ -718,7 +870,7 @@ impl Settings {
         let mut content = column![
             h3("AI access"),
             text("Connect a local AI client to this Cube's Vault. Your AI provider may receive financial information. Only enable access for a client you trust."),
-            text("Read-only. No keys, signing, payments or wallet changes. Paired clients remain trusted until revoked. Wallet access pauses on lock or close and resumes after ordinary unlock."),
+            text(if cfg!(feature = "mcp-transactions") && self.pairing_location.as_ref().is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest)) { "Choose read access or separately scoped unsigned transaction preparation. No keys, signing or broadcast through MCP. Pairing remains trusted until revoked; access pauses on lock/close and resumes after ordinary unlock. Unsigned drafts end with the session." } else { "Read-only. No keys, signing, payments or wallet changes. Paired clients remain trusted until revoked. Wallet access pauses on lock or close and resumes after ordinary unlock." }),
         ].spacing(16);
         if !cfg!(any(unix, windows)) || !supported {
             return content.push(text("MCP currently supports Bitcoin Vaults on macOS, Linux and Windows. This wallet is unavailable for MCP.")).into();
@@ -754,10 +906,21 @@ impl Settings {
                         .on_toggle(move |v| message(Message::Capability(i, v))),
                 );
             }
+            #[cfg(feature = "mcp-transactions")]
+            if self
+                .pairing_location
+                .as_ref()
+                .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest))
+            {
+                content = content.push(checkbox(self.transactions_allowed)
+                    .label("Prepare unsigned Regtest transactions (separate from wallet reads)")
+                    .on_toggle(move |v| message(Message::Transactions(v))))
+                    .push(text("Exact satoshi recipients and explicit fee limits only. The PSBT stays in Tenshu; review recipient addresses, amounts, fees and change before signing. Up to 8 construction attempts per client and unlock, including failed engine attempts. No self-send, recovery selection or fiat conversion."));
+            }
             content = content.push(
                 button("Pair client until revoked").on_press_maybe(
                     (self.wallet_allowed
-                        && self.capabilities.iter().any(|v| *v)
+                        && (self.capabilities.iter().any(|v| *v) || self.transaction_selection())
                         && !self.client_name.trim().is_empty())
                     .then(|| message(Message::Pair)),
                 ),
@@ -915,6 +1078,8 @@ impl VaultReader {
             wire::Request::PrepareProposal(_)
                 | wire::Request::PrepareCreation(_)
                 | wire::Request::Proposal(_)
+                | wire::Request::PrepareTransaction(_)
+                | wire::Request::Transaction(_)
         ) {
             return Err(wire::Error::AccessDenied);
         }
@@ -938,7 +1103,9 @@ impl VaultReader {
         match request {
             wire::Request::PrepareProposal(_)
             | wire::Request::PrepareCreation(_)
-            | wire::Request::Proposal(_) => Err(wire::Error::AccessDenied),
+            | wire::Request::Proposal(_)
+            | wire::Request::PrepareTransaction(_)
+            | wire::Request::Transaction(_) => Err(wire::Error::AccessDenied),
             wire::Request::List(_) => Ok(wire::Response::List(wire::WalletList {
                 wallets: vec![wire::WalletMetadata {
                     wallet_id: self.wallet_id.clone(),
@@ -1213,6 +1380,8 @@ mod tests {
                     daemon: Some(daemon.clone()),
                     supported: true,
                     proposal_supported: false,
+                    #[cfg(feature = "mcp-transactions")]
+                    last_poll_at_startup: None,
                 })
             };
             let configuration = |settings: &mut Settings, id: &str| -> Value {
@@ -1399,6 +1568,8 @@ mod tests {
                 daemon: Some(daemon.clone()),
                 supported: true,
                 proposal_supported: false,
+                #[cfg(feature = "mcp-transactions")]
+                last_poll_at_startup: None,
             });
             assert!(
                 settings.paired.is_empty(),
@@ -1480,12 +1651,14 @@ mod tests {
             let tools = discovered["tools"].as_array().unwrap();
             let names: std::collections::BTreeSet<_> = tools.iter()
                 .map(|tool| tool["name"].as_str().unwrap()).collect();
-            assert_eq!(tools.len(), 8);
+            assert_eq!(tools.len(), 10);
             assert_eq!(names, std::collections::BTreeSet::from([
                 "tenshu_get_capabilities", "tenshu_list_wallets",
                 "tenshu_get_wallet_summary", "tenshu_get_transactions",
                 "tenshu_get_wallet_policy_summary", "tenshu_prepare_wallet_proposal",
                 "tenshu_get_wallet_proposal", "tenshu_prepare_wallet_creation",
+                "tenshu_prepare_transaction",
+                "tenshu_get_prepared_transaction",
             ]));
             let call = |id, name: &str, arguments: Value| json!({"jsonrpc":"2.0", "id":id, "method":"tools/call", "params":{"name":name,"arguments":arguments}});
             let listed = response(&mut stdin, &mut stdout, call(3, "tenshu_list_wallets", json!({}))).await;
@@ -1510,6 +1683,15 @@ mod tests {
             }))).await;
             assert_eq!(setup_denied["isError"], true);
             assert_eq!(setup_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            let transaction_denied = response(&mut stdin, &mut stdout, call(11, "tenshu_prepare_transaction", json!({
+                "wallet_id": id, "request_id": "read-grant-must-not-prepare",
+                "recipients": [{"address": "bcrt1qqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqdku202", "amount_sats": 10000}],
+                "fee_rate_sat_vb": 2, "max_fee_sats": 1000
+            }))).await;
+            assert_eq!(transaction_denied["isError"], true);
+            assert_eq!(transaction_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
+            let draft_denied = response(&mut stdin, &mut stdout, call(12, "tenshu_get_prepared_transaction", json!({"wallet_id": id, "draft_id": "foreign"}))).await;
+            assert_eq!(draft_denied["structuredContent"], json!({"error":{"code":"access_denied"}}));
             super::super::session::close();
             let locked = response(&mut stdin, &mut stdout, call(8, "tenshu_get_wallet_summary", json!({"wallet_id":id}))).await;
             assert_eq!(locked["structuredContent"]["error"]["code"], "access_denied");
@@ -1846,6 +2028,8 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
+                    #[cfg(feature = "mcp-transactions")]
+                    last_poll_at_startup: None,
                 })
             };
             settings.update(Message::Creation(true), None, None, true, cube);
@@ -1950,6 +2134,8 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
+                    #[cfg(feature = "mcp-transactions")]
+                    last_poll_at_startup: None,
                 })
             };
             let pair = |settings: &mut Settings, name: &str| {

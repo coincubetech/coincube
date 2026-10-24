@@ -18,13 +18,24 @@ pub fn wallet(
     root: &std::path::Path,
     descriptor: coincube_core::descriptors::CoincubeDescriptor,
 ) -> (Config, DaemonHandle) {
+    wallet_on_chain(root, descriptor, bitcoin::Network::Bitcoin.into())
+}
+/// Same disposable wallet engine, explicitly bound to Bitcoin Regtest.
+pub fn regtest_wallet(
+    root: &std::path::Path,
+    descriptor: coincube_core::descriptors::CoincubeDescriptor,
+) -> (Config, DaemonHandle) {
+    wallet_on_chain(root, descriptor, bitcoin::Network::Regtest.into())
+}
+fn wallet_on_chain(
+    root: &std::path::Path,
+    descriptor: coincube_core::descriptors::CoincubeDescriptor,
+    chain: coincube_core::chain::ChainId,
+) -> (Config, DaemonHandle) {
     let secp = Secp256k1::verification_only();
     let database = SqliteDb::new(
         root.join("wallet.sqlite3"),
-        Some(FreshDbOptions::new(
-            bitcoin::Network::Bitcoin.into(),
-            descriptor.clone(),
-        )),
+        Some(FreshDbOptions::new(chain, descriptor.clone())),
         &secp,
     )
     .unwrap();
@@ -73,9 +84,15 @@ pub fn wallet(
     }]);
     connection.confirm_coins(&[(outpoint, 1, 1)]);
     connection.update_tip(&DummyBitcoind::new().tip);
+    if chain == coincube_core::chain::ChainId::Regtest {
+        // This fixture's synthetic confirmed coins represent a completed poll.
+        // Populate its corresponding readiness metadata deterministically;
+        // production synchronization checks are not bypassed.
+        connection.set_wallet_last_poll_timestamp(1).unwrap();
+    }
     drop(connection);
     let config = Config::new(
-        BitcoinConfig::new(bitcoin::Network::Bitcoin.into(), Duration::from_secs(3600)),
+        BitcoinConfig::new(chain, Duration::from_secs(3600)),
         None,
         log::LevelFilter::Warn,
         descriptor.clone(),

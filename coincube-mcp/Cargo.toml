@@ -8,6 +8,7 @@ license = "BSD-3-Clause"
 default = []
 # Only companion builds paired with the experimental native Regtest workflow.
 native-proposals = []
+native-transactions = []
 adapter = ["dep:rmcp"]
 
 [[bin]]
