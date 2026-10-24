@@ -894,7 +894,7 @@ class Component extends DCLogic {
     return {
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       hideP:S.hide?'true':'false',shown:!S.hide,hidden:S.hide,toggleHide:()=>set({hide:!S.hide}),
       lockAsk:!!S.lockAsk,lockIdle:!S.lockAsk,askLock:()=>set({lockAsk:true}),cancelLock:()=>set({lockAsk:false}),
       cube:{name:b2b?'Blake workspace':testNC?'Lab':'Everyday',net:b2b?'Bitcoin Blake2b':testNC?'Testnet4':'Bitcoin mainnet',main:!b2b&&!testNC,b2b:b2b,test:testNC,alt:b2b||testNC,vault:b2b?'Vault · Blake workspace':'Vault · Lab'},

@@ -988,7 +988,7 @@ class Component extends DCLogic {
     ].concat(nodeRow ? [nodeRow] : []).map((r) => ({ k: r[0], v: r[1], tone: r[2] }));
 
     return {
-      themeClass: (THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       steps, cubeName,
       netName: N.label, netIsB2b: b2b && !N.test, netNotB2b: !(b2b && !N.test), netHasTag: !!N.tag, b2bFam: b2b, notB2bFam: !b2b, netTag: N.tag, netTagCls: N.test ? 'test' : 'b2b',

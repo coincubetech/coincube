@@ -521,7 +521,7 @@ class Component extends DCLogic {
     const attn=disc?{text:'Reconnect required',pick:go('settings')}:{text:'Backup not confirmed',pick:go('backup')};
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'', motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''), motionClass:P.reducedMotion?'reduced':'',
       cubeName:cubeName, vaultAlias:vaultAlias,
       menuOpen:S.menu, toggleMenu:()=>self.setState({menu:!S.menu,lock:false}),
       lockAsk:!!S.lock, lockIdle:!S.lock, askLock:()=>self.setState({lock:true}), cancelLock:()=>self.setState({lock:false}),

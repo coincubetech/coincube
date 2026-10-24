@@ -574,7 +574,7 @@ class Component extends DCLogic {
       :hidden?'Prototype · synthetic data · gate: server flag off and not enrolled, so the Duress entry is hidden (not greyed)'
       :'Prototype · synthetic account and contacts · gate: server flag or enrolment, plus Pro/Estate entitlement · copy quoted from the app';
     return {
-      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       isActive:active,notActive:!active,act:act,vf:vf,foot:foot,I:I,
       navItems:navItems,floorCubes:floorCubes,v:v,go:go,st:st,kits:kits,en:en,ds:ds,cl:cl,ct:ct
     };

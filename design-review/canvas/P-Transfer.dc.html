@@ -654,7 +654,7 @@ class Component extends DCLogic {
     const titles={fromto:'Transfer',pickcube:'Transfer',unlock:'Transfer',amount:'Transfer',quote:'Transfer',done:'Transfer',split:'Bitcoin Blake2b copy'};
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       hideP:hide?'true':'false',shown:!hide,hidden:hide,
       lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
       toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),

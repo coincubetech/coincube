@@ -557,7 +557,7 @@ class Component extends DCLogic {
     const vaultish=['hardware','keychain','labels','warnings'].indexOf(sec)>=0;
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       lockIdle:!self.state.lockAsk,lockAsk:!!self.state.lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
       signedIn:!out2,signedOut:out2,acctTitle:out2?'Connect account · Signed out':'alex@example.test · Signed in',connTitle:'Cube service · '+(out2?'Not checked':'Connected'),
       nav:{vault:vaultish?'on':'',vaultCur:vaultish?'page':'false',settings:(sec==='pair'||sec==='export')?'on':'',settingsCur:(sec==='pair'||sec==='export')?'page':'false'},

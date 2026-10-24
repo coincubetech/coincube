@@ -792,7 +792,7 @@ class Component extends DCLogic {
     };
 
     return {
-      themeClass: (THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       topBack: !launcher, topNet: launcher, netChip: isB2bNet ? 'Network: Bitcoin Blake2b' : 'Network: Bitcoin',
       connWord: signedOut ? 'Signed out' : 'Signed in',
