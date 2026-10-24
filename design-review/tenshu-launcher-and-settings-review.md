@@ -716,3 +716,9 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Robert:** the arrow icons were hard to see and should be white; the Launcher's List screen was missing from the prototype.
 
 **Applied (P-Launcher, P-AppPrefs):** the paging arrows are now white on the panel background with a heavier stroke and a lighter ring (ink-coloured in the light theme). The Launcher gains the List style the app already offers: App preferences › Launcher › Launcher style writes a device flag, and the Launcher also switches to List under reduced motion, matching the app's automatic fallback. The list shows every visible Cube in one scrolling column with avatar, name and lock state, network icon and tag, wallet icons, a short backup state and an Open / Go to Cube action. Selecting a row opens a 440 px side panel with the same details, PIN/passkey unlock and network-checks content the cube faces show, so the full Launcher journey works in both styles. Paging arrows and the floor are hidden in List. Review lever `launcherStyle` (auto · cubes · list); auto follows the device flag and reduced motion.
+
+## Launcher: light-theme examples for Cubes and List (2026-10-24, canvas v104)
+
+**Robert:** show a light version of the Launcher for the Cubes view and for the List view.
+
+**Applied:** two artboards at the end of the Launcher row, `P-Launcher-Light` and `P-Launcher-Light-List`, each mounting the real `P-Launcher` with `theme=light` (and `launcher-style=list` for the second). They share the Launcher's fixtures and behaviour, so the light tokens already defined on `.tenshu.light` (background, panel, rail, ink, muted, line, floor and face colours, test-network edge, shadow) are shown without a second copy of the screen. The Launcher's own theme lever gives the same result on the main board.
