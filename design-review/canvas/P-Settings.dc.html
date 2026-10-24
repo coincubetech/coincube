@@ -376,6 +376,19 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </section>
         </sc-if>
 
+        <sc-if value="{{ sec.ai }}" hint-placeholder-val="{{ false }}">
+          <section class="grp" aria-labelledby="h-ai">
+            <h3 id="h-ai">AI access</h3>
+            <p class="intro">Let the AI you already use operate this Cube through Tenshu's local connection. Tenshu stays the wallet engine; seeds, keys, PINs, passwords and passkeys never enter the conversation.</p>
+            <div class="rows">
+              <div class="row"><div class="rl"><p class="lb">Claude Desktop</p><p class="ds">Vault · Family savings, Spark · Daily spending · Read wallet information, Manage wallet setup · Available</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
+              <div class="row"><div class="rl"><p class="lb">Maple AI Desktop</p><p class="ds">Vault · Family savings · Read wallet information · Paused, Cube was locked</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
+              <div class="row"><div class="rl"><p class="lb">Pair a client</p><p class="ds">Pair once; access lasts until you revoke it. Each client gets only the Cubes, wallets and permissions you choose.</p></div><div class="rc"><a class="btn pri" href="P-AI-Access.dc.html">Open AI access</a></div></div>
+            </div>
+            <p class="cap" style="margin-top:12px">A local connection is not a private one: anything a paired client reads can be sent to its AI provider. In progress with a client: <a href="P-AI-Setup.dc.html" style="color:var(--acc-ink)">wallet setup</a> · <a href="P-AI-Transaction.dc.html" style="color:var(--acc-ink)">prepared transaction</a>.</p>
+          </section>
+        </sc-if>
+
         <!-- ======== DATA & EXPORTS (Cube) ======== -->
         <sc-if value="{{ sec.dataCube }}" hint-placeholder-val="{{ false }}">
           <section class="grp" aria-labelledby="h-dc">
@@ -670,7 +683,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </div>
 <p style="margin:12px 24px 0;font-size:12px;color:var(--muted)">More Settings screens: <a href="P-GapsAccount.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Recovery Kit mode, alerts scope, Avatar</a><a href="P-GapsWallets.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Node settings extras, RBF, feerate, Vault overview states</a><a href="P-GapsDetails.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Banners, checkout, Add to Cubes, Spark guard, batch label, share wallet, split entry</a></p>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","device","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","device","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","ai","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p){
     super(p);
@@ -696,7 +709,7 @@ class Component extends DCLogic {
 
     // scope + section: levers seed it, in-page clicks override until a lever changes
     const SC={
-      cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['data','Data & exports']]},
+      cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['ai','AI access'],['data','Data & exports']]},
       device:{label:'This device',line:'This device · every Cube on This Mac',tabs:[]},
       vault:{label:noVault?'Vault · none':'Vault · '+vaultAlias,line:(noVault?'Vault · none in this Cube':'Vault · '+vaultAlias)+' · '+net,tabs:[['wallet','Wallet & signers'],['node','Node'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
       spark:{label:hasSpark?'Spark · Daily spending':'Spark · unavailable',line:(hasSpark?'Spark · Daily spending':'Spark · unavailable')+' · '+net,tabs:[['spark','Spark'],['connections','Connections']]}
@@ -715,7 +728,7 @@ class Component extends DCLogic {
     // per-section flags
     const on=(sc,tb)=>!loading&&scope===sc&&tab===tb;
     const sec={
-      display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),dataCube:on('cube','data'),
+      display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),ai:on('cube','ai'),dataCube:on('cube','data'),
       device:!loading&&scope==='device',
       wallet:on('vault','wallet')&&hasVault,node:on('vault','node')&&hasVault,pair:on('vault','pair')&&hasVault,connVault:on('vault','connections')&&hasVault,
       vaultNone:!loading&&scope==='vault'&&noVault,

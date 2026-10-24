@@ -75,6 +75,9 @@ navigation.
 | Marketplace Buy/Sell, P2P (P-BuySell, P-P2P) | `app/view/buysell/**`, `app/view/p2p/**`, `app/state/buysell.rs` |
 | Duress, Members, Border Wallet, Delete, Signing (P-Duress, P-Members, P-BorderWallet, P-Delete, P-Signing) | `app/view/duress/**`, `app/view/connect/cube_members.rs`, `app/view/settings/local_signing.rs`, `app/view/vault/hw.rs`, `phone_signer/**` |
 | App preferences (P-AppPrefs), incl. the Developer-mode and Bitcoin Blake2b device toggles | `app/view/settings/general.rs`, `app/view/settings/about.rs`, `feature_flags.rs` (Blake2b is a runtime device setting now, not a Connect entitlement) |
+| AI access: paired clients, pairing, permissions, revoke (P-AI-Access, entry from Cube › Settings › AI access) | `app/local_mcp.rs` and the `coincube-mcp` crate on the `mcp` branch (today: one-hour grants, read capabilities, copied config). Planned: pairing that persists until revoked, scoped to Cubes/wallets, with three permissions (read · manage setup · prepare transactions). Keep the credential out of chat; keep the provider disclosure. |
+| AI-led wallet setup progress, handoffs, final native review (P-AI-Setup) | `installer/proposal.rs` and `installer/**` (today: experimental Regtest proposal → native key selection → exact-state review digest). Planned: the assistant orchestrates; Tenshu owns device actions, PIN/passkey, backup, the final review and admission. |
+| AI-prepared transaction draft and review (P-AI-Transaction) | New: a preparation capability over `coincube-core::spend` and the daemon's coin selection and fee estimation, with Tenshu's exchange rate; signing stays in `app/view/vault/spend/**` and the existing signers. No autonomous spending. |
 | Theme, type, components | `coincube-ui/src/theme/**` (`palette.rs` for tokens), `coincube-ui/src/font.rs`, `coincube-ui/src/component/**` |
 
 Do not touch `coincubed/`, `coincube-core/`, `coincube-spark-bridge/`, `services/unlock/`,
@@ -143,6 +146,12 @@ review doc section in parentheses.
    P-Connect, P-Create, P-Restore).
 8. **Activity, Transfer, Marketplace, Duress, Members, Signing, Border Wallet,
    Delete, App preferences, gap screens.** One PR per screen family.
+9. **AI access (on the `mcp` feature branch, not master).** Persistent pairing
+   and client management first (P-AI-Access), then AI-led setup orchestration
+   on top of the existing proposal/native-review path (P-AI-Setup), then
+   transaction preparation (P-AI-Transaction). Each screen carries Today /
+   Planned labels; the review doc section "AI access revised" has the exact
+   states and the current-vs-planned boundary.
 
 ## 6. Constraints that apply to every step
 
