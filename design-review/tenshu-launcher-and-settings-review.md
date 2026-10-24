@@ -755,3 +755,17 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 **Robert:** make a PR with the updated designs exported so Codex can work with them.
 
 **Applied:** `screens/dark/` (34 boards, device settings at their defaults) and `screens/light/` (the Light theme page, 33 boards including the Launcher List view), indexed in `screens/README.md`, and linked from `HANDOFF.md`. The canvas sources in `canvas/` match canvas v113.
+
+## Activity header, Settings scopes, balance eye (2026-10-24, canvas v114–v117)
+
+**Robert:** the Activity header is messy; move Ready, Loading and Failed to the right of the search field.
+
+**Applied:** the title row now holds only the title, the Cube line and, on the right, the result count with "N filters active · Clear filters" when filters are on. The Spark history prototype states (Ready, Loading, Failed) sit at the end of the filter row, after Search. The search placeholder is shortened to "Label, txid, hash or swap ID" so it fits.
+
+**Robert:** the "This device" Settings scope is unnecessary; remove it.
+
+**Applied:** Settings scopes are now Cube, Vault and Spark. The scope held only a link to App preferences (reachable from the Cube top bar on every screen) and a Stable Balance status that duplicates Spark › Stable Balance. Removed from Settings, the Overview settings index, Members and the Recovery Kit gap screen. Device-wide preferences live only in App preferences.
+
+**Robert:** the eye for showing and hiding balances is missing from the top bar on some screens.
+
+**Applied:** the Overview, the one Cube screen without it, now has the top-bar eye; it hides every balance on the page, and the Total and Wallets section eyes remain as finer controls. Every Cube screen's top bar now reads: account chip, Cube service chip, eye, App preferences. For Codex: implement it as one Cube-wide hide-balances flag shared by every screen; the prototype keeps it per board.

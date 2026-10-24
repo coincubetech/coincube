@@ -272,7 +272,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <sc-for list="{{ scopes }}" as="s" hint-placeholder-count="4">
             <button type="button" class="sb" aria-pressed="{{ s.pressed }}" title="{{ s.label }}" onClick="{{ s.pick }}">
               <sc-if value="{{ s.cube }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 1.75 15.5 5.5v7L9 16.25 2.5 12.5v-7z"/><path d="M2.5 5.5 9 9.25l6.5-3.75M9 9.25v7"/></svg></sc-if>
-              <sc-if value="{{ s.device }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><rect x="2" y="3" width="14" height="9.5" rx="1.5"/><path d="M6 15.5h6M9 12.5v3"/></svg></sc-if>
               <sc-if value="{{ s.vault }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
               <sc-if value="{{ s.spark }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
               <span>{{ s.label }}</span>
@@ -422,16 +421,6 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <div class="row"><div class="rl"><p class="lb">Labels</p><p class="ds">Standard format other wallets can read.</p></div><div class="rc"><button type="button" class="btn">Export…</button><button type="button" class="btn">Import…</button></div></div>
               <div class="row"><div class="rl"><p class="lb">Transactions</p><p class="ds">CSV. Fiat uses this Cube’s rate source.</p></div><div class="rc"><button type="button" class="btn">Export…</button></div></div>
               <div class="row"><div class="rl"><p class="lb">Plaintext descriptor</p><p class="ds">For hardware registration or other wallets.</p></div><div class="rc"><button type="button" class="btn">Export…</button></div></div>
-            </div>
-          </section>
-        </sc-if>
-
-        <!-- ======== THIS DEVICE ======== -->
-        <sc-if value="{{ sec.device }}" hint-placeholder-val="{{ false }}">
-          <section class="grp" aria-label="This device">
-            <div class="rows">
-              <div class="row"><div class="rl"><p class="lb">App preferences live in the Launcher</p></div><div class="rc"><a class="btn" href="P-AppPrefs.dc.html">Open App preferences</a></div></div>
-              <div class="row"><div class="rl"><p class="lbl-line"><span class="lb">Spark · Stable Balance</span><span class="st {{ dev.cls }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle class="gc" cx="9" cy="9" r="6.5"/><path class="g go" d="M6 9h6"/></svg>{{ dev.status }}</span></p><p class="ds">{{ dev.text }}</p></div><div class="rc"><sc-if value="{{ has.spark }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn" onClick="{{ go.spark }}">Review in Spark</button></sc-if></div></div>
             </div>
           </section>
         </sc-if>
@@ -684,7 +673,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </div>
 <p style="margin:12px 24px 0;font-size:12px;color:var(--muted)">More Settings screens: <a href="P-GapsAccount.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Recovery Kit mode, alerts scope, Avatar</a><a href="P-GapsWallets.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Node settings extras, RBF, feerate, Vault overview states</a><a href="P-GapsDetails.dc.html" style="font-size:12px;color:var(--muted);text-decoration:underline;text-underline-offset:3px;margin-right:12px">Banners, checkout, Add to Cubes, Spark guard, batch label, share wallet, split entry</a></p>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","device","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","ai","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"scope":{"editor":"enum","options":["cube","vault","spark"],"default":"cube","section":"Review"},"section":{"editor":"enum","options":["display","backup","payments","ai","data","wallet","node","pair","connections","spark"],"default":"display","section":"Review"},"reviewState":{"editor":"enum","options":["normal","loading","signedOut","cubeDisconnected","offlineNode","noVault","importedVault","testnetSparkUnavailable","longNames","saveFailure"],"default":"normal","section":"Review"},"pairStep":{"editor":"enum","options":["idle","picker","waiting","error","paired"],"default":"idle","section":"Review"},"lnState":{"editor":"enum","options":["existing","claim","checking","signed-out","disconnected","error"],"default":"existing","section":"Review"},"alertsState":{"editor":"enum","options":["auto","verified","unknown","signedOut","denied"],"default":"auto","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p){
     super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
@@ -713,7 +702,6 @@ class Component extends DCLogic {
     // scope + section: levers seed it, in-page clicks override until a lever changes
     const SC={
       cube:{label:'Cube · '+cubeName,line:'Cube · '+cubeName+' · '+net,tabs:[['display','Display & appearance'],['backup','Backup & protection'],['payments','Payment checks'],['ai','AI access'],['data','Data & exports']]},
-      device:{label:'This device',line:'This device · every Cube on This Mac',tabs:[]},
       vault:{label:noVault?'Vault · none':'Vault · '+vaultAlias,line:(noVault?'Vault · none in this Cube':'Vault · '+vaultAlias)+' · '+net,tabs:[['wallet','Wallet & signers'],['node','Node'],['pair','Pair with Keychain'],['connections','Connections'],['data','Data & exports']]},
       spark:{label:hasSpark?'Spark · Daily spending':'Spark · unavailable',line:(hasSpark?'Spark · Daily spending':'Spark · unavailable')+' · '+net,tabs:[['spark','Spark'],['connections','Connections']]}
     };
@@ -723,7 +711,7 @@ class Component extends DCLogic {
     const sel=(S.sel&&S.sel.for===key)?S.sel:lever;
     const scope=sel.scope,tab=sel.tab,cs=SC[scope];
     const setTo=(sc,tb)=>()=>self.setState({sel:{for:key,scope:sc,tab:fit(sc,tb||'')}});
-    const scopes=['cube','device','vault','spark'].map(k=>({label:SC[k].label,pressed:k===scope?'true':'false',pick:setTo(k),cube:k==='cube',device:k==='device',vault:k==='vault',spark:k==='spark'}));
+    const scopes=['cube','vault','spark'].map(k=>({label:SC[k].label,pressed:k===scope?'true':'false',pick:setTo(k),cube:k==='cube',vault:k==='vault',spark:k==='spark'}));
     const emptyScope=(scope==='vault'&&noVault)||(scope==='spark'&&!hasSpark);
     const tabs=cs.tabs.map(t=>({label:t[1],cur:t[0]===tab?'page':'false',cls:t[0]===tab?'on':'',pick:setTo(scope,t[0])}));
     const goNode=setTo('vault','node');
@@ -732,7 +720,6 @@ class Component extends DCLogic {
     const on=(sc,tb)=>!loading&&scope===sc&&tab===tb;
     const sec={
       display:on('cube','display'),dataVault:on('vault','data')&&hasVault,backup:on('cube','backup'),payments:on('cube','payments'),ai:on('cube','ai'),dataCube:on('cube','data'),
-      device:!loading&&scope==='device',
       wallet:on('vault','wallet')&&hasVault,node:on('vault','node')&&hasVault,pair:on('vault','pair')&&hasVault,connVault:on('vault','connections')&&hasVault,
       vaultNone:!loading&&scope==='vault'&&noVault,
       spark:on('spark','spark')&&hasSpark,connSpark:on('spark','connections')&&hasSpark,sparkNone:!loading&&scope==='spark'&&!hasSpark
@@ -894,12 +881,11 @@ class Component extends DCLogic {
       lock:{idle:!S.lockAsk,asking:!!S.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},
       chip:chip,hideP:pr(hide),shown:!hide,hidden:hide,toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
       has:{spark:hasSpark,vault:hasVault,liquid:!testnet},attn:attn,go:go,
-      scopeLine:cs.line,scopeLabel:cs.label,scopeHasNet:scope!=='device',scopes:scopes,tabs:tabs,showTabs:cs.tabs.length>0&&!emptyScope,
+      scopeLine:cs.line,scopeLabel:cs.label,scopeHasNet:true,scopes:scopes,tabs:tabs,showTabs:cs.tabs.length>0&&!emptyScope,
       loading:loading,skel:[{a:'width:40%',b:'width:65%;margin-top:8px'},{a:'width:30%',b:'width:50%;margin-top:8px'},{a:'width:45%',b:'width:60%;margin-top:8px'},{a:'width:35%',b:'width:40%;margin-top:8px'}],
       sec:sec,form:form,avatar:avatar,bk:bk,alerts:alerts,noVault:noVault,offline:offline,imported:imported,
       chk:chk,strictP:pr(S.strict),strictText:S.strict?'On':'Off',togStrict:()=>self.setState({strict:!S.strict}),
       dataVaultText:noVault?'No Vault in this Cube.':'Exported per Vault.',
-      dev:hasSpark?{cls:'s-off',status:'Off',text:'Doesn’t travel with the seed.'}:{cls:'s-off',status:'Not available',text:'Spark isn’t available on Testnet4.'},
       signers:signers,aliasClean:!aliasDirty,aliasMsg:aliasDirty?'Unsaved name changes':'',
       aliasDiscard:()=>self.setState({aliases:{for:rs,v:savedA}}),aliasSave:()=>self.setState({aliasSaved:{for:rs,v:curA}}),
       pair:pair,pairKeys:pairKeys,phones:phones,noop:()=>{},
