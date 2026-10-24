@@ -1875,6 +1875,9 @@ mod tests {
         }
     }
 
+    /// Whether an emitted message is the intent an Action is expected to send.
+    type IntentCheck = fn(&Message) -> bool;
+
     #[test]
     fn compose_actions_follow_visual_order_and_activate_existing_intents_once() {
         use keyboard::key::Named;
@@ -1883,7 +1886,7 @@ mod tests {
             first_step: false,
             ..Scenario::valid_send()
         };
-        let cases: [(Id, fn(&Message) -> bool); 7] = [
+        let cases: [(Id, IntentCheck); 7] = [
             (Id::new(ADD_RECIPIENT_ID), |m| {
                 matches!(m, Message::CreateSpend(CreateSpendMessage::AddRecipient))
             }),
@@ -2172,8 +2175,12 @@ mod tests {
         assert_eq!(harness.shift_tab().id, Some(preset(1)));
     }
 
+    /// Rendering and pointer motion emit no compose intent. The only message a
+    /// redraw may produce is the shared dashboard's content scroll reporting its
+    /// initial viewport (`view::Message::Scroll`, from iced
+    /// `Scrollable::notify_viewport`): once, and only when the page overflows.
     #[test]
-    fn rendering_and_pointer_motion_emit_no_intents() {
+    fn rendering_emits_only_the_dashboard_viewport_notice_and_motion_emits_nothing() {
         let fixture = Fixture::new(ThemeMode::Dark, 3);
         for scenario in [
             Scenario::valid_send(),
@@ -2186,24 +2193,42 @@ mod tests {
                 ..Scenario::valid_send()
             },
         ] {
-            let mut harness = Harness::new(compose(&fixture, &scenario), WIDE);
-            assert!(harness
-                .send(
+            for outer in [COMPACT, WIDE, TALL] {
+                let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+                let overflows = harness
+                    .probe()
+                    .scrollables
+                    .iter()
+                    .any(|(viewport, content)| content > viewport);
+                // Compact and wide pages scroll; the tall window shows it all.
+                assert_eq!(overflows, outer != TALL, "{:?}", outer);
+                let redraw = || {
                     Event::Window(iced::window::Event::RedrawRequested(
-                        std::time::Instant::now()
-                    )),
-                    mouse::Cursor::Unavailable,
-                )
-                .is_empty());
-            let bounds = harness.probe().focus[0].bounds;
-            assert!(harness
-                .send(
+                        std::time::Instant::now(),
+                    ))
+                };
+                let first = harness.send(redraw(), mouse::Cursor::Unavailable);
+                if overflows {
+                    assert!(
+                        matches!(first.as_slice(), [Message::Scroll(offset)] if *offset == 0.0),
+                        "{:?}: {:?}",
+                        outer,
+                        first
+                    );
+                } else {
+                    assert!(first.is_empty(), "{:?}: {:?}", outer, first);
+                }
+                let second = harness.send(redraw(), mouse::Cursor::Unavailable);
+                assert!(second.is_empty(), "{:?}: {:?}", outer, second);
+                let bounds = harness.probe().focus[0].bounds;
+                let moved = harness.send(
                     Event::Mouse(mouse::Event::CursorMoved {
-                        position: bounds.center()
+                        position: bounds.center(),
                     }),
                     mouse::Cursor::Available(bounds.center()),
-                )
-                .is_empty());
+                );
+                assert!(moved.is_empty(), "{:?}: {:?}", outer, moved);
+            }
         }
     }
 }
