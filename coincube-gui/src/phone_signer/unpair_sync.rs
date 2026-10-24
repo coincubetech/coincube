@@ -196,7 +196,12 @@ pub async fn remove_phones_that_unpaired(
         if outcome != ProbeOutcome::Unpaired {
             continue;
         }
-        match pairing_store::remove_unpaired_by_peer(dir, &phone.cert_pin, phone.paired_at_unix) {
+        match pairing_store::remove_unpaired_by_peer(
+            dir,
+            &phone.cert_pin,
+            phone.paired_at_unix,
+            phone.imported_pairing_revision(),
+        ) {
             Ok(true) => removed.push(phone.name.clone()),
             Ok(false) => {}
             Err(e) => tracing::warn!("could not remove {} after it unpaired: {}", phone.name, e),

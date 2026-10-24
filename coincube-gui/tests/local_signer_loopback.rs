@@ -14,10 +14,14 @@
 #[path = "common/lan_binding.rs"]
 mod lan_binding;
 use std::net::Ipv4Addr;
-use std::sync::Arc;
+use std::{str::FromStr, sync::Arc};
 
+use base64::{engine::general_purpose::STANDARD, Engine as _};
 use coincube_core::miniscript::bitcoin::{
-    bip32::Fingerprint, psbt::Psbt, transaction::Version, Transaction,
+    bip32::Fingerprint, psbt::Psbt, secp256k1::Secp256k1, transaction::Version, Transaction,
+};
+use coincube_core::{
+    imported_spend::verify_imported_signatures, wallet_descriptor::ImportedWalletDescriptor,
 };
 use prost::Message as _;
 use rcgen::{CertificateParams, DistinguishedName, DnType, KeyPair, PKCS_ED25519};
@@ -26,12 +30,15 @@ use rustls::server::WebPkiClientVerifier;
 use rustls::ServerConfig;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio::sync::oneshot;
 use tokio_rustls::TlsAcceptor;
 
 use coincube_gui::dir::NetworkDirectory;
 use coincube_gui::phone_signer::{
     identity::{pin_hex8, DesktopIdentity},
-    pairing_store::PairedPhone,
+    pairing_store::{self, ImportedPairingScope, PairedPhone, SignerBinding},
+    pairing_transaction::PairingTransaction,
+    policy::PhonePolicy,
     protocol::{local_v1, LocalEnvelope},
     tls,
     transport::PairedTransport,
@@ -39,6 +46,13 @@ use coincube_gui::phone_signer::{
 };
 use coincube_gui::services::connect::crypto::{seal_to_device, DeviceTransportKey};
 use coincube_gui::services::connect::grpc::connect_v1 as cv1;
+use serde_json::Value;
+use sha2::{Digest, Sha256};
+
+const IMPORTED_REQUESTS: &str =
+    include_str!("../src/phone_signer/fixtures/imported_canonical_requests.json");
+const IMPORTED_SIGNED: &str =
+    include_str!("../src/phone_signer/fixtures/imported_canonical_signed.json");
 
 /// Self-signed Ed25519 cert + key, returned as the rustls-pki-types
 /// `Der` newtypes the runtime expects.
@@ -91,6 +105,159 @@ fn empty_psbt() -> Psbt {
     Psbt::from_unsigned_tx(tx).expect("empty psbt")
 }
 
+fn imported_case(name: &str) -> (Value, Psbt, Psbt, ImportedWalletDescriptor, PhonePolicy) {
+    let requests: Value = serde_json::from_str(IMPORTED_REQUESTS).expect("frozen desktop requests");
+    let signed: Value = serde_json::from_str(IMPORTED_SIGNED).expect("native signed results");
+    let request = requests["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|vector| vector["name"] == name)
+        .unwrap()
+        .clone();
+    let result = signed["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|vector| vector["name"] == name)
+        .unwrap();
+    let original =
+        Psbt::deserialize(&STANDARD.decode(request["psbt"].as_str().unwrap()).unwrap()).unwrap();
+    let returned = Psbt::deserialize(
+        &STANDARD
+            .decode(result["signed_psbt"].as_str().unwrap())
+            .unwrap(),
+    )
+    .unwrap();
+    let wallet = ImportedWalletDescriptor::parse(
+        request["descriptor"].as_str().unwrap(),
+        None,
+        coincube_core::chain::ChainId::Testnet,
+    )
+    .unwrap();
+    let loaded = coincube_gui::app::wallet::Wallet::new(wallet.clone());
+    let policy = PhonePolicy::from_wallet(&loaded).unwrap();
+    assert_eq!(policy.descriptor(), request["descriptor"].as_str().unwrap());
+    assert_eq!(
+        policy.transport_id().to_string(),
+        request["descriptor_id"].as_str().unwrap()
+    );
+    (request, original, returned, wallet, policy)
+}
+
+fn imported_pairing(
+    request: &Value,
+    policy: &PhonePolicy,
+    cert_pin: tls::CertFingerprint,
+    transport_pubkey: Vec<u8>,
+) -> PairedPhone {
+    let key: Value = serde_json::from_str::<Value>(IMPORTED_REQUESTS).unwrap()["keys"][0].clone();
+    let fingerprint = Fingerprint::from_str(key["fingerprint"].as_str().unwrap()).unwrap();
+    let coincube_gui::phone_signer::policy::PhonePolicyKind::Imported { wallet, wallet_id } =
+        policy.kind()
+    else {
+        panic!("expected imported policy")
+    };
+    assert_eq!(request["signer_key_id"], key["backend_key_id"]);
+    PairedPhone {
+        signer_binding: Some(SignerBinding {
+            key_id: key["backend_key_id"].as_u64().unwrap().to_string(),
+            xpub: key["xpub"].as_str().unwrap().to_owned(),
+            fingerprint,
+            descriptor_sha256: Sha256::digest(policy.descriptor().as_bytes()).to_vec(),
+            imported_scope: Some(
+                ImportedPairingScope::for_account(
+                    wallet,
+                    wallet_id,
+                    key["xpub"].as_str().unwrap(),
+                    fingerprint,
+                )
+                .unwrap(),
+            ),
+        }),
+        cert_pin,
+        name: "Synthetic imported phone".into(),
+        paired_at_unix: 7,
+        wallet_fingerprints: vec![fingerprint],
+        vault_fingerprint: policy.transport_id(),
+        transport_pubkey,
+        fallback_addr: None,
+    }
+}
+
+fn persist_imported_pairing(
+    dir: &coincube_gui::dir::CoincubeDirectory,
+    candidate: PairedPhone,
+    revision: uuid::Uuid,
+) -> PairedPhone {
+    let transaction = PairingTransaction::prepare(dir, revision.to_string(), candidate).unwrap();
+    transaction.write_candidate().unwrap();
+    transaction.decide().unwrap();
+    transaction.finish().unwrap()
+}
+
+async fn imported_signer_against(
+    request: &Value,
+    policy: PhonePolicy,
+    response: FakeResponse,
+) -> (
+    PhoneSigner,
+    tokio::task::JoinHandle<()>,
+    coincube_gui::dir::CoincubeDirectory,
+    PairedPhone,
+) {
+    let (desk_cert, desk_key) = mint_ed25519_cert("Imported desktop (test)");
+    let (phone_cert, phone_key) = mint_ed25519_cert("Imported phone (test)");
+    let desktop_pin = tls::fingerprint_of(&desk_cert);
+    let phone_pin = tls::fingerprint_of(&phone_cert);
+    let desktop = DesktopIdentity {
+        cert_der: desk_cert,
+        key_der: desk_key,
+    };
+    let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let phone_transport = fresh_transport_key("imported-phone");
+    let candidate = imported_pairing(
+        request,
+        &policy,
+        phone_pin,
+        phone_transport.public_key().to_vec(),
+    );
+    let phone_handle = tokio::spawn(async move {
+        fake_phone(
+            listener,
+            phone_cert,
+            phone_key,
+            desktop_pin,
+            response,
+            phone_transport,
+        )
+        .await
+        .expect("imported fake phone");
+    });
+    let transport = PairedTransport::connect(addr, &desktop, phone_pin)
+        .await
+        .expect("dial imported fake phone");
+    let path = std::env::temp_dir().join(format!(
+        "coincube-imported-sign-tx-{}",
+        uuid::Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&path).unwrap();
+    let dir = coincube_gui::dir::CoincubeDirectory::new(path);
+    let paired = persist_imported_pairing(&dir, candidate, uuid::Uuid::new_v4());
+    let fingerprint = paired.signer_binding.as_ref().unwrap().fingerprint;
+    let signer = PhoneSigner::new(
+        transport,
+        fingerprint,
+        None,
+        paired.clone(),
+        policy,
+        dir.clone(),
+        Some(Arc::new(fresh_transport_key("imported-desktop"))),
+    );
+    (signer, phone_handle, dir, paired)
+}
+
 /// How the fake phone responds after reading the `PresentSession`.
 /// Lets the same harness drive happy-path, error-envelope, and
 /// "close without responding" scenarios.
@@ -114,6 +281,16 @@ enum FakeResponse {
     /// `#[tokio::test(start_paused = true)]` so the wall-clock wait
     /// collapses to instant via auto-advance.
     HangForever,
+    /// Native BDK signed fixture, delayed at the real phone-review boundary.
+    Imported {
+        expected_descriptor: String,
+        expected_psbt: Vec<u8>,
+        signed_psbt: Vec<u8>,
+        review_started: oneshot::Sender<()>,
+        release_review: oneshot::Receiver<()>,
+    },
+    /// A pre-send refusal must close the transport without a frame.
+    NoPresentSession,
 }
 
 /// Run a fake phone server on the supplied `listener` that presents
@@ -139,14 +316,25 @@ async fn fake_phone(
     let acceptor = TlsAcceptor::from(Arc::new(cfg));
     let mut tls = acceptor.accept(tcp).await?;
 
-    // Read one length-prefixed PresentSession.
+    // Read one length-prefixed PresentSession. For a pre-send refusal the
+    // signer is dropped after sign_tx returns, making EOF a deterministic
+    // assertion that no frame was ever emitted.
     let mut len_buf = [0u8; 4];
+    if matches!(&response, FakeResponse::NoPresentSession) {
+        let read = tls.read_exact(&mut len_buf).await;
+        assert!(
+            matches!(read, Err(ref error) if error.kind() == std::io::ErrorKind::UnexpectedEof),
+            "revoked cached signer emitted a PresentSession"
+        );
+        return Ok(());
+    }
     tls.read_exact(&mut len_buf).await?;
     let len = u32::from_be_bytes(len_buf) as usize;
     let mut payload = vec![0u8; len];
     tls.read_exact(&mut payload).await?;
     let envelope = LocalEnvelope::decode(payload.as_slice())?;
-    let (session_id, request_id, psbt_bytes, creator_pub) = match envelope.payload {
+    let (session_id, request_id, psbt_bytes, descriptor_bytes, creator_pub) = match envelope.payload
+    {
         Some(local_v1::local_envelope::Payload::PresentSession(p)) => {
             let s = p.session.expect("session present");
             assert_eq!(
@@ -169,10 +357,20 @@ async fn fake_phone(
                     &s.request_id,
                 )
                 .expect("open sealed PSBT");
+            let de = s.descriptor_envelopes.first().expect("descriptor envelope");
+            let descriptor = phone_transport
+                .open(
+                    &de.ephemeral_pubkey,
+                    &de.nonce,
+                    &de.ciphertext,
+                    &s.request_id,
+                )
+                .expect("open sealed descriptor");
             (
                 s.session_id,
                 s.request_id,
                 psbt.to_vec(),
+                descriptor.to_vec(),
                 s.creator_transport_pubkey,
             )
         }
@@ -237,6 +435,38 @@ async fn fake_phone(
             tokio::time::sleep(std::time::Duration::from_secs(60 * 60 * 24)).await;
             None
         }
+        FakeResponse::Imported {
+            expected_descriptor,
+            expected_psbt,
+            signed_psbt,
+            review_started,
+            release_review,
+        } => {
+            assert_eq!(descriptor_bytes, expected_descriptor.as_bytes());
+            assert_eq!(psbt_bytes, expected_psbt);
+            review_started
+                .send(())
+                .expect("test waits for phone review");
+            release_review.await.expect("test releases phone review");
+            let sealed = seal_to_device(&creator_pub, &request_id, &signed_psbt)
+                .expect("seal native signed PSBT to desktop");
+            Some(LocalEnvelope {
+                payload: Some(local_v1::local_envelope::Payload::Partial(
+                    local_v1::PartialSignature {
+                        session_id,
+                        signed_psbt: Vec::new(),
+                        signed_key_ids: vec!["10".into()],
+                        signature_envelope: Some(cv1::PayloadEnvelope {
+                            device_id: String::new(),
+                            ephemeral_pubkey: sealed.ephemeral_pubkey,
+                            nonce: sealed.nonce,
+                            ciphertext: sealed.ciphertext,
+                        }),
+                    },
+                )),
+            })
+        }
+        FakeResponse::NoPresentSession => unreachable!(),
     };
     if let Some(envelope) = reply {
         let mut buf = Vec::with_capacity(envelope.encoded_len());
@@ -318,8 +548,12 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         Fingerprint::default(),
         None,
         paired,
-        TEST_DESCRIPTOR.to_string(),
-        coincube_core::chain::ChainId::Regtest,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(
+            TEST_DESCRIPTOR,
+            coincube_core::chain::ChainId::Regtest,
+        )
+        .expect("vault policy"),
+        coincube_gui::dir::CoincubeDirectory::new(std::env::temp_dir()),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     let mut psbt = empty_psbt();
@@ -404,8 +638,9 @@ async fn signer_against_chain_response(
         Fingerprint::default(),
         None,
         paired,
-        TEST_DESCRIPTOR.to_string(),
-        chain,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(TEST_DESCRIPTOR, chain)
+            .expect("vault policy"),
+        coincube_gui::dir::CoincubeDirectory::new(std::env::temp_dir()),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)
@@ -589,5 +824,155 @@ async fn btcb2_lan_refuses_before_a_session_is_sent() {
         );
         phone.abort();
         drop(signer);
+    }
+}
+
+#[derive(Clone, Copy)]
+enum ImportedReviewChange {
+    None,
+    Remove,
+    Replace,
+}
+
+/// Drive the actual HWI entry point with an authenticated, native-BDK signed
+/// result. The phone holds the TLS session open at review until the test
+/// changes the durable pairing row, so the production post-review read decides
+/// whether an otherwise valid signature may reach the caller's PSBT.
+async fn imported_sign_tx_case(name: &str, change: ImportedReviewChange) {
+    let (request, original, returned, wallet, policy) = imported_case(name);
+    let before = original.serialize();
+    let (review_started_tx, review_started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let response = FakeResponse::Imported {
+        expected_descriptor: policy.descriptor().to_owned(),
+        expected_psbt: before.clone(),
+        signed_psbt: returned.serialize(),
+        review_started: review_started_tx,
+        release_review: release_rx,
+    };
+    let (signer, phone_handle, dir, paired) =
+        imported_signer_against(&request, policy, response).await;
+    let signing = tokio::spawn(async move {
+        let mut psbt = original;
+        let result = async_hwi::HWI::sign_tx(&signer, &mut psbt).await;
+        (result, psbt)
+    });
+    tokio::time::timeout(std::time::Duration::from_secs(10), review_started_rx)
+        .await
+        .expect("phone reached review")
+        .expect("review signal");
+    let replacement = match change {
+        ImportedReviewChange::None => None,
+        ImportedReviewChange::Remove => {
+            pairing_store::unpair(&dir, &paired.cert_pin).unwrap();
+            assert!(pairing_store::load(&dir).unwrap().phones.is_empty());
+            None
+        }
+        ImportedReviewChange::Replace => {
+            let current = persist_imported_pairing(&dir, paired.clone(), uuid::Uuid::new_v4());
+            assert_eq!(current.cert_pin, paired.cert_pin);
+            assert_eq!(current.paired_at_unix, paired.paired_at_unix);
+            assert_ne!(
+                current.imported_pairing_revision(),
+                paired.imported_pairing_revision()
+            );
+            Some(current)
+        }
+    };
+    release_tx.send(()).unwrap();
+    let (result, signed) = tokio::time::timeout(std::time::Duration::from_secs(10), signing)
+        .await
+        .expect("sign_tx completed")
+        .unwrap();
+    phone_handle.await.unwrap();
+    match change {
+        ImportedReviewChange::None => {
+            result.expect("current imported pairing accepts native signature");
+            let original = Psbt::deserialize(&before).unwrap();
+            assert_eq!(signed.unsigned_tx, original.unsigned_tx);
+            assert_eq!(signed.outputs, original.outputs);
+            assert_eq!(signed.inputs[0].partial_sigs.len(), 1);
+            let mut without_added_signatures = signed.clone();
+            for (current, prior) in without_added_signatures
+                .inputs
+                .iter_mut()
+                .zip(&original.inputs)
+            {
+                current.partial_sigs = prior.partial_sigs.clone();
+            }
+            assert_eq!(
+                without_added_signatures.serialize(),
+                before,
+                "sign_tx changed a non-signature PSBT field"
+            );
+            assert_eq!(
+                verify_imported_signatures(
+                    &wallet,
+                    &original,
+                    &signed,
+                    &Secp256k1::verification_only()
+                )
+                .unwrap(),
+                vec![1]
+            );
+        }
+        ImportedReviewChange::Remove | ImportedReviewChange::Replace => {
+            result.expect_err("revoked imported pairing refuses late valid response");
+            assert_eq!(signed.serialize(), before, "caller PSBT mutated on refusal");
+            if let Some(current) = replacement {
+                let store = pairing_store::load(&dir).unwrap();
+                assert_eq!(store.phones.len(), 1);
+                assert_eq!(
+                    store.phones[0].imported_pairing_revision(),
+                    current.imported_pairing_revision(),
+                    "late old response displaced the new pairing"
+                );
+            }
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn imported_sign_tx_accepts_native_phone_result() {
+    imported_sign_tx_case("sortedmulti_first", ImportedReviewChange::None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn imported_sign_tx_rechecks_pairing_after_valid_phone_review() {
+    for (name, change) in [
+        ("sortedmulti_nonfirst", ImportedReviewChange::Remove),
+        ("sortedmulti_first", ImportedReviewChange::Replace),
+    ] {
+        imported_sign_tx_case(name, change).await;
+    }
+}
+
+/// A cached handle may stay alive after local unpair/re-pair, but it must not
+/// emit even a PresentSession once its exact persisted authority is gone.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn imported_cached_signer_refuses_before_present_session_after_revocation() {
+    for replace in [false, true] {
+        let (request, mut psbt, _, _, policy) = imported_case("sortedmulti_first");
+        let (signer, phone_handle, dir, paired) =
+            imported_signer_against(&request, policy, FakeResponse::NoPresentSession).await;
+        let before = psbt.serialize();
+        if replace {
+            let current = persist_imported_pairing(&dir, paired.clone(), uuid::Uuid::new_v4());
+            assert_ne!(
+                current.imported_pairing_revision(),
+                paired.imported_pairing_revision()
+            );
+        } else {
+            pairing_store::unpair(&dir, &paired.cert_pin).unwrap();
+        }
+        async_hwi::HWI::sign_tx(&signer, &mut psbt)
+            .await
+            .expect_err("cached imported handle lost its authority");
+        assert_eq!(psbt.serialize(), before);
+        drop(signer);
+        tokio::time::timeout(std::time::Duration::from_secs(10), phone_handle)
+            .await
+            .expect("phone saw transport close without PresentSession")
+            .unwrap();
     }
 }

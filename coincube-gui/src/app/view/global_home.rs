@@ -85,7 +85,11 @@ fn pending_deposit_card<'a>(
             .spacing(8)
             .align_y(Alignment::Center)
             .push(warning_icon().size(12).style(theme::text::secondary))
-            .push(text("Pending deposit").size(12).color(color::GREY_2))
+            .push(
+                text("Pending deposit")
+                    .size(12)
+                    .style(theme::text::secondary),
+            )
             .push(Space::new().width(Length::Fill))
             .push(text(display_amount).size(12).color(color::ORANGE)),
     )
@@ -2435,8 +2439,12 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                             "Transfer",
                             Some(arrow_down_up_icon()),
                             Message::FocusAction,
-                            (!total_balance_loading)
-                                .then_some(Message::Home(HomeMessage::NextStep)),
+                            transfer_balance_ready(
+                                total_balance_loading,
+                                has_spark,
+                                spark_balance_loaded,
+                            )
+                            .then_some(Message::Home(HomeMessage::NextStep)),
                             |_t, _s| iced::widget::button::Style {
                                 text_color: color::ORANGE,
                                 border: iced::Border {
@@ -2472,6 +2480,16 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
 /// present on every cube and so only a *second* wallet was in question. The
 /// Liquid sunset gate breaks that assumption — a new cube can now have Spark
 /// alone, which has nothing to transfer with — so the count is now explicit.
+/// Aggregate failure may end loading for display while an installed Spark
+/// wallet still has no authoritative funds for the transfer picker or cap.
+pub(crate) fn transfer_balance_ready(
+    total_balance_loading: bool,
+    has_spark: bool,
+    spark_balance_loaded: bool,
+) -> bool {
+    !total_balance_loading && (!has_spark || spark_balance_loaded)
+}
+
 fn transfer_available(has_liquid: bool, has_vault: bool, has_spark: bool) -> bool {
     [has_liquid, has_vault, has_spark]
         .iter()
@@ -2813,6 +2831,241 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TransferTrigger {
+        Pointer,
+        Enter,
+        Space,
+    }
+
+    /// Send real pointer/key events to the production Hub tree. Disabled
+    /// Actions do not expose focus IDs, so pointer targeting uses the rendered
+    /// Transfer text bounds rather than assuming a focusable Action exists.
+    fn activate_transfer(
+        content: Element<'_, Message>,
+        text_bounds: iced::Rectangle,
+        trigger: TransferTrigger,
+    ) -> Vec<Message> {
+        use coincube_ui::font;
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Operation, Tree},
+            Layout,
+        };
+        use iced::{keyboard, mouse, Event, Rectangle, Size};
+
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        // The Hub's Transfer action can sit below the 900px viewport. Expose
+        // the same production tree in a tall headless viewport for activation;
+        // the separate capture still checks the real 1440×900 geometry.
+        let size = Size::new(953.0, 2400.0);
+        assert!(
+            text_bounds.y >= 0.0 && text_bounds.y + text_bounds.height <= size.height,
+            "Transfer label at {:?} is outside activation viewport",
+            text_bounds
+        );
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> = iced::widget::scrollable(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        if !matches!(trigger, TransferTrigger::Pointer) {
+            let id = landing_control_id("test-cube", "Hub", "transfer");
+            let mut operation: Box<dyn Operation<()>> = Box::new(focusable::focus(id));
+            loop {
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut operation::black_box(operation.as_mut()),
+                );
+                match operation.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        }
+        let cursor = if matches!(trigger, TransferTrigger::Pointer) {
+            mouse::Cursor::Available(text_bounds.center())
+        } else {
+            mouse::Cursor::Unavailable
+        };
+        let events = match trigger {
+            TransferTrigger::Pointer => vec![
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ],
+            TransferTrigger::Enter | TransferTrigger::Space => {
+                let named = if matches!(trigger, TransferTrigger::Enter) {
+                    keyboard::key::Named::Enter
+                } else {
+                    keyboard::key::Named::Space
+                };
+                let key = keyboard::Key::Named(named);
+                let physical_key =
+                    keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+                vec![
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: key.clone(),
+                        modified_key: key.clone(),
+                        physical_key,
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                        text: None,
+                        repeat: false,
+                    }),
+                    Event::Keyboard(keyboard::Event::KeyReleased {
+                        key: key.clone(),
+                        modified_key: key,
+                        physical_key,
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                    }),
+                ]
+            }
+        };
+        let mut messages = Vec::new();
+        for event in events {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+        }
+        messages
+    }
+
+    #[test]
+    fn r06a_transfer_action_requires_authoritative_spark_after_partial_total_settles() {
+        use crate::app::{state::GlobalHome, view::shared::landing::capture};
+
+        let fixture = ViewFixture::new();
+        let snapshots = GlobalHome::r06a_transfer_snapshots();
+        for snapshot in &snapshots {
+            let mut config = fixture.config(0, None, None);
+            // The adapter itself is inert (no bridge). Its real update results
+            // feed this installed-Spark pure presenter without fabricating a
+            // backend or claiming that State::view had a live Spark route.
+            config.has_spark = snapshot.has_spark;
+            config.has_liquid = !snapshot.has_spark;
+            config.has_vault = true;
+            config.spark_balance = snapshot.spark_balance;
+            config.spark_btc_balance = snapshot.spark_balance;
+            config.spark_balance_loaded = snapshot.spark_balance_loaded;
+            config.spark_balance_error = snapshot.spark_balance_error;
+            config.total_balance_loading = snapshot.total_balance_loading;
+            let inspection = capture::inspect(
+                &format!("hub-transfer-{}", snapshot.name),
+                global_home_view(config),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            let text_bounds = inspection
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == "Transfer").then_some(*bounds))
+                .expect("rendered Hub Transfer label");
+            let expected = matches!(
+                snapshot.name,
+                "trusted-postsync" | "trusted-refresh-error" | "no-spark"
+            );
+            assert_eq!(
+                inspection.has_focus(landing_control_id("test-cube", "Hub", "transfer")),
+                expected,
+                "{} focus eligibility",
+                snapshot.name
+            );
+            for trigger in [
+                TransferTrigger::Pointer,
+                TransferTrigger::Enter,
+                TransferTrigger::Space,
+            ] {
+                let mut config = fixture.config(0, None, None);
+                config.has_spark = snapshot.has_spark;
+                config.has_liquid = !snapshot.has_spark;
+                config.has_vault = true;
+                config.spark_balance = snapshot.spark_balance;
+                config.spark_btc_balance = snapshot.spark_balance;
+                config.spark_balance_loaded = snapshot.spark_balance_loaded;
+                config.spark_balance_error = snapshot.spark_balance_error;
+                config.total_balance_loading = snapshot.total_balance_loading;
+                let messages = activate_transfer(global_home_view(config), text_bounds, trigger);
+                let next_steps = messages
+                    .iter()
+                    .filter(|message| matches!(message, Message::Home(HomeMessage::NextStep)))
+                    .count();
+                assert_eq!(
+                    next_steps,
+                    usize::from(expected),
+                    "{} {trigger:?}: {messages:?}",
+                    snapshot.name
+                );
+            }
+        }
+
+        let trusted = snapshots
+            .iter()
+            .find(|snapshot| snapshot.name == "trusted-postsync")
+            .unwrap();
+        assert_eq!(trusted.spark_balance, Amount::from_sat(12_000));
+        let mut amount = fixture.config(1, Some(TransferDirection::SparkToVault), None);
+        amount.spark_balance = trusted.spark_balance;
+        let entered = capture::inspect(
+            "hub-transfer-trusted-amount",
+            global_home_view(amount),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(entered.contains("12,000"));
+        // Modal::operate only visits its base, so inspect the actual popup
+        // presenter rather than mistaking the amount summary for picker text.
+        let selected = capture::inspect(
+            "hub-transfer-trusted-picker",
+            wallet_selector_popup(
+                Some(WalletKind::Spark),
+                Some(WalletKind::Vault),
+                PickerSide::From,
+                true,
+                true,
+                false,
+                Amount::from_sat(0),
+                trusted.spark_balance,
+                Amount::from_sat(375_000),
+                BitcoinDisplayUnit::Sats,
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(selected.contains("FROM"));
+        assert!(selected.contains("Spark"));
+        assert!(selected.contains("12,000"));
     }
 
     /// Every directed pair of distinct wallets must map to exactly one

@@ -542,6 +542,50 @@ impl ImportedBitcoinPanel {
             })
     }
 
+    #[cfg(test)]
+    pub(crate) fn reviewer_accept_completed_scan(&mut self) {
+        let wallet = self
+            .import
+            .active_attachment()
+            .expect("ready imported fixture")
+            .clone();
+        let chain = self.chain();
+        let descriptor = wallet.descriptor.clone();
+        let window = wallet.initial_lookahead;
+        self.info = Some(model::GetInfoResult {
+            version: "synthetic completed scan".into(),
+            network: chain.bitcoin_network(),
+            chain_id: Some(chain),
+            block_height: 1,
+            sync: 1.0,
+            descriptors: coincubed::commands::GetInfoDescriptors {
+                main: coincube_core::wallet_descriptor::WalletDescriptor::Imported(
+                    descriptor.clone(),
+                ),
+            },
+            imported_wallet: Some(coincubed::commands::ImportedWalletSync {
+                wallet_identity: descriptor.identity(chain).unwrap().to_string(),
+                chain_id: chain,
+                birthday: wallet.birthday,
+                initial_lookahead: window,
+                discovery_target: window,
+                receive_scanned: window,
+                change_scanned: window,
+                history_complete: true,
+            }),
+            rescan_progress: None,
+            refused_reorg_depth: None,
+            chain_divergence: false,
+            timestamp: 0,
+            last_poll_timestamp: Some(1),
+            history_sync: Default::default(),
+            receive_index: 0,
+            change_index: 0,
+        });
+        self.coins = Some(model::ListCoinsResult { coins: Vec::new() });
+        assert!(self.is_ready());
+    }
+
     /// Bind a claim to the active public policy and the daemon's completed
     /// discovery coverage. Allocated receive/change indices also need to fit
     /// inside the fork scan, including the current next address.
