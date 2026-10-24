@@ -4,8 +4,7 @@
 //! - Unified portfolio card with a total balance header + one asset row
 //!   for BTC. No USDt (that's a Liquid-only asset) and no
 //!   L-BTC branding — Spark runs on real Bitcoin.
-//! - Recent transactions list using the shared `TransactionListItem`
-//!   widget, so Lightning / on-chain rows look identical across wallets.
+//! - Recent transactions use the same compact row as the other landings.
 //! - A "Stable" badge on the balance when the SDK reports an active
 //!   Stable Balance token.
 
@@ -15,12 +14,7 @@ use crate::app::wallets::DomainPaymentStatus;
 use coincube_ui::component::text::Text;
 use coincube_ui::{
     color,
-    component::{
-        amount::*,
-        button,
-        text::*,
-        transaction::{TransactionDirection, TransactionListItem},
-    },
+    component::{amount::*, button, text::*},
     icon::{self, receipt_icon},
     theme,
     widget::*,
@@ -32,6 +26,10 @@ use iced::{
 
 use crate::app::settings::display::DisplayMode;
 use crate::app::state::spark::overview::SparkBalanceSnapshot;
+use crate::app::view::shared::activity_row::{
+    activity_row, ActivityDirection, ActivityIdentity, ActivityRow,
+};
+use crate::app::view::shared::landing::{amount_cell, AmountCell, AmountTier};
 use crate::app::view::vault::fiat::FiatAmount;
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
 use crate::app::view::{FiatAmountConverter, SparkOverviewMessage};
@@ -97,13 +95,16 @@ pub struct SparkRecentTransaction {
 pub struct SparkOverviewView<'a> {
     pub status: SparkStatus,
     pub recent_transactions: &'a [SparkRecentTransaction],
+    pub cube_id: &'a str,
+    /// An error can coexist with a retained last-success snapshot.
+    pub last_error: Option<&'a str>,
     pub fiat_converter: Option<FiatAmountConverter>,
     pub bitcoin_unit: BitcoinDisplayUnit,
     pub show_direction_badges: bool,
     /// Phase 6: `true` when the SDK reports an active Stable Balance
     /// token. Rendered as a small "Stable" badge next to the balance
     /// header.
-    pub stable_balance_active: bool,
+    pub stable_balance_active: Option<bool>,
     /// Reference BTC/USD price used to fold USDB into the unified
     /// portfolio total at the current rate. `None` skips the fold —
     /// matches the Liquid panel's USDt behaviour.
@@ -143,6 +144,8 @@ impl<'a> SparkOverviewView<'a> {
                 self.show_direction_badges,
                 self.stable_balance_active,
                 self.display_mode,
+                self.cube_id,
+                self.last_error,
             ),
         }
     }
@@ -156,9 +159,11 @@ fn connected_view<'a>(
     recent: &'a [SparkRecentTransaction],
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: BitcoinDisplayUnit,
-    show_direction_badges: bool,
-    stable_balance_active: bool,
+    _show_direction_badges: bool,
+    stable_balance_active: Option<bool>,
     display_mode: DisplayMode,
+    cube_id: &str,
+    last_error: Option<&str>,
 ) -> Element<'a, SparkOverviewMessage> {
     use crate::app::breez_spark::assets::stable_token_as_sats;
 
@@ -170,21 +175,18 @@ fn connected_view<'a>(
     // pegged to fiat; if we showed only `balance_sats` here, toggling
     // Stable Balance ON would look like the wallet was emptied.
     //
-    // Fallback: `cache.btc_usd_price` is only populated when the
-    // user's fiat preference is USD. For users on EUR/GBP/etc. it
-    // stays `None`, which would collapse the headline to 0 — so we
-    // fall back to `fiat_converter.price_per_btc()` (user-fiat per
-    // BTC). That introduces a small FX-spread error since USDB is
-    // technically USD-denominated, not user-fiat-denominated, but
-    // the error is bounded and far better than the entire holding
-    // disappearing.
-    let reference_price =
-        btc_usd_price.or_else(|| fiat_converter.as_ref().map(|c| c.price_per_btc()));
+    // USDB is USD-denominated. A quote in EUR/GBP is not a USD quote;
+    // only the dedicated BTC/USD quote can value this holding in sats.
+    let reference_price = btc_usd_price.filter(|price| *price > 0.0 && price.is_finite());
     let usdb_as_sats = stable_balance
         .map(|sb| stable_token_as_sats(sb.balance, sb.decimals, reference_price))
         .unwrap_or(0);
+    let has_unvalued_usdb =
+        stable_balance.as_ref().is_some_and(|sb| sb.balance > 0) && reference_price.is_none();
     let total_balance = Amount::from_sat(balance_sats.saturating_add(usdb_as_sats));
-    let total_fiat = fiat_converter.as_ref().map(|c| c.convert(total_balance));
+    let total_fiat = (!has_unvalued_usdb)
+        .then(|| fiat_converter.as_ref().map(|c| c.convert(total_balance)))
+        .flatten();
 
     // Sum pending BTC (in/out) from the recent-transactions list for
     // the small "pending" indicators underneath the total. Skip
@@ -200,30 +202,35 @@ fn connected_view<'a>(
                 .spacing(8)
                 .align_y(Alignment::Center)
                 .push(h4_bold("Balance"))
-                .push_maybe(stable_balance_active.then(stable_badge)),
+                .push_maybe((stable_balance_active == Some(true)).then(stable_badge)),
         )
-        .push(wallet_header::<SparkOverviewMessage>(WalletHeaderProps {
-            sats: total_balance,
-            fiat: total_fiat,
-            balance_masked: false,
-            bitcoin_unit,
-            variant: HeaderVariant::Overview,
-            sync: SyncState::Synced,
-            unconfirmed: None,
-            pending_send_sats: pending_outgoing_sats,
-            pending_receive_sats: pending_incoming_sats,
-            display_mode,
-            on_swap: Some(SparkOverviewMessage::FlipDisplayMode),
-        }));
+        .push(if has_unvalued_usdb {
+            amount_cell::<SparkOverviewMessage>(
+                AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote"),
+                AmountTier::Card,
+            )
+        } else {
+            wallet_header::<SparkOverviewMessage>(WalletHeaderProps {
+                sats: total_balance,
+                fiat: total_fiat,
+                balance_masked: false,
+                bitcoin_unit,
+                variant: HeaderVariant::Landing,
+                sync: SyncState::Synced,
+                unconfirmed: None,
+                pending_send_sats: pending_outgoing_sats,
+                pending_receive_sats: pending_incoming_sats,
+                display_mode,
+                on_swap: Some(SparkOverviewMessage::FlipDisplayMode),
+            })
+            .into()
+        });
 
-    // Stable Balance auto-sweeps the BTC balance into USDB, so the
-    // raw `balance_sats` reads 0 even though the user can still send
-    // bitcoin normally — the SDK converts USDB back to sats as needed
-    // when sending. Surface the spendable total (= raw BTC + USDB
-    // folded at the current price) so the row matches the header and
-    // accurately represents what's spendable.
-    let btc_row_amount = total_balance;
-    let btc_row_fiat = total_fiat;
+    // Show raw BTC alongside raw USDB. The combined header is only a
+    // current-rate display estimate when a dedicated BTC/USD quote exists;
+    // the send route keeps the SDK's own spending behavior.
+    let btc_row_amount = Amount::from_sat(balance_sats);
+    let btc_row_fiat = fiat_converter.as_ref().map(|c| c.convert(btc_row_amount));
 
     let btc_fiat_str = btc_row_fiat
         .as_ref()
@@ -234,17 +241,14 @@ fn connected_view<'a>(
         .align_y(Alignment::Center)
         .push(coincube_ui::image::asset_network_logo::<SparkOverviewMessage>("btc", "spark", 40.0))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(amount_with_size_and_unit(
-            &btc_row_amount,
-            P1_SIZE,
-            bitcoin_unit,
+        .push(amount_cell::<SparkOverviewMessage>(
+            AmountCell::shown(
+                btc_row_amount.to_formatted_string_with_unit(bitcoin_unit),
+                (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
+            ),
+            AmountTier::Row,
         ))
-        .push(
-            text(btc_fiat_str)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
-        )
+        .push(iced::widget::Space::new().width(Length::Fill))
         .push(
             button::primary(None, "Send")
                 .on_press(SparkOverviewMessage::SendBtc)
@@ -256,99 +260,125 @@ fn connected_view<'a>(
                 .width(Length::Fixed(90.0)),
         );
 
-    let portfolio_card = Container::new(Column::new().spacing(16).push(total_col).push(btc_row))
-        .padding(20)
-        .width(Length::Fill)
-        .style(|t| container::Style {
-            background: Some(Background::Color(t.colors.cards.simple.background)),
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 0.2,
-                radius: 25.0.into(),
-            },
-            ..Default::default()
-        });
+    let usdb_row = stable_balance.as_ref().map(|sb| {
+        use crate::app::breez_spark::assets::format_token_display;
+        Row::new()
+            .spacing(10)
+            .align_y(Alignment::Center)
+            .push(text("USDB").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
+            .push(amount_cell::<SparkOverviewMessage>(
+                AmountCell::shown(
+                    format!("{} USDB", format_token_display(sb.balance, sb.decimals)),
+                    None,
+                ),
+                AmountTier::Row,
+            ))
+    });
+    let portfolio_card = Container::new(
+        Column::new()
+            .spacing(16)
+            .push(total_col)
+            .push(btc_row)
+            .push_maybe(usdb_row)
+            .push_maybe((stable_balance_active.is_none()).then(|| {
+                text("Stable Balance setting is still unknown")
+                    .size(P2_SIZE)
+                    .style(theme::text::secondary)
+            }))
+            .push_maybe(
+                (stable_balance_active == Some(false)
+                    && stable_balance.as_ref().is_some_and(|sb| sb.balance > 0))
+                .then(|| {
+                    text("USDB is held while Stable Balance is off. Review Spark settings.")
+                        .size(P2_SIZE)
+                        .style(theme::text::warning)
+                }),
+            ),
+    )
+    .padding(20)
+    .width(Length::Fill)
+    .style(|t| container::Style {
+        background: Some(Background::Color(t.colors.cards.simple.background)),
+        border: iced::Border {
+            color: color::ORANGE,
+            width: 0.2,
+            radius: 25.0.into(),
+        },
+        ..Default::default()
+    });
 
     content = content.push(portfolio_card);
+    if let Some(error) = last_error {
+        content = content.push(
+            text(format!(
+                "Last known balance · Spark refresh failed: {error}"
+            ))
+            .size(P2_SIZE)
+            .style(theme::text::warning),
+        );
+    }
 
     // ── Recent transactions ───────────────────────────────────────────
     content = content.push(Column::new().spacing(10).push(h4_bold("Last transactions")));
 
     if !recent.is_empty() {
-        for (idx, tx) in recent.iter().enumerate() {
-            let direction = if tx.is_incoming {
-                TransactionDirection::Incoming
-            } else {
-                TransactionDirection::Outgoing
-            };
-
-            let tx_icon = match tx.method {
-                SparkPaymentMethod::Lightning => {
-                    coincube_ui::image::asset_network_logo("btc", "lightning", 40.0)
-                }
-                SparkPaymentMethod::OnChainBitcoin => {
-                    coincube_ui::image::asset_network_logo("btc", "bitcoin", 40.0)
-                }
-                SparkPaymentMethod::Spark => {
-                    coincube_ui::image::asset_network_logo("btc", "spark", 40.0)
-                }
-                SparkPaymentMethod::StableBalance => {
-                    coincube_ui::image::asset_network_logo("btc", "spark", 40.0)
-                }
-            };
-
-            let display_amount = row_display_amount(tx);
-
-            let mut item = TransactionListItem::new(direction, &display_amount, bitcoin_unit)
-                .with_custom_icon(tx_icon)
-                .with_show_direction_badge(show_direction_badges)
-                .with_label(tx.description.clone())
-                .with_time_ago(tx.time_ago.clone());
-
-            if let Some(token_str) = tx.token_display.as_ref() {
-                // Token rows: replace the BTC headline with the token
-                // string. The fiat label still rides along underneath
-                // because USDB is pegged to USD.
-                item = item.with_amount_override(token_str.clone());
-            }
-            if let Some(fiat) = tx.fiat_amount.as_ref() {
-                item = item.with_fiat_amount(format!(
-                    "{} {}",
-                    fiat.to_formatted_string(),
-                    fiat.currency()
-                ));
-            }
-
-            if matches!(tx.status, DomainPaymentStatus::Pending) {
-                let (bg, fg) = (color::GREY_3, color::BLACK);
-                let pending_badge = Container::new(
-                    Row::new()
-                        .push(
-                            icon::warning_icon()
-                                .size(14)
-                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .push(
-                            text("Pending")
-                                .bold()
-                                .size(14)
-                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .spacing(4),
-                )
-                .padding([2, 8])
-                .style(move |_| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: 12.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
+        for tx in recent {
+            let open = (!tx.id.trim().is_empty()
+                && recent.iter().filter(|other| other.id == tx.id).count() == 1)
+                .then(|| SparkOverviewMessage::SelectTransaction(tx.id.clone()));
+            let amount = tx.token_display.clone().unwrap_or_else(|| {
+                row_display_amount(tx).to_formatted_string_with_unit(bitcoin_unit)
+            });
+            let secondary = tx
+                .fiat_amount
+                .as_ref()
+                .filter(|_| tx.method != SparkPaymentMethod::StableBalance)
+                .map(|fiat| {
+                    format!(
+                        "{} {} · current rate",
+                        fiat.to_formatted_string(),
+                        fiat.currency()
+                    )
                 });
-                item = item.with_custom_status(pending_badge.into());
-            }
-
-            content = content.push(item.view(SparkOverviewMessage::SelectTransaction(idx)));
+            let rail = match tx.method {
+                SparkPaymentMethod::Lightning => "Lightning",
+                SparkPaymentMethod::OnChainBitcoin => "Bitcoin on-chain",
+                SparkPaymentMethod::Spark => "Spark",
+                SparkPaymentMethod::StableBalance => "Stable Balance",
+            };
+            content = content.push(activity_row(
+                ActivityRow {
+                    identity: ActivityIdentity {
+                        cube: cube_id.to_owned(),
+                        wallet: "Spark".into(),
+                        payment: open.as_ref().map(|_| tx.id.clone()),
+                    },
+                    rail: Some(rail.into()),
+                    date: (tx.timestamp > 0)
+                        .then(|| {
+                            chrono::DateTime::<chrono::Utc>::from_timestamp(tx.timestamp as i64, 0)
+                        })
+                        .flatten()
+                        .map(|date| {
+                            date.with_timezone(&chrono::Local)
+                                .format("%b %-d, %H:%M")
+                                .to_string()
+                        })
+                        .unwrap_or_else(|| "Time unknown".into()),
+                    timezone_tooltip: (tx.timestamp > 0).then(|| "Local time".into()),
+                    direction: if tx.is_incoming {
+                        ActivityDirection::Incoming
+                    } else {
+                        ActivityDirection::Outgoing
+                    },
+                    label: tx.description.clone(),
+                    wallet_caption: None,
+                    amount: AmountCell::shown(amount, secondary),
+                    status: tx.status.into(),
+                },
+                false,
+                open,
+            ));
         }
     } else {
         content = content.push(placeholder(
@@ -400,16 +430,14 @@ fn connected_view<'a>(
         .on_press(SparkOverviewMessage::History)
     };
 
-    if !recent.is_empty() {
-        content = content
-            .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-            .push(
-                Container::new(view_transactions_button)
-                    .width(Length::Fill)
-                    .center_x(Length::Fill),
-            )
-            .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
-    }
+    content = content
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(
+            Container::new(view_transactions_button)
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
 
     content.into()
 }

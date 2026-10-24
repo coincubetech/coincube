@@ -45,6 +45,9 @@ pub enum HeaderVariant {
     Jumbo,
     Card,
     Overview,
+    /// Explicit opt-in for wallet landing balances; payment screens retain
+    /// their existing Overview typography and behavior.
+    Landing,
 }
 
 /// Balance sync / catch-up state. `Synced` and `Stale` render the amount
@@ -153,7 +156,7 @@ pub fn wallet_header<'a, M: 'a + Clone>(props: WalletHeaderProps<M>) -> Column<'
 
     let primary_size = match variant {
         HeaderVariant::Jumbo => H1_SIZE,
-        HeaderVariant::Card | HeaderVariant::Overview => H2_SIZE,
+        HeaderVariant::Card | HeaderVariant::Overview | HeaderVariant::Landing => H2_SIZE,
     };
     let secondary_size = P1_SIZE;
 

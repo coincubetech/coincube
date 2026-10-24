@@ -43,7 +43,7 @@ pub enum SparkOverviewMessage {
     SendBtc,
     ReceiveBtc,
     History,
-    SelectTransaction(usize),
+    SelectTransaction(String),
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,

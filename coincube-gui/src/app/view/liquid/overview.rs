@@ -1,14 +1,9 @@
 use coincube_core::miniscript::bitcoin::Amount;
 
-use crate::app::wallets::{DomainPaymentDetails, DomainPaymentStatus};
+use crate::app::wallets::{DomainPayment, DomainPaymentStatus};
 use coincube_ui::{
     color,
-    component::{
-        amount::*,
-        button,
-        text::*,
-        transaction::{TransactionDirection, TransactionListItem},
-    },
+    component::{amount::*, button, text::*},
     icon::{self, receipt_icon},
     theme,
     widget::Element,
@@ -20,6 +15,10 @@ use iced::{
 
 use crate::app::breez_liquid::assets::format_usdt_display;
 use crate::app::settings::display::DisplayMode;
+use crate::app::view::shared::activity_row::{
+    activity_row, ActivityDirection, ActivityIdentity, ActivityRow,
+};
+use crate::app::view::shared::landing::{amount_cell, AmountCell, AmountTier};
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
 use crate::app::view::{liquid::RecentTransaction, FiatAmountConverter, LiquidOverviewMessage};
 
@@ -29,15 +28,31 @@ pub fn liquid_overview_view<'a>(
     usdt_balance: u64,
     fiat_converter: Option<FiatAmountConverter>,
     recent_transaction: &[RecentTransaction],
+    recent_payments: &[DomainPayment],
     error: Option<&'a str>,
+    has_loaded_snapshot: bool,
+    loading: bool,
+    cube_id: &str,
     bitcoin_unit: BitcoinDisplayUnit,
     btc_usd_price: Option<f64>,
-    show_direction_badges: bool,
+    _show_direction_badges: bool,
     display_mode: DisplayMode,
     // Whether cross-asset swaps (SideSwap) are available on this network.
     // Drives the Swap button — hidden off-mainnet where SideSwap can't run.
     swap_supported: bool,
 ) -> Element<'a, LiquidOverviewMessage> {
+    if !has_loaded_snapshot {
+        let status = error.unwrap_or(if loading {
+            "Loading Liquid balances and activity…"
+        } else {
+            "Liquid balance has not loaded yet"
+        });
+        return Column::new()
+            .spacing(12)
+            .push(h2("Liquid"))
+            .push(text(status).size(P1_SIZE).style(theme::text::secondary))
+            .into();
+    }
     let mut content = Column::new().spacing(20);
 
     let btc_fiat = fiat_converter.as_ref().map(|c| c.convert(btc_balance));
@@ -66,37 +81,43 @@ pub fn liquid_overview_view<'a>(
 
     // ── Unified portfolio card ─────────────────────────────────────────────
     // USDt is pegged to USD, so always use BTC/USD price for conversion.
+    let usable_usd_quote = btc_usd_price.filter(|price| *price > 0.0 && price.is_finite());
     let usdt_fiat_value = usdt_balance as f64 / 1e8; // USDt base units → dollars
-    let usdt_as_sats = if let Some(btc_price_usd) = btc_usd_price {
-        if btc_price_usd > 0.0 {
-            (usdt_fiat_value / btc_price_usd * 1e8) as u64
-        } else {
-            0
-        }
-    } else {
-        0
-    };
-    let total_sats = btc_balance.to_sat() + usdt_as_sats;
+    let usdt_as_sats = usable_usd_quote
+        .map(|btc_price_usd| (usdt_fiat_value / btc_price_usd * 1e8) as u64)
+        .unwrap_or(0);
+    let total_sats = btc_balance.to_sat().saturating_add(usdt_as_sats);
     let total_balance = Amount::from_sat(total_sats);
-    let total_fiat = fiat_converter.as_ref().map(|c| c.convert(total_balance));
+    let unvalued_usdt = usdt_balance > 0 && usable_usd_quote.is_none();
+    let total_fiat = (!unvalued_usdt)
+        .then(|| fiat_converter.as_ref().map(|c| c.convert(total_balance)))
+        .flatten();
 
     // Total balance header
     let total_col = Column::new()
         .spacing(4)
         .push(h4_bold("Balance"))
-        .push(wallet_header::<LiquidOverviewMessage>(WalletHeaderProps {
-            sats: total_balance,
-            fiat: total_fiat,
-            balance_masked: false,
-            bitcoin_unit,
-            variant: HeaderVariant::Overview,
-            sync: SyncState::Synced,
-            unconfirmed: None,
-            pending_send_sats: pending_outgoing_sats,
-            pending_receive_sats: pending_incoming_sats,
-            display_mode,
-            on_swap: Some(LiquidOverviewMessage::FlipDisplayMode),
-        }));
+        .push(if unvalued_usdt {
+            amount_cell::<LiquidOverviewMessage>(
+                AmountCell::unavailable("Combined L-BTC and USDt valuation needs a BTC/USD quote"),
+                AmountTier::Card,
+            )
+        } else {
+            wallet_header::<LiquidOverviewMessage>(WalletHeaderProps {
+                sats: total_balance,
+                fiat: total_fiat,
+                balance_masked: false,
+                bitcoin_unit,
+                variant: HeaderVariant::Landing,
+                sync: SyncState::Synced,
+                unconfirmed: None,
+                pending_send_sats: pending_outgoing_sats,
+                pending_receive_sats: pending_incoming_sats,
+                display_mode,
+                on_swap: Some(LiquidOverviewMessage::FlipDisplayMode),
+            })
+            .into()
+        });
 
     // L-BTC asset row
     let lbtc_fiat_str = btc_fiat
@@ -115,17 +136,14 @@ pub fn liquid_overview_view<'a>(
                 .bold()
                 .width(Length::Fixed(60.0)),
         )
-        .push(amount_with_size_and_unit(
-            &btc_balance,
-            P1_SIZE,
-            bitcoin_unit,
+        .push(amount_cell::<LiquidOverviewMessage>(
+            AmountCell::shown(
+                btc_balance.to_formatted_string_with_unit(bitcoin_unit),
+                (!lbtc_fiat_str.is_empty()).then_some(lbtc_fiat_str),
+            ),
+            AmountTier::Row,
         ))
-        .push(
-            text(lbtc_fiat_str)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
-        )
+        .push(iced::widget::Space::new().width(Length::Fill))
         .push(
             button::primary(None, "Send")
                 .on_press(LiquidOverviewMessage::SendLbtc)
@@ -139,7 +157,6 @@ pub fn liquid_overview_view<'a>(
 
     // USDt asset row
     let usdt_display = format!("{} USDt", format_usdt_display(usdt_balance));
-    let usdt_fiat_str = format!("${:.2}", usdt_fiat_value);
     let usdt_row = Row::new()
         .spacing(10)
         .align_y(Alignment::Center)
@@ -147,13 +164,11 @@ pub fn liquid_overview_view<'a>(
             LiquidOverviewMessage,
         >("usdt", "liquid", 40.0))
         .push(text("USDt").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(text(usdt_display).size(P1_SIZE))
-        .push(
-            text(usdt_fiat_str)
-                .size(P2_SIZE)
-                .style(theme::text::secondary)
-                .width(Length::Fill),
-        )
+        .push(amount_cell::<LiquidOverviewMessage>(
+            AmountCell::shown(usdt_display, None),
+            AmountTier::Row,
+        ))
+        .push(iced::widget::Space::new().width(Length::Fill))
         .push(
             button::primary(None, "Send")
                 .on_press(LiquidOverviewMessage::SendUsdt)
@@ -204,84 +219,88 @@ pub fn liquid_overview_view<'a>(
 
     if !recent_transaction.is_empty() {
         for (idx, tx) in recent_transaction.iter().enumerate() {
-            let direction = if tx.is_incoming {
-                TransactionDirection::Incoming
-            } else {
-                TransactionDirection::Outgoing
-            };
-
-            let is_usdt = tx.usdt_display.is_some();
-
-            let tx_icon = if is_usdt {
-                coincube_ui::image::asset_network_logo("usdt", "liquid", 40.0)
-            } else {
-                match &tx.details {
-                    DomainPaymentDetails::Lightning { .. } => {
-                        coincube_ui::image::asset_network_logo("btc", "lightning", 40.0)
-                    }
-                    DomainPaymentDetails::LiquidAsset { .. } => {
-                        coincube_ui::image::asset_network_logo("lbtc", "liquid", 40.0)
-                    }
-                    DomainPaymentDetails::OnChainBitcoin { .. } => {
-                        coincube_ui::image::asset_network_logo("btc", "bitcoin", 40.0)
-                    }
-                }
-            };
-
-            let display_amount = if tx.is_incoming {
-                tx.amount
-            } else {
-                tx.amount + tx.fees_sat
-            };
-
-            let mut item = TransactionListItem::new(direction, &display_amount, bitcoin_unit)
-                .with_custom_icon(tx_icon)
-                .with_show_direction_badge(show_direction_badges)
-                .with_label(tx.description.clone())
-                .with_time_ago(tx.time_ago.clone());
-
-            if let Some(ref usdt_display) = tx.usdt_display {
-                item = item.with_amount_override(usdt_display.clone());
-            } else {
-                let fiat_str = tx
-                    .fiat_amount
-                    .as_ref()
-                    .map(|fiat| format!("{} {}", fiat.to_formatted_string(), fiat.currency()));
-                if let Some(fiat) = fiat_str {
-                    item = item.with_fiat_amount(fiat);
-                }
-            }
-
-            if matches!(tx.status, DomainPaymentStatus::Pending) {
-                let (bg, fg) = (color::GREY_3, color::BLACK);
-                let pending_badge = Container::new(
-                    Row::new()
-                        .push(
-                            icon::warning_icon()
-                                .size(14)
-                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .push(
-                            text("Pending")
-                                .bold()
-                                .size(14)
-                                .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-                        )
-                        .spacing(4),
-                )
-                .padding([2, 8])
-                .style(move |_| iced::widget::container::Style {
-                    background: Some(iced::Background::Color(bg)),
-                    border: iced::Border {
-                        radius: 12.0.into(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
+            // Both slices come from the same recent vector in the state
+            // adapter. Selection resolves against the latest raw vector by
+            // SDK identity, never by this display index.
+            let source = recent_payments.get(idx);
+            let payment_id = source.and_then(DomainPayment::stable_identity);
+            let open = payment_id
+                .as_ref()
+                .filter(|identity| {
+                    crate::app::wallets::types::find_unique_payment(recent_payments, identity)
+                        .is_some()
+                })
+                .cloned()
+                .map(LiquidOverviewMessage::SelectTransaction);
+            // The SDK can report `now()` for a direct unconfirmed transfer.
+            // Do not present that value as historical transaction time.
+            let confirmed_date = source
+                .filter(|payment| {
+                    payment.status == DomainPaymentStatus::Complete && payment.timestamp > 0
+                })
+                .and_then(|payment| {
+                    chrono::DateTime::<chrono::Utc>::from_timestamp(i64::from(payment.timestamp), 0)
+                })
+                .map(|date| {
+                    date.with_timezone(&chrono::Local)
+                        .format("%b %-d, %H:%M")
+                        .to_string()
                 });
-                item = item.with_custom_status(pending_badge.into());
-            }
-
-            content = content.push(item.view(LiquidOverviewMessage::SelectTransaction(idx)));
+            let date = confirmed_date.clone().unwrap_or_else(|| {
+                match source.map(|payment| payment.status) {
+                    Some(
+                        DomainPaymentStatus::Created
+                        | DomainPaymentStatus::Pending
+                        | DomainPaymentStatus::RefundPending
+                        | DomainPaymentStatus::WaitingFeeAcceptance,
+                    ) => "Time pending",
+                    _ => "Time unknown",
+                }
+                .to_owned()
+            });
+            let amount = tx.usdt_display.clone().unwrap_or_else(|| {
+                (if tx.is_incoming {
+                    tx.amount
+                } else {
+                    tx.amount + tx.fees_sat
+                })
+                .to_formatted_string_with_unit(bitcoin_unit)
+            });
+            let secondary = tx.fiat_amount.as_ref().map(|fiat| {
+                format!(
+                    "{} {} · current rate",
+                    fiat.to_formatted_string(),
+                    fiat.currency()
+                )
+            });
+            let rail = match &tx.details {
+                crate::app::wallets::DomainPaymentDetails::Lightning { .. } => "Lightning",
+                crate::app::wallets::DomainPaymentDetails::LiquidAsset { .. } => "Liquid",
+                crate::app::wallets::DomainPaymentDetails::OnChainBitcoin { .. } => "Bitcoin swap",
+            };
+            content = content.push(activity_row(
+                ActivityRow {
+                    identity: ActivityIdentity {
+                        cube: cube_id.to_owned(),
+                        wallet: "Liquid".into(),
+                        payment: payment_id.map(|identity| format!("{identity:?}")),
+                    },
+                    rail: Some(rail.into()),
+                    date,
+                    timezone_tooltip: confirmed_date.map(|_| "Local time".into()),
+                    direction: if tx.is_incoming {
+                        ActivityDirection::Incoming
+                    } else {
+                        ActivityDirection::Outgoing
+                    },
+                    label: tx.description.clone(),
+                    wallet_caption: None,
+                    amount: AmountCell::shown(amount, secondary),
+                    status: tx.status.into(),
+                },
+                false,
+                open,
+            ));
         }
     } else {
         content = content.push(placeholder(
@@ -333,24 +352,34 @@ pub fn liquid_overview_view<'a>(
         .on_press(LiquidOverviewMessage::History)
     };
 
-    if !recent_transaction.is_empty() {
-        content = content
-            .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
-            .push(
-                Container::new(view_transactions_button)
-                    .width(Length::Fill)
-                    .center_x(Length::Fill),
-            )
-            .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
+    content = content
+        .push(iced::widget::Space::new().height(Length::Fixed(20.0)))
+        .push(
+            Container::new(view_transactions_button)
+                .width(Length::Fill)
+                .center_x(Length::Fill),
+        )
+        .push(iced::widget::Space::new().height(Length::Fixed(40.0)));
+
+    if loading {
+        content = content.push(
+            text("Refreshing Liquid balances and activity…")
+                .size(P2_SIZE)
+                .style(theme::text::secondary),
+        );
     }
 
     if let Some(err) = error {
         content = content.push(
-            Container::new(text(err.to_string()).size(14).color(color::RED))
-                .padding(10)
-                .style(theme::card::invalid)
-                .width(Length::Fill)
-                .max_width(800),
+            Container::new(
+                text(format!("Last known data · {err}"))
+                    .size(14)
+                    .color(color::RED),
+            )
+            .padding(10)
+            .style(theme::card::invalid)
+            .width(Length::Fill)
+            .max_width(800),
         );
     }
 

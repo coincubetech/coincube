@@ -921,7 +921,7 @@ pub enum LiquidOverviewMessage {
     /// button is hidden off-mainnet, where SideSwap is unavailable).
     Swap,
     History,
-    SelectTransaction(usize),
+    SelectTransaction(crate::app::wallets::types::DomainPaymentIdentity),
     /// Forwarded to the top-level handler to flip the global
     /// fiat-native ↔ bitcoin-native display mode.
     FlipDisplayMode,

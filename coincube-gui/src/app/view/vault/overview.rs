@@ -11,12 +11,7 @@ use iced::{
 use coincube_core::miniscript::bitcoin;
 use coincube_ui::{
     color,
-    component::{
-        amount::*,
-        button, card, form, spinner,
-        text::*,
-        transaction::{TransactionBadge, TransactionDirection, TransactionListItem},
-    },
+    component::{amount::*, button, card, form, spinner, text::*},
     icon::{self, cross_icon},
     theme,
     widget::{Button, Column, ColumnExt, Element},
@@ -30,6 +25,10 @@ use crate::{
         view::{
             balance_header_card, dashboard, loading_placeholder,
             message::Message,
+            shared::activity_row::{
+                activity_row, ActivityDirection, ActivityIdentity, ActivityRow, ActivityStatus,
+            },
+            shared::landing::{amount_cell, AmountCell, AmountTier},
             vault::coins,
             vault::label,
             wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps},
@@ -188,16 +187,19 @@ pub fn vault_overview_view<'a>(
     fiat_converter: Option<FiatAmountConverter>,
     expiring_coins: &[bitcoin::OutPoint],
     events: &'a [Payment],
+    cube_id: &str,
     is_last_page: bool,
     processing: bool,
     loading: bool,
+    history_loaded: bool,
+    history_error: Option<&str>,
     sync_status: &SyncStatus,
     show_rescan_prompt: bool,
     awaiting_rescan_date: bool,
     bitcoin_unit: BitcoinDisplayUnit,
     node_bitcoind_sync_progress: Option<f64>,
     node_bitcoind_ibd: Option<bool>,
-    show_direction_badges: bool,
+    _show_direction_badges: bool,
     display_mode: DisplayMode,
 ) -> Element<'a, Message> {
     // Show external-unconfirmed coins as part of the headline balance
@@ -222,25 +224,18 @@ pub fn vault_overview_view<'a>(
             "btc", "bitcoin", 40.0,
         ))
         .push(text("BTC").size(P1_SIZE).bold().width(Length::Fixed(60.0)))
-        .push(if history_unknown {
-            Row::new().push(text("—").size(P1_SIZE).style(theme::text::secondary))
-        } else {
-            Row::new().push(amount_with_size_and_unit(
-                &total_balance,
-                P1_SIZE,
-                bitcoin_unit,
-            ))
-        })
-        .push(
-            text(if history_unknown {
-                String::new()
+        .push(amount_cell::<Message>(
+            if history_unknown {
+                AmountCell::unknown("Vault history has not loaded")
             } else {
-                btc_fiat_str
-            })
-            .size(P2_SIZE)
-            .style(theme::text::secondary)
-            .width(Length::Fill),
-        )
+                AmountCell::shown(
+                    total_balance.to_formatted_string_with_unit(bitcoin_unit),
+                    (!btc_fiat_str.is_empty()).then_some(btc_fiat_str),
+                )
+            },
+            AmountTier::Row,
+        ))
+        .push(Space::new().width(Length::Fill))
         .push(
             button::primary(None, "Send")
                 .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Send)))
@@ -262,7 +257,7 @@ pub fn vault_overview_view<'a>(
                             fiat: fiat_balance,
                             balance_masked: false,
                             bitcoin_unit,
-                            variant: HeaderVariant::Overview,
+                            variant: HeaderVariant::Landing,
                             sync,
                             unconfirmed: None,
                             pending_send_sats: 0,
@@ -354,7 +349,16 @@ pub fn vault_overview_view<'a>(
         .push(
             Column::new()
                 .spacing(10)
-                .push(h4_bold("Last transactions"))
+                .push(h4_bold("Recent activity"))
+                .push_maybe(history_error.map(|error| {
+                    text(if history_loaded {
+                        format!("Last known activity · {error}")
+                    } else {
+                        error.to_owned()
+                    })
+                    .size(P2_SIZE)
+                    .style(theme::text::warning)
+                }))
                 .push_maybe(loading.then(|| {
                     loading_placeholder(
                         icon::receipt_icon().size(48),
@@ -375,9 +379,9 @@ pub fn vault_overview_view<'a>(
                     if event.kind != PaymentKind::SendToSelf {
                         col.push(event_list_view(
                             event,
+                            cube_id,
                             bitcoin_unit,
                             fiat_converter,
-                            show_direction_badges,
                         ))
                     } else {
                         col
@@ -411,7 +415,7 @@ pub fn vault_overview_view<'a>(
                     None
                 }),
         )
-        .push_maybe(if !events.is_empty() {
+        .push_maybe(if history_loaded {
             Some(
                 Container::new({
                     let tx_icon = icon::history_icon()
@@ -470,52 +474,75 @@ pub fn vault_overview_view<'a>(
 
 fn event_list_view(
     event: &Payment,
+    cube_id: &str,
     bitcoin_unit: BitcoinDisplayUnit,
     fiat_converter: Option<FiatAmountConverter>,
-    show_direction_badges: bool,
-) -> Element<'_, Message> {
+) -> Element<'static, Message> {
     let direction = match event.kind {
-        PaymentKind::Incoming => TransactionDirection::Incoming,
-        PaymentKind::SelfTransfer | PaymentKind::SendToSelf => TransactionDirection::SelfTransfer,
-        PaymentKind::Outgoing => TransactionDirection::Outgoing,
+        PaymentKind::Incoming => ActivityDirection::Incoming,
+        PaymentKind::SelfTransfer | PaymentKind::SendToSelf => ActivityDirection::SelfTransfer,
+        PaymentKind::Outgoing => ActivityDirection::Outgoing,
     };
 
-    let label = if let Some(label) = &event.label {
-        Some(label.clone())
-    } else {
-        event
-            .address_label
-            .as_ref()
-            .map(|label| format!("address label: {}", label))
+    let label = event
+        .label
+        .clone()
+        .or_else(|| {
+            event
+                .address_label
+                .as_ref()
+                .map(|label| format!("address label: {label}"))
+        })
+        .unwrap_or_else(|| match direction {
+            ActivityDirection::Incoming => "Received".into(),
+            ActivityDirection::Outgoing => "Sent".into(),
+            ActivityDirection::SelfTransfer => "Self-transfer".into(),
+        });
+    let amount = event.amount.to_formatted_string_with_unit(bitcoin_unit);
+    let amount = match direction {
+        ActivityDirection::Outgoing => format!("−{amount}"),
+        ActivityDirection::Incoming => format!("+{amount}"),
+        ActivityDirection::SelfTransfer => amount,
     };
-
-    let mut item = TransactionListItem::new(direction, &event.amount, bitcoin_unit)
-        .with_custom_icon(coincube_ui::image::asset_network_logo(
-            "btc", "bitcoin", 40.0,
-        ))
-        .with_show_direction_badge(show_direction_badges);
-
-    if let Some(label) = label {
-        item = item.with_label(label);
-    }
-
-    if let Some(timestamp) = event.time {
-        item = item.with_timestamp(timestamp);
-    } else {
-        item = item.with_badge(TransactionBadge::Unconfirmed);
-    }
-
-    if let Some(fiat_amount) = fiat_converter.map(|converter| {
+    let fiat_amount = fiat_converter.map(|converter| {
         let fiat = converter.convert(event.amount);
-        format!("{} {}", fiat.to_formatted_string(), fiat.currency())
-    }) {
-        item = item.with_fiat_amount(fiat_amount);
-    }
-
-    item.view(Message::Menu(Menu::Vault(VaultSubMenu::Transactions(
-        Some(event.outpoint.txid),
-    ))))
-    .into()
+        format!(
+            "{} {} · current rate",
+            fiat.to_formatted_string(),
+            fiat.currency()
+        )
+    });
+    activity_row(
+        ActivityRow {
+            identity: ActivityIdentity {
+                cube: cube_id.to_owned(),
+                wallet: "Vault".into(),
+                payment: Some(format!("{}:{}", event.outpoint.txid, event.outpoint.vout)),
+            },
+            rail: Some("Bitcoin on-chain".into()),
+            date: event
+                .time
+                .as_ref()
+                .map(|time| {
+                    time.with_timezone(&Local)
+                        .format("%b %-d, %H:%M")
+                        .to_string()
+                })
+                .unwrap_or_else(|| "Time unknown".into()),
+            timezone_tooltip: Some("Local time".into()),
+            direction,
+            label,
+            wallet_caption: None,
+            amount: AmountCell::shown(amount, fiat_amount),
+            status: if event.time.is_some() {
+                ActivityStatus::Complete
+            } else {
+                ActivityStatus::Unconfirmed
+            },
+        },
+        false,
+        Some(Message::SelectPayment(event.outpoint)),
+    )
 }
 
 pub fn payment_view<'a>(

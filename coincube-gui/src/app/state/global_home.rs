@@ -269,6 +269,10 @@ pub struct GlobalHome {
     /// `get_info` RPC is in flight, or forever when no Spark
     /// backend is wired up for this cube.
     spark_balance: Amount,
+    /// Raw Spark holdings retained solely for truthful landing presentation.
+    spark_btc_balance: Amount,
+    spark_stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
+    spark_balance_error: bool,
     spark_balance_loaded: bool,
     /// Set once the bridge has forwarded `Event::Synced` from the
     /// SDK. Until then a `get_info` response may be the SDK's
@@ -420,6 +424,9 @@ impl GlobalHome {
             liquid_balance_loaded: false,
             liquid_balance_error: false,
             spark_balance: Amount::ZERO,
+            spark_btc_balance: Amount::ZERO,
+            spark_stable_balance: None,
+            spark_balance_error: false,
             spark_balance_loaded: false,
             spark_synced_seen: false,
             spark_load_retry_count: 0,
@@ -490,6 +497,9 @@ impl GlobalHome {
             liquid_balance_loaded: false,
             liquid_balance_error: false,
             spark_balance: Amount::ZERO,
+            spark_btc_balance: Amount::ZERO,
+            spark_stable_balance: None,
+            spark_balance_error: false,
             spark_balance_loaded: false,
             spark_synced_seen: false,
             spark_load_retry_count: 0,
@@ -606,7 +616,7 @@ impl State for GlobalHome {
         let total_balance_loading = (cache.has_imported_bitcoin && self.imported_balance.is_none())
             || total_balance_pending(BalanceReadiness {
                 has_spark,
-                spark_loaded: self.spark_balance_loaded,
+                spark_loaded: self.spark_balance_loaded || self.spark_balance_error,
                 has_liquid,
                 liquid_loaded: self.liquid_balance_loaded,
                 usdt_loaded: self.usdt_balance_loaded,
@@ -619,6 +629,9 @@ impl State for GlobalHome {
             view::global_home::global_home_view(GlobalViewConfig {
                 liquid_balance,
                 spark_balance: self.spark_balance,
+                spark_btc_balance: self.spark_btc_balance,
+                spark_stable_balance: self.spark_stable_balance.as_ref(),
+                spark_balance_error: self.spark_balance_error,
                 usdt_balance,
                 usdt_balance_error,
                 vault_balance,
@@ -773,6 +786,9 @@ impl State for GlobalHome {
                             self.spark_pending_resync = false;
                             return self.load_spark_balance().unwrap_or_else(Task::none);
                         }
+                        self.spark_btc_balance = btc;
+                        self.spark_stable_balance = stable_balance.clone();
+                        self.spark_balance_error = false;
                         // Fold any Stable Balance (USDB) holding into the shown
                         // Spark balance — auto-sweep means a BTC-only reading
                         // would understate a funded wallet. Shared with the
@@ -2458,6 +2474,7 @@ impl State for GlobalHome {
                         // by the in-flight guard — fire a fresh one
                         // now so the placeholder can converge.
                         self.spark_balance_loading = false;
+                        self.spark_balance_error = true;
                         if self.spark_pending_resync {
                             self.spark_pending_resync = false;
                             return self.load_spark_balance().unwrap_or_else(Task::none);

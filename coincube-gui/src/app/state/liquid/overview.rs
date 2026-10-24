@@ -26,6 +26,8 @@ pub struct LiquidOverview {
     recent_payments: Vec<DomainPayment>,
     selected_payment: Option<DomainPayment>,
     error: Option<String>,
+    has_loaded_snapshot: bool,
+    loading: bool,
     /// Local swap log path + its send-leg tx ids, used to label swap rows
     /// (the SDK doesn't mark swaps). Re-read on reload so new swaps show.
     swaps_path: PathBuf,
@@ -43,6 +45,8 @@ impl LiquidOverview {
             recent_payments: Vec::new(),
             selected_payment: None,
             error: None,
+            has_loaded_snapshot: false,
+            loading: false,
             swaps_path,
             swap_tx_ids,
         }
@@ -154,7 +158,11 @@ impl State for LiquidOverview {
                 self.usdt_balance,
                 fiat_converter,
                 &self.recent_transaction,
+                &self.recent_payments,
                 self.error.as_deref(),
+                self.has_loaded_snapshot,
+                self.loading,
+                &cache.cube_id,
                 cache.bitcoin_unit,
                 cache.btc_usd_price,
                 cache.show_direction_badges,
@@ -221,8 +229,13 @@ impl State for LiquidOverview {
                 view::LiquidOverviewMessage::History => {
                     return redirect(Menu::Liquid(LiquidSubMenu::Transactions(None)));
                 }
-                view::LiquidOverviewMessage::SelectTransaction(idx) => {
-                    if let Some(payment) = self.recent_payments.get(*idx).cloned() {
+                view::LiquidOverviewMessage::SelectTransaction(identity) => {
+                    if let Some(payment) = crate::app::wallets::types::find_unique_payment(
+                        &self.recent_payments,
+                        identity,
+                    )
+                    .cloned()
+                    {
                         self.selected_payment = Some(payment.clone());
                         return Task::batch(vec![
                             redirect(Menu::Liquid(LiquidSubMenu::Transactions(None))),
@@ -236,6 +249,8 @@ impl State for LiquidOverview {
                     recent_payment,
                 } => {
                     self.error = None;
+                    self.loading = false;
+                    self.has_loaded_snapshot = true;
                     self.btc_balance = *balance;
                     self.usdt_balance = *usdt_balance;
                     // Re-read the swap log so swaps recorded elsewhere since the
@@ -332,9 +347,11 @@ impl State for LiquidOverview {
                     // Already presentation copy: the producer built it with
                     // `UserError::toast()` and sent the SDK detail to the log.
                     self.error = Some(err.clone());
+                    self.loading = false;
                     return Task::done(Message::View(view::Message::ShowError(err.clone())));
                 }
                 view::LiquidOverviewMessage::RefreshRequested => {
+                    self.loading = true;
                     return self.load_balance();
                 }
                 view::LiquidOverviewMessage::FlipDisplayMode => {
@@ -359,6 +376,7 @@ impl State for LiquidOverview {
         _wallet: Option<Arc<Wallet>>,
     ) -> Task<Message> {
         self.selected_payment = None;
+        self.loading = true;
         // (swap_tx_ids is refreshed in the DataLoaded handler the load below
         // dispatches, so it stays current on every refresh — not just reload.)
         // Load balance immediately for fast display, and trigger an SDK sync
@@ -374,5 +392,57 @@ impl State for LiquidOverview {
             ),
             self.load_balance(),
         ])
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_first_read_is_not_zero_and_later_error_keeps_last_snapshot() {
+        let network = coincube_core::miniscript::bitcoin::Network::Bitcoin;
+        let backend = Arc::new(LiquidBackend::new(Arc::new(
+            crate::app::breez_liquid::BreezClient::disconnected(network),
+        )));
+        let mut panel = LiquidOverview::new(backend, PathBuf::from("/nonexistent/r06-swaps"));
+        let cache = Cache::default();
+        assert!(!panel.has_loaded_snapshot);
+
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::View(view::Message::LiquidOverview(
+                view::LiquidOverviewMessage::Error("offline".to_string()),
+            )),
+        );
+        assert!(!panel.has_loaded_snapshot);
+        assert_eq!(panel.error.as_deref(), Some("offline"));
+
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::View(view::Message::LiquidOverview(
+                view::LiquidOverviewMessage::DataLoaded {
+                    balance: Amount::from_sat(50_000),
+                    usdt_balance: 12_345_678,
+                    recent_payment: Vec::new(),
+                },
+            )),
+        );
+        assert!(panel.has_loaded_snapshot);
+        assert_eq!(panel.btc_balance.to_sat(), 50_000);
+        assert_eq!(panel.usdt_balance, 12_345_678);
+
+        let _ = panel.update(
+            None,
+            &cache,
+            Message::View(view::Message::LiquidOverview(
+                view::LiquidOverviewMessage::Error("refresh failed".to_string()),
+            )),
+        );
+        assert_eq!(panel.error.as_deref(), Some("refresh failed"));
+        assert_eq!(panel.btc_balance.to_sat(), 50_000);
+        assert_eq!(panel.usdt_balance, 12_345_678);
     }
 }

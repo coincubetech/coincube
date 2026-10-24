@@ -18,6 +18,7 @@ use iced::{
 };
 
 use crate::app::breez_liquid::assets::format_usdt_display;
+use crate::app::view::shared::landing::{amount_cell, AmountCell, AmountTier};
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
 use crate::app::{
     menu::Menu,
@@ -74,7 +75,9 @@ pub struct PendingTransfer {
 fn pending_deposit_card<'a>(
     pending_transfer: PendingTransfer,
     bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
+    let display_amount = pending_deposit_amount(pending_transfer, bitcoin_unit, balance_masked);
     Container::new(
         Row::new()
             .spacing(8)
@@ -82,15 +85,7 @@ fn pending_deposit_card<'a>(
             .push(warning_icon().size(12).style(theme::text::secondary))
             .push(text("Pending deposit").size(12).color(color::GREY_2))
             .push(Space::new().width(Length::Fill))
-            .push(
-                text(
-                    pending_transfer
-                        .amount
-                        .to_formatted_string_with_unit(bitcoin_unit),
-                )
-                .size(12)
-                .color(color::ORANGE),
-            ),
+            .push(text(display_amount).size(12).color(color::ORANGE)),
     )
     .padding([10, 14])
     .style(|t| iced::widget::container::Style {
@@ -103,6 +98,20 @@ fn pending_deposit_card<'a>(
         ..Default::default()
     })
     .into()
+}
+
+fn pending_deposit_amount(
+    pending_transfer: PendingTransfer,
+    bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
+) -> String {
+    if balance_masked {
+        AmountCell::masked().primary
+    } else {
+        pending_transfer
+            .amount
+            .to_formatted_string_with_unit(bitcoin_unit)
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -410,7 +419,11 @@ fn wallet_card<'a>(
     let content = if matches!(wallet_type, WalletType::Vault) && loaded {
         if let Some(pending_transfer) = pending_vault_incoming {
             if pending_transfer.stage != TransferStage::Completed {
-                content.push(pending_deposit_card(pending_transfer, bitcoin_unit))
+                content.push(pending_deposit_card(
+                    pending_transfer,
+                    bitcoin_unit,
+                    balance_masked,
+                ))
             } else {
                 content
             }
@@ -1471,6 +1484,9 @@ pub struct GlobalViewConfig<'a> {
     /// the first `get_info` round-trip is in flight or if the
     /// bridge subprocess is currently down.
     pub spark_balance: Amount,
+    pub spark_btc_balance: Amount,
+    pub spark_stable_balance: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+    pub spark_balance_error: bool,
     pub usdt_balance: u64,
     pub usdt_balance_error: bool,
     pub pending_liquid_send_sats: u64,
@@ -1586,6 +1602,9 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     let GlobalViewConfig {
         liquid_balance,
         spark_balance,
+        spark_btc_balance,
+        spark_stable_balance,
+        spark_balance_error,
         usdt_balance,
         usdt_balance_error,
         pending_liquid_send_sats,
@@ -1708,22 +1727,17 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // USDt is pegged to USD, so always use BTC/USD price for conversion.
     // When the user's fiat currency is USD, btc_usd_price == converter.price_per_btc().
     // When it differs (e.g. EUR), we must use the dedicated USD price to avoid mispricing.
+    let usable_usd_quote = btc_usd_price.filter(|price| *price > 0.0 && price.is_finite());
     let usdt_fiat_value = usdt_balance as f64 / 1e8; // USDt base units → dollars
-    let usdt_as_sats = if let Some(btc_price_usd) = btc_usd_price {
-        if btc_price_usd > 0.0 {
-            (usdt_fiat_value / btc_price_usd * 1e8) as u64
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    let usdt_as_sats = usable_usd_quote
+        .map(|btc_price_usd| (usdt_fiat_value / btc_price_usd * 1e8) as u64)
+        .unwrap_or(0);
     // A gated-off Liquid wallet contributes nothing to the aggregate. Its
     // balances are zero in that state anyway (the state layer skips the
     // loaders), but stating it here keeps the Total Balance honest even if a
     // stale value ever survived the gate flipping.
     let total_sats = if has_liquid {
-        liquid_balance.to_sat() + usdt_as_sats
+        liquid_balance.to_sat().saturating_add(usdt_as_sats)
     } else {
         0
     };
@@ -1741,11 +1755,37 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     } else {
         vault_balance
     };
-    let global_total_sats = spark_balance.to_sat() + total_sats + display_vault_balance.to_sat();
+    let spark_usdb_held = spark_stable_balance.is_some_and(|holding| holding.balance > 0);
+    let spark_usdb_as_sats = spark_stable_balance
+        .map(|holding| {
+            crate::app::breez_spark::assets::stable_token_as_sats(
+                holding.balance,
+                holding.decimals,
+                usable_usd_quote,
+            )
+        })
+        .unwrap_or(0);
+    let spark_display_balance = Amount::from_sat(if has_spark {
+        spark_btc_balance
+            .to_sat()
+            .saturating_add(spark_usdb_as_sats)
+    } else {
+        0
+    });
+    let spark_valuation_partial = spark_usdb_held && usable_usd_quote.is_none();
+    let global_total_sats = spark_display_balance
+        .to_sat()
+        .saturating_add(total_sats)
+        .saturating_add(display_vault_balance.to_sat());
     let global_total_amount = Amount::from_sat(global_total_sats);
     let global_total_fiat = fiat_converter
         .as_ref()
         .map(|c| c.convert(global_total_amount));
+    let total_partial = (has_spark && (spark_balance_error || spark_valuation_partial))
+        || (has_liquid
+            && (liquid_balance_error
+                || usdt_balance_error
+                || (usdt_balance > 0 && usable_usd_quote.is_none())));
 
     let orange_outline_btn = |label: &'static str, msg: Message| -> Element<'a, Message> {
         button::orange_outline(None, label)
@@ -1939,7 +1979,18 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // Combined Liquid headline (L-BTC + USDt-as-sats). Both component
     // balances must be loaded — a partial sum would be misleading.
     let liquid_card_header_loaded = liquid_balance_loaded && usdt_balance_loaded;
-    let liquid_card_header: Element<'a, Message> = if liquid_card_header_loaded {
+    let liquid_card_header: Element<'a, Message> = if liquid_card_header_loaded
+        && (liquid_balance_error
+            || usdt_balance_error
+            || (usdt_balance > 0 && usable_usd_quote.is_none()))
+    {
+        amount_cell::<Message>(
+            AmountCell::unavailable(
+                "Combined Liquid valuation is partial; asset amounts are below",
+            ),
+            AmountTier::Card,
+        )
+    } else if liquid_card_header_loaded {
         wallet_header::<Message>(WalletHeaderProps::new(
             total_amount,
             total_fiat,
@@ -2004,7 +2055,16 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // signer hide it entirely, so the entire widget tree is built
     // lazily inside `then(..)` to avoid wasted work on every render.
     let spark_card = has_spark.then(|| {
-        let spark_fiat = fiat_converter.as_ref().map(|c| c.convert(spark_balance));
+        let spark_fiat = (!spark_valuation_partial)
+            .then(|| {
+                fiat_converter
+                    .as_ref()
+                    .map(|c| c.convert(spark_display_balance))
+            })
+            .flatten();
+        let spark_btc_fiat = fiat_converter
+            .as_ref()
+            .map(|c| c.convert(spark_btc_balance));
         let spark_btc_row = Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
@@ -2018,7 +2078,13 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     .width(Length::Fixed(60.0)),
             )
             .push(if balance_masked {
-                Row::new().push(text("********").size(P1_SIZE))
+                Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
+            } else if spark_balance_error && !spark_balance_loaded {
+                Row::new().push(
+                    text("Balance unavailable")
+                        .size(P1_SIZE)
+                        .style(theme::text::warning),
+                )
             } else if !spark_balance_loaded {
                 // Pre-Synced placeholder — see the comment on the
                 // Spark wallet_header below for why we don't render
@@ -2031,12 +2097,12 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     |content| text(content).size(P1_SIZE).style(theme::text::secondary),
                 ))
             } else {
-                amount_with_size_and_unit(&spark_balance, P1_SIZE, bitcoin_unit)
+                amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
             })
             .push_maybe(
                 (!balance_masked && spark_balance_loaded)
                     .then(|| {
-                        spark_fiat
+                        spark_btc_fiat
                             .as_ref()
                             .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
                     })
@@ -2058,9 +2124,23 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         // since the SDK can return a stale persisted value before
         // incremental sync completes. Animated dots match the Total
         // Balance loading treatment for visual consistency.
-        let spark_header: Element<'a, Message> = if spark_balance_loaded {
+        let spark_header: Element<'a, Message> = if spark_balance_error && !spark_balance_loaded {
+            amount_cell::<Message>(
+                AmountCell::unavailable("Spark bridge has not returned a balance"),
+                AmountTier::Card,
+            )
+        } else if spark_balance_loaded && spark_valuation_partial {
+            amount_cell::<Message>(
+                if balance_masked {
+                    AmountCell::masked()
+                } else {
+                    AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote")
+                },
+                AmountTier::Card,
+            )
+        } else if spark_balance_loaded {
             wallet_header::<Message>(WalletHeaderProps::new(
-                spark_balance,
+                spark_display_balance,
                 spark_fiat,
                 balance_masked,
                 bitcoin_unit,
@@ -2098,9 +2178,40 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             )
             .push(spark_header)
             .push(spark_btc_row)
+            .push_maybe(spark_stable_balance.map(|holding| {
+                let text_value = format!(
+                    "{} USDB",
+                    crate::app::breez_spark::assets::format_token_display(
+                        holding.balance,
+                        holding.decimals,
+                    )
+                );
+                Row::new()
+                    .spacing(8)
+                    .align_y(Alignment::Center)
+                    .push(
+                        text("USDB")
+                            .size(P1_SIZE)
+                            .style(theme::text::secondary)
+                            .width(Length::Fixed(60.0)),
+                    )
+                    .push(amount_cell::<Message>(
+                        if balance_masked {
+                            AmountCell::masked()
+                        } else {
+                            AmountCell::shown(text_value, None)
+                        },
+                        AmountTier::Row,
+                    ))
+            }))
+            .push_maybe((spark_balance_error && spark_balance_loaded).then(|| {
+                text("Last known Spark balance · refresh failed")
+                    .size(P2_SIZE)
+                    .style(theme::text::warning)
+            }))
             .push_maybe(pending_spark_incoming.and_then(|pt| {
                 (pt.stage != TransferStage::Completed)
-                    .then(|| pending_deposit_card(pt, bitcoin_unit))
+                    .then(|| pending_deposit_card(pt, bitcoin_unit, balance_masked))
             }));
 
         let spark_card: Element<'a, Message> = Container::new(spark_card_content)
@@ -2145,11 +2256,14 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     };
 
     // Total Balance block — the fiat-first headline number above the
-    // Wallets section. While any wallet is still loading we render
-    // an animated-dots placeholder so the aggregate doesn't briefly
-    // read as a misleadingly low partial. Once loaded, a degraded
-    // indicator surfaces beside the label when USDt failed to fetch
-    // (its contribution to the SATS line is then excluded).
+    // Wallets section. Before the first authoritative result, a zero is not
+    // a wallet balance. A failed first read without any known component is
+    // unavailable; with known components, the sum is explicitly partial.
+    let any_known_balance = (has_spark && spark_balance_loaded)
+        || (has_liquid
+            && ((liquid_balance_loaded && !liquid_balance_error)
+                || (usdt_balance_loaded && !usdt_balance_error)))
+        || (has_vault && vault_loaded && (!has_imported_bitcoin || imported_balance.is_some()));
     let total_balance_label_row = Row::new()
         .spacing(0)
         .align_y(Alignment::Center)
@@ -2164,7 +2278,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
         )
         .push_maybe(
-            ((usdt_balance_error || liquid_balance_error) && !total_balance_loading)
+            (total_partial && !total_balance_loading)
                 .then(|| warning_icon().size(12).style(theme::text::secondary)),
         );
 
@@ -2184,6 +2298,15 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 |content| text(content).size(P1_SIZE).style(theme::text::secondary),
             ))
             .into()
+    } else if !any_known_balance {
+        amount_cell::<Message>(
+            if balance_masked {
+                AmountCell::masked()
+            } else {
+                AmountCell::unavailable("No wallet balance has loaded successfully")
+            },
+            AmountTier::Total,
+        )
     } else {
         wallet_header::<Message>(WalletHeaderProps::new(
             global_total_amount,
@@ -2200,7 +2323,14 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     let total_balance_block = Column::new()
         .spacing(6)
         .push(total_balance_label_row)
-        .push(total_balance_value);
+        .push(total_balance_value)
+        .push_maybe(
+            (total_partial && !total_balance_loading && !balance_masked).then(|| {
+                text("Partial total · one or more wallet amounts or USD valuations are unavailable")
+                    .size(P2_SIZE)
+                    .style(theme::text::warning)
+            }),
+        );
 
     Column::new()
         .spacing(20)
@@ -2355,6 +2485,9 @@ mod tests {
             GlobalViewConfig {
                 liquid_balance: Amount::from_sat(125_000),
                 spark_balance: Amount::from_sat(250_000),
+                spark_btc_balance: Amount::from_sat(250_000),
+                spark_stable_balance: None,
+                spark_balance_error: false,
                 usdt_balance: 100_000_000,
                 usdt_balance_error: false,
                 pending_liquid_send_sats: 1_000,
@@ -2423,6 +2556,19 @@ mod tests {
             VaultToSpark,
             SparkToVault,
         ]
+    }
+
+    #[test]
+    fn hub_mask_redacts_pending_deposit_amount() {
+        let pending = PendingTransfer {
+            amount: Amount::from_sat(31_000),
+            stage: TransferStage::PendingDeposit,
+        };
+        let visible = pending_deposit_amount(pending, BitcoinDisplayUnit::Sats, false);
+        let hidden = pending_deposit_amount(pending, BitcoinDisplayUnit::Sats, true);
+        assert!(visible.contains("31"));
+        assert_eq!(hidden, AmountCell::masked().primary);
+        assert!(!hidden.contains("31"));
     }
 
     /// Every directed pair of distinct wallets must map to exactly one
