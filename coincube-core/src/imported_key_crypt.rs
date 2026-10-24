@@ -217,19 +217,30 @@ fn parse_header(bytes: &[u8]) -> Result<(u8, KdfParams), ImportedKeyCryptError> 
         t_cost: bytes[6],
         p_cost: bytes[7],
     };
+    validate_header_params(params, seed_crypt::WRITE_PARAMS)?;
+    Ok((bytes[0], params))
+}
+
+/// Pure pre-KDF check. The floor remains private and production always passes
+/// the seed-file write cost; tests can prove that exact floor without paying
+/// for a 256 MiB Argon2 derivation on every malformed-header case.
+fn validate_header_params(
+    params: KdfParams,
+    floor: KdfParams,
+) -> Result<(), ImportedKeyCryptError> {
     // Bound untrusted header work before Argon2 allocates memory. Production
     // V1/V2 records use at least the existing seed cost; a new format version
     // is required to raise this ceiling.
-    if params.memory_kib < seed_crypt::WRITE_PARAMS.memory_kib
+    if params.memory_kib < floor.memory_kib
         || params.memory_kib > 262_144
-        || params.t_cost < seed_crypt::WRITE_PARAMS.t_cost
+        || params.t_cost < floor.t_cost
         || params.t_cost > 6
-        || params.p_cost < seed_crypt::WRITE_PARAMS.p_cost
+        || params.p_cost < floor.p_cost
         || params.p_cost > 8
     {
         return Err(ImportedKeyCryptError::InvalidFormat);
     }
-    Ok((bytes[0], params))
+    Ok(())
 }
 
 fn key(
@@ -396,6 +407,64 @@ mod tests {
     use crate::{chain::ChainId, imported_keys::verify_imported_account};
     use miniscript::bitcoin::{bip32::DerivationPath, secp256k1::Secp256k1};
     use std::str::FromStr;
+
+    #[test]
+    fn production_header_floor_and_ceiling_reject_each_dimension_before_kdf() {
+        let production = KdfParams::SEED;
+        assert_eq!(validate_header_params(production, KdfParams::SEED), Ok(()));
+        assert_eq!(
+            validate_header_params(KdfParams::TEST, KdfParams::SEED),
+            Err(ImportedKeyCryptError::InvalidFormat)
+        );
+        for weaker in [
+            KdfParams {
+                memory_kib: production.memory_kib - 1,
+                ..production
+            },
+            KdfParams {
+                t_cost: production.t_cost - 1,
+                ..production
+            },
+            KdfParams {
+                p_cost: production.p_cost - 1,
+                ..production
+            },
+        ] {
+            assert_eq!(
+                validate_header_params(weaker, KdfParams::SEED),
+                Err(ImportedKeyCryptError::InvalidFormat),
+                "production accepted an under-floor header: {weaker:?}"
+            );
+        }
+        for excessive in [
+            KdfParams {
+                memory_kib: 262_145,
+                ..production
+            },
+            KdfParams {
+                t_cost: 7,
+                ..production
+            },
+            KdfParams {
+                p_cost: 9,
+                ..production
+            },
+        ] {
+            assert_eq!(
+                validate_header_params(excessive, KdfParams::SEED),
+                Err(ImportedKeyCryptError::InvalidFormat),
+                "production accepted an over-ceiling header: {excessive:?}"
+            );
+        }
+        // Unit codec tests intentionally use TEST; the pure check above
+        // still proves the production floor without a high-cost KDF run.
+        assert_eq!(
+            parse_header(&header(PIN_ONLY_VERSION, KdfParams::TEST))
+                .unwrap()
+                .1,
+            KdfParams::TEST
+        );
+    }
 
     fn fixture() -> (
         ImportedWalletDescriptor,
