@@ -252,7 +252,9 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 .lrow .lb{font-size:13px}
 .lrow .lact{justify-self:end;font-size:13px;font-weight:500;color:var(--acc-ink)}
 .lpanel{width:440px;flex:none;border-left:1px solid var(--line);background:var(--panel);overflow:auto}
-.lpanel .fc.lp{position:static;width:auto;height:auto;min-height:100%;transform:none;pointer-events:auto;padding:24px 28px}
+.lpanel .fc.lp{position:static;width:auto;height:auto;transform:none;pointer-events:auto;padding:24px 28px}
+.lpanel,.lpanel *{pointer-events:auto}
+.lpanel{position:relative;z-index:7}
 .lpanel .fc .grow{flex:0}
 </style>
 </helmet>
@@ -504,7 +506,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         </div>
         <sc-if value="{{ lsel.on }}" hint-placeholder-val="{{ false }}">
           <aside class="lpanel" aria-label="Selected Cube">
-                        <sc-if value="{{ lsel.showDetails }}" hint-placeholder-val="{{ false }}">
+                        <sc-if value="{{ lsel.detailsOnly }}" hint-placeholder-val="{{ false }}">
                           <section class="fc lp" aria-labelledby="lp-title">
                             <h2 class="pn" id="lp-title" style="display:flex;align-items:center;gap:10px"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ lsel.av }}"></path></svg></span>{{ lsel.p.name }}</h2>
                             <p class="pnet">
@@ -889,7 +891,7 @@ class Component extends DCLogic {
           cubeStyle: 'transform:' + cubeT,
           // face content: 420x420 layout scaled into the face's padding box (s minus the 1.5px edges)
           fcStyle: 'transform:scale(' + ((T.s - 3) / FACE).toFixed(5) + ')',
-          showDetails: active, showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
+          showDetails: active, detailsOnly: active && phase === 'details', showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
           blHidden: String(!(active && phase === 'details')),
           p: active ? P : EMPTY,
           // a background Cube hands off: outgoing reverses at once, incoming starts 160ms later in details with a fresh PIN field
@@ -908,7 +910,7 @@ class Component extends DCLogic {
     const km = st.keyMode || 'closed';
     const listItems = rows.length ? rows[0].items : [];
     const lfound = listItems.find((it) => it.p !== EMPTY) || null;
-    const lsel = Object.assign({ on: !!lfound, p: EMPTY, name: '', state: '', stCls: '', edge: '', tag: '', hasTag: false, btcLogo: true, logo: false, coinCls: '', isOpen: false, notOpen: true, hint: '', showDetails: false, showUnlock: false, showChecks: false, av: '' }, lfound || {});
+    const lsel = Object.assign({ on: !!lfound, p: EMPTY, name: '', state: '', stCls: '', edge: '', tag: '', hasTag: false, btcLogo: true, logo: false, coinCls: '', isOpen: false, notOpen: true, hint: '', showDetails: false, detailsOnly: false, showUnlock: false, showChecks: false, av: '' }, lfound || {});
     return {
       b2bOn: B2B,
       themeClass: theme === 'light' ? 'light' : '',
