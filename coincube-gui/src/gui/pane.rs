@@ -44,6 +44,8 @@ pub enum ViewMessage {
     /// handler focuses an existing Home tab and routes it to its
     /// Connect overview so the user can sign in.
     OpenConnectSignIn,
+    /// Return to the Launcher while the originating Cube tab stays open.
+    OpenLauncher,
     /// Bubbled from a tab whose paid-feature locked card emitted
     /// [`crate::app::view::Message::OpenPlanBilling`]. The handler focuses an
     /// existing Home tab and routes it to Connect → Plan & Billing.
@@ -329,6 +331,9 @@ impl Pane {
                             tab::Message::OpenConnectSignIn => {
                                 Task::done(Message::View(ViewMessage::OpenConnectSignIn))
                             }
+                            tab::Message::OpenLauncher => {
+                                Task::done(Message::View(ViewMessage::OpenLauncher))
+                            }
                             tab::Message::OpenPlanBilling => {
                                 Task::done(Message::View(ViewMessage::OpenPlanBilling))
                             }
@@ -390,6 +395,12 @@ impl Pane {
                 // user reaches the login form.
                 let nav = crate::home::Message::View(crate::home::ViewMessage::GoToSection(
                     crate::home::HomeSection::Connect(crate::app::menu::ConnectSubMenu::Overview),
+                ));
+                return self.focus_home_tab_with(nav, cfg);
+            }
+            Message::View(ViewMessage::OpenLauncher) => {
+                let nav = crate::home::Message::View(crate::home::ViewMessage::GoToSection(
+                    crate::home::HomeSection::Cubes,
                 ));
                 return self.focus_home_tab_with(nav, cfg);
             }

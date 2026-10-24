@@ -143,6 +143,14 @@ pub enum Message {
     /// Copy text and show confirmation after the clipboard write is requested.
     CopyWithToast(String, String),
     Menu(Menu),
+    /// Show the Launcher while keeping this Cube's session in its App tab.
+    OpenLauncher,
+    /// Lock through the tab's secure lifecycle, then show the Launcher.
+    LockCubeToLauncher,
+    ToggleCubeSwitcher,
+    AskCubeLock,
+    CancelCubeLock,
+    ToggleVaultTools,
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
     /// Recovery Kit" mode. Branches off the same button the default
@@ -282,7 +290,6 @@ pub enum Message {
     /// `false` = decline. Handled at the App level; the answer is persisted
     /// per-cube so the prompt never re-fires.
     RecoveryAlertsConsent(bool),
-    DismissBackupWarning,
     /// Close the Spark Stable Balance banner for this session
     /// (`Cache::spark_notice`). Handled at the App level.
     DismissSparkNotice,
