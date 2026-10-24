@@ -744,3 +744,14 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 ## Fix: setting changes propagate again; in-Cube overlays without shared state (2026-10-24, canvas v111)
 
 While exporting, two regressions of mine surfaced. (1) Removing the cross-tab listener in v108 also stopped one artboard hearing a setting change made in another, so the Launcher again needed a reload after App preferences changes. The listener is restored on every screen. (2) The "a Cube is on screen" marker was unreliable because the player keeps every artboard mounted and re-renders them all on a setting change, so hidden Cube screens re-set it. It is gone. The Cube top bar now links to two small boards, "App preferences · over an open Cube" and "Connect · over an open Cube", which mount the real sheets with `in-cube=1`; the Launcher links to the plain ones. Verified: Developer mode on and off reflects on the Launcher without a reload; App preferences and Connect from the Overview overlay the Cube and Close returns to it; from the Launcher they overlay the Launcher.
+
+## Fixes found while exporting screens (2026-10-24, canvas v112–v113)
+
+- **Import or restore:** the line "Bitcoin Blake2b supports Vault creation only." showed with Blake2b off. It now shows only when Blake2b is on for the device (v112).
+- **Opening a Cube, light twin:** after the "is open" beat, the board mounted a dark Overview. The light twin now passes the forced light theme to the Overview it opens into (v113).
+
+## Exported screens for the hand-off (2026-10-24)
+
+**Robert:** make a PR with the updated designs exported so Codex can work with them.
+
+**Applied:** `screens/dark/` (34 boards, device settings at their defaults) and `screens/light/` (the Light theme page, 33 boards including the Launcher List view), indexed in `screens/README.md`, and linked from `HANDOFF.md`. The canvas sources in `canvas/` match canvas v113.
