@@ -148,6 +148,96 @@ fn export_canonical_sortedmulti_requests() {
 }
 
 #[test]
+fn wallet_policy_entry_preserves_both_frozen_imported_requests_and_vault_control() {
+    use coincube_core::{
+        descriptors::CoincubeDescriptor,
+        miniscript::bitcoin::{
+            bip32::{Xpriv, Xpub},
+            Network,
+        },
+    };
+
+    let frozen: Value = serde_json::from_str(CANONICAL_REQUEST).unwrap();
+    assert_eq!(
+        serde_json::to_vec_pretty(&canonical_sortedmulti_requests()).unwrap(),
+        CANONICAL_REQUEST.as_bytes()
+    );
+    for name in ["sortedmulti_first", "sortedmulti_nonfirst"] {
+        let vector = case(&frozen, name);
+        let exact = vector["descriptor"].as_str().unwrap();
+        let imported =
+            ImportedWalletDescriptor::parse(exact, None, crate::chain::ChainId::Testnet).unwrap();
+        let loaded = crate::app::wallet::Wallet::new(imported.clone());
+        let entry = PhonePolicy::from_wallet(&loaded).unwrap();
+        assert_eq!(entry.descriptor().as_bytes(), exact.as_bytes(), "{name}");
+        assert!(
+            entry.descriptor().contains("48'/1'/0'/2'"),
+            "{name}",
+            name = name
+        );
+        assert!(
+            entry.descriptor().ends_with("#slsxmyf5"),
+            "{name}",
+            name = name
+        );
+        assert_eq!(
+            hex::encode(Sha256::digest(entry.descriptor().as_bytes())),
+            vector["descriptor_sha256"].as_str().unwrap(),
+            "{name}"
+        );
+        assert_eq!(
+            entry.transport_id().to_string(),
+            vector["descriptor_id"].as_str().unwrap(),
+            "{name}"
+        );
+        let policy::PhonePolicyKind::Imported { wallet, wallet_id } = entry.kind() else {
+            panic!("imported Wallet must yield imported PhonePolicy")
+        };
+        assert_eq!(wallet, &imported, "{name}");
+        assert_eq!(wallet_id, &loaded.id(), "{name}");
+        assert_eq!(
+            wallet_id,
+            &crate::app::settings::WalletId::for_imported(
+                &imported,
+                crate::chain::ChainId::Testnet
+            )
+            .unwrap(),
+            "{name}"
+        );
+    }
+
+    let secp = Secp256k1::new();
+    let roots = [
+        Xpriv::new_master(Network::Bitcoin, &[5; 32]).unwrap(),
+        Xpriv::new_master(Network::Bitcoin, &[6; 32]).unwrap(),
+    ];
+    let keys: Vec<_> = roots
+        .iter()
+        .map(|root| {
+            format!(
+                "[{}]{}/<0;1>/*",
+                root.fingerprint(&secp),
+                Xpub::from_priv(&secp, root)
+            )
+        })
+        .collect();
+    let vault = CoincubeDescriptor::from_str(&format!(
+        "wsh(or_d(pk({}),and_v(v:pkh({}),older(52560))))",
+        keys[0], keys[1]
+    ))
+    .unwrap();
+    let loaded = crate::app::wallet::Wallet::new(vault.clone());
+    let entry = PhonePolicy::from_wallet(&loaded).unwrap();
+    assert!(matches!(entry.kind(), policy::PhonePolicyKind::Vault(_)));
+    assert_eq!(entry.descriptor(), vault.to_string());
+    assert_eq!(entry.chain(), loaded.chain);
+    assert_eq!(
+        entry.transport_id().to_string(),
+        hex::encode(&Sha256::digest(entry.descriptor().as_bytes())[..4])
+    );
+}
+
+#[test]
 fn actual_canonical_phone_results_verify_against_unchanged_tenshu_request() {
     assert_eq!(
         hex::encode(Sha256::digest(CANONICAL_REQUEST.as_bytes())),
