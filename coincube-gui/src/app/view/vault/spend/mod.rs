@@ -1692,6 +1692,7 @@ mod tests {
         let clear = Id::new(CLEAR_ID);
         let prepare = Id::new(PREPARE_ID);
         let base = Scenario::valid_send();
+        let capture_tall = std::env::var_os("R07A_CAPTURE_DIR").is_some();
         let cases = [
             Case {
                 name: "valid",
@@ -1913,6 +1914,16 @@ mod tests {
                         "{context}: {inputs:?}"
                     );
                     harness.capture(name, appearance, &theme);
+                    if capture_tall
+                        && outer == WIDE
+                        && matches!(*name, "valid" | "batch" | "invalid-fee" | "generating")
+                    {
+                        // The ordinary viewport cuts off the real dashboard
+                        // footer. TALL is already used above to put every
+                        // Send control inside the rendered content viewport.
+                        Harness::new(compose(&fixture, scenario), TALL)
+                            .capture(name, appearance, &theme);
+                    }
                 }
             }
         }
