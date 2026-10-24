@@ -1113,7 +1113,7 @@ impl GUI {
                         .unwrap_or(0);
                 }
                 self.focus = Some(pane_id);
-                return result.map(move |message| Message::Pane(pane_id, message));
+                result.map(move |message| Message::Pane(pane_id, message))
             }
             Message::Pane(_, pane::Message::View(pane::ViewMessage::SplitTab(_))) => Task::none(),
             Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::CloseTab(i))) => {
