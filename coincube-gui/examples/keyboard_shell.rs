@@ -42,6 +42,7 @@ struct Fixture {
     stream_status: ConnectionStatus,
     input: String,
     last_action: String,
+    action_count: u64,
 }
 
 impl Default for Fixture {
@@ -53,6 +54,7 @@ impl Default for Fixture {
             stream_status: ConnectionStatus::Inactive,
             input: String::new(),
             last_action: "No action yet".to_owned(),
+            action_count: 0,
         }
     }
 }
@@ -81,68 +83,75 @@ impl Fixture {
                 Task::none()
             }
             Message::InputSubmitted => {
+                self.action_count += 1;
                 self.last_action = format!("Input submitted: {}", self.input);
                 Task::none()
             }
-            Message::Shell(intent) => match intent {
-                view::Message::ToggleCubeSwitcher => {
-                    self.shell.switcher_open = !self.shell.switcher_open;
-                    self.shell.lock_confirmation = false;
-                    self.last_action = "Cube switcher toggled".to_owned();
-                    iced::widget::operation::focus(shell::CUBE_SWITCHER_ID)
+            Message::Shell(intent) => {
+                if !matches!(intent, view::Message::FocusAction(_)) {
+                    self.action_count += 1;
                 }
-                view::Message::AskCubeLock => {
-                    self.shell.switcher_open = true;
-                    self.shell.lock_confirmation = true;
-                    self.last_action = "Lock review opened".to_owned();
-                    iced::widget::operation::focus(shell::CUBE_LOCK_CANCEL_ID)
-                }
-                view::Message::CancelCubeLock => {
-                    self.shell.lock_confirmation = false;
-                    self.last_action = "Lock review cancelled".to_owned();
-                    iced::widget::operation::focus(shell::CUBE_LOCK_ID)
-                }
-                view::Message::ToggleVaultTools => {
-                    self.shell.tools_open = !self.shell.tools_open;
-                    self.last_action = "Tools toggled".to_owned();
-                    iced::widget::operation::focus(shell::VAULT_TOOLS_ID)
-                }
-                view::Message::Menu(menu) => {
-                    if matches!(
-                        menu,
-                        Menu::Vault(
-                            VaultSubMenu::Coins(_)
-                                | VaultSubMenu::PSBTs(_)
-                                | VaultSubMenu::Recovery
-                                | VaultSubMenu::Claim
-                        )
-                    ) {
-                        self.shell.tools_open = true;
+                match intent {
+                    view::Message::FocusAction(id) => iced::widget::operation::focus(id),
+                    view::Message::ToggleCubeSwitcher => {
+                        self.shell.switcher_open = !self.shell.switcher_open;
+                        self.shell.lock_confirmation = false;
+                        self.last_action = "Cube switcher toggled".to_owned();
+                        iced::widget::operation::focus(shell::CUBE_SWITCHER_ID)
                     }
-                    self.last_action = format!("Route: {menu:?}");
-                    self.menu = menu;
-                    Task::none()
+                    view::Message::AskCubeLock => {
+                        self.shell.switcher_open = true;
+                        self.shell.lock_confirmation = true;
+                        self.last_action = "Lock review opened".to_owned();
+                        iced::widget::operation::focus(shell::CUBE_LOCK_CANCEL_ID)
+                    }
+                    view::Message::CancelCubeLock => {
+                        self.shell.lock_confirmation = false;
+                        self.last_action = "Lock review cancelled".to_owned();
+                        iced::widget::operation::focus(shell::CUBE_LOCK_ID)
+                    }
+                    view::Message::ToggleVaultTools => {
+                        self.shell.tools_open = !self.shell.tools_open;
+                        self.last_action = "Tools toggled".to_owned();
+                        iced::widget::operation::focus(shell::VAULT_TOOLS_ID)
+                    }
+                    view::Message::Menu(menu) => {
+                        if matches!(
+                            menu,
+                            Menu::Vault(
+                                VaultSubMenu::Coins(_)
+                                    | VaultSubMenu::PSBTs(_)
+                                    | VaultSubMenu::Recovery
+                                    | VaultSubMenu::Claim
+                            )
+                        ) {
+                            self.shell.tools_open = true;
+                        }
+                        self.last_action = format!("Route: {menu:?}");
+                        self.menu = menu;
+                        Task::none()
+                    }
+                    view::Message::OpenLauncher => {
+                        self.last_action = "Launcher return requested (synthetic)".to_owned();
+                        Task::none()
+                    }
+                    view::Message::OpenConnectSignIn => {
+                        self.last_action = "Connect sign-in requested (synthetic)".to_owned();
+                        Task::none()
+                    }
+                    view::Message::ToggleTheme => self.update(Message::ToggleTheme),
+                    view::Message::LockCubeToLauncher => {
+                        self.last_action = "Lock confirmed (synthetic; no Cube exists)".to_owned();
+                        self.shell.lock_confirmation = false;
+                        self.shell.switcher_open = false;
+                        Task::none()
+                    }
+                    other => {
+                        self.last_action = format!("Shell intent: {other:?}");
+                        Task::none()
+                    }
                 }
-                view::Message::OpenLauncher => {
-                    self.last_action = "Launcher return requested (synthetic)".to_owned();
-                    Task::none()
-                }
-                view::Message::OpenConnectSignIn => {
-                    self.last_action = "Connect sign-in requested (synthetic)".to_owned();
-                    Task::none()
-                }
-                view::Message::ToggleTheme => self.update(Message::ToggleTheme),
-                view::Message::LockCubeToLauncher => {
-                    self.last_action = "Lock confirmed (synthetic; no Cube exists)".to_owned();
-                    self.shell.lock_confirmation = false;
-                    self.shell.switcher_open = false;
-                    Task::none()
-                }
-                other => {
-                    self.last_action = format!("Shell intent: {other:?}");
-                    Task::none()
-                }
-            },
+            }
         }
     }
 
@@ -176,10 +185,15 @@ impl Fixture {
             text("Keyboard proof fixture").size(26),
             text("Production shell widgets; synthetic state and intents only."),
             text(&self.last_action),
+            text(format!("Action count: {}", self.action_count)),
             text("Tab and Shift-Tab move focus. Escape closes the innermost shell review."),
             text("Toggle theme to inspect both focus-ring palettes."),
-            action::Action::new("tenshu.fixture.theme", text("Toggle theme"))
-                .on_press(view::Message::ToggleTheme),
+            action::Action::new(
+                "tenshu.fixture.theme",
+                text("Toggle theme"),
+                view::Message::FocusAction
+            )
+            .on_press(view::Message::ToggleTheme),
         ]
         .spacing(20)
         .padding(28)
