@@ -50,7 +50,10 @@ pub(crate) fn validate(input: &CreationInput) -> Result<Validated, Error> {
                     || origin.as_ref().len() != usize::from(xpub.xkey.depth)
                     || (xpub.xkey.depth == 0 && *fingerprint != xpub.xkey.fingerprint())
                     || !fingerprints.insert(*fingerprint)
-                    || !accounts.insert(xpub.xkey)
+                    // Depth, parent fingerprint, child number and origin are
+                    // caller-controlled metadata. Only the key and chain code
+                    // identify the account's derived signing keys.
+                    || !accounts.insert((xpub.xkey.public_key, xpub.xkey.chain_code))
                 {
                     return Err(Error::InvalidInput);
                 }
@@ -245,6 +248,38 @@ pub(crate) mod tests {
         let mut repeated = original.clone();
         repeated.keys.recovery[0] = repeated.keys.primary[0].replacen("4ba43603", "11223344", 1);
         assert!(validate(&repeated).is_err());
+    }
+
+    #[test]
+    fn proposal_rejects_metadata_aliases_within_primary_and_across_recovery() {
+        use coincube_core::miniscript::bitcoin::bip32::{ChildNumber, Fingerprint};
+
+        let original = input();
+        let DescriptorPublicKey::XPub(source) =
+            DescriptorPublicKey::from_str(&original.keys.primary[0]).unwrap()
+        else {
+            panic!("account key expected")
+        };
+        let mut alias = source.xkey;
+        alias.depth = 1;
+        alias.parent_fingerprint = Fingerprint::from([99; 4]);
+        alias.child_number = ChildNumber::from_normal_idx(42).unwrap();
+        let alias = format!("[11223344/42]{alias}");
+
+        // Each alias is a valid account by itself: reject its duplicate
+        // derivation identity, not its distinct, untrusted origin metadata.
+        let mut distinct = original.clone();
+        distinct.keys.primary[0] = alias.clone();
+        assert!(validate(&distinct).is_ok());
+        for primary in [true, false] {
+            let mut duplicate = original.clone();
+            if primary {
+                duplicate.keys.primary[1] = alias.clone();
+            } else {
+                duplicate.keys.recovery[0] = alias.clone();
+            }
+            assert!(matches!(validate(&duplicate), Err(Error::InvalidInput)));
+        }
     }
 
     #[test]
