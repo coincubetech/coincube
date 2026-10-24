@@ -2020,7 +2020,8 @@ fn split_entry_point_guard_rejects_gate_regressions() {
             &format!("        ));\n{refusal}        panel.bind_funding_target(binding);"),
         )
     }
-    let mutations: [(&str, fn(&str) -> String, &str); 5] = [
+    type GuardMutation = (&'static str, fn(&str) -> String, &'static str);
+    let mutations: [GuardMutation; 5] = [
         (
             "target split_from",
             wrong_split_from,
