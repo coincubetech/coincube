@@ -23,7 +23,7 @@ use coincube_ui::{
         lightning_outline_icon, receipt_icon, recovery_icon, settings_icon, shop_icon, vault_icon,
     },
     theme,
-    widget::{Button, Column, ColumnExt, Element, Row, Text},
+    widget::{action::Action, Column, ColumnExt, Element, Row, Text},
 };
 use iced::{
     widget::{column, container, row, rule, scrollable, text, Space},
@@ -33,6 +33,27 @@ use iced::{
 pub const FULL_WIDTH: f32 = 248.0;
 pub const COMPACT_WIDTH: f32 = 208.0;
 pub const TOP_BAR_HEIGHT: f32 = 56.0;
+pub const LAUNCHER_RETURN_ID: &str = "tenshu.launcher.return";
+pub const CUBE_SWITCHER_ID: &str = "tenshu.cube.switcher";
+pub const CUBE_LOCK_ID: &str = "tenshu.cube.lock.ask";
+pub const CUBE_LOCK_CANCEL_ID: &str = "tenshu.cube.lock.cancel";
+pub const VAULT_TOOLS_ID: &str = "tenshu.vault.tools";
+pub const SETTINGS_ID: &str = "tenshu.shell.settings";
+pub const MIDDLE_SCROLL_ID: &str = "tenshu.shell.middle-scroll";
+
+/// Innermost shell dismissal. The GUI owns Escape dispatch; this helper only
+/// identifies the existing harmless intent for the currently open disclosure.
+pub fn escape_intent(state: ShellState) -> Option<Message> {
+    if state.lock_confirmation {
+        Some(Message::CancelCubeLock)
+    } else if state.switcher_open {
+        Some(Message::ToggleCubeSwitcher)
+    } else if state.tools_open {
+        Some(Message::ToggleVaultTools)
+    } else {
+        None
+    }
+}
 
 #[derive(Debug, Clone, Copy, Default)]
 pub struct ShellState {
@@ -90,10 +111,12 @@ fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
 
 /// The 56px bar contains only the Tenshu return action and status chips.
 pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
-    let brand = Button::new(
+    let brand = Action::new(
+        LAUNCHER_RETURN_ID,
         row![cube_icon().size(17), text("Tenshu").size(15)]
             .spacing(8)
             .align_y(Alignment::Center),
+        Message::FocusAction,
     )
     .padding([7, 8])
     .style(theme::button::shell_brand)
@@ -106,10 +129,14 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             .into()
     } else {
         container(
-            Button::new(status("Signed out", false))
-                .padding([6, 11])
-                .style(theme::button::shell_nav)
-                .on_press(Message::OpenConnectSignIn),
+            Action::new(
+                "tenshu.connect.sign-in",
+                status("Signed out", false),
+                Message::FocusAction,
+            )
+            .padding([6, 11])
+            .style(theme::button::shell_nav)
+            .on_press(Message::OpenConnectSignIn),
         )
         .style(theme::container::shell_chip)
         .into()
@@ -153,6 +180,7 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             .padding([0, 16]),
     )
     .height(Length::Fixed(TOP_BAR_HEIGHT))
+    .align_y(iced::alignment::Vertical::Center)
     .width(Length::Fill)
     .style(theme::container::shell_top)
     .into()
@@ -166,6 +194,7 @@ fn nav_row<'a>(
     nested: bool,
     disabled_reason: Option<String>,
 ) -> Element<'a, Message> {
+    let label = label.into();
     let mut body: Row<Message> = Row::new().spacing(10).align_y(Alignment::Center);
     if nested {
         body = body.push(Space::new().width(Length::Fixed(18.0)));
@@ -182,8 +211,19 @@ fn nav_row<'a>(
                 }),
         );
     }
-    body = body.push(text(label.into()).size(if nested { 13 } else { 14 }));
-    let mut button = Button::new(body)
+    body = body.push(text(label.clone()).size(if nested { 13 } else { 14 }));
+    let id = if nested {
+        format!("tenshu.shell.sub.{label}.{message:?}")
+    } else {
+        match label.as_str() {
+            "Lock Cube" => CUBE_LOCK_ID.to_owned(),
+            "Tools" => VAULT_TOOLS_ID.to_owned(),
+            "Settings" => SETTINGS_ID.to_owned(),
+            "All Cubes" => "tenshu.launcher.all-cubes".to_owned(),
+            _ => format!("tenshu.shell.nav.{label}"),
+        }
+    };
+    let mut button = Action::new(id, body, Message::FocusAction)
         .width(Length::Fill)
         .padding([9, 10])
         .style(if active {
@@ -267,7 +307,8 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
     } else {
         short_cube_name(ctx.cube_name)
     };
-    let control = Button::new(
+    let control = Action::new(
+        CUBE_SWITCHER_ID,
         row![
             avatar,
             column![
@@ -286,6 +327,7 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
         ]
         .spacing(9)
         .align_y(Alignment::Center),
+        Message::FocusAction,
     )
     .padding([8, 10])
     .width(Length::Fill)
@@ -334,17 +376,26 @@ fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Mes
             .push(
                 row![
                     container(
-                        Button::new(text("Lock").size(13))
-                            .padding([6, 12])
-                            .style(theme::button::primary)
-                            .on_press(Message::LockCubeToLauncher)
+                        Action::new(
+                            "tenshu.cube.lock.confirm",
+                            text("Lock").size(13),
+                            Message::FocusAction
+                        )
+                        .padding([6, 12])
+                        .style(theme::button::primary)
+                        .focus_radius(25.0)
+                        .on_press(Message::LockCubeToLauncher)
                     )
                     .id("cube-lock-confirm"),
                     container(
-                        Button::new(text("Cancel").size(13))
-                            .padding([6, 12])
-                            .style(theme::button::shell_nav)
-                            .on_press(Message::CancelCubeLock)
+                        Action::new(
+                            CUBE_LOCK_CANCEL_ID,
+                            text("Cancel").size(13),
+                            Message::FocusAction
+                        )
+                        .padding([6, 12])
+                        .style(theme::button::shell_nav)
+                        .on_press(Message::CancelCubeLock)
                     )
                     .id("cube-lock-cancel"),
                 ]
@@ -478,7 +529,9 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     let overview = Menu::Cube(CubeSubMenu::Overview);
     let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
     let activity = activity_route(ctx);
-    let mut top: Column<Message> = Column::new().spacing(2).padding([0, 10]);
+    // A focused row paints 4px beyond its hit bounds. Later selected rows
+    // have opaque fills, so they need this clearance to keep the ring visible.
+    let mut top: Column<Message> = Column::new().spacing(4).padding([0, 10]);
     top = top
         .push(route("Overview", Some(home_icon()), menu, overview, false))
         .push(nav_row(
@@ -502,7 +555,9 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             false,
         ));
 
-    let mut middle: Column<Message> = Column::new().spacing(2).padding([0, 10]);
+    // The scroll viewport clips drawing outside its content. Reserve more
+    // than the focus ring's 4px outer extent at its first and last actions.
+    let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
     middle = middle.push(section("WALLETS"));
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
@@ -666,7 +721,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     }
     sidebar = sidebar
         .push(top)
-        .push(scrollable(middle).height(Length::Fill))
+        .push(scrollable(middle).id(MIDDLE_SCROLL_ID).height(Length::Fill))
         .push_maybe(state.backup_attention.then(|| {
             nav_row(
                 "Backup not confirmed · Review",
@@ -686,3 +741,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
         .style(theme::container::shell_rail)
         .into()
 }
+
+#[cfg(test)]
+mod keyboard_tests;

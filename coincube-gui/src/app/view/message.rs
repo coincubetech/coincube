@@ -151,6 +151,9 @@ pub enum Message {
     AskCubeLock,
     CancelCubeLock,
     ToggleVaultTools,
+    /// A shared Action's pointer-down request. The App applies whole-tree
+    /// focus so a captured sidebar click also blurs content controls.
+    FocusAction(iced::advanced::widget::Id),
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
     /// Recovery Kit" mode. Branches off the same button the default

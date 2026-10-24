@@ -243,6 +243,8 @@ fn dashboard_shell_with_info<'a>(
     let shell_state = nav::shell::ShellState {
         switcher_open: cache.cube_switcher_open,
         lock_confirmation: cache.cube_lock_confirmation,
+        // Menu entry opens Tools in App::update. Honor an explicit close even
+        // while a Tools child remains selected; the content route is retained.
         tools_open: cache.vault_tools_open,
         backup_attention: show_backup_warning,
     };
