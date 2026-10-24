@@ -6,7 +6,7 @@ Read this file first, then the review doc, then the inventory.
 
 | What | Where |
 | --- | --- |
-| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v113) |
+| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v117) |
 | Exported screenshots of every screen, dark and light (open without a browser session) | `screens/dark/`, `screens/light/`, index in `screens/README.md` |
 | Artboard sources (35 linked screens plus their light twins, plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index in `canvas/canvas.json` |
 | Earlier exploration boards the prototype was distilled from (superseded) | `archive/explorations/` |

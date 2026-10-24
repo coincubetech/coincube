@@ -1,6 +1,6 @@
 # Exported screens
 
-Static PNG exports of every board in the Tenshu prototype (canvas v113,
+Static PNG exports of every board in the Tenshu prototype (canvas v117,
 2026-10-24), so the design can be read without a claude.ai session. Pixels only:
 exact copy, spacing, tokens and state logic are in `../canvas/<source>`.
 
