@@ -657,6 +657,7 @@ class Component extends DCLogic {
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
   }
   renderVals() {
+    try { localStorage.setItem('tenshu.proto.inCube', '0'); } catch (e) {}
     // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
     let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage

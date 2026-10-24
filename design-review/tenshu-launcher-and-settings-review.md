@@ -728,3 +728,9 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Robert:** switching to Light in App preferences did not turn the Launcher light.
 
 **Applied:** App preferences › Appearance › Theme (System · Light · Dark) is now a device setting shared across the prototype, like Developer mode, Blake2b and Launcher style. Every screen's theme class follows it: Light or Dark win outright; System falls back to each board's review lever. App preferences announces the change, and every screen re-renders on it, so the Launcher and the Cube screens switch without a refresh. The two light-theme example boards stay light regardless of the device setting.
+
+## Connect and App preferences overlay the current screen (2026-10-24, canvas v107)
+
+**Robert:** Connect and App preferences must be reachable from anywhere, including inside an open Cube, and must not send the user back to the Launcher.
+
+**Applied:** both sheets now know whether a Cube is on screen. Inside a Cube they overlay the Cube (the Overview, dimmed, behind the sheet) and Close returns to the Cube; at the Launcher they keep the Launcher backdrop and return there. The Cube top bar gains an App preferences icon beside the Connect chip, so both overlays are one click away from every Cube screen. Prototype mechanics: Cube screens set `tenshu.proto.inCube` on render and the Launcher clears it; the sheets read it to pick backdrop and Close target.
