@@ -406,7 +406,7 @@ class Component extends DCLogic {
     };
 
     return {
-      themeClass: (THEME === 'light' || (THEME !== 'dark' && theme === 'light')) ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && theme === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       crumb: recon ? 'Vault · Family savings › PSBTs' : 'Create Vault · Set keys',
       crumbHref: recon ? 'P-Advanced.dc.html' : 'P-Create.dc.html',

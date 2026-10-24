@@ -478,7 +478,7 @@ class Component extends DCLogic {
       : (s.style === 'list' ? 'Showing List.' : 'Showing Cubes.');
 
     return {
-      themeClass: effTheme === 'light' ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : (effTheme === 'light' ? 'light' : ''),
       motionClass: reduced ? 'reduced' : '',
       okPath: I.ok, offPath: I.off,
       floorCubes, sections, inCube: IN_CUBE, atLauncher: !IN_CUBE, closeHref: IN_CUBE ? 'P-Overview.dc.html' : 'P-Launcher.dc.html', backTitle: IN_CUBE ? 'Back to the Cube' : 'Back to the Launcher',

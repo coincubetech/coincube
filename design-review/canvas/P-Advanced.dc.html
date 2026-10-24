@@ -587,7 +587,7 @@ class Component extends DCLogic {
       b2bOn: B2B,
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:this.props.forceTheme?(this.props.forceTheme==='light'?'light':''):((THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':''),motionClass:P.reducedMotion?'reduced':'',
       hideP:hide?'true':'false',shown:!hide,hidden:hide,
       toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
       lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},

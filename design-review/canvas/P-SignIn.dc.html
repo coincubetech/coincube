@@ -366,7 +366,7 @@ class Component extends DCLogic {
 
     const signedIn = step === 'done';
     return {
-      themeClass: (THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       signedIn,
       acctCls: signedIn ? '' : 'out',

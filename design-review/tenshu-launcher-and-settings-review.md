@@ -734,3 +734,9 @@ Applied and verified (canvas versions 58–60): the Tools page has four tabs und
 **Robert:** Connect and App preferences must be reachable from anywhere, including inside an open Cube, and must not send the user back to the Launcher.
 
 **Applied:** both sheets now know whether a Cube is on screen. Inside a Cube they overlay the Cube (the Overview, dimmed, behind the sheet) and Close returns to the Cube; at the Launcher they keep the Launcher backdrop and return there. The Cube top bar gains an App preferences icon beside the Connect chip, so both overlays are one click away from every Cube screen. Prototype mechanics: Cube screens set `tenshu.proto.inCube` on render and the Launcher clears it; the sheets read it to pick backdrop and Close target.
+
+## Light theme page: a light twin of every screen (2026-10-24, canvas v109)
+
+**Robert:** add the remaining light-mode pages.
+
+**Applied:** a second canvas page, "Light theme (same prototype, forced light)", holds a twin of every prototype screen in the same six-row grouping plus the AI access row. Each twin mounts the real screen with `force-theme=light`, so it shares fixtures, links and behaviour and stays current with every change; every screen now honours that forced theme, and the device Appearance setting still governs the main prototype. Every screen was checked in Light before this: the token blocks were already complete, so the light page is a reference set rather than a fix.
