@@ -407,9 +407,9 @@ coins, save a spend, sign, broadcast, or guarantee future input availability.
 Tenshu verifies the actual inputs, recipient amounts, wallet-owned change,
 unsigned state and total fee before returning a minimized summary. The raw PSBT,
 input identities and change address stay inside Tenshu. Request IDs are immutable
-after successful construction: exact retries return the same draft without a new
-change reservation, and changed input conflicts. At most eight successful drafts
-are retained per client/unlock. Use `tenshu_get_prepared_transaction` with the
+after an engine attempt: exact retries return the same draft or error without a
+new change reservation, and changed input conflicts. At most eight engine
+construction attempts (including failures) are retained per client/unlock. Use `tenshu_get_prepared_transaction` with the
 returned draft ID and same opaque wallet ID to reread the summary; foreign IDs
 and other scopes are denied.
 
@@ -422,3 +422,8 @@ native flow. Back/cancel returns to AI access. No tool claims recipient identity
 hardware possession or backup verification. Lock/close/revocation clears access
 to the session drafts; ordinary unlock restores only the separately approved
 pairing, not old draft identities.
+
+Transaction construction is gated on a completed poll newer than the native
+startup baseline. Failed engine constructions are cached under their immutable
+request IDs and count toward the eight-attempt session bound; retrying a fee-limit
+failure does not reserve change again.

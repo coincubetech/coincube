@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum recipients in one preparation.
 pub const MAX_RECIPIENTS: usize = 8;
-/// Maximum drafts retained per paired client and unlocked session.
+/// Maximum engine construction attempts per paired client and unlocked session, including failures.
 pub const MAX_DRAFTS: usize = 8;
 /// Bitcoin's total supply, expressed in satoshis.
 pub const MAX_SATS: u64 = 2_100_000_000_000_000;

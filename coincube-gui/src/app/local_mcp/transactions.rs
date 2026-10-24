@@ -34,14 +34,14 @@ pub(crate) struct NativeDraft {
 }
 struct Draft {
     input: PrepareInput,
-    summary: Prepared,
-    native: NativeDraft,
+    result: Result<(Prepared, NativeDraft), wire::Error>,
 }
 #[derive(Clone)]
 pub(super) struct Service {
     descriptor: CoincubeDescriptor,
     daemon: Arc<dyn Daemon + Send + Sync>,
     wallet_id: String,
+    last_poll_at_startup: Option<u32>,
     drafts: Arc<tokio::sync::Mutex<BTreeMap<String, Draft>>>,
     revoked: Arc<AtomicBool>,
     slots: Arc<tokio::sync::Semaphore>,
@@ -51,11 +51,13 @@ impl Service {
         descriptor: CoincubeDescriptor,
         daemon: Arc<dyn Daemon + Send + Sync>,
         wallet_id: String,
+        last_poll_at_startup: Option<u32>,
     ) -> Self {
         Self {
             descriptor,
             daemon,
             wallet_id,
+            last_poll_at_startup,
             drafts: Arc::default(),
             revoked: Arc::default(),
             slots: Arc::new(tokio::sync::Semaphore::new(1)),
@@ -70,7 +72,11 @@ impl Service {
         }
         self.drafts
             .try_lock()
-            .map(|d| d.values().map(|v| v.summary.clone()).collect())
+            .map(|d| {
+                d.values()
+                    .filter_map(|v| v.result.as_ref().ok().map(|(s, _)| s.clone()))
+                    .collect()
+            })
             .unwrap_or_default()
     }
     pub fn native(&self, id: &str) -> Option<NativeDraft> {
@@ -81,8 +87,9 @@ impl Service {
             .try_lock()
             .ok()?
             .values()
-            .find(|d| d.summary.draft_id == id)
-            .map(|d| d.native.clone())
+            .filter_map(|d| d.result.as_ref().ok())
+            .find(|(s, _)| s.draft_id == id)
+            .map(|(_, native)| native.clone())
     }
     fn ready(&self, info: &crate::daemon::model::GetInfoResult) -> bool {
         !(!self.daemon.backend().is_embedded()
@@ -100,7 +107,7 @@ impl Service {
                     info.block_height,
                     info.sync,
                     info.last_poll_timestamp,
-                    None,
+                    self.last_poll_at_startup,
                     &info.history_sync
                 ),
                 SyncStatus::Synced
@@ -141,8 +148,9 @@ impl Service {
                 .lock()
                 .await
                 .values()
-                .find(|d| d.summary.draft_id == draft_id)
-                .map(|d| wire::Response::Transaction(d.summary.clone()))
+                .filter_map(|d| d.result.as_ref().ok())
+                .find(|(s, _)| s.draft_id == draft_id)
+                .map(|(s, _)| wire::Response::Transaction(s.clone()))
                 .ok_or(Error::AccessDenied),
             _ => Err(Error::AccessDenied),
         }
@@ -154,7 +162,11 @@ impl Service {
         let mut drafts = self.drafts.lock().await;
         if let Some(draft) = drafts.get(&input.request_id) {
             return if draft.input == input {
-                Ok(draft.summary.clone())
+                draft
+                    .result
+                    .as_ref()
+                    .map(|(s, _)| s.clone())
+                    .map_err(Clone::clone)
             } else {
                 Err(Error::TransactionConflict)
             };
@@ -177,9 +189,39 @@ impl Service {
                 return Err(Error::InvalidInput);
             }
         }
+        // Charge and cache every engine attempt, including fee/validation failures:
+        // successful engine construction may already have reserved change. Keep
+        // this lock across completion so cancellation/retries cannot build twice.
+        drafts.insert(
+            input.request_id.clone(),
+            Draft {
+                input: input.clone(),
+                result: Err(Error::Unavailable),
+            },
+        );
+        let result = self.construct(&input, &destinations).await;
+        let summary = result
+            .as_ref()
+            .map(|(s, _)| s.clone())
+            .map_err(Clone::clone);
+        drafts
+            .get_mut(&input.request_id)
+            .expect("attempt inserted")
+            .result = result;
+        summary
+    }
+    async fn construct(
+        &self,
+        input: &PrepareInput,
+        destinations: &HashMap<
+            Address<coincube_core::miniscript::bitcoin::address::NetworkUnchecked>,
+            u64,
+        >,
+    ) -> Result<(Prepared, NativeDraft), wire::Error> {
+        use wire::Error;
         let result = self
             .daemon
-            .create_spend_tx(&[], &destinations, input.fee_rate_sat_vb, None)
+            .create_spend_tx(&[], destinations, input.fee_rate_sat_vb, None)
             .await
             .map_err(|_| Error::Unavailable)?;
         let (psbt, warnings) = match result {
@@ -198,7 +240,7 @@ impl Service {
             .await
             .map_err(|_| Error::Unavailable)?
             .coins;
-        let (fee_sats, change_sats) = validate(&input, &psbt, &coins, &self.descriptor)?;
+        let (fee_sats, change_sats) = validate(input, &psbt, &coins, &self.descriptor)?;
         if self.revoked.load(Ordering::SeqCst) {
             return Err(Error::AccessDenied);
         }
@@ -215,19 +257,14 @@ impl Service {
             input_count: outpoints.len(),
             signing_required: true,
         };
-        drafts.insert(
-            input.request_id.clone(),
-            Draft {
-                input,
-                summary: summary.clone(),
-                native: NativeDraft {
-                    psbt,
-                    coins,
-                    warnings,
-                },
+        Ok((
+            summary,
+            NativeDraft {
+                psbt,
+                coins,
+                warnings,
             },
-        );
-        Ok(summary)
+        ))
     }
 }
 impl wire::Reader for Service {
@@ -405,7 +442,10 @@ mod tests {
             coincubed::mcp_test_fixture::regtest_wallet(&root, descriptor.clone());
         let daemon =
             Arc::new(crate::daemon::embedded::EmbeddedDaemon::from_regtest_handle(config, handle));
-        (root, Service::new(descriptor, daemon, "wallet".into()))
+        (
+            root,
+            Service::new(descriptor, daemon, "wallet".into(), None),
+        )
     }
     fn input() -> PrepareInput {
         let script = ScriptBuf::new_p2wsh(&WScriptHash::all_zeros());
@@ -495,7 +535,7 @@ mod tests {
             let mut fee=input();fee.max_fee_sats=1;cases.push((fee,wire::Error::FeeLimitExceeded));
             for (i,(mut request,expected))in cases.into_iter().enumerate(){request.request_id=format!("rejected-{i}");assert!(matches!(service.read(wire::Request::PrepareTransaction(request)).await,Err(e)if e==expected));}
             assert!(service.summaries().is_empty());
-            for i in 0..wire::transaction::MAX_DRAFTS {let mut request=input();request.request_id=format!("bounded-{i}");prepared(&service,request).await;}
+            for i in 0..wire::transaction::MAX_DRAFTS-2 {let mut request=input();request.request_id=format!("bounded-{i}");prepared(&service,request).await;}
             let mut overflow=input();overflow.request_id="overflow".into();assert!(matches!(service.read(wire::Request::PrepareTransaction(overflow)).await,Err(wire::Error::Unavailable)));
             assert!(service.daemon.list_spend_txs().await.unwrap().spend_txs.is_empty());
             cleanup(root,service).await;
@@ -556,6 +596,79 @@ mod tests {
             let mut spent = native.coins.clone();
             spent[0].is_immature = true;
             assert!(validate(&input(), &native.psbt, &spent, &service.descriptor).is_err());
+            cleanup(root, service).await;
+        });
+    }
+
+    #[test]
+    fn mcp_transaction_startup_baseline_regression() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, mut service) = fixture();
+            let mut info = service.daemon.get_info().await.unwrap();
+            service.last_poll_at_startup = Some(100);
+            info.last_poll_timestamp = Some(100);
+            assert!(
+                !service.ready(&info),
+                "persisted prior-run poll is not a fresh poll"
+            );
+            info.last_poll_timestamp = Some(101);
+            assert!(service.ready(&info));
+            cleanup(root, service).await;
+        });
+    }
+
+    #[test]
+    fn mcp_transaction_rejected_constructions_are_cached_and_bounded_regression() {
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture();
+            let mut request = input();
+            request.max_fee_sats = 1;
+            let call = |v| wire::Request::PrepareTransaction(v);
+            assert_eq!(
+                service.read(call(request.clone())).await.unwrap_err(),
+                wire::Error::FeeLimitExceeded
+            );
+            let index = service.daemon.get_info().await.unwrap().change_index;
+            assert_eq!(
+                service.read(call(request.clone())).await.unwrap_err(),
+                wire::Error::FeeLimitExceeded
+            );
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                index,
+                "failed retry reserved change again"
+            );
+            let mut changed = request.clone();
+            changed.max_fee_sats = 1000;
+            assert_eq!(
+                service.read(call(changed)).await.unwrap_err(),
+                wire::Error::TransactionConflict
+            );
+            for i in 1..wire::transaction::MAX_DRAFTS {
+                request.request_id = format!("failed-{i}");
+                assert_eq!(
+                    service.read(call(request.clone())).await.unwrap_err(),
+                    wire::Error::FeeLimitExceeded
+                );
+            }
+            let bounded = service.daemon.get_info().await.unwrap().change_index;
+            request.request_id = "one-too-many".into();
+            assert_eq!(
+                service.read(call(request)).await.unwrap_err(),
+                wire::Error::Unavailable
+            );
+            assert_eq!(
+                service.daemon.get_info().await.unwrap().change_index,
+                bounded
+            );
+            assert!(service.summaries().is_empty());
+            assert!(service
+                .daemon
+                .list_spend_txs()
+                .await
+                .unwrap()
+                .spend_txs
+                .is_empty());
             cleanup(root, service).await;
         });
     }
@@ -635,6 +748,7 @@ mod tests {
                     daemon: Some(service.daemon.clone()),
                     supported: true,
                     proposal_supported: false,
+                    last_poll_at_startup: None,
                 })
             };
             session::open_without_pin("tx-fixture");

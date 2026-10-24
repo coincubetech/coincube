@@ -125,6 +125,8 @@ pub(crate) struct PairingContext<'a> {
     pub daemon: Option<Arc<dyn Daemon + Send + Sync>>,
     pub supported: bool,
     pub proposal_supported: bool,
+    #[cfg(feature = "mcp-transactions")]
+    pub last_poll_at_startup: Option<u32>,
 }
 impl Settings {
     fn paired_clients_view(&self) -> Element<'_, view::Message> {
@@ -263,6 +265,8 @@ impl Settings {
             daemon,
             supported,
             proposal_supported,
+            #[cfg(feature = "mcp-transactions")]
+            last_poll_at_startup,
         } = context;
         if super::session::generation_for(cube_id).is_none() || self.pairing_poisoned {
             return;
@@ -395,6 +399,7 @@ impl Settings {
                                         .clone(),
                                     daemon.clone(),
                                     opaque.clone(),
+                                    last_poll_at_startup,
                                 ));
                                 let reader: Arc<dyn wire::Reader> = service.clone();
                                 transactions = Some(service);
@@ -910,7 +915,7 @@ impl Settings {
                 content = content.push(checkbox(self.transactions_allowed)
                     .label("Prepare unsigned Regtest transactions (separate from wallet reads)")
                     .on_toggle(move |v| message(Message::Transactions(v))))
-                    .push(text("Exact satoshi recipients and explicit fee limits only. The PSBT stays in Tenshu; review recipient addresses, amounts, fees and change before signing. Up to 8 drafts per client and unlock. No self-send, recovery selection or fiat conversion."));
+                    .push(text("Exact satoshi recipients and explicit fee limits only. The PSBT stays in Tenshu; review recipient addresses, amounts, fees and change before signing. Up to 8 construction attempts per client and unlock, including failed engine attempts. No self-send, recovery selection or fiat conversion."));
             }
             content = content.push(
                 button("Pair client until revoked").on_press_maybe(
@@ -1375,6 +1380,8 @@ mod tests {
                     daemon: Some(daemon.clone()),
                     supported: true,
                     proposal_supported: false,
+                    #[cfg(feature = "mcp-transactions")]
+                    last_poll_at_startup: None,
                 })
             };
             let configuration = |settings: &mut Settings, id: &str| -> Value {
@@ -1561,6 +1568,8 @@ mod tests {
                 daemon: Some(daemon.clone()),
                 supported: true,
                 proposal_supported: false,
+                #[cfg(feature = "mcp-transactions")]
+                last_poll_at_startup: None,
             });
             assert!(
                 settings.paired.is_empty(),
@@ -2019,6 +2028,8 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
+                    #[cfg(feature = "mcp-transactions")]
+                    last_poll_at_startup: None,
                 })
             };
             settings.update(Message::Creation(true), None, None, true, cube);
@@ -2123,6 +2134,8 @@ mod proposal_consent_tests {
                     daemon: None,
                     supported: false,
                     proposal_supported: true,
+                    #[cfg(feature = "mcp-transactions")]
+                    last_poll_at_startup: None,
                 })
             };
             let pair = |settings: &mut Settings, name: &str| {
