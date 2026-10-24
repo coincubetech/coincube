@@ -72,7 +72,7 @@ a.tbtn:hover{color:var(--ink)}
 .floor::before{content:"";position:absolute;top:0;left:14%;right:14%;height:1px;background:var(--floor-rule)}
 .field{position:absolute;inset:0;overflow-x:hidden;overflow-y:auto}
 .rows{display:flex;flex-direction:column;box-sizing:border-box}
-.rows.big{padding:84px 48px 24px}
+.rows.big{padding:168px 48px 24px}
 .rows.mid{padding:40px 48px 24px;gap:12px}
 .rows.dense{padding:28px 48px 24px;gap:8px}
 .row{display:flex;justify-content:center}
@@ -219,6 +219,43 @@ a.btn.primary:hover,.btn.primary:hover{background:#ffa54d;border-color:#ffa54d;c
 .dock{display:flex;align-items:center;gap:8px}
 .foot{height:28px;flex:none;display:flex;align-items:center;justify-content:center;font-size:12px;color:var(--muted);border-top:1px solid var(--line);background:var(--bg)}
 a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color:var(--acc-ink)}
+/* paging (2026-10-23) */
+.pgbtn{position:absolute;top:50%;transform:translateY(-50%);width:44px;height:44px;border-radius:50%;border:1px solid var(--muted);background:var(--panel);color:#fff;cursor:pointer;z-index:6;display:grid;place-items:center;box-shadow:0 6px 18px var(--shadow)}
+.tenshu.light .pgbtn{color:var(--ink)}
+.pgbtn .ic{width:22px;height:22px;stroke-width:2.4;color:inherit}
+.pgbtn.l{left:18px}.pgbtn.r{right:18px}
+.pgbtn:hover{background:var(--hover)}
+.pgbtn[disabled]{opacity:.3;cursor:default}
+.pgdots{position:absolute;left:0;right:0;bottom:16px;display:flex;align-items:center;justify-content:center;gap:8px;z-index:6}
+.pgdots .dot{width:8px;height:8px;border-radius:50%;border:0;padding:0;background:var(--line);cursor:pointer}
+.pgdots .dot.on{background:var(--accent)}
+.pgdots .pgtx{margin-left:10px;font-size:12px;color:var(--muted)}
+.stage:focus{outline:none}
+/* list view (2026-10-23) */
+.lview{position:absolute;inset:0;display:flex;overflow:hidden}
+.llist{flex:1;min-width:0;overflow:auto;padding:16px 24px 24px}
+.lhead,.lrow{display:grid;grid-template-columns:44px minmax(0,1.3fr) minmax(0,1fr) 96px minmax(0,1fr) 96px;column-gap:14px;align-items:center;padding:0 12px}
+.lhead{height:34px;font-size:12px;color:var(--muted);border-bottom:1px solid var(--line)}
+.lrow{width:100%;height:60px;border:0;border-bottom:1px solid var(--line);background:transparent;color:var(--ink);cursor:pointer;text-align:left;font:inherit;border-radius:0}
+.lrow:hover{background:var(--hover)}
+.lrow.on{background:var(--selected)}
+.lrow .av{width:32px;height:32px}
+.lrow .lblt{display:flex;flex-direction:column;min-width:0}
+.lrow .nm{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.lrow .st{font-size:12px;color:var(--muted)}.lrow .st.open{color:var(--good)}
+.lrow .lnet{display:flex;align-items:center;gap:6px;font-size:13px;min-width:0}
+.lrow .lnet .coin{width:16px;height:16px}
+.lrow .lw{display:flex;gap:8px;color:var(--muted)}
+.lrow .lw svg{width:16px;height:16px;fill:none;stroke:currentColor;stroke-width:1.5;stroke-linecap:round;stroke-linejoin:round;flex:none;margin:0}
+.lrow .lnet>span:not(.coin){white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lrow .lb{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.lrow .lb{font-size:13px}
+.lrow .lact{justify-self:end;font-size:13px;font-weight:500;color:var(--acc-ink)}
+.lpanel{width:440px;flex:none;border-left:1px solid var(--line);background:var(--panel);overflow:auto}
+.lpanel .fc.lp{position:static;width:auto;height:auto;transform:none;pointer-events:auto;padding:24px 28px}
+.lpanel,.lpanel *{pointer-events:auto}
+.lpanel{position:relative;z-index:7}
+.lpanel .fc .grow{flex:0}
 </style>
 </helmet>
 <div class="tenshu {{themeClass}} {{motionClass}}" style="width:1440px;height:900px;box-sizing:border-box;overflow:hidden;font-family:'IBM Plex Sans',system-ui,sans-serif;font-size:14px;line-height:1.45;color:var(--ink);background:var(--bg);display:flex;flex-direction:column">
@@ -282,9 +319,17 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </a>
   </header>
 
-  <main class="stage" aria-label="Cubes on this device">
+  <main class="stage" aria-label="Cubes on this device" tabIndex="-1" onWheel="{{ wheel }}" onKeyDown="{{ pageKeys }}">
     <div class="floor" style="{{ floorStyle }}" aria-hidden="true"></div>
     <p class="sr" aria-live="polite">{{ announce }}</p>
+    <sc-if value="{{ paged }}" hint-placeholder-val="{{ false }}">
+      <button type="button" class="pgbtn l" aria-label="Previous Cubes" disabled="{{ pgPrevOff }}" onClick="{{ pgPrev }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M11 4 6 9l5 5"/></svg></button>
+      <button type="button" class="pgbtn r" aria-label="More Cubes" disabled="{{ pgNextOff }}" onClick="{{ pgNext }}"><svg class="ic" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4 5 5-5 5"/></svg></button>
+      <div class="pgdots" role="group" aria-label="Page {{ pgN }} of {{ pgTotal }}">
+        <sc-for list="{{ pgDots }}" as="d" hint-placeholder-count="2"><button type="button" class="dot {{ d.cls }}" aria-label="{{ d.aria }}" onClick="{{ d.pick }}"></button></sc-for>
+        <span class="pgtx">Page {{ pgN }} of {{ pgTotal }} · swipe, scroll sideways or use the arrow keys</span>
+      </div>
+    </sc-if>
 
     <sc-if value="{{ isEmpty }}" hint-placeholder-val="{{ false }}">
       <div class="empty">
@@ -302,6 +347,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
     </sc-if>
 
     <sc-if value="{{ hasCubes }}" hint-placeholder-val="{{ true }}">
+      <sc-if value="{{ cubesMode }}" hint-placeholder-val="{{ true }}">
       <div class="field">
         <div class="rows {{ mode }}">
           <sc-for list="{{ rows }}" as="row" hint-placeholder-count="1">
@@ -437,6 +483,117 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </sc-for>
         </div>
       </div>
+      </sc-if>
+    <sc-if value="{{ listMode }}" hint-placeholder-val="{{ false }}">
+      <div class="lview">
+        <div class="llist" role="list" aria-label="Cubes">
+          <div class="lhead" aria-hidden="true"><span></span><span>Cube</span><span>Network</span><span>Wallets</span><span>Backup</span><span></span></div>
+          <sc-for list="{{ listItems }}" as="item" hint-placeholder-count="9">
+            <button type="button" class="lrow {{ item.lcls }}" role="listitem" aria-pressed="{{ item.pressed }}" aria-label="{{ item.aria }}" onClick="{{ item.pick }}">
+              <span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ item.av }}"></path></svg></span>
+              <span class="lblt"><span class="nm">{{ item.name }}</span><span class="st {{ item.stCls }}">{{ item.state }}</span></span>
+              <span class="lnet"><sc-if value="{{ item.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if><sc-if value="{{ item.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ item.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if><span>{{ item.netFull }}</span><sc-if value="{{ item.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ item.edge }}">{{ item.tag }}</span></sc-if></span>
+              <span class="lw" aria-label="Wallets">
+                <sc-if value="{{ item.hasVault }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2 3.5 4v4.5c0 3.4 2.3 6.1 5.5 7.5 3.2-1.4 5.5-4.1 5.5-7.5V4z"/></svg></sc-if>
+                <sc-if value="{{ item.hasSpark }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M10 2 4 10h4.5L8 16l6-8H9.5z"/></svg></sc-if>
+                <sc-if value="{{ item.hasLiquid }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M9 2.5c2.6 3.2 4.5 5.8 4.5 8a4.5 4.5 0 0 1-9 0c0-2.2 1.9-4.8 4.5-8z"/></svg></sc-if>
+              </span>
+              <span class="lb {{ item.bTone }}">{{ item.bShort }}</span>
+              <span class="lact">{{ item.actLabel }}</span>
+            </button>
+          </sc-for>
+          <p class="cap" style="padding:10px 12px">List view · chosen in App preferences › Launcher, or automatic under reduced motion.</p>
+        </div>
+        <sc-if value="{{ lsel.on }}" hint-placeholder-val="{{ false }}">
+          <aside class="lpanel" aria-label="Selected Cube">
+                        <sc-if value="{{ lsel.detailsOnly }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc lp" aria-labelledby="lp-title">
+                            <h2 class="pn" id="lp-title" style="display:flex;align-items:center;gap:10px"><span class="av" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.1" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="11" fill="currentColor" opacity=".08" stroke="none"></circle><path d="{{ lsel.av }}"></path></svg></span>{{ lsel.p.name }}</h2>
+                            <p class="pnet">
+                              <sc-if value="{{ lsel.btcLogo }}" hint-placeholder-val="{{ true }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt=""></span></sc-if>
+                              <sc-if value="{{ lsel.logo }}" hint-placeholder-val="{{ false }}"><span class="coin {{ lsel.coinCls }}" aria-hidden="true"><img src="/_blob/c39785504daaef5633099a8ae196c784" alt=""></span></sc-if>
+                              <span>{{ lsel.p.net }}</span>
+                              <sc-if value="{{ lsel.hasTag }}" hint-placeholder-val="{{ false }}"><span class="tb {{ lsel.edge }}">{{ lsel.tag }}</span></sc-if>
+                            </p>
+                            <dl class="pdl">
+                              <div><dt>Lock</dt><dd><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ lsel.lockPath }}"></path></svg><span>{{ lsel.state }}</span></dd></div>
+                              <div><dt>Backup</dt><dd class="{{ lsel.p.bTone }}"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ lsel.p.bPath }}"></path></svg><span>{{ lsel.p.bText }}</span></dd></div>
+                              <div><dt>Connect</dt><dd class="{{ lsel.p.cTone }}">{{ lsel.p.cText }}</dd></div>
+                              <div><dt>Wallets</dt><dd>
+                                <sc-for list="{{ lsel.p.wallets }}" as="w" hint-placeholder-count="3">
+                                  <span class="wch"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linejoin="round" aria-hidden="true"><path d="{{ w.path }}"></path></svg><span>{{ w.label }}</span></span>
+                                </sc-for>
+                              </dd></div>
+                            </dl>
+                            <sc-if value="{{ lsel.p.hasNote }}" hint-placeholder-val="{{ false }}"><p class="pnote">{{ lsel.p.note }}</p></sc-if>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <sc-if value="{{ lsel.isOpen }}" hint-placeholder-val="{{ false }}"><a class="btn primary" onMouseDown="{{ lsel.p.markSeen }}" onClick="{{ lsel.p.toBrowse }}" href="P-Overview.dc.html">Go to Cube</a><button type="button" class="btn" onClick="{{ lsel.p.lockNow }}">Lock</button></sc-if><sc-if value="{{ lsel.notOpen }}" hint-placeholder-val="{{ true }}"><button type="button" class="btn primary {{ lsel.p.openDemo }}" tabIndex="{{ lsel.p.dTab }}" aria-label="{{ lsel.p.openLabel }}" onClick="{{ lsel.p.toUnlock }}">Open</button></sc-if>
+                              <button type="button" class="linkbtn" tabIndex="{{ lsel.p.dTab }}" onClick="{{ lsel.p.toBrowse }}">Back</button>
+                              <a class="linkbtn" tabIndex="{{ lsel.p.dTab }}" href="P-Delete.dc.html">Delete…</a>
+                            </div>
+                            <p class="pfoot">{{ lsel.hint }}</p>
+                          </section>
+                        </sc-if>
+                        <sc-if value="{{ lsel.showUnlock }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc lp" aria-labelledby="unlock-title">
+                            <h2 class="pn" id="unlock-title">Open {{ lsel.p.name }} <span class="sub">· {{ lsel.p.net }}</span></h2>
+                            <fieldset class="fld">
+                              <legend>PIN</legend>
+                              <div class="pinrow">
+                                <input id="pin-d1" class="dg {{ lsel.p.pinDemo }}" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 1" aria-describedby="pin-note" value="{{ lsel.p.d1 }}" onInput="{{ lsel.p.set1 }}" onKeyDown="{{ lsel.p.back1 }}">
+                                <input id="pin-d2" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 2" aria-describedby="pin-note" value="{{ lsel.p.d2 }}" onInput="{{ lsel.p.set2 }}" onKeyDown="{{ lsel.p.back2 }}">
+                                <input id="pin-d3" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 3" aria-describedby="pin-note" value="{{ lsel.p.d3 }}" onInput="{{ lsel.p.set3 }}" onKeyDown="{{ lsel.p.back3 }}">
+                                <input id="pin-d4" class="dg" type="{{ lsel.p.pinType }}" inputmode="numeric" autocomplete="off" maxLength="1" aria-label="PIN digit 4" aria-describedby="pin-note" value="{{ lsel.p.d4 }}" onInput="{{ lsel.p.set4 }}" onKeyDown="{{ lsel.p.back4 }}">
+                                <button type="button" class="pineye" aria-pressed="{{ lsel.p.showPressed }}" aria-label="Show PIN" onClick="{{ lsel.p.toggleShow }}">
+                                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="{{ lsel.p.eyePath }}"></path></svg>
+                                </button>
+                              </div>
+                              <span class="help">Enter this Cube's PIN, or use its passkey.</span>
+                            </fieldset>
+                            <div class="pact" style="margin-top:20px">
+                              <button type="button" class="btn primary" disabled="{{ lsel.p.unlockOff }}" onClick="{{ lsel.p.unlockPin }}">Unlock</button>
+                              <button type="button" class="btn" onClick="{{ lsel.p.unlockKey }}">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="8" cy="15.5" r="4"></circle><path d="M10.9 12.6L19 4.5M16 7.5l2.5 2.5M13.8 9.7l2 2"></path></svg>
+                                <span>Use passkey</span>
+                              </button>
+                            </div>
+                            <div class="grow"></div>
+                            <p class="pnote" id="pin-note">Network checks run after your PIN is accepted.</p>
+                            <div class="pact" style="margin-top:8px">
+                              <button type="button" class="linkbtn" onClick="{{ lsel.p.toDetails }}">Cancel</button>
+                            </div>
+                          </section>
+                        </sc-if>
+                        <sc-if value="{{ lsel.showChecks }}" hint-placeholder-val="{{ false }}">
+                          <section class="fc lp" aria-labelledby="checks-title">
+                            <h2 class="pn" id="checks-title">Opening {{ lsel.p.name }} <span class="sub">· {{ lsel.p.net }}</span></h2>
+                            <ol class="steps" aria-live="polite">
+                              <li class="step">
+                                <svg class="tone-good" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><path d="M8 12.3l2.8 2.8L16.2 9.6"></path></svg>
+                                <span class="tx">{{ lsel.p.step1 }}</span><span class="sv">Done</span>
+                              </li>
+                              <li class="step">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle><circle cx="12" cy="12" r="2.5" fill="currentColor"></circle></svg>
+                                <span class="tx">{{ lsel.p.step2 }}</span><span class="sv">In progress</span>
+                              </li>
+                              <li class="step pending">
+                                <svg class="tone-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" aria-hidden="true"><circle cx="12" cy="12" r="9"></circle></svg>
+                                <span class="tx">{{ lsel.p.step3 }}</span><span class="sv">Waiting</span>
+                              </li>
+                            </ol>
+                            <div class="grow"></div>
+                            <div class="pact">
+                              <a class="btn primary {{ lsel.p.contDemo }}" onMouseDown="{{ lsel.p.markSeen }}" onClick="{{ lsel.p.toBrowse }}" href="P-Opening.dc.html">Continue to Cube</a>
+                              <button type="button" class="linkbtn" onClick="{{ lsel.p.cancelOpen }}">Cancel</button>
+                            </div>
+                            <p class="pfoot">Prototype shortcut. The app continues only after every check passes.</p>
+                          </section>
+                        </sc-if>
+          </aside>
+        </sc-if>
+      </div>
+    </sc-if>
     </sc-if>
   </main>
 
@@ -488,10 +645,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
   <div class="foot">Concept prototype V3 · synthetic data · spin-to-face flow; face content is a flat panel over the scene, as the native Iced plan requires</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","20"],"default":"4","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","checks"],"default":"browse","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"$preview":{"width":1440,"height":900}}'>
+<script type="text/x-dc" data-dc-script data-props='{"cubeCount":{"editor":"enum","options":["0","1","4","9","20"],"default":"9","section":"Review"},"launcherStyle":{"editor":"enum","options":["auto","cubes","list"],"default":"auto","section":"Review"},"startPhase":{"editor":"enum","options":["browse","details","unlock","checks"],"default":"browse","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"focusDemo":{"editor":"boolean","default":false,"section":"Review"},"accountState":{"editor":"enum","options":["signedIn","signedOut"],"default":"signedIn","section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
   constructor(p) {
     super(p);
+    // prototype-only: the player keeps this artboard mounted; re-render when App preferences changes a device setting
+    try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); window.addEventListener('focus', bump); document.addEventListener('visibilitychange', bump); } catch (e) {}
     const lever = (this.props && this.props.startPhase) || 'browse';
     // lever = the startPhase value the current state was made under; when the lever changes, it wins (Everyday selected)
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };
@@ -501,6 +660,10 @@ class Component extends DCLogic {
     let DEV = false; try { DEV = localStorage.getItem('tenshu.proto.dev') === '1'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
+    // prototype-only: Launcher style (App preferences › Launcher) shared across artboards; List also when reduced motion is on
+    let LIST = false; try { LIST = localStorage.getItem('tenshu.proto.launcher') === 'list'; } catch (e) {}
+    const lstyle = this.props.launcherStyle || 'auto';
+    const listMode = lstyle === 'list' || (lstyle === 'auto' && (LIST || !!this.props.reducedMotion));
     const CH = {
       btc: { menu: 'Bitcoin mainnet', full: 'Bitcoin mainnet', live: true, edge: 'btc', tag: '' },
       b2b: { menu: 'Bitcoin Blake2b mainnet', full: 'Bitcoin Blake2b mainnet', live: true, edge: 'b2b', tag: 'Blake2b', logo: true },
@@ -563,7 +726,7 @@ class Component extends DCLogic {
     ];
 
     const theme = this.props.theme ?? 'dark';
-    const count = parseInt(this.props.cubeCount ?? '4', 10) || 0;
+    const count = parseInt(this.props.cubeCount ?? '9', 10) || 0;
     const focusDemo = !!this.props.focusDemo;
     const lever = this.props.startPhase ?? 'browse';
     const st = this.state;
@@ -576,6 +739,8 @@ class Component extends DCLogic {
     const all = CUBES.filter((r) => (B2B || (r[2] !== 'b2b' && r[2] !== 'b2t')) && (DEV || CH[r[2]].live)).slice(0, count).map((r) => ({ id: r[0], name: r[1], network: r[2], bk: r[3], w: r[4], note: r[5] }));
     const vis = all.filter(matches);
     const n = vis.length;
+    const pages = Math.max(1, Math.ceil(n / 4));
+    const pg = Math.min(st.page || 0, pages - 1);
     const hidden = all.length - n;
 
     // state machine: browse -> details -> unlock -> checks. A selection hidden by filters falls back to browse.
@@ -590,7 +755,7 @@ class Component extends DCLogic {
     const browsing = phase === 'browse';
     const handoff = !leverWins && !browsing && !!st.handoff;
     // every action clears the handoff flag (so later spins have no delay) unless the patch sets it
-    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances };
+    const cur = { lever, phase, selected: selId, method, filter: f, prev: leverWins ? null : st.prev, handoff: false, hideBalances: !!st.hideBalances, page: pg };
     const go = (patch) => this.setState(Object.assign({}, cur, { networkMenu: false, pin: null, showPin: false }, patch));
 
     // Robert (2026-10-23): "All networks" only when more than one network is listed; Live/Test only in Developer mode
@@ -607,9 +772,8 @@ class Component extends DCLogic {
     else if (count > 0) countText = n + ' of ' + count + ' Cubes · ' + hidden + ' hidden';
 
     // size tiers (V2). Slot heights are fixed so each scene's stage position is computable.
-    const T = n <= 4 ? { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 84, rowGap: 0 }
-      : n <= 8 ? { mode: 'mid', s: 120, slot: 192, h: 288, cols: 4, gap: 28, padT: 40, rowGap: 12 }
-      : { mode: 'dense', s: 85, slot: 152, h: 248, cols: 5, gap: 20, padT: 28, rowGap: 8 };
+    // Robert (2026-10-23): one size, four Cubes per page; more Cubes page sideways (arrows, trackpad swipe, arrow keys). padT matches .rows.big.
+    const T = { mode: 'big', s: 152, slot: 232, h: 344, cols: 4, gap: 40, padT: 168, rowGap: 0 };
 
     // spin target: face center at stage (720, 392), projected face = 420px.
     // The scene's perspective-origin travels with the Cube so the final face sits on the optical axis:
@@ -687,12 +851,13 @@ class Component extends DCLogic {
         };
       });
     }
+    const BSHORT = { ok: 'Backed up', warn: 'Backup not confirmed', unk: 'Backup status unknown', na: 'Local only' };
     const EMPTY = { name: '', net: '', bText: '', bTone: '', bPath: '', wallets: [], cText: '', cTone: '', hasNote: false, note: '', openLabel: '', dTab: '-1', step1: '', step2: '', step3: '', openDemo: '', pinDemo: '', contDemo: '', pinType: 'password', unlockOff: true, showPressed: 'false', eyePath: '', d1: '', d2: '', d3: '', d4: '' };
 
     // Items keep the same order and keys in every phase: only classes and transform strings change, so both Cubes in a handoff keep their transitions.
     const rows = [];
-    for (let r = 0; r * T.cols < n; r++) {
-      const inRow = vis.slice(r * T.cols, (r + 1) * T.cols);
+    { const r = 0;
+      const inRow = listMode ? vis : vis.slice(pg * 4, pg * 4 + 4);
       const rowW = inRow.length * T.slot + (inRow.length - 1) * T.gap;
       const x0 = 48 + (1344 - rowW) / 2;
       const items = inRow.map((c, i) => {
@@ -722,12 +887,13 @@ class Component extends DCLogic {
           aria: c.name + ', ' + ch.full + ', locked, ' + BK[c.bk].aria + ', wallets: ' + ws + '. Show details',
           cls: T.mode + (isSel ? ' lead' : '') + (isPrev ? ' prev' : '') + (active ? ' active' : '') + (active && handoff ? ' handoff' : '') + (!browsing && !isSel ? ' dim' : ''),
           hitCls: focusDemo && browsing && idx === 1 ? 'demo-focus' : '',
+          netFull: ch.full, bShort: BSHORT[c.bk] || '', bTone: (BK[c.bk] || {}).tone || '', lcls: isSel ? 'on' : '', actLabel: c.id === openId ? 'Go to Cube' : 'Open', pressed: String(isSel),
           slotStyle: 'width:' + T.slot + 'px;height:' + T.h + 'px',
           sceneStyle: '--s:' + T.s + 'px;perspective-origin:' + origin,
           cubeStyle: 'transform:' + cubeT,
           // face content: 420x420 layout scaled into the face's padding box (s minus the 1.5px edges)
           fcStyle: 'transform:scale(' + ((T.s - 3) / FACE).toFixed(5) + ')',
-          showDetails: active, showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
+          showDetails: active, detailsOnly: active && phase === 'details', showUnlock: active && phase === 'unlock', showChecks: active && phase === 'checks',
           blHidden: String(!(active && phase === 'details')),
           p: active ? P : EMPTY,
           // a background Cube hands off: outgoing reverses at once, incoming starts 160ms later in details with a fresh PIN field
@@ -744,6 +910,9 @@ class Component extends DCLogic {
     }
 
     const km = st.keyMode || 'closed';
+    const listItems = rows.length ? rows[0].items : [];
+    const lfound = listItems.find((it) => it.p !== EMPTY) || null;
+    const lsel = Object.assign({ on: !!lfound, p: EMPTY, name: '', state: '', stCls: '', edge: '', tag: '', hasTag: false, btcLogo: true, logo: false, coinCls: '', isOpen: false, notOpen: true, hint: '', showDetails: false, detailsOnly: false, showUnlock: false, showChecks: false, av: '' }, lfound || {});
     return {
       b2bOn: B2B,
       themeClass: theme === 'light' ? 'light' : '',
@@ -765,7 +934,14 @@ class Component extends DCLogic {
       hasCubes: n > 0,
       hiddenText: hidden + (hidden === 1 ? ' Cube hidden.' : ' Cubes hidden.'),
       mode: T.mode, rows,
-      floorStyle: n === 0 ? 'top:44%' : T.mode === 'big' ? 'top:30%' : 'top:6%',
+      floorStyle: listMode ? 'display:none' : (n === 0 ? 'top:44%' : 'top:40%'),
+      cubesMode: !listMode, listMode, listItems, lsel,
+      paged: pages > 1 && !listMode, pgN: String(pg + 1), pgTotal: String(pages), pgPrevOff: pg === 0, pgNextOff: pg >= pages - 1,
+      pgPrev: () => { if (pg > 0) go({ page: pg - 1, phase: 'browse' }); },
+      pgNext: () => { if (pg < pages - 1) go({ page: pg + 1, phase: 'browse' }); },
+      pgDots: Array.from({ length: pages }, (_, i) => ({ cls: i === pg ? 'on' : '', aria: 'Page ' + (i + 1) + ' of ' + pages, pick: () => go({ page: i, phase: 'browse' }) })),
+      wheel: (e) => { if (pages < 2 || !e) return; const dx = e.deltaX || (e.shiftKey ? e.deltaY : 0); if (Math.abs(dx) < 24) return; const now = Date.now(); if (this._wheelAt && now - this._wheelAt < 600) return; this._wheelAt = now; if (dx > 0 && pg < pages - 1) go({ page: pg + 1, phase: 'browse' }); else if (dx < 0 && pg > 0) go({ page: pg - 1, phase: 'browse' }); },
+      pageKeys: (e) => { if (pages < 2 || !e) return; const tg = e.target && e.target.tagName; if (tg === 'INPUT' || tg === 'TEXTAREA') return; if (e.key === 'ArrowRight' || e.key === 'PageDown') { if (e.preventDefault) e.preventDefault(); if (pg < pages - 1) go({ page: pg + 1, phase: 'browse' }); } else if (e.key === 'ArrowLeft' || e.key === 'PageUp') { if (e.preventDefault) e.preventDefault(); if (pg > 0) go({ page: pg - 1, phase: 'browse' }); } },
       announce,
       hidePressed: String(!!st.hideBalances), eyeOpen: !st.hideBalances, eyeShut: !!st.hideBalances,
       hideTitle: st.hideBalances ? 'Balances hidden on this device' : 'Hide balances on this device',

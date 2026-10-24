@@ -271,6 +271,33 @@
       "title": "Marketplace · P2P",
       "is_interactive": true,
       "page": "proto"
+    },
+    "P-AI-Access.dc.html": {
+      "x": 0,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI access · paired clients, pairing, permissions, revoke (from Settings)",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-AI-Setup.dc.html": {
+      "x": 1600,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI-led wallet setup · handoffs, states, final review",
+      "is_interactive": true,
+      "page": "proto"
+    },
+    "P-AI-Transaction.dc.html": {
+      "x": 3200,
+      "y": 7200,
+      "w": 1440,
+      "h": 900,
+      "title": "AI-prepared transaction · draft, review, signing states, failures",
+      "is_interactive": true,
+      "page": "proto"
     }
   },
   "createdOnFiles": {
@@ -330,6 +357,14 @@
       "y": 5860,
       "w": 240,
       "maxW": 3200
+    },
+    "g7": {
+      "kind": "title1",
+      "text": "AI access · pair once, AI-led wallet setup, AI-prepared transactions (planned extension; labels mark what exists today)",
+      "x": 0,
+      "y": 7060,
+      "w": 240,
+      "maxW": 4800
     }
   },
   "order": [
@@ -362,7 +397,10 @@
     "P-GapsWallets.dc.html",
     "P-GapsDetails.dc.html",
     "P-BuySell.dc.html",
-    "P-P2P.dc.html"
+    "P-P2P.dc.html",
+    "P-AI-Access.dc.html",
+    "P-AI-Setup.dc.html",
+    "P-AI-Transaction.dc.html"
   ],
   "pages": [
     {

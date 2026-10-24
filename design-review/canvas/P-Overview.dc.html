@@ -121,7 +121,12 @@ button.row:hover{background:var(--hover)}
 .adv{padding-left:28px}
 .btn{display:inline-flex;align-items:center;gap:6px;height:32px;padding:0 14px;border:1px solid var(--line);border-radius:8px;background:var(--panel);cursor:pointer;font-weight:500;font-size:13px;color:var(--ink);white-space:nowrap}
 .btn.pri{background:var(--accent);border-color:var(--accent);color:#1a1208}
-.tr{display:grid;grid-template-columns:32px minmax(0,1fr) 110px 150px;align-items:center;column-gap:14px;padding:12px 6px;border-bottom:1px solid var(--line)}
+.tr{display:grid;grid-template-columns:104px minmax(0,1fr) 128px 132px;align-items:center;column-gap:12px;height:56px;padding:0 12px;border-bottom:1px solid var(--line);color:var(--ink);text-decoration:none;font-size:14px}
+.tenshu a.tr{color:var(--ink)}.tr:hover{background:var(--hover)}
+.tr .tm{font-size:13px;color:var(--muted)}.tr .cell{display:flex;align-items:center;gap:8px;min-width:0}.tr .cell .ic{color:var(--muted);flex:none}.tr .wn{font-size:12px;color:var(--muted);white-space:nowrap}
+.tr .ell{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.tr .amt{text-align:right;font-weight:600;white-space:nowrap;font-size:14px;line-height:1.3;margin:0;padding:0}.tr .amt .fx{display:block;font-size:12px;font-weight:400;color:var(--muted);margin-top:1px}
+.tr .stc{display:flex;align-items:center;gap:6px;font-size:13px;font-weight:500;white-space:nowrap}.tr .stc.ok{color:var(--good)}.tr .stc.warn{color:var(--warn)}.tr .stc.bad{color:var(--bad)}
 .tr .amt2{text-align:right;font-weight:600}
 .dir{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;background:var(--hover);color:var(--muted)}
 .lead{display:flex;gap:24px;align-items:center;margin-top:24px;padding:20px 0;border-top:1px solid var(--line);border-bottom:1px solid var(--line)}
@@ -332,12 +337,15 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <h2>Recent activity</h2>
           <div class="rows">
             <sc-for list="{{ vaultAct }}" as="t" hint-placeholder-count="3">
-              <div class="tr">
-                <span class="dir"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if></span>
-                <span>{{ t.desc }}</span><span class="cap">{{ t.when }}</span><span class="amt2">{{ t.amt }}</span>
-              </div>
+              <a class="tr" href="P-Activity.dc.html" title="Open in Activity">
+                <span class="tm">{{ t.when }}</span>
+                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
+                <span class="amt r">{{ t.amt }}<span class="fx">{{ t.fiat }}</span></span>
+                <span class="stc {{ t.stCls }}"><sc-if value="{{ t.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if><sc-if value="{{ t.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if><sc-if value="{{ t.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg></sc-if><span class="ell">{{ t.st }}</span></span>
+              </a>
             </sc-for>
           </div>
+          <p class="cap" style="margin-top:10px"><a href="P-Activity.dc.html" style="color:var(--accent)">View all transactions</a></p>
         </div>
         <div class="adv1" style="margin-top:36px;border-top:1px solid var(--line)">
           <a class="row" href="P-Advanced.dc.html"><svg class="ic lead-ic" aria-hidden="true" viewBox="0 0 18 18"><path d="M3 5.5h12M3 9h12M3 12.5h12M6 4v3M11 7.5v3M8 11v3"/></svg><span class="tx"><span class="lb" style="display:block">Tools</span><span class="ds" style="display:block">Coin control, PSBT proposals, recovery path, split coins</span></span><svg class="ic cv" aria-hidden="true" viewBox="0 0 18 18"><path d="m7 4.5 4.5 4.5L7 13.5"/></svg></a>
@@ -356,10 +364,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <h2>Recent activity</h2>
           <div class="rows">
             <sc-for list="{{ sparkAct }}" as="t" hint-placeholder-count="4">
-              <div class="tr">
-                <span class="dir"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if></span>
-                <span>{{ t.desc }}</span><span class="cap">{{ t.when }}</span><span class="amt2">{{ t.amt }}</span>
-              </div>
+              <a class="tr" href="P-Activity.dc.html" title="Open in Activity">
+                <span class="tm">{{ t.when }}</span>
+                <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><span class="ell">{{ t.desc }}</span></span>
+                <span class="amt r">{{ t.amt }}<span class="fx">{{ t.fiat }}</span></span>
+                <span class="stc {{ t.stCls }}"><sc-if value="{{ t.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if><sc-if value="{{ t.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if><sc-if value="{{ t.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg></sc-if><span class="ell">{{ t.st }}</span></span>
+              </a>
             </sc-for>
           </div>
           <p class="cap" style="margin-top:10px"><a href="P-Activity.dc.html" style="color:var(--accent)">View all transactions</a></p>
@@ -425,11 +435,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
         <p class="idl"><img src="/_blob/dbbfc88f16f7cc27510d81f434c268ea" alt="">{{ cubeName }} · Bitcoin mainnet</p>
         <div class="rows" style="margin-top:24px">
           <sc-for list="{{ activity }}" as="t" hint-placeholder-count="5">
-            <div class="tr">
-              <span class="dir"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if></span>
-              <span style="min-width:0"><span style="display:block;font-weight:500">{{ t.desc }}</span><span class="cap" style="display:block;overflow-wrap:anywhere">{{ t.wallet }}</span></span>
-              <span class="cap">{{ t.when }}</span><span class="amt2">{{ t.amt }}</span>
-            </div>
+              <a class="tr" href="P-Activity.dc.html" title="Open in Activity">
+              <span class="tm">{{ t.when }}</span>
+              <span class="cell"><sc-if value="{{ t.inbound }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M13 5 5 13M5 7v6h6"/></svg></sc-if><sc-if value="{{ t.outbound }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="M5 13 13 5M7 5h6v6"/></svg></sc-if><span class="ell">{{ t.desc }}</span><span class="wn">{{ t.wallet }}</span></span>
+              <span class="amt r">{{ t.amt }}<span class="fx">{{ t.fiat }}</span></span>
+              <span class="stc {{ t.stCls }}"><sc-if value="{{ t.sOk }}" hint-placeholder-val="{{ true }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="m6.25 9.25 1.9 1.9 3.6-3.9"/></svg></sc-if><sc-if value="{{ t.sPend }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><circle cx="9" cy="9" r="6.5"/><path d="M9 5.5V9l2.5 1.5"/></svg></sc-if><sc-if value="{{ t.sSig }}" hint-placeholder-val="{{ false }}"><svg class="ic s" aria-hidden="true" viewBox="0 0 18 18"><path d="m3 15 1-4 8-8 3 3-8 8z"/></svg></sc-if><span class="ell">{{ t.st }}</span></span>
+            </a>
           </sc-for>
         </div>
       </sc-if>
@@ -497,7 +508,8 @@ class Component extends DCLogic {
     const nvi=(pg)=>({cls:page===pg?'on kf':'',cur:page===pg?'page':'false',pick:go(pg)});
     const asset=(wn,a)=>({tick:a.tick,num:m(a.num,hw),unit:a.unit,fiat:hw?'':a.fiat,cls:a.zero?'zero':'',btc:a.coin==='btc',lbtc:a.coin==='lbtc',usdt:a.coin==='usdt',sendLabel:'Send '+a.tick+' from '+wn,recvLabel:'Receive '+a.tick+' to '+wn});
     const card=(wn,fiat,sats,assets)=>({fiat:m(fiat,hw),sats:m(sats,hw),assets:assets.map(a=>asset(wn,a))});
-    const flow=(r)=>Object.assign({},r,{inbound:r.dir==='in',outbound:r.dir==='out',amt:m(r.amt,hw)});
+    const flow=(r)=>Object.assign({},r,{inbound:r.dir==='in',outbound:r.dir==='out',amt:m(r.amt,hw),fiat:m(r.fx||'',hw),
+      st:r.st||'Confirmed',stCls:r.st&&/signature/.test(r.st)?'warn':(r.st&&/pending/i.test(r.st)?'warn':'ok'),sOk:!r.st||r.st==='Confirmed',sPend:!!r.st&&/pending/i.test(r.st),sSig:!!r.st&&/signature/.test(r.st)});
     const vName='Vault · '+vaultAlias;
     const kit=signedOut?{status:'Sign in required',text:'Needs your Connect account'}:disc?{status:'Reconnect required',text:'Needs this Cube’s service connection'}:{status:'Not set up',text:'Encrypted copy in your Connect account'};
     const ln=signedOut?{ready:false,blocked:true,text:'Sign in to claim an address',action:'Sign in'}:disc?{ready:false,blocked:true,text:'Reconnect this Cube to check your address',action:'Reconnect'}:{ready:true,blocked:false,text:'Receive to a readable address',action:''};
@@ -523,23 +535,23 @@ class Component extends DCLogic {
       vault:card(vName,'$0.00','0',[{coin:'btc',tick:'BTC',num:'0',unit:'SATS',fiat:'0.00 USD',zero:true}]),
       goVault:go('vault'), goBackup:go('backup'),
       sparkAct:[
-        {dir:'in',desc:'Spark transfer',when:'17 hours ago',amt:'+2 SATS'},
-        {dir:'out',desc:'Lightning payment · Example Coffee Co.',when:'Yesterday',amt:'\u22123,000 SATS'},
-        {dir:'in',desc:'Spark transfer',when:'2 days ago',amt:'+3 SATS'},
-        {dir:'in',desc:'Lightning address · received',when:'3 days ago',amt:'+25,000 SATS'}
+        {dir:'in',desc:'Spark transfer',when:'Today 14:32',amt:'+2 SATS',fx:'$0.00',st:'Pending'},
+        {dir:'out',desc:'Lightning payment · Example Coffee Co.',when:'Yesterday 19:47',amt:'\u22123,000 SATS',fx:'$2.48'},
+        {dir:'in',desc:'Spark transfer',when:'Oct 20, 08:30',amt:'+3 SATS',fx:'$0.00'},
+        {dir:'in',desc:'Lightning address · received',when:'Oct 19, 13:40',amt:'+25,000 SATS',fx:'$20.70'}
       ].map(flow),
       sb:{on:S.sb?'true':'false',state:S.sb?'On on this device':'Off on this device',text:S.sb?'On':'Off',toggle:()=>self.setState({sb:!S.sb})},
       vaultAct:[
-        {dir:'out',desc:'Sent · 2 of 3 signed',when:'[DATE]',amt:'−40,000 SATS'},
-        {dir:'in',desc:'Received',when:'[DATE]',amt:'+30,000 SATS'},
-        {dir:'in',desc:'Received',when:'[DATE]',amt:'+10,000 SATS'}
+        {dir:'out',desc:'Roof repair deposit',when:'Today 09:18',amt:'−40,000 SATS',fx:'$33.12',st:'2 of 3 signatures'},
+        {dir:'in',desc:'Received',when:'Oct 19, 21:15',amt:'+30,000 SATS',fx:'$24.84'},
+        {dir:'in',desc:'Received',when:'Oct 15, 10:02',amt:'+10,000 SATS',fx:'$8.28'}
       ].map(flow),
       activity:[
-        {dir:'in',desc:'Received',wallet:'Spark · Daily spending',when:'[DATE]',amt:'+25,053 SATS'},
-        {dir:'in',desc:'Received L-BTC',wallet:'Liquid · Travel',when:'[DATE]',amt:'+12,784 SATS'},
-        {dir:'in',desc:'Received USDt',wallet:'Liquid · Travel',when:'[DATE]',amt:'+10.37 USDt'},
-        {dir:'out',desc:'Sent · 2 of 3 signed',wallet:vName,when:'[DATE]',amt:'−40,000 SATS'},
-        {dir:'in',desc:'Received',wallet:vName,when:'[DATE]',amt:'+40,000 SATS'}
+        {dir:'in',desc:'Received',wallet:'Spark · Daily spending',when:'Today 14:32',amt:'+25,053 SATS',fx:'$20.74'},
+        {dir:'in',desc:'Received L-BTC',wallet:'Liquid · Travel',when:'Yesterday 11:05',amt:'+12,784 SATS',fx:'$10.58'},
+        {dir:'in',desc:'Received USDt',wallet:'Liquid · Travel',when:'Yesterday 12:02',amt:'+10.37 USDt',fx:'$10.37'},
+        {dir:'out',desc:'Roof repair deposit',wallet:vName,when:'Today 09:18',amt:'−40,000 SATS',fx:'$33.12',st:'2 of 3 signatures'},
+        {dir:'in',desc:'Received',wallet:vName,when:'Oct 19, 21:15',amt:'+40,000 SATS',fx:'$33.12'}
       ].map(flow),
       kit:kit, ln:Object.assign({}, ln, (function(){
         // Lightning Address change flow (app: Spark Settings → Lightning Address → Change; "Change your Lightning Address?" / "Yes, change it")
