@@ -769,3 +769,15 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 **Robert:** the eye for showing and hiding balances is missing from the top bar on some screens.
 
 **Applied:** the Overview, the one Cube screen without it, now has the top-bar eye; it hides every balance on the page, and the Total and Wallets section eyes remain as finer controls. Every Cube screen's top bar now reads: account chip, Cube service chip, eye, App preferences. For Codex: implement it as one Cube-wide hide-balances flag shared by every screen; the prototype keeps it per board.
+
+## Settings apply as they change; more AI clients (2026-10-24, canvas v118–v120)
+
+**Robert:** the Settings design has a "Save changes" button; confirm whether the app needs one, and if not remove it from every settings design.
+
+**Checked in the app:** it doesn't. `coincube-gui/src/app/state/settings/general.rs` persists each display setting from its own change handler (`update_unit_setting`, `update_price_setting`, the direction-badges toggle), with no save step. The only explicit commits are text fields: the Vault wallet and key aliases (`app/view/vault/settings/mod.rs`, "Update") and local-signing fallback rows ("Save").
+
+**Applied:** Settings › Display & appearance and Vault › Wallet & signers no longer have Save/Discard bars. Toggles, segmented controls and selects apply at once, and a quiet "Saved" confirms it. Text fields (Cube name, Vault name, signer names) save when you press Return or leave the field, and say so. A failed write still shows the alert with Try again (the `saveFailure` lever). Buttons that finish a flow or dialog are unchanged (Save contact, Apply a key, save a coin label or PSBT, Save permissions).
+
+**Robert:** add Codex/ChatGPT, and support Grok.
+
+**Applied:** AI access and Settings › AI access list a paired "Codex · ChatGPT" client (Spark only, read plus prepare unsigned transactions), and the pairing step offers Claude Desktop, Codex · ChatGPT, Maple AI Desktop, Grok and Other MCP host. The pairing step's radio buttons now select correctly (they always showed the last option).

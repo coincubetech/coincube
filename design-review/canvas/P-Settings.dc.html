@@ -132,8 +132,7 @@ select.in{width:240px}
 .lead{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:24px;align-items:center;margin-top:24px;padding:18px 0;border-top:2px solid var(--warn);border-bottom:1px solid var(--line)}
 .lead.unk{border-top-color:var(--line)}
 .lead h2{font-size:20px;font-weight:600;margin-top:6px}
-.fbar{display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:12px 0}
-.fbar .msg{margin-right:auto;font-size:13px;color:var(--muted)}
+.saved{min-height:18px;padding:8px 0 0;font-size:13px;color:var(--muted);text-align:right}
 .dsc{display:flex;align-items:center;gap:8px;width:100%;margin-top:32px;padding:12px 0;border:0;border-top:1px solid var(--line);border-bottom:1px solid var(--line);background:none;cursor:pointer;text-align:left;font-weight:600;font-size:15px;color:var(--ink)}
 .dsc:hover{background:var(--hover)}
 .dsc .ic{transition:transform .15s;color:var(--muted)}
@@ -301,7 +300,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           <section class="grp" aria-labelledby="h-amt">
             <h3 id="h-amt">Amounts &amp; currency</h3>
             <sc-if value="{{ form.error }}" hint-placeholder-val="{{ false }}">
-              <div class="note bad" role="alert"><div><p><b>Couldn't save Currency and Exchange-rate source.</b></p><p>Your edits are kept below.</p></div><button type="button" class="btn" onClick="{{ form.save }}">Try again</button></div>
+              <div class="note bad" role="alert"><div><p><b>Couldn't save Currency and Exchange-rate source.</b></p><p>The rest of this page saved. Your choice is kept below.</p></div><button type="button" class="btn" onClick="{{ form.save }}">Try again</button></div>
             </sc-if>
             <div class="rows">
               <div class="row"><div class="rl"><p class="lb" id="u-l">Bitcoin unit</p></div><div class="rc"><div class="seg" role="group" aria-labelledby="u-l"><button type="button" aria-pressed="{{ form.btc }}" onClick="{{ form.setBtc }}">BTC</button><button type="button" aria-pressed="{{ form.sats }}" onClick="{{ form.setSats }}">Sats</button></div></div></div>
@@ -311,12 +310,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
               <div class="row"><div class="rl"><label class="lb" for="src">Exchange-rate source</label><p class="ds">Never changes a balance.</p></div><div class="rc"><select id="src" class="{{ form.errCls }}" value="{{ form.source }}" onChange="{{ form.setSource }}"><option value="A">[RATE SOURCE A]</option><option value="B">[RATE SOURCE B]</option></select></div></div>
               <div class="row"><div class="rl"><p class="lbl-line"><span class="lb" id="b-l">Direction badges</span><span class="sc">This device</span></p><p class="ds">In and Out badges in Activity.</p></div><div class="rc"><button type="button" class="tog" aria-labelledby="b-l" aria-pressed="{{ form.badges }}" onClick="{{ form.togBadges }}"><span class="kn"></span>{{ form.badgesText }}</button></div></div>
             </div>
-            <div class="fbar"><span class="msg" role="status">{{ form.msg }}</span><button type="button" class="btn" disabled="{{ form.clean }}" onClick="{{ form.discard }}">Discard</button><button type="button" class="btn pri" disabled="{{ form.clean }}" onClick="{{ form.save }}">{{ form.saveLabel }}</button></div>
+            <p class="saved" role="status">{{ form.msg }}</p>
           </section>
           <section class="grp" aria-labelledby="h-id">
             <h3 id="h-id">Cube identity</h3>
             <div class="rows">
-              <div class="row"><div class="rl"><label class="lb" for="cname">Cube name</label></div><div class="rc"><input id="cname" class="in" value="{{ form.name }}" onChange="{{ form.setName }}"></div></div>
+              <div class="row"><div class="rl"><label class="lb" for="cname">Cube name</label><p class="ds">Saved when you press Return or leave the field.</p></div><div class="rc"><input id="cname" class="in" value="{{ form.name }}" onChange="{{ form.setName }}"></div></div>
               <div class="row"><div class="rl" style="display:flex;gap:14px;align-items:center"><div class="ava" aria-hidden="true">[ava]</div><div><p class="lb">Avatar</p>
                 <sc-if value="{{ avatar.ready }}" hint-placeholder-val="{{ true }}"><p class="ds">Regenerations left: [N]</p></sc-if>
                 <sc-if value="{{ avatar.loading }}" hint-placeholder-val="{{ false }}"><p class="ds">Loading…</p></sc-if>
@@ -382,6 +381,7 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
             <p class="intro">Let the AI you already use operate this Cube through Tenshu's local connection. Tenshu stays the wallet engine; seeds, keys, PINs, passwords and passkeys never enter the conversation.</p>
             <div class="rows">
               <div class="row"><div class="rl"><p class="lb">Claude Desktop</p><p class="ds">Vault · Family savings, Spark · Daily spending · Read wallet information, Manage wallet setup · Available</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
+              <div class="row"><div class="rl"><p class="lb">Codex · ChatGPT</p><p class="ds">Spark · Daily spending · Read wallet information, Prepare unsigned transactions · Available</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
               <div class="row"><div class="rl"><p class="lb">Maple AI Desktop</p><p class="ds">Vault · Family savings · Read wallet information · Paused, Cube was locked</p></div><div class="rc"><a class="btn" href="P-AI-Access.dc.html">Manage</a></div></div>
               <div class="row"><div class="rl"><p class="lb">Pair a client</p><p class="ds">Pair once; access lasts until you revoke it. Each client gets only the Cubes, wallets and permissions you choose.</p></div><div class="rc"><a class="btn pri" href="P-AI-Access.dc.html">Open AI access</a></div></div>
             </div>
@@ -443,12 +443,13 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
           </section>
           <section class="grp" aria-labelledby="h-sg">
             <h3 id="h-sg">Signers</h3>
+            <p class="intro">Names save when you press Return or leave the field.</p>
             <div class="rows">
               <sc-for list="{{ signers }}" as="g" hint-placeholder-count="3">
                 <div class="row"><div class="rl"><label class="lb" for="{{ g.id }}">{{ g.kind }}</label><p class="ds"><span class="mono">{{ g.fp }}</span> · {{ g.owner }}</p></div><div class="rc"><input id="{{ g.id }}" class="in" aria-label="Alias for {{ g.kind }}" value="{{ g.alias }}" onChange="{{ g.set }}"></div></div>
               </sc-for>
             </div>
-            <div class="fbar"><span class="msg" role="status">{{ aliasMsg }}</span><button type="button" class="btn" disabled="{{ aliasClean }}" onClick="{{ aliasDiscard }}">Discard</button><button type="button" class="btn pri" disabled="{{ aliasClean }}" onClick="{{ aliasSave }}">Save names</button></div>
+            <p class="saved" role="status">{{ aliasMsg }}</p>
           </section>
           <section class="grp" aria-labelledby="h-ph">
             <h3 id="h-ph">Phone signing and members</h3>
@@ -750,7 +751,8 @@ class Component extends DCLogic {
     const initial=saveFail?Object.assign({},base,{currency:'EUR',source:'B'}):base;
     const f=(S.form&&S.form.for===rs)?S.form.v:initial;
     const dirty=JSON.stringify(f)!==JSON.stringify(base);
-    const setF=(patch)=>self.setState({form:{for:rs,v:Object.assign({},f,patch)},saved:false});
+    // settings apply as they change (as in the app); the saveFailure lever shows a failed write
+    const setF=(patch)=>{const v=Object.assign({},f,patch);self.setState(saveFail?{form:{for:rs,v:v},saved:false}:{form:{for:rs,v:v},base:{for:rs,v:v},saved:true});};
     const pr=(b)=>b?'true':'false';
     const ev=(e)=>(e&&e.target)?e.target.value:'';
     const form={
@@ -761,9 +763,7 @@ class Component extends DCLogic {
       togFiat:()=>setF({fiat:!f.fiat}),togBadges:()=>setF({badges:!f.badges}),
       setCurrency:(e)=>setF({currency:ev(e)}),setSource:(e)=>setF({source:ev(e)}),setName:(e)=>setF({name:ev(e)}),
       error:saveFail&&dirty,errCls:(saveFail&&dirty)?'in err':'in',clean:!dirty,
-      saveLabel:saveFail&&dirty?'Try again':'Save changes',
-      msg:saveFail&&dirty?'Not saved':(dirty?'Unsaved changes':(S.saved?'Saved':'')),
-      discard:()=>self.setState({form:{for:rs,v:base}}),
+      msg:saveFail&&dirty?'':(S.saved?'Saved':''),
       save:()=>{if(saveFail)return;self.setState({base:{for:rs,v:f},form:{for:rs,v:f},saved:true});}
     };
     const avatar={ready:!signedOut&&!disc,loading:false,error:signedOut||disc,
@@ -805,9 +805,8 @@ class Component extends DCLogic {
     ];
     const savedA=(S.aliasSaved&&S.aliasSaved.for===rs)?S.aliasSaved.v:defSigners.map(s=>s.alias);
     const curA=(S.aliases&&S.aliases.for===rs)?S.aliases.v:savedA;
-    const aliasDirty=JSON.stringify(curA)!==JSON.stringify(savedA);
     const signers=defSigners.map((s,i)=>Object.assign({},s,{id:'sg'+i,alias:curA[i],
-      set:(e)=>{const a=curA.slice();a[i]=ev(e);self.setState({aliases:{for:rs,v:a}});}}));
+      set:(e)=>{const a=curA.slice();a[i]=ev(e);self.setState({aliases:{for:rs,v:a},aliasSaved:{for:rs,v:a}});}}));
 
     // pair with Keychain
     const pairProp=P.pairStep||'idle';
@@ -886,8 +885,7 @@ class Component extends DCLogic {
       sec:sec,form:form,avatar:avatar,bk:bk,alerts:alerts,noVault:noVault,offline:offline,imported:imported,
       chk:chk,strictP:pr(S.strict),strictText:S.strict?'On':'Off',togStrict:()=>self.setState({strict:!S.strict}),
       dataVaultText:noVault?'No Vault in this Cube.':'Exported per Vault.',
-      signers:signers,aliasClean:!aliasDirty,aliasMsg:aliasDirty?'Unsaved name changes':'',
-      aliasDiscard:()=>self.setState({aliases:{for:rs,v:savedA}}),aliasSave:()=>self.setState({aliasSaved:{for:rs,v:curA}}),
+      signers:signers,aliasMsg:(S.aliasSaved&&S.aliasSaved.for===rs)?'Saved':'',
       pair:pair,pairKeys:pairKeys,phones:phones,noop:()=>{},
       acctLine:acctLine,health:health,ln:ln,usdb:hide?'••••••':'25.00 USDB',
       open:{wx:tg('wx'),nx:tg('nx'),bx:tg('bx')},nd:nd
