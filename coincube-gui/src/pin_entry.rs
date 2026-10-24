@@ -209,6 +209,13 @@ impl PinEntry {
         self.fork_signer.lock().ok()?.take()
     }
 
+    /// The Connect identity rechecked by the successful fork classification.
+    /// This is carried into a scoped Claim load so a rotated bearer can still
+    /// be admitted for the same account without trusting a Home label.
+    pub(crate) fn verified_connect_user(&self) -> Option<u32> {
+        self.connect_expected_user
+    }
+
     pub fn fail_open(&mut self, reason: String) {
         self.loading = false;
         self.error = Some(reason);

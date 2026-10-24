@@ -404,13 +404,19 @@ async fn run_local_duress_activation(root: &std::path::Path, account_id: Option<
 
 #[derive(Debug)]
 pub enum Message {
+    StartClaimInstaller,
+    ClaimInstallCancelled,
     OpenForkClaim(app::claim_intent::ForkHandoff),
     OpenBitcoinClaim(app::claim_intent::ForkHandoff),
+    /// An App callback is valid only for the App generation that emitted it.
+    /// A retained Launcher tab can otherwise reuse this tab ID after Lock.
+    AppAsync(u64, Box<Message>),
     ForkAsync(u64, Box<Message>),
     ForkTaskFinished(u64, u64),
     Launch(home::Message),
     Install(installer::Message),
     Load(loader::Message),
+    ClaimResourcesLoaded(Box<ClaimResources>),
     Run(app::Message),
     Login(login::Message),
     PinEntry(crate::pin_entry::Message),
@@ -520,6 +526,41 @@ pub enum Message {
     ForkInstallCompleted(u64, installer::Message),
 }
 
+/// A restricted fork-loader result. GUI transfers these resources to the
+/// source App's Claim owner; this payload must never become a second App.
+pub struct ClaimResources {
+    pub intent: home::ClaimOpenIntent,
+    pub wallet: Arc<Wallet>,
+    pub cache: Cache,
+    pub daemon: Arc<dyn crate::daemon::Daemon + Sync + Send>,
+    pub bitcoind: Option<crate::node::bitcoind::Bitcoind>,
+    pub settings: app::settings::CubeSettings,
+    pub client: Option<crate::services::coincube::CoincubeClient>,
+    pub verified_account: Option<u32>,
+}
+
+impl std::fmt::Debug for ClaimResources {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClaimResources")
+            .field("operation", &self.intent.operation)
+            .field("fork_cube", &self.settings.id)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ClaimResources {
+    pub(crate) fn stop_owned(&mut self) {
+        if self.daemon.backend().is_embedded() {
+            if let Err(error) = tokio::runtime::Handle::current().block_on(self.daemon.stop()) {
+                tracing::error!("Claim fork daemon stop failed: {error}");
+            }
+        }
+        if let Some(bitcoind) = self.bitcoind.take() {
+            bitcoind.stop();
+        }
+    }
+}
+
 /// Resolve the Vault from its authoritative chain, never its address encoding.
 fn vault_settings_for_cube(
     root: &CoincubeDirectory,
@@ -605,6 +646,8 @@ pub struct Tab {
     /// to show them. `Loader` and `Login` cannot toast, so anything raised
     /// before the Cube is up waits here.
     pending_unlock_warnings: Vec<String>,
+    app_generation: u64,
+    claim_open: Option<home::ClaimOpenIntent>,
     fork_session_generation: u64,
     fork_save_task: Option<iced::task::Handle>,
     fork_tasks: HashMap<u64, iced::task::Handle>,
@@ -622,6 +665,8 @@ impl Tab {
             state,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
             pending_unlock_warnings: Vec::new(),
+            app_generation: 0,
+            claim_open: None,
             fork_session_generation: 0,
             fork_save_task: None,
             fork_tasks: HashMap::new(),
@@ -629,6 +674,14 @@ impl Tab {
             pending_split_after_install: false,
             pending_imported_claim: None,
         }
+    }
+
+    pub(crate) fn set_claim_open(&mut self, intent: home::ClaimOpenIntent) {
+        self.claim_open = Some(intent);
+    }
+
+    pub(crate) fn claim_open_owner(&self) -> Option<app::cache::AppGeneration> {
+        self.claim_open.as_ref().map(|intent| intent.owner)
     }
 
     pub fn cache(&self) -> Option<&Cache> {
@@ -764,7 +817,10 @@ impl Tab {
                     return if app.cube_settings().network.is_blake2b() {
                         self.guard_fork_task(Task::done(Message::LockCube))
                     } else {
-                        Task::done(Message::LockCube)
+                        Task::done(Message::AppAsync(
+                            self.app_generation,
+                            Box::new(Message::LockCube),
+                        ))
                     };
                 }
                 app.on_tick().map(Message::Run)
@@ -793,7 +849,12 @@ impl Tab {
         if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
             self.guard_fork_task(task)
         } else {
-            task
+            if matches!(self.state, State::App(_)) {
+                let generation = self.app_generation;
+                task.map(move |message| Message::AppAsync(generation, Box::new(message)))
+            } else {
+                task
+            }
         }
     }
 
@@ -935,6 +996,14 @@ impl Tab {
         generation == self.fork_session_generation
     }
 
+    pub(crate) fn accepts_app_generation(&self, generation: u64) -> bool {
+        generation == self.app_generation && matches!(self.state, State::App(_))
+    }
+
+    pub(crate) fn app_generation_token(&self) -> Option<u64> {
+        matches!(self.state, State::App(_)).then_some(self.app_generation)
+    }
+
     fn guard_fork_task(&mut self, task: Task<Message>) -> Task<Message> {
         if task.units() == 0 {
             return task;
@@ -952,6 +1021,12 @@ impl Tab {
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         let message = match message {
+            Message::AppAsync(generation, message) => {
+                if !self.accepts_app_generation(generation) {
+                    return Task::none();
+                }
+                *message
+            }
             Message::ForkAsync(generation, message) => {
                 if generation != self.fork_session_generation {
                     return Task::none();
@@ -966,9 +1041,20 @@ impl Tab {
             }
             message => message,
         };
+        if matches!(
+            message,
+            Message::StartClaimInstaller | Message::ClaimInstallCancelled
+        ) {
+            return Task::done(message);
+        }
+        let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
         let result = self.update_inner(message);
+        let is_app = matches!(&self.state, State::App(_));
+        if was_app != is_app {
+            self.app_generation = self.app_generation.wrapping_add(1);
+        }
         if matches!(&self.state, State::App(app) if app.local_feature_revoked()) {
             drop(result);
             return self.invalidate_fork_state(AuthChange::LogOut, true, true);
@@ -987,13 +1073,22 @@ impl Tab {
                 self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
                 self.fork_tasks.clear();
             }
-            result
+            if was_app && is_app {
+                let generation = self.app_generation;
+                result.map(move |message| Message::AppAsync(generation, Box::new(message)))
+            } else {
+                result
+            }
         }
     }
 
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
+            Message::Launch(home::Message::RunClaim(root, config, chain, cube, intent)) => {
+                self.claim_open = Some(intent);
+                Message::Launch(home::Message::Run(root, config, chain, cube))
+            }
             Message::ForkInstallCompleted(generation, msg) => {
                 if generation != self.fork_session_generation {
                     return Task::none();
@@ -1011,7 +1106,7 @@ impl Tab {
                 // Match the secure close path used by LockCube: revoke work
                 // tied to this session, wipe the cached signer/PIN, then
                 // drop App (and its wallet clients) before opening Home.
-                app.revoke_claim();
+                app.stop();
                 crate::app::session::close();
                 let (home, command) = Home::new_for_chain(datadir, Some(chain));
                 self.state = State::Home(home);
@@ -1031,7 +1126,7 @@ impl Tab {
                 // A claim in flight is revoked before the Cube's context goes:
                 // the `App` is dropped a few lines down, and a queued
                 // submission must not outlive the session it was confirmed in.
-                app.revoke_claim();
+                app.stop();
                 crate::app::session::close();
 
                 let config = app::Config::from_file(
@@ -1779,15 +1874,17 @@ impl Tab {
                         // and the persisted target before entering step one.
                         if let Some(source) = &i.source_cube {
                             i.claim_target_saved = true;
-                            match reopen_claim_source(&i.datadir, source) {
-                                Ok((state, task)) => {
-                                    app::claim_intent::arm(source.settings.id.clone());
-                                    self.state = state;
-                                    return task;
-                                }
-                                Err(error) => {
-                                    i.navigation_error = Some(error);
-                                    return Task::none();
+                            if self.claim_open.is_none() {
+                                match reopen_claim_source(&i.datadir, source) {
+                                    Ok((state, task)) => {
+                                        app::claim_intent::arm(source.settings.id.clone());
+                                        self.state = state;
+                                        return task;
+                                    }
+                                    Err(error) => {
+                                        i.navigation_error = Some(error);
+                                        return Task::none();
+                                    }
                                 }
                             }
                         }
@@ -1971,6 +2068,9 @@ impl Tab {
                 } else if let installer::Message::BackToApp(network) = msg {
                     self.pending_split_after_install = false;
                     self.pending_imported_claim = None;
+                    if self.claim_open.take().is_some() {
+                        return Task::done(Message::ClaimInstallCancelled);
+                    }
                     // A claim was launched from a *different* Cube than the one
                     // being built, so there is no `cube_settings` to go back to
                     // — without this the user who backs out of a claim lands on
@@ -2052,11 +2152,16 @@ impl Tab {
             }
             (State::Loader(loader), Message::Load(msg)) => match msg {
                 loader::Message::View(loader::ViewMessage::SwitchNetwork) => {
+                    let claim_cancelled = self.claim_open.take().is_some();
                     // Back from the loader abandons this open, and its Split
                     // handoff with it (Retry keeps both).
                     app::split_intent::clear();
+                    if claim_cancelled {
+                        return Task::done(Message::ClaimInstallCancelled);
+                    }
                     let (home, command) =
                         Home::new(loader.datadir_path.clone(), Some(loader.network));
+                    loader.stop();
                     self.state = State::Home(home);
                     command.map(Message::Launch)
                 }
@@ -2097,7 +2202,7 @@ impl Tab {
                 }
                 loader::Message::Synced(Ok((
                     wallet,
-                    cache,
+                    mut cache,
                     daemon,
                     bitcoind,
                     backup,
@@ -2105,6 +2210,32 @@ impl Tab {
                 ))) => {
                     if loader.fork_revoked() {
                         return Task::none();
+                    }
+                    if let Some(intent) = self.claim_open.take() {
+                        if cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
+                            || backup.is_some()
+                        {
+                            loader.fail(loader::Error::Unexpected(
+                                "The paired Claim load did not return an active fork Vault.".into(),
+                            ));
+                            return Task::none();
+                        }
+                        cache.cube_encryption_key = loader.cube_encryption_key.clone();
+                        let client = loader.connect_client.clone();
+                        let verified_account = loader.claim_verified_account;
+                        loader.detach_claim_resources();
+                        return Task::done(Message::ClaimResourcesLoaded(Box::new(
+                            ClaimResources {
+                                intent,
+                                wallet,
+                                cache,
+                                daemon,
+                                bitcoind,
+                                settings: cube_settings,
+                                client,
+                                verified_account,
+                            },
+                        )));
                     }
                     if cube_settings.network.is_blake2b() {
                         let opened = if loader.requires_connect() {
@@ -2346,82 +2477,9 @@ impl Tab {
                         }
                     }
                     app::Message::View(app::view::Message::StartClaimBlake2b) => {
-                        // B1.4 claim target. The source Cube is the one running
-                        // here; its descriptor and its unlocked master signer
-                        // are what the target is built from, so both are read
-                        // from this `App` rather than collected by a step.
-                        //
-                        // Creates the target only — see `installer::claim`.
-                        let cube = app.cube_settings().clone();
-                        let Some(wallet) = app.wallet() else {
-                            return Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(
-                                    "This Cube has no Vault to claim.".to_string(),
-                                ),
-                            )));
-                        };
-                        let Some(inheritance_descriptor) = wallet.inheritance_descriptor() else {
-                            return Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(
-                                    "This imported Bitcoin wallet does not have a Vault claim policy."
-                                        .to_string(),
-                                ),
-                            )));
-                        };
-                        let Some(fingerprint) = cube.master_signer_fingerprint else {
-                            return Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(
-                                    "This Cube's master key isn't available in this session."
-                                        .to_string(),
-                                ),
-                            )));
-                        };
-                        let Some(signer) = app::session::unlocked_signer(&cube.id, fingerprint)
-                        else {
-                            return Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(
-                                    "Unlock this Cube again to start a claim.".to_string(),
-                                ),
-                            )));
-                        };
-                        let source = installer::ClaimSource {
-                            // The whole Cube: the installer needs its id and
-                            // name, its backup state (inherited by the target,
-                            // which shares the mnemonic), and the settings
-                            // themselves to rebuild this Cube if the user backs
-                            // out of the claim.
-                            cube: cube.clone(),
-                            descriptor: inheritance_descriptor.clone(),
-                            signer: std::sync::Arc::new(crate::signer::Signer::new(signer)),
-                        };
-                        match Installer::try_new_for_chain(
-                            app.datadir().clone(),
-                            crate::chain::ChainId::BitcoinBlake2b,
-                            None,
-                            UserFlow::ClaimBlake2b {
-                                from_cube: Box::new(source),
-                            },
-                            true,
-                            // Deliberately not the source Cube's settings: the
-                            // installer is building a Bitcoin Blake2b Cube, and
-                            // `try_new_for_chain` refuses settings from another
-                            // chain. The source travels in the flow instead.
-                            None,
-                            app.breez_client(),
-                            app.spark_backend(),
-                            GlobalSettings::load_developer_mode(&GlobalSettings::path(
-                                app.datadir(),
-                            )),
-                            app.authenticated_coincube_client(),
-                        ) {
-                            Ok((install, command)) => {
-                                self.state = State::Installer(Box::new(install));
-                                command.map(Message::Install)
-                            }
-                            Err(error) => Task::done(Message::Run(app::Message::View(
-                                app::view::Message::ShowError(error.to_string()),
-                            ))),
-                        }
+                        // The pane retains this source App while a temporary
+                        // installer builds its counterpart Cube.
+                        Task::done(Message::StartClaimInstaller)
                     }
                     app::Message::View(app::view::Message::SetupVaultRestoreFromKit) => {
                         // W15 — same installer launch path as SetupVault,
@@ -2601,8 +2659,11 @@ impl Tab {
                                         cube.network.bitcoin_network(),
                                     ),
                                 );
-                                app::session::open(cube.id.clone(), pin);
-                                let (loader, command) = if requires_connect {
+                                let scoped_claim = self.claim_open.is_some();
+                                if !scoped_claim {
+                                    app::session::open(cube.id.clone(), pin.clone());
+                                }
+                                let (mut loader, command) = if requires_connect {
                                     Loader::new_for_chain(
                                         datadir.clone(),
                                         config.clone(),
@@ -2620,6 +2681,11 @@ impl Tab {
                                         cek,
                                     )
                                 };
+                                if scoped_claim {
+                                    loader.set_scoped_seed_password(pin);
+                                    loader.claim_verified_account =
+                                        pin_entry.verified_connect_user();
+                                }
                                 self.state = State::Loader(loader);
                                 return command.map(Message::Load);
                             }
@@ -3091,6 +3157,10 @@ impl Tab {
                     }
                 }
                 crate::pin_entry::Message::Back => {
+                    if self.claim_open.take().is_some() {
+                        app::split_intent::clear();
+                        return Task::done(Message::ClaimInstallCancelled);
+                    }
                     // An abandoned unlock abandons its Split handoff too; it
                     // must not fire on a later ordinary open of this Cube.
                     app::split_intent::clear();
@@ -3677,7 +3747,13 @@ impl Tab {
                 .map(|(generation, message)| {
                     Message::ForkAsync(generation, Box::new(Message::Run(message)))
                 }),
-            State::App(v) => v.subscription().map(Message::Run),
+            State::App(v) => {
+                v.subscription()
+                    .with(self.app_generation)
+                    .map(|(generation, message)| {
+                        Message::AppAsync(generation, Box::new(Message::Run(message)))
+                    })
+            }
             State::Home(v) => v.subscription().map(Message::Launch),
             State::Login(_) => Subscription::none(),
             State::PinEntry(_) => Subscription::none(),
@@ -3698,7 +3774,12 @@ impl Tab {
                     Message::ForkAsync(generation, Box::new(Message::Run(message)))
                 })
             }
-            State::App(v) => v.view().map(Message::Run),
+            State::App(v) => {
+                let generation = self.app_generation;
+                v.view().map(move |message| {
+                    Message::AppAsync(generation, Box::new(Message::Run(message)))
+                })
+            }
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
@@ -3718,6 +3799,7 @@ impl Tab {
     }
 
     pub fn stop(&mut self) {
+        self.claim_open = None;
         match &mut self.state {
             State::Loader(s) => s.stop(),
             State::Home(s) => s.stop(),
@@ -6528,6 +6610,72 @@ mod fork_completion_tests {
             drop(tab);
             std::fs::remove_dir_all(root_path).unwrap();
         }
+    }
+
+    #[test]
+    fn scoped_claim_target_save_keeps_source_and_uses_target_unlock() {
+        let _guard = app::session::test_guard();
+        let root_path =
+            std::env::temp_dir().join(format!("scoped-claim-save-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(root_path.clone());
+        let fork_dir = root.network_directory(ChainId::BitcoinBlake2b);
+        fork_dir.init().unwrap();
+        app::Config::new(false)
+            .to_file(&fork_dir.path().join(app::config::DEFAULT_FILE_NAME))
+            .unwrap();
+        let source = CubeSettings::new_with_raw_id(
+            "claim-source".into(),
+            "Bitcoin source".into(),
+            ChainId::Bitcoin,
+        );
+        let target = CubeSettings::new_with_raw_id(
+            "claim-target".into(),
+            "Paired destination".into(),
+            ChainId::BitcoinBlake2b,
+        );
+        let (mut installer, startup) = Installer::new(
+            root.clone(),
+            bitcoin::Network::Bitcoin,
+            None,
+            installer::UserFlow::CreateWallet,
+            true,
+            None,
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        drop(startup);
+        installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+        installer.source_cube = Some(installer::SourceCube {
+            settings: source.clone(),
+            breez_client: None,
+            spark_backend: None,
+        });
+        let owner = app::cache::AppGeneration::next();
+        let handoff =
+            app::claim_intent::ForkHandoff::new(&root, source.id.clone(), target.id.clone())
+                .unwrap();
+        let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
+        tab.set_claim_open(crate::home::ClaimOpenIntent::new(
+            owner,
+            &root,
+            source.id.clone(),
+            target.id.clone(),
+            crate::home::ClaimRoute::Begin(handoff),
+        ));
+        app::claim_intent::clear();
+        let generation = tab.fork_session_generation;
+        drop(tab.update(Message::ForkInstallCompleted(
+            generation,
+            installer::Message::CubeSaved(Ok((target, None, None)), None, None),
+        )));
+        assert!(matches!(tab.state, State::PinEntry(_)));
+        assert_eq!(tab.claim_open_owner(), Some(owner));
+        assert!(!app::claim_intent::take(&source.id));
+        drop(tab);
+        std::fs::remove_dir_all(root_path).unwrap();
     }
 
     async fn outputs(task: Task<Message>) -> Vec<Message> {

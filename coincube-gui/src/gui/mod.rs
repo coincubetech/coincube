@@ -5,7 +5,7 @@ use iced::{
         operation::{focus_next, focus_previous},
         pane_grid,
     },
-    Length, Size, Subscription, Task,
+    Size, Subscription, Task,
 };
 use iced_runtime::window;
 use std::collections::{HashMap, HashSet};
@@ -16,7 +16,7 @@ extern crate serde;
 extern crate serde_json;
 
 use coincube_core::miniscript::bitcoin;
-use coincube_ui::widget::{Column, Container, Element};
+use coincube_ui::widget::Element;
 
 mod cache;
 pub mod pane;
@@ -164,6 +164,27 @@ fn connect_account_message(
     }
 }
 
+/// Guarded App tasks bypass Pane's ordinary task-output mapper. Preserve its
+/// navigation bubbles after checking the generation in `GUI::update`.
+fn route_guarded_tab_result(
+    pane_id: pane_grid::Pane,
+    tab_id: usize,
+    message: tab::Message,
+) -> Message {
+    let view = match message {
+        tab::Message::OpenLauncher => pane::ViewMessage::OpenLauncher,
+        tab::Message::OpenConnectSignIn => pane::ViewMessage::OpenConnectSignIn,
+        tab::Message::OpenPlanBilling => pane::ViewMessage::OpenPlanBilling,
+        tab::Message::ToggleTheme => pane::ViewMessage::ToggleTheme,
+        tab::Message::GlobalSettingsChanged => pane::ViewMessage::GlobalSettingsChanged,
+        tab::Message::ConnectSignedIn => pane::ViewMessage::ConnectSignedIn,
+        tab::Message::OpenBitcoinClaim(handoff) => pane::ViewMessage::OpenBitcoinClaim(handoff),
+        tab::Message::OpenForkClaim(handoff) => pane::ViewMessage::OpenForkClaim(handoff),
+        message => return Message::Pane(pane_id, pane::Message::tab(tab_id, message)),
+    };
+    Message::Pane(pane_id, pane::Message::View(view))
+}
+
 impl GUI {
     pub fn title(&self) -> String {
         match cfg!(debug_assertions) {
@@ -221,6 +242,22 @@ impl GUI {
         // actions. A queued event from an old App cannot affect a reopened one.
         let message = match message {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, tab_message))
+                if matches!(tab_message.as_ref(), tab::Message::AppAsync(..)) =>
+            {
+                let tab::Message::AppAsync(generation, message) = *tab_message else {
+                    unreachable!();
+                };
+                let current = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .is_some_and(|tab| tab.accepts_app_generation(generation));
+                if !current {
+                    return Task::none();
+                }
+                route_guarded_tab_result(pane_id, tab_id, *message)
+            }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, tab_message))
                 if matches!(tab_message.as_ref(), tab::Message::ForkAsync(..)) =>
             {
                 let tab::Message::ForkAsync(generation, message) = *tab_message else {
@@ -234,7 +271,15 @@ impl GUI {
                 if !current {
                     return Task::none();
                 }
-                Message::Pane(pane_id, pane::Message::tab(tab_id, *message))
+                route_guarded_tab_result(pane_id, tab_id, *message)
+            }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, _))
+                if !self
+                    .panes
+                    .get(pane_id)
+                    .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id)) =>
+            {
+                return Task::none();
             }
             message => message,
         };
@@ -243,9 +288,10 @@ impl GUI {
         // an account still being checked cannot bypass its gate that way.
         let opening_pin = match &message {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => match inner.as_ref() {
-                tab::Message::Launch(home::Message::Run(root, _, chain, _))
-                    if chain.is_blake2b() =>
-                {
+                tab::Message::Launch(
+                    home::Message::Run(root, _, chain, _)
+                    | home::Message::RunClaim(root, _, chain, _, _),
+                ) if chain.is_blake2b() => {
                     self.panes
                         .get(*pane_id)
                         .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
@@ -778,6 +824,61 @@ impl GUI {
             }
             Message::Pane(
                 origin,
+                pane::Message::View(pane::ViewMessage::OpenForkClaim(handoff)),
+            ) => {
+                let retained = self.panes.iter().find_map(|(&pane_id, pane)| {
+                    pane.tabs.iter().find_map(|tab| match &tab.state {
+                        tab::State::App(app)
+                            if app.has_claim_pair_context()
+                                && handoff.matches_root(app.datadir())
+                                && app.cube_settings().id == handoff.bitcoin_cube() =>
+                        {
+                            Some((pane_id, tab.id, tab.app_generation_token()?))
+                        }
+                        _ => None,
+                    })
+                });
+                if let Some((pane_id, tab_id, generation)) = retained {
+                    let task = self
+                        .panes
+                        .get_mut(pane_id)
+                        .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
+                        .and_then(|tab| match &mut tab.state {
+                            tab::State::App(app) => Some(app.begin_claim_pair_phase(handoff)),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Err("The Claim source Cube closed.".into()))
+                        .unwrap_or_else(|error| {
+                            Task::done(AppMessage::View(crate::app::view::Message::ShowError(
+                                error,
+                            )))
+                        });
+                    self.focus = Some(pane_id);
+                    return task.map(move |message| {
+                        Message::Pane(
+                            pane_id,
+                            pane::Message::tab(
+                                tab_id,
+                                tab::Message::AppAsync(
+                                    generation,
+                                    Box::new(tab::Message::Run(message)),
+                                ),
+                            ),
+                        )
+                    });
+                }
+                if let Some(pane) = self.panes.get_mut(origin) {
+                    pane.update(
+                        pane::Message::View(pane::ViewMessage::OpenForkClaim(handoff)),
+                        &self.config,
+                    )
+                    .map(move |message| Message::Pane(origin, message))
+                } else {
+                    Task::none()
+                }
+            }
+            Message::Pane(
+                origin,
                 pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
             ) => {
                 // Reuse an already-unlocked source in any pane. Opening a second
@@ -885,22 +986,97 @@ impl GUI {
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ToggleTheme)) => {
                 self.update(Message::ToggleTheme)
             }
-            Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::SplitTab(i))) => {
-                if let Some(p) = self.panes.get_mut(pane_id) {
-                    if let Some(tab) = p.remove_tab(i) {
-                        let mut new_pane = pane::Pane::new_with_tab(tab.state);
-                        new_pane.set_theme_mode(self.theme_mode);
-                        let result = self
-                            .panes
-                            .split(pane_grid::Axis::Vertical, pane_id, new_pane);
-
-                        if let Some((pane, _)) = result {
-                            self.focus = Some(pane);
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(inner.as_ref(), tab::Message::LockCubeToLauncher)
+                    || self.panes.get(pane_id).is_some_and(|pane| {
+                        let Some(source) = pane.tabs.iter().find(|tab| tab.id == tab_id) else {
+                            return false;
+                        };
+                        let valid_lock = match inner.as_ref() {
+                            tab::Message::LockCube => true,
+                            tab::Message::AppAsync(generation, nested) => {
+                                source.app_generation_token() == Some(*generation)
+                                    && matches!(nested.as_ref(), tab::Message::LockCube)
+                            }
+                            _ => false,
+                        };
+                        valid_lock
+                            && (matches!(
+                                pane.tabs.get(pane.focused_tab).map(|tab| &tab.state),
+                                Some(tab::State::Home(_))
+                            ) || match &source.state {
+                                tab::State::App(app) => pane.tabs.iter().any(|tab| {
+                                    tab.claim_open_owner() == Some(app.cache().app_generation)
+                                }),
+                                _ => false,
+                            })
+                    }) =>
+            {
+                let owner = self
+                    .panes
+                    .get(pane_id)
+                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
+                    .and_then(|tab| match &tab.state {
+                        tab::State::App(app) => Some(app.cache().app_generation),
+                        _ => None,
+                    });
+                if let Some(owner) = owner {
+                    for (_, pane) in self.panes.iter_mut() {
+                        for index in (0..pane.tabs.len()).rev() {
+                            if pane.tabs[index].claim_open_owner() == Some(owner) {
+                                pane.close_tab(index);
+                            }
+                        }
+                    }
+                }
+                if let Some(pane) = self.panes.get_mut(pane_id) {
+                    if let Some(index) = pane.tabs.iter().position(|tab| tab.id == tab_id) {
+                        if matches!(pane.tabs[index].state, tab::State::App(_)) {
+                            pane.close_tab(index); // waits for daemon stop
+                            crate::app::session::close(); // zeroizes signer/PIN
+                            self.focus = Some(pane_id);
+                            return pane
+                                .focus_launcher(&self.config)
+                                .map(move |message| Message::Pane(pane_id, message));
                         }
                     }
                 }
                 Task::none()
             }
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
+                if matches!(inner.as_ref(), tab::Message::DuressActivated { .. }) =>
+            {
+                let result = {
+                    let Some(pane) = self.panes.get_mut(pane_id) else {
+                        return Task::none();
+                    };
+                    let Some(index) = pane.tabs.iter().position(|tab| tab.id == tab_id) else {
+                        return Task::none();
+                    };
+                    pane.tabs[index].stop();
+                    pane.update(pane::Message::Tab(tab_id, inner), &self.config)
+                };
+                // The wipe is complete: do not leave a Launcher or another
+                // Cube surface visible above the cryptic duress state.
+                for (&other_id, other_pane) in self.panes.iter_mut() {
+                    for index in (0..other_pane.tabs.len()).rev() {
+                        if other_id != pane_id || other_pane.tabs[index].id != tab_id {
+                            other_pane.close_tab(index);
+                        }
+                    }
+                }
+                crate::app::session::close();
+                if let Some(pane) = self.panes.get_mut(pane_id) {
+                    pane.focused_tab = pane
+                        .tabs
+                        .iter()
+                        .position(|tab| tab.id == tab_id)
+                        .unwrap_or(0);
+                }
+                self.focus = Some(pane_id);
+                return result.map(move |message| Message::Pane(pane_id, message));
+            }
+            Message::Pane(_, pane::Message::View(pane::ViewMessage::SplitTab(_))) => Task::none(),
             Message::Pane(pane_id, pane::Message::View(pane::ViewMessage::CloseTab(i))) => {
                 if let Some(pane) = self.panes.get_mut(pane_id) {
                     let _ = pane
@@ -929,6 +1105,121 @@ impl GUI {
                     unreachable!();
                 };
                 let mut tasks = Vec::new();
+                if let Some((root, chain, cube, intent)) = match &msg {
+                    home::Message::Run(root, _, chain, cube) => Some((root, chain, cube, None)),
+                    home::Message::RunClaim(root, _, chain, cube, intent) => {
+                        Some((root, chain, cube, Some(intent)))
+                    }
+                    _ => None,
+                } {
+                    let claim_route = intent.is_some_and(|intent| {
+                        self.panes.iter().any(|(_, pane)| {
+                            pane.tabs.iter().any(|tab| match &tab.state {
+                                tab::State::App(app) => intent.validates(app, root, *chain, cube),
+                                _ => false,
+                            })
+                        })
+                    });
+                    if intent.is_some() && !claim_route {
+                        crate::app::claim_intent::clear();
+                        crate::app::split_intent::clear();
+                        if let Some(tab::State::Home(home)) = self
+                            .panes
+                            .get_mut(p)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == t))
+                            .map(|tab| &mut tab.state)
+                        {
+                            home.set_error("The Claim source or paired Cube changed. Open Claim again from the source Cube.");
+                        }
+                        return Task::none();
+                    }
+                    if let Some(intent) = intent {
+                        let already_opening = self.panes.iter().any(|(_, pane)| {
+                            pane.tabs
+                                .iter()
+                                .any(|tab| tab.claim_open_owner() == Some(intent.owner))
+                        });
+                        if already_opening {
+                            return Task::none();
+                        }
+                    }
+                    // Opening the same Cube from the Launcher resumes its live
+                    // App. In particular this must not ask for its PIN again.
+                    let existing = self.panes.iter().find_map(|(&pane_id, pane)| {
+                        pane.tabs
+                            .iter()
+                            .enumerate()
+                            .find_map(|(index, tab)| match &tab.state {
+                                tab::State::App(app)
+                                    if app.datadir() == root
+                                        && app.cube_settings().network == *chain
+                                        && app.cube_settings().id == cube.id =>
+                                {
+                                    Some((pane_id, index))
+                                }
+                                _ => None,
+                            })
+                    });
+                    if let Some((pane_id, index)) = existing {
+                        self.focus = Some(pane_id);
+                        if let Some(pane) = self.panes.get_mut(pane_id) {
+                            if let Some(home::ClaimRoute::Return(handoff)) =
+                                intent.map(|intent| &intent.route)
+                            {
+                                if let tab::State::App(app) = &mut pane.tabs[index].state {
+                                    let task = app
+                                        .resume_returned_bitcoin_claim(handoff)
+                                        .unwrap_or_else(|error| {
+                                            Task::done(AppMessage::View(
+                                                crate::app::view::Message::ShowError(error),
+                                            ))
+                                        });
+                                    let tab_id = pane.tabs[index].id;
+                                    pane.focused_tab = index;
+                                    return task.map(move |message| {
+                                        Message::Pane(
+                                            pane_id,
+                                            pane::Message::tab(tab_id, tab::Message::Run(message)),
+                                        )
+                                    });
+                                }
+                            }
+                            return pane
+                                .update(
+                                    pane::Message::View(pane::ViewMessage::FocusTab(index)),
+                                    &self.config,
+                                )
+                                .map(move |message| Message::Pane(pane_id, message));
+                        }
+                    }
+
+                    // Claim is an existing paired-wallet operation: its source
+                    // must remain available to sign the counterpart. Ordinary
+                    // Cube switching closes the old wallet and secret session
+                    // synchronously before the new Home::Run reaches unlock.
+                    if !claim_route {
+                        let mut closed = false;
+                        for (_, pane) in self.panes.iter_mut() {
+                            for index in (0..pane.tabs.len()).rev() {
+                                if matches!(
+                                    pane.tabs[index].state,
+                                    tab::State::App(_)
+                                        | tab::State::Loader(_)
+                                        | tab::State::Installer(_)
+                                        | tab::State::Login(_)
+                                        | tab::State::PinEntry(_)
+                                        | tab::State::PasskeyUnlock(_)
+                                ) {
+                                    pane.close_tab(index);
+                                    closed = true;
+                                }
+                            }
+                        }
+                        if closed {
+                            crate::app::session::close();
+                        }
+                    }
+                }
                 if let home::Message::View(home::ViewMessage::DeleteCube(
                     home::DeleteCubeMessage::Confirm(..),
                 )) = &msg
@@ -981,6 +1272,159 @@ impl GUI {
 
                 Task::batch(tasks)
             }
+            Message::Pane(loader_pane, pane::Message::Tab(loader_tab, inner))
+                if matches!(inner.as_ref(), tab::Message::ClaimResourcesLoaded(_)) =>
+            {
+                let tab::Message::ClaimResourcesLoaded(resources) = *inner else {
+                    unreachable!();
+                };
+                let mut resources = *resources;
+                let loader_present = self.panes.get(loader_pane).is_some_and(|pane| {
+                    pane.tabs.iter().any(|tab| {
+                        tab.id == loader_tab && matches!(tab.state, tab::State::Loader(_))
+                    })
+                });
+                let source = self.panes.iter().find_map(|(&pane_id, pane)| {
+                    pane.tabs.iter().find_map(|tab| match &tab.state {
+                        tab::State::App(app)
+                            if app.cache().app_generation == resources.intent.owner =>
+                        {
+                            Some((pane_id, tab.id, tab.app_generation_token()?))
+                        }
+                        _ => None,
+                    })
+                });
+                let Some((source_pane, source_tab, source_generation)) =
+                    source.filter(|_| loader_present)
+                else {
+                    resources.stop_owned();
+                    crate::app::claim_intent::clear();
+                    crate::app::split_intent::clear();
+                    if let Some(pane) = self.panes.get_mut(loader_pane) {
+                        if let Some(index) = pane.tabs.iter().position(|tab| tab.id == loader_tab) {
+                            pane.close_tab(index);
+                        }
+                    }
+                    return Task::none();
+                };
+                let admission = self
+                    .panes
+                    .get_mut(source_pane)
+                    .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == source_tab))
+                    .and_then(|tab| match &mut tab.state {
+                        tab::State::App(app) => Some(app.admit_claim_pair_context(
+                            &resources.intent,
+                            resources.wallet.clone(),
+                            resources.daemon.clone(),
+                            resources.cache.clone(),
+                            resources.settings.clone(),
+                            resources.client.clone(),
+                            resources.verified_account,
+                            resources.bitcoind.clone(),
+                        )),
+                        _ => None,
+                    })
+                    .unwrap_or_else(|| Err("The Claim source Cube closed.".into()));
+                if let Err(error) = admission {
+                    resources.stop_owned();
+                    crate::app::split_intent::clear();
+                    if let Some(pane) = self.panes.get_mut(loader_pane) {
+                        if let Some(index) = pane.tabs.iter().position(|tab| tab.id == loader_tab) {
+                            pane.close_tab(index);
+                        }
+                    }
+                    self.focus = Some(source_pane);
+                    return Task::done(Message::Pane(
+                        source_pane,
+                        pane::Message::tab(
+                            source_tab,
+                            tab::Message::AppAsync(
+                                source_generation,
+                                Box::new(tab::Message::Run(AppMessage::View(
+                                    crate::app::view::Message::ShowError(error),
+                                ))),
+                            ),
+                        ),
+                    ));
+                }
+                if let Some(pane) = self.panes.get_mut(loader_pane) {
+                    if let Some(index) = pane.tabs.iter().position(|tab| tab.id == loader_tab) {
+                        if let Some(mut tab) = pane.remove_tab(index) {
+                            tab.stop();
+                        }
+                    }
+                }
+                self.focus = Some(source_pane);
+                if let Some(pane) = self.panes.get_mut(source_pane) {
+                    if let Some(index) = pane.tabs.iter().position(|tab| tab.id == source_tab) {
+                        pane.focused_tab = index;
+                    }
+                }
+                let start = match resources.intent.route {
+                    home::ClaimRoute::Begin(handoff) => self
+                        .panes
+                        .get_mut(source_pane)
+                        .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == source_tab))
+                        .and_then(|tab| match &mut tab.state {
+                            tab::State::App(app) => Some(if app.claim_pair_request().is_some() {
+                                Ok(Task::done(AppMessage::View(
+                                    crate::app::view::Message::Claim(
+                                        crate::app::view::ClaimMessage::CheckFunding,
+                                    ),
+                                )))
+                            } else {
+                                app.resume_returned_bitcoin_claim(&handoff)
+                            }),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Err("The Claim source Cube closed.".into())),
+                    home::ClaimRoute::Continue(handoff) => self
+                        .panes
+                        .get_mut(source_pane)
+                        .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == source_tab))
+                        .and_then(|tab| match &mut tab.state {
+                            tab::State::App(app) => Some(app.begin_claim_pair_phase(handoff)),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Err("The Claim source Cube closed.".into())),
+                    home::ClaimRoute::Imported(request) => self
+                        .panes
+                        .get_mut(source_pane)
+                        .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == source_tab))
+                        .and_then(|tab| match &mut tab.state {
+                            tab::State::App(app) => Some(app.begin_imported_split_context(request)),
+                            _ => None,
+                        })
+                        .unwrap_or_else(|| Err("The imported Split source Cube closed.".into())),
+                    home::ClaimRoute::Return(_) => Ok(Task::none()),
+                };
+                match start {
+                    Ok(task) => task.map(move |message| {
+                        Message::Pane(
+                            source_pane,
+                            pane::Message::tab(
+                                source_tab,
+                                tab::Message::AppAsync(
+                                    source_generation,
+                                    Box::new(tab::Message::Run(message)),
+                                ),
+                            ),
+                        )
+                    }),
+                    Err(error) => {
+                        if let Some(tab::State::App(app)) = self
+                            .panes
+                            .get_mut(source_pane)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == source_tab))
+                            .map(|tab| &mut tab.state)
+                        {
+                            app.revoke_claim();
+                        }
+                        log::warn!("Claim pair admission could not start: {error}");
+                        Task::none()
+                    }
+                }
+            }
             Message::Pane(i, msg) => {
                 // Bind the Claim's Bitcoin tab to its exact, currently open
                 // BTCB2 wallet immediately before a deposit or signed-pair
@@ -993,22 +1437,24 @@ impl GUI {
                     }
                     _ => None,
                 } {
-                    let request = self
+                    let (fork_daemon, begin_pair) = self
                         .panes
                         .get(i)
                         .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == *tab_id))
                         .and_then(|tab| match &tab.state {
-                            tab::State::App(app) => app.claim_pair_request(),
+                            tab::State::App(app) => {
+                                let request = app.claim_pair_request()?;
+                                let binding = app.claim_fork_daemon(&request);
+                                let begin = if binding.is_none() && !app.has_claim_pair_context() {
+                                    app.claim_pair_handoff()
+                                } else {
+                                    None
+                                };
+                                Some((binding, begin))
+                            }
                             _ => None,
-                        });
-                    let fork_daemon = request.as_ref().and_then(|request| {
-                        self.panes.iter().find_map(|(_, pane)| {
-                            pane.tabs.iter().find_map(|tab| match &tab.state {
-                                tab::State::App(app) => app.claim_fork_daemon(request),
-                                _ => None,
-                            })
                         })
-                    });
+                        .unwrap_or((None, None));
                     if let Some(tab::State::App(app)) = self
                         .panes
                         .get_mut(i)
@@ -1016,6 +1462,27 @@ impl GUI {
                         .map(|tab| &mut tab.state)
                     {
                         app.bind_claim_fork_daemon(fork_daemon);
+                    }
+                    if matches!(
+                        &msg,
+                        pane::Message::Tab(_, inner)
+                            if matches!(inner.as_ref(), tab::Message::Run(
+                                AppMessage::View(crate::app::view::Message::Claim(
+                                    crate::app::view::ClaimMessage::CheckFunding
+                                ))
+                            ))
+                    ) {
+                        if let Some(handoff) = begin_pair {
+                            return if let Some(pane) = self.panes.get_mut(i) {
+                                pane.update(
+                                    pane::Message::View(pane::ViewMessage::OpenForkPair(handoff)),
+                                    &self.config,
+                                )
+                                .map(move |message| Message::Pane(i, message))
+                            } else {
+                                Task::none()
+                            };
+                        }
                     }
                 }
                 match msg {
@@ -1108,30 +1575,7 @@ impl GUI {
                 self.focus = Some(pane);
                 Task::none()
             }
-            Message::Resized(pane_grid::ResizeEvent { split, ratio }) => {
-                self.panes.resize(split, ratio);
-                Task::none()
-            }
-            Message::Dragged(pane_grid::DragEvent::Dropped { pane, target }) => {
-                if let pane_grid::Target::Pane(p, pane_grid::Region::Center) = target {
-                    let (tabs, focused_tab) = if let Some(origin) = self.panes.get_mut(pane) {
-                        (std::mem::take(&mut origin.tabs), origin.focused_tab)
-                    } else {
-                        (Vec::new(), 0)
-                    };
-
-                    if let Some(dest) = self.panes.get_mut(p) {
-                        if !tabs.is_empty() {
-                            dest.add_tabs(tabs, focused_tab);
-                        }
-                    }
-                    self.panes.close(pane);
-                    self.focus = Some(p);
-                } else {
-                    self.panes.drop(pane, target);
-                }
-                Task::none()
-            }
+            Message::Resized(_) | Message::Dragged(_) => Task::none(),
             Message::ToggleTheme => {
                 use coincube_ui::theme::palette::ThemeMode;
                 self.theme_mode = match self.theme_mode {
@@ -1310,37 +1754,13 @@ impl GUI {
     }
 
     pub fn view(&self) -> Element<Message> {
-        if self.panes.len() == 1 {
-            if let Some((&id, pane)) = self.panes.iter().nth(0) {
-                return Column::new()
-                    .push(pane.tabs_menu_view().map(move |msg| Message::Pane(id, msg)))
-                    .push(pane.view().map(move |msg| Message::Pane(id, msg)))
-                    .into();
-            }
-        }
-
-        let focus = self.focus;
-        let pane_grid = pane_grid::PaneGrid::new(&self.panes, |id, pane, _| {
-            let _is_focused = focus == Some(id);
-
-            pane_grid::Content::new(pane.view().map(move |msg| Message::Pane(id, msg))).title_bar(
-                pane_grid::TitleBar::new(
-                    pane.tabs_menu_view().map(move |msg| Message::Pane(id, msg)),
-                ),
-            )
-        })
-        .spacing(10)
-        .width(Length::Fill)
-        .height(Length::Fill)
-        .on_click(Message::Clicked)
-        .on_drag(Message::Dragged)
-        .on_resize(10, Message::Resized);
-
-        Container::new(pane_grid)
-            .style(coincube_ui::theme::pane_grid::pane_grid_background)
-            .width(Length::Fill)
-            .height(Length::Fill)
-            .into()
+        let (&id, pane) = self
+            .panes
+            .iter()
+            .find(|(id, _)| Some(**id) == self.focus)
+            .or_else(|| self.panes.iter().next())
+            .expect("GUI always owns its primary pane");
+        pane.view().map(move |message| Message::Pane(id, message))
     }
 
     pub fn scale_factor(&self) -> f32 {
@@ -2795,6 +3215,129 @@ mod claim_return_routing_tests {
                 drop(gui);
                 std::fs::remove_dir_all(path).unwrap();
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod single_open_lifecycle_tests {
+    use super::*;
+    use crate::{app, chain::ChainId};
+
+    #[test]
+    fn launcher_resumes_one_app_and_switch_closes_it_before_unlock() {
+        let result = std::thread::Builder::new()
+            .name("single-open-lifecycle".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let (source, handoff, path) =
+                    app::claim_step1_tests::returning_claim_fixture(false);
+                let root = source.datadir().clone();
+                let source_settings = source.cube_settings().clone();
+                let source_id = source_settings.id.clone();
+                let generation = source.cache().app_generation;
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                let app_count = |gui: &GUI| {
+                    gui.panes
+                        .iter()
+                        .flat_map(|(_, pane)| pane.tabs.iter())
+                        .filter(|tab| matches!(tab.state, tab::State::App(_)))
+                        .count()
+                };
+                assert_eq!(app_count(&gui), 1);
+
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::View(pane::ViewMessage::OpenLauncher),
+                )));
+                assert_eq!(app_count(&gui), 1);
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::App(_)
+                ));
+                assert_eq!(gui.panes.get(pane_id).unwrap().focused_tab, 1);
+
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::Run(
+                            root.clone(),
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            source_settings.clone(),
+                        )),
+                    ),
+                )));
+                assert_eq!(app_count(&gui), 1);
+                assert_eq!(gui.panes.get(pane_id).unwrap().focused_tab, 0);
+                let tab::State::App(resumed) = &gui.panes.get(pane_id).unwrap().tabs[0].state
+                else {
+                    panic!("same Cube must resume the retained App");
+                };
+                assert_eq!(resumed.cache().app_generation, generation);
+
+                // A typed Return route must also resume the retained source
+                // panel, rather than treating it as an ordinary focus-only
+                // reopen and leaving its Claim intent armed.
+                app::claim_intent::arm(source_id.clone());
+                let intent = home::ClaimOpenIntent::new(
+                    generation,
+                    &root,
+                    source_id.clone(),
+                    handoff.fork_cube().to_owned(),
+                    home::ClaimRoute::Return(handoff),
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::RunClaim(
+                            root.clone(),
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            source_settings,
+                            intent,
+                        )),
+                    ),
+                )));
+                assert!(!app::claim_intent::take(&source_id));
+                assert_eq!(app_count(&gui), 1);
+
+                let other = app::settings::CubeSettings::new_with_raw_id(
+                    "other".into(),
+                    "Other".into(),
+                    ChainId::Bitcoin,
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::Run(
+                            root,
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            other,
+                        )),
+                    ),
+                )));
+                assert_eq!(app_count(&gui), 0, "old App must stop before B unlocks");
+                drop(gui);
+                std::fs::remove_dir_all(path).unwrap();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
         }
     }
 }

@@ -16,6 +16,8 @@ use super::tab;
 pub enum Message {
     Tab(usize, Box<tab::Message>),
     View(ViewMessage),
+    StartClaimInstaller(usize),
+    ClaimInstallCancelled(usize),
     ImportedPairReady {
         source_tab: usize,
         request: crate::imported_claim::ImportedClaimRequest,
@@ -31,6 +33,7 @@ impl Message {
 
 #[derive(Debug, Clone)]
 pub enum ViewMessage {
+    OpenForkPair(app::claim_intent::ForkHandoff),
     OpenForkClaim(app::claim_intent::ForkHandoff),
     OpenBitcoinClaim(app::claim_intent::ForkHandoff),
     FocusTab(usize),
@@ -71,6 +74,110 @@ pub struct Pane {
 }
 
 impl Pane {
+    fn open_claim_installer(&mut self, source_tab: usize) -> Task<Message> {
+        let owner = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == source_tab)
+            .and_then(|tab| {
+                let tab::State::App(app) = &tab.state else {
+                    return None;
+                };
+                Some(app.cache().app_generation)
+            });
+        if let Some(index) = self
+            .tabs
+            .iter()
+            .position(|tab| tab.claim_open_owner() == owner && owner.is_some())
+        {
+            self.focused_tab = index;
+            return Task::none();
+        }
+        let prepared = self
+            .tabs
+            .iter()
+            .find(|tab| tab.id == source_tab)
+            .and_then(|tab| {
+                let tab::State::App(app) = &tab.state else {
+                    return None;
+                };
+                Some((|| {
+                    let cube = app.cube_settings().clone();
+                    let wallet = app
+                        .wallet()
+                        .ok_or_else(|| "This Cube has no Vault to claim.".to_string())?;
+                    let descriptor = wallet.inheritance_descriptor().ok_or_else(|| {
+                        "This imported Bitcoin wallet does not have a Vault claim policy."
+                            .to_string()
+                    })?;
+                    let fingerprint = cube.master_signer_fingerprint.ok_or_else(|| {
+                        "This Cube's master key isn't available in this session.".to_string()
+                    })?;
+                    let signer = app::session::unlocked_signer(&cube.id, fingerprint)
+                        .ok_or_else(|| "Unlock this Cube again to start a claim.".to_string())?;
+                    let source = crate::installer::ClaimSource {
+                        cube: cube.clone(),
+                        descriptor: descriptor.clone(),
+                        signer: std::sync::Arc::new(crate::signer::Signer::new(signer)),
+                    };
+                    let root = app.datadir().clone();
+                    let (installer, task) = crate::installer::Installer::try_new_for_chain(
+                        root.clone(),
+                        crate::chain::ChainId::BitcoinBlake2b,
+                        None,
+                        crate::installer::UserFlow::ClaimBlake2b {
+                            from_cube: Box::new(source),
+                        },
+                        true,
+                        None,
+                        app.breez_client(),
+                        app.spark_backend(),
+                        crate::app::settings::global::GlobalSettings::load_developer_mode(
+                            &crate::app::settings::global::GlobalSettings::path(app.datadir()),
+                        ),
+                        app.authenticated_coincube_client(),
+                    )
+                    .map_err(|error| error.to_string())?;
+                    let fork_cube = installer.context.cube_id.clone().ok_or_else(|| {
+                        "The Claim installer did not reserve a destination Cube.".to_string()
+                    })?;
+                    let handoff = app::claim_intent::ForkHandoff::new(
+                        &root,
+                        cube.id.clone(),
+                        fork_cube.clone(),
+                    )?;
+                    let intent = crate::home::ClaimOpenIntent::new(
+                        app.cache().app_generation,
+                        &root,
+                        cube.id,
+                        fork_cube,
+                        crate::home::ClaimRoute::Begin(handoff),
+                    );
+                    Ok((installer, task, intent))
+                })())
+            });
+        let Some(prepared) = prepared else {
+            return Task::none();
+        };
+        let (installer, task, intent) = match prepared {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                return Task::done(Message::tab(
+                    source_tab,
+                    tab::Message::Run(app::Message::View(app::view::Message::ShowError(error))),
+                ));
+            }
+        };
+        self.tabs_created += 1;
+        let id = self.tabs_created;
+        let mut tab = tab::Tab::new(id, tab::State::Installer(Box::new(installer)));
+        tab.set_claim_open(intent);
+        tab.set_theme_mode(self.theme_mode);
+        self.tabs.push(tab);
+        self.focused_tab = self.tabs.len() - 1;
+        task.map(move |message| Message::tab(id, tab::Message::Install(message)))
+    }
+
     pub fn new(cfg: &Config) -> (Self, Task<Message>) {
         let (state, task) = tab::State::new(cfg.coincube_directory.clone(), cfg.network);
         (
@@ -108,14 +215,34 @@ impl Pane {
     /// by the OpenConnectSignIn / OpenPlanBilling handlers, which differ only in
     /// the Connect sub-section `nav` targets.
     fn focus_home_tab_with(&mut self, nav: crate::home::Message, cfg: &Config) -> Task<Message> {
+        let claim_owner = match &nav {
+            crate::home::Message::BeginClaimPair(handoff)
+            | crate::home::Message::ContinueForkClaim(handoff)
+            | crate::home::Message::ReturnBitcoinClaim(handoff) => {
+                self.tabs.iter().find_map(|tab| {
+                    let tab::State::App(app) = &tab.state else {
+                        return None;
+                    };
+                    (handoff.matches_root(app.datadir())
+                        && app.cube_settings().network == crate::chain::ChainId::Bitcoin
+                        && app.cube_settings().id == handoff.bitcoin_cube())
+                    .then_some(app.cache().app_generation)
+                })
+            }
+            _ => None,
+        };
         let home_tab = self
             .tabs
             .iter()
             .enumerate()
-            .find(|(_, t)| matches!(&t.state, tab::State::Home(_)))
+            .find(|(_, t)| matches!(&t.state, tab::State::Home(home) if !home.is_claim_route()))
             .map(|(i, t)| (i, t.id));
         if let Some((idx, tab_id)) = home_tab {
             self.focused_tab = idx;
+            if let (Some(owner), tab::State::Home(home)) = (claim_owner, &mut self.tabs[idx].state)
+            {
+                home.set_claim_owner(owner);
+            }
             return Task::done(Message::tab(tab_id, tab::Message::Launch(nav)));
         }
         // No Home tab open — spawn one and queue the navigation against its id
@@ -123,6 +250,11 @@ impl Pane {
         let add_task = self.add_tab(cfg);
         let new_tab_id = self.tabs.last().map(|t| t.id);
         if let Some(tab_id) = new_tab_id {
+            if let (Some(owner), Some(tab::State::Home(home))) =
+                (claim_owner, self.tabs.last_mut().map(|tab| &mut tab.state))
+            {
+                home.set_claim_owner(owner);
+            }
             return Task::batch([
                 add_task,
                 Task::done(Message::tab(tab_id, tab::Message::Launch(nav))),
@@ -131,8 +263,21 @@ impl Pane {
         add_task
     }
 
+    pub(crate) fn focus_launcher(&mut self, cfg: &Config) -> Task<Message> {
+        self.focus_home_tab_with(
+            crate::home::Message::View(crate::home::ViewMessage::GoToSection(
+                crate::home::HomeSection::Cubes,
+            )),
+            cfg,
+        )
+    }
+
     pub fn close_tab(&mut self, i: usize) {
         if let Some(mut tab) = self.remove_tab(i) {
+            let owner = match &tab.state {
+                tab::State::App(app) => Some(app.cache().app_generation),
+                _ => None,
+            };
             // Closing a tab mid-open abandons that open. The Split slot is
             // global, so fail closed and drop it rather than let it fire on
             // a later ordinary open.
@@ -140,6 +285,13 @@ impl Pane {
                 crate::app::split_intent::clear();
             }
             tab.stop();
+            if let Some(owner) = owner {
+                for index in (0..self.tabs.len()).rev() {
+                    if self.tabs[index].claim_open_owner() == Some(owner) {
+                        self.close_tab(index);
+                    }
+                }
+            }
         }
     }
 
@@ -260,6 +412,22 @@ impl Pane {
 
     pub fn update(&mut self, message: Message, cfg: &Config) -> Task<Message> {
         match message {
+            Message::StartClaimInstaller(source_tab) => {
+                return self.open_claim_installer(source_tab);
+            }
+            Message::ClaimInstallCancelled(temporary_tab) => {
+                if let Some(index) = self.tabs.iter().position(|tab| tab.id == temporary_tab) {
+                    self.close_tab(index);
+                }
+                if let Some(index) = self
+                    .tabs
+                    .iter()
+                    .position(|tab| matches!(tab.state, tab::State::App(_)))
+                {
+                    self.focused_tab = index;
+                }
+                return Task::none();
+            }
             Message::ImportedPairReady {
                 source_tab,
                 request,
@@ -293,7 +461,16 @@ impl Pane {
                         ))
                     }
                 };
-                let (home, task) = crate::home::Home::new_imported_claim(root, request, client);
+                let owner = self.tabs.iter().find(|t| t.id == source_tab).and_then(|t| {
+                    let tab::State::App(app) = &t.state else {
+                        return None;
+                    };
+                    Some(app.cache().app_generation)
+                });
+                let (mut home, task) = crate::home::Home::new_imported_claim(root, request, client);
+                if let Some(owner) = owner {
+                    home.set_claim_owner(owner);
+                }
                 self.tabs_created += 1;
                 let id = self.tabs_created;
                 let mut tab = tab::Tab::new(id, tab::State::Home(home));
@@ -309,12 +486,33 @@ impl Pane {
                 ) {
                     return self.open_imported_claim(id);
                 }
-                return self
+                let owner = self.tabs.iter().find(|tab| tab.id == id).and_then(|tab| {
+                    let tab::State::App(app) = &tab.state else {
+                        return None;
+                    };
+                    Some(app.cache().app_generation)
+                });
+                let task = self
                     .tabs
                     .iter_mut()
-                    .find(|t| t.id == id)
-                    .map(|t| {
-                        t.update(*msg).then(move |msg| match msg {
+                    .find(|tab| tab.id == id)
+                    .map(|tab| tab.update(*msg));
+                if let Some(owner) = owner {
+                    let retained = self.tabs.iter().any(|tab| {
+                        tab.id == id
+                            && matches!(&tab.state, tab::State::App(app) if app.cache().app_generation == owner)
+                    });
+                    if !retained {
+                        for index in (0..self.tabs.len()).rev() {
+                            if self.tabs[index].claim_open_owner() == Some(owner) {
+                                self.close_tab(index);
+                            }
+                        }
+                    }
+                }
+                return task
+                    .map(|task| {
+                        task.then(move |msg| match msg {
                             // Bubble ToggleTheme up to pane level as a ViewMessage
                             tab::Message::GlobalSettingsChanged => {
                                 Task::done(Message::View(ViewMessage::GlobalSettingsChanged))
@@ -327,6 +525,12 @@ impl Pane {
                             }
                             tab::Message::OpenForkClaim(handoff) => {
                                 Task::done(Message::View(ViewMessage::OpenForkClaim(handoff)))
+                            }
+                            tab::Message::StartClaimInstaller => {
+                                Task::done(Message::StartClaimInstaller(id))
+                            }
+                            tab::Message::ClaimInstallCancelled => {
+                                Task::done(Message::ClaimInstallCancelled(id))
                             }
                             tab::Message::OpenConnectSignIn => {
                                 Task::done(Message::View(ViewMessage::OpenConnectSignIn))
@@ -369,7 +573,9 @@ impl Pane {
                     }
                 }
             }
-            Message::View(ViewMessage::AddTab) => return self.add_tab(cfg),
+            // The public tab strip is gone. Home is created only by the
+            // explicit Launcher/Account/Plan routes above.
+            Message::View(ViewMessage::AddTab) => {}
             Message::View(ViewMessage::CloseTab(i)) => {
                 self.close_tab(i);
             }
@@ -390,6 +596,10 @@ impl Pane {
                 return self
                     .focus_home_tab_with(crate::home::Message::ContinueForkClaim(handoff), cfg);
             }
+            Message::View(ViewMessage::OpenForkPair(handoff)) => {
+                return self
+                    .focus_home_tab_with(crate::home::Message::BeginClaimPair(handoff), cfg);
+            }
             Message::View(ViewMessage::OpenConnectSignIn) => {
                 // Focus/spawn a Home tab and land on Connect → Overview so the
                 // user reaches the login form.
@@ -399,10 +609,7 @@ impl Pane {
                 return self.focus_home_tab_with(nav, cfg);
             }
             Message::View(ViewMessage::OpenLauncher) => {
-                let nav = crate::home::Message::View(crate::home::ViewMessage::GoToSection(
-                    crate::home::HomeSection::Cubes,
-                ));
-                return self.focus_home_tab_with(nav, cfg);
+                return self.focus_launcher(cfg);
             }
             Message::View(ViewMessage::OpenPlanBilling) => {
                 // Focus/spawn a Home tab and land on Connect → Plan & Billing,

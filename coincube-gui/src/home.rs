@@ -262,6 +262,96 @@ pub enum HomeSection {
     SplitWallet,
 }
 
+/// A Claim navigation request names the exact source App and counterpart.
+/// It carries no unlock authority; admission rechecks the live App and saved
+/// Cube metadata before any resources are opened.
+#[derive(Debug, Clone)]
+pub(crate) enum ClaimRoute {
+    Begin(app::claim_intent::ForkHandoff),
+    Continue(app::claim_intent::ForkHandoff),
+    Return(app::claim_intent::ForkHandoff),
+    Imported(crate::imported_claim::ImportedClaimRequest),
+}
+
+#[derive(Debug, Clone)]
+pub struct ClaimOpenIntent {
+    pub(crate) operation: app::cache::AppGeneration,
+    pub(crate) owner: app::cache::AppGeneration,
+    pub(crate) root: std::path::PathBuf,
+    pub(crate) source_cube: String,
+    pub(crate) fork_cube: String,
+    pub(crate) route: ClaimRoute,
+}
+
+impl ClaimOpenIntent {
+    pub(crate) fn new(
+        owner: app::cache::AppGeneration,
+        root: &CoincubeDirectory,
+        source_cube: String,
+        fork_cube: String,
+        route: ClaimRoute,
+    ) -> Self {
+        Self {
+            operation: app::cache::AppGeneration::next(),
+            owner,
+            root: root.path().to_path_buf(),
+            source_cube,
+            fork_cube,
+            route,
+        }
+    }
+
+    pub(crate) fn validates(
+        &self,
+        owner: &app::App,
+        root: &CoincubeDirectory,
+        chain: ChainId,
+        cube: &CubeSettings,
+    ) -> bool {
+        if self.operation == self.owner
+            || self.root != root.path()
+            || owner.cache().app_generation != self.owner
+            || owner.datadir() != root
+            || owner.cube_settings().network != ChainId::Bitcoin
+            || owner.cube_settings().id != self.source_cube
+            || self.source_cube == self.fork_cube
+        {
+            return false;
+        }
+        match &self.route {
+            ClaimRoute::Begin(handoff) | ClaimRoute::Continue(handoff) => {
+                chain == ChainId::BitcoinBlake2b
+                    && cube.id == self.fork_cube
+                    && handoff.bitcoin_cube() == self.source_cube
+                    && handoff.fork_cube() == self.fork_cube
+                    && handoff
+                        .resolve_target(root)
+                        .is_ok_and(|saved| saved.id == cube.id)
+            }
+            ClaimRoute::Return(handoff) => {
+                chain == ChainId::Bitcoin
+                    && cube.id == self.source_cube
+                    && handoff.bitcoin_cube() == self.source_cube
+                    && handoff.fork_cube() == self.fork_cube
+                    && handoff
+                        .resolve_source(root)
+                        .is_ok_and(|saved| saved.id == cube.id)
+            }
+            ClaimRoute::Imported(request) => {
+                chain == ChainId::BitcoinBlake2b
+                    && cube.id == self.fork_cube
+                    && request.source.cube_id == self.source_cube
+                    && owner
+                        .prepare_imported_claim()
+                        .is_ok_and(|(current, client)| {
+                            current.source == request.source
+                                && request.validate(root, &client).is_ok()
+                        })
+            }
+        }
+    }
+}
+
 /// Context stashed for firing a remote cube update after local rename succeeds.
 struct PendingRemoteRename {
     cube_id: String,
@@ -273,6 +363,8 @@ pub struct Home {
     global_blake2b_enabled: bool,
     global_feature_request: u64,
     pending_fork_claim: Option<app::claim_intent::ForkHandoff>,
+    pending_begin_claim: bool,
+    claim_owner: Option<app::cache::AppGeneration>,
     state: State,
     displayed_networks: Vec<ChainId>,
     /// Descriptor checksums that already have a Bitcoin Blake2b claim target
@@ -445,6 +537,8 @@ impl Home {
                 global_blake2b_enabled: false,
                 global_feature_request: 0,
                 pending_fork_claim: None,
+                pending_begin_claim: false,
+                claim_owner: None,
                 // Resolved on the first `refresh_displayed_networks`.
                 btcb2_claim_targets: std::collections::HashSet::new(),
                 state: State::Unchecked,
@@ -541,6 +635,18 @@ impl Home {
         &self,
     ) -> Option<crate::imported_claim::ImportedClaimRequest> {
         self.imported_claim.clone()
+    }
+
+    /// Claim pairs temporarily retain their source Cube while opening the
+    /// counterpart. Ordinary Launcher switches close the previous Cube first.
+    pub(crate) fn is_claim_route(&self) -> bool {
+        self.imported_claim.is_some()
+            || self.pending_fork_claim.is_some()
+            || self.claim_owner.is_some()
+    }
+
+    pub(crate) fn set_claim_owner(&mut self, owner: app::cache::AppGeneration) {
+        self.claim_owner = Some(owner);
     }
 
     #[cfg(test)]
@@ -1175,7 +1281,11 @@ impl Home {
 
     /// Route a paired Claim through the ordinary launcher. This does not
     /// unlock a Cube or admit a wallet by itself.
-    fn continue_fork_claim(&mut self, handoff: app::claim_intent::ForkHandoff) -> Task<Message> {
+    fn continue_fork_claim(
+        &mut self,
+        handoff: app::claim_intent::ForkHandoff,
+        begin: bool,
+    ) -> Task<Message> {
         app::claim_intent::clear();
         let chain = ChainId::BitcoinBlake2b;
         if let Some(reason) = self.connect_chain_availability(chain).reason() {
@@ -1203,13 +1313,25 @@ impl Home {
                 return Task::none();
             }
         };
-        app::claim_intent::arm_fork(handoff);
-        Task::done(Message::Run(
-            self.datadir_path.clone(),
-            config,
-            chain,
-            target,
-        ))
+        let root = self.datadir_path.clone();
+        if let Some(owner) = self.claim_owner.take() {
+            let intent = ClaimOpenIntent::new(
+                owner,
+                &root,
+                handoff.bitcoin_cube().to_owned(),
+                handoff.fork_cube().to_owned(),
+                if begin {
+                    ClaimRoute::Begin(handoff)
+                } else {
+                    ClaimRoute::Continue(handoff)
+                },
+            );
+            Task::done(Message::RunClaim(root, config, chain, target, intent))
+        } else {
+            app::claim_intent::clear();
+            self.set_error("The source Cube closed. Reopen Claim from its Bitcoin Vault.");
+            Task::none()
+        }
     }
 
     fn return_bitcoin_claim(&mut self, handoff: app::claim_intent::ForkHandoff) -> Task<Message> {
@@ -1235,13 +1357,20 @@ impl Home {
                 return Task::none();
             }
         };
-        app::claim_intent::arm_return(handoff);
-        Task::done(Message::Run(
-            self.datadir_path.clone(),
-            config,
-            chain,
-            source,
-        ))
+        let root = self.datadir_path.clone();
+        if let Some(owner) = self.claim_owner.take() {
+            let intent = ClaimOpenIntent::new(
+                owner,
+                &root,
+                handoff.bitcoin_cube().to_owned(),
+                handoff.fork_cube().to_owned(),
+                ClaimRoute::Return(handoff),
+            );
+            Task::done(Message::RunClaim(root, config, chain, source, intent))
+        } else {
+            app::claim_intent::arm_return(handoff);
+            Task::done(Message::Run(root, config, chain, source))
+        }
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
@@ -1264,7 +1393,26 @@ impl Home {
         };
         let task = match message {
             Message::ReturnBitcoinClaim(handoff) => self.return_bitcoin_claim(handoff),
+            Message::BeginClaimPair(handoff) => {
+                self.pending_begin_claim = true;
+                app::claim_intent::clear();
+                if !handoff.matches_root(&self.datadir_path) {
+                    self.pending_fork_claim = None;
+                    self.set_error("This Claim belongs to a different data directory.");
+                    return Task::none();
+                }
+                self.pending_fork_claim = Some(handoff);
+                self.refresh_displayed_networks();
+                if let Some(reason) = self
+                    .connect_chain_availability(ChainId::BitcoinBlake2b)
+                    .reason()
+                {
+                    self.set_error(reason.to_string());
+                }
+                Task::none()
+            }
             Message::ContinueForkClaim(handoff) => {
+                self.pending_begin_claim = false;
                 app::claim_intent::clear();
                 if !handoff.matches_root(&self.datadir_path) {
                     self.pending_fork_claim = None;
@@ -1293,6 +1441,8 @@ impl Home {
                             | ViewMessage::ConnectAccount(app::view::ConnectAccountMessage::LogOut)
                     )
                 ) {
+                    self.claim_owner = None;
+                    self.pending_begin_claim = false;
                     if self.imported_claim.take().is_some() {
                         self.resume_split_after_install = false;
                         self.split_wallet.cancel();
@@ -1317,7 +1467,10 @@ impl Home {
         {
             self.pending_fork_claim
                 .take()
-                .map_or_else(Task::none, |handoff| self.continue_fork_claim(handoff))
+                .map_or_else(Task::none, |handoff| {
+                    let begin = std::mem::take(&mut self.pending_begin_claim);
+                    self.continue_fork_claim(handoff, begin)
+                })
         } else {
             Task::none()
         };
@@ -3158,10 +3311,23 @@ impl Home {
                     };
                     app::split_intent::arm(intent);
                     let datadir = self.datadir_path.clone();
-                    return Task::perform(
-                        async move { (datadir, cfg, source, cube) },
-                        |(datadir, cfg, source, cube)| Message::Run(datadir, cfg, source, cube),
+                    if self.imported_claim.is_some() && self.claim_owner.is_some() {
+                        let request = self.imported_claim.take().expect("checked above");
+                        let owner = self.claim_owner.take().expect("checked above");
+                        let intent = ClaimOpenIntent::new(
+                            owner,
+                            &datadir,
+                            request.source.cube_id.clone(),
+                            cube.id.clone(),
+                            ClaimRoute::Imported(request),
+                        );
+                        return Task::done(Message::RunClaim(datadir, cfg, source, cube, intent));
+                    }
+                    app::split_intent::clear();
+                    self.set_error(
+                        "The imported source Cube closed. Open Claim from that wallet again.",
                     );
+                    return Task::none();
                 }
                 let client = self.connect_account.authenticated_client();
                 let generation = self.connect_account.session_generation();
@@ -6294,6 +6460,7 @@ pub enum Message {
     GlobalSettingsChanged,
     GlobalFeatureLoaded(u64, bool),
     View(ViewMessage),
+    BeginClaimPair(app::claim_intent::ForkHandoff),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
     ReturnBitcoinClaim(app::claim_intent::ForkHandoff),
     /// A focus refresh must not replace a form opened while the read ran.
@@ -6332,6 +6499,13 @@ pub enum Message {
         app::config::Config,
         crate::chain::ChainId,
         CubeSettings,
+    ),
+    RunClaim(
+        CoincubeDirectory,
+        app::config::Config,
+        crate::chain::ChainId,
+        CubeSettings,
+        ClaimOpenIntent,
     ),
     StartRecovery,
     CubeCreated(Result<CubeSettings, String>),
@@ -10974,6 +11148,7 @@ mod chain_identity_open_tests {
 
     fn is_run_for(msg: &Message, chain: ChainId, id: &str) -> bool {
         matches!(msg, Message::Run(_, _, c, cube) if *c == chain && cube.id == id)
+            || matches!(msg, Message::RunClaim(_, _, c, cube, _) if *c == chain && cube.id == id)
     }
 
     #[test]
@@ -11160,7 +11335,8 @@ mod chain_identity_open_tests {
         let pair =
             app::claim_intent::ForkHandoff::new(&root, "source".into(), "target".into()).unwrap();
         let mut home = Home::new(root.clone(), Some(Network::Bitcoin)).0;
-        assert!(drain(home.update(Message::ContinueForkClaim(pair.clone()))).is_empty());
+        home.set_claim_owner(app::cache::AppGeneration::next());
+        assert!(drain(home.update(Message::BeginClaimPair(pair.clone()))).is_empty());
         assert!(home.pending_fork_claim.is_some());
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
         let mut client = CoincubeClient::new();
@@ -11176,21 +11352,35 @@ mod chain_identity_open_tests {
             .iter()
             .any(|m| is_run_for(m, ChainId::BitcoinBlake2b, "target")));
         assert!(home.pending_fork_claim.is_none());
-        assert!(matches!(
-            app::claim_intent::take_for_cube(&root, "target"),
-            Some(app::claim_intent::Intent::Fork(_))
-        ));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::RunClaim(_, _, ChainId::BitcoinBlake2b, cube, intent)
+                if cube.id == "target" && matches!(&intent.route, ClaimRoute::Begin(_))
+        )));
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
+        assert!(
+            !home.is_claim_route(),
+            "a consumed route must free the one launcher"
+        );
+        home.set_claim_owner(app::cache::AppGeneration::next());
+        let continued = drain(home.update(Message::ContinueForkClaim(pair.clone())));
+        assert!(continued.iter().any(|message| matches!(
+            message,
+            Message::RunClaim(_, _, ChainId::BitcoinBlake2b, cube, intent)
+                if cube.id == "target" && matches!(&intent.route, ClaimRoute::Continue(_))
+        )));
         // Returning opens the exact source through the ordinary unlock route;
         // only that source and root can consume the recovery intent.
+        home.set_claim_owner(app::cache::AppGeneration::next());
         let messages = drain(home.update(Message::ReturnBitcoinClaim(pair.clone())));
         assert!(messages
             .iter()
             .any(|m| is_run_for(m, ChainId::Bitcoin, "source")));
-        assert!(matches!(
-            app::claim_intent::take_for_cube(&root, "source"),
-            Some(app::claim_intent::Intent::RecoverBitcoin(_))
-        ));
+        assert!(messages.iter().any(|message| matches!(
+            message,
+            Message::RunClaim(_, _, ChainId::Bitcoin, cube, intent)
+                if cube.id == "source" && matches!(&intent.route, ClaimRoute::Return(_))
+        )));
         assert!(app::claim_intent::take_for_cube(&root, "source").is_none());
         let foreign = app::claim_intent::ForkHandoff::new(
             &CoincubeDirectory::new(root.path().join("other")),
@@ -11217,6 +11407,36 @@ mod chain_identity_open_tests {
         assert!(home.error().unwrap().contains("ambiguous"));
         assert!(app::claim_intent::take_for_cube(&root, "target").is_none());
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn claim_navigation_cannot_borrow_another_app_or_destination() {
+        let _guard = crate::app::session::test_guard();
+        let (app, handoff, path) = app::claim_step1_tests::returning_claim_fixture(false);
+        let root = app.datadir().clone();
+        let target = handoff.resolve_target(&root).unwrap();
+        let owner = app.cache().app_generation;
+        let intent = ClaimOpenIntent::new(
+            owner,
+            &root,
+            app.cube_settings().id.clone(),
+            target.id.clone(),
+            ClaimRoute::Begin(handoff),
+        );
+        assert!(intent.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+
+        let mut stale = intent.clone();
+        stale.owner = app::cache::AppGeneration::next();
+        assert!(!stale.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+        let mut wrong_target = intent.clone();
+        wrong_target.fork_cube = "unrelated".into();
+        assert!(!wrong_target.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+        let mut wrong_root = intent;
+        wrong_root.root = path.join("other");
+        assert!(!wrong_root.validates(&app, &root, ChainId::BitcoinBlake2b, &target));
+
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 
     #[test]
