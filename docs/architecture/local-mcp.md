@@ -97,9 +97,13 @@ or extra remote trust is introduced.
 
 New pairing is persisted before usable configuration is exposed. Explicit revoke
 stops runtimes first and atomically removes the chosen stored client; other clients
-retain their credentials. On a failed write, all runtimes stop and the desktop
-attempts to invalidate this registry's dedicated wrapping key so stale ciphertext
-cannot restore access. If both storage and keystore invalidation fail, the UI
+retain their credentials. A failed client addition rereads and authenticates the
+registry under the same owner lock: exact unchanged storage preserves existing
+clients and reports the add error; the exact intended replacement is accepted
+only after retrying the directory durability barrier. Unreadable or unexpected
+storage, failed durability confirmation, and failed removal/enable-state writes
+stop all runtimes and attempt to invalidate this registry's dedicated wrapping key
+so stale ciphertext cannot restore access. If both storage and keystore invalidation fail, the UI
 explicitly reports that durable revocation is unconfirmed. This error is not a
 successful revoke. Cube deletion and duress wipe remove ciphertext and locators;
 keystore deletion is not required on the critical wipe path.

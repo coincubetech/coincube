@@ -432,12 +432,20 @@ impl Settings {
         let result = super::session::admit_generation(cube_id, generation, || {
             Some(store.add(client_name, scope))
         });
+        self.finish_pairing(result);
+    }
+    fn finish_pairing(&mut self, result: Option<Result<String, pairings::AddError>>) {
         match result {
             None => {
                 self.pairing_error =
                     Some("Cube locked or changed before pairing was saved. No client was paired.")
             }
-            Some(Err(_)) => self.persistence_failed(),
+            Some(Err(pairings::AddError::Unchanged)) => {
+                self.pairing_error = Some(
+                    "Could not save the new client. Existing pairings are unchanged; retry pairing.",
+                );
+            }
+            Some(Err(pairings::AddError::Uncertain)) => self.persistence_failed(),
             Some(Ok(_)) => {
                 self.pairing_error = None;
                 self.client_name.clear();
@@ -1725,7 +1733,7 @@ mod tests {
 mod proposal_consent_tests {
     use super::*;
     #[test]
-    fn pairing_management_preserves_other_clients_pending_proposals() {
+    fn pairing_management_and_failed_add_preserve_other_clients_pending_proposals() {
         let _guard = crate::app::session::test_guard();
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let cube = "paired-proposal-fixture";
@@ -1790,6 +1798,32 @@ mod proposal_consent_tests {
             .unwrap() else {
                 panic!("proposal")
             };
+            // Exercise the same result handler as a failed native Pair action.
+            // Storage fault tests prove this result means the old document is exact.
+            let owner = settings.pairing_store.as_ref().unwrap().owner();
+            settings.finish_pairing(Some(Err(pairings::AddError::Unchanged)));
+            assert!(!settings.pairing_poisoned);
+            assert!(settings.pairing_error.is_some());
+            assert!(settings.paired[0].server.grant.active());
+            assert!(Arc::ptr_eq(
+                &owner,
+                &settings.pairing_store.as_ref().unwrap().owner()
+            ));
+            refresh(&mut settings);
+            for request in [
+                wire::Request::Proposal(wire::proposal::ProposalInput {
+                    proposal_id: original.proposal_id.clone(),
+                }),
+                wire::Request::PrepareProposal(input.clone()),
+            ] {
+                let wire::Response::Proposal(after_failure) =
+                    wire::ipc::call(&socket, &token, request).await.unwrap()
+                else {
+                    panic!("existing proposal remains available after failed add")
+                };
+                assert_eq!(after_failure, original);
+            }
+            drop(owner);
             pair(&mut settings, "B");
             refresh(&mut settings);
             let b = settings

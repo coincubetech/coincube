@@ -96,7 +96,7 @@ pub(super) enum Scope {
     Proposal,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Client {
     pub id: String,
@@ -111,13 +111,28 @@ impl Drop for Client {
     }
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 struct Document {
     version: u8,
     binding: Binding,
     enabled: bool,
     clients: Vec<Client>,
+}
+
+/// Whether a failed addition is known not to have changed stored authorization.
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum AddError {
+    Unchanged,
+    Uncertain,
+}
+
+/// Finish the durability barrier that may have failed after atomic replacement.
+fn confirm_directory(directory: &Path) -> io::Result<()> {
+    check_private(directory, true)?;
+    #[cfg(unix)]
+    fs::File::open(directory)?.sync_all()?;
+    Ok(())
 }
 
 /// The owner lock lives as long as any endpoint for this registry. A competing
@@ -170,53 +185,7 @@ impl Store {
         }
         let path = location.directory.join("clients.enc");
         let document = if path.exists() {
-            check_private(&path, false)?;
-            let file = fs::File::open(&path)?;
-            if file.metadata()?.len() > LIMIT {
-                return Err(io::Error::other("pairing registry too large"));
-            }
-            let mut bytes = Vec::new();
-            file.take(LIMIT + 1).read_to_end(&mut bytes)?;
-            if bytes.len() < 33 || &bytes[..5] != b"TMCP\x01" {
-                return Err(io::Error::other("invalid pairing registry"));
-            }
-            let cipher = ChaCha20Poly1305::new_from_slice(key.as_ref())
-                .map_err(|_| io::Error::other("pairing key unavailable"))?;
-            let aad = serde_json::to_vec(&location.binding)?;
-            let plain = Zeroizing::new(
-                cipher
-                    .decrypt(
-                        Nonce::from_slice(&bytes[5..17]),
-                        Payload {
-                            msg: &bytes[17..],
-                            aad: &aad,
-                        },
-                    )
-                    .map_err(|_| io::Error::other("pairing registry authentication failed"))?,
-            );
-            let document: Document = serde_json::from_slice(&plain)
-                .map_err(|_| io::Error::other("invalid pairing registry"))?;
-            if document.version != 1
-                || document.binding != location.binding
-                || document.clients.len() > MAX_CLIENTS
-            {
-                return Err(io::Error::other("invalid pairing scope"));
-            }
-            let mut ids = std::collections::HashSet::new();
-            for client in &document.clients {
-                if client.id.len() != 32
-                    || !client.id.bytes().all(|b| b.is_ascii_hexdigit())
-                    || !ids.insert(client.id.clone())
-                    || client.credential.len() != 64
-                    || !client.credential.bytes().all(|b| b.is_ascii_hexdigit())
-                    || client.name.is_empty()
-                    || client.name.chars().count() > 64
-                    || client.name.chars().any(char::is_control)
-                {
-                    return Err(io::Error::other("invalid pairing client"));
-                }
-            }
-            document
+            Self::read_document(&location, &key)?
         } else if create {
             Document {
                 version: 1,
@@ -237,6 +206,61 @@ impl Store {
             store.persist(&store.document)?;
         }
         Ok(store)
+    }
+    /// Reread under the existing owner lock, preserving every startup validation.
+    fn read_document(location: &Location, key: &[u8; 32]) -> io::Result<Document> {
+        check_private(&location.directory, true)?;
+        if location.directory.canonicalize()? != location.directory {
+            return Err(io::Error::other("pairing path redirected"));
+        }
+        let path = location.directory.join("clients.enc");
+        check_private(&path, false)?;
+        let file = fs::File::open(&path)?;
+        if file.metadata()?.len() > LIMIT {
+            return Err(io::Error::other("pairing registry too large"));
+        }
+        let mut bytes = Vec::new();
+        file.take(LIMIT + 1).read_to_end(&mut bytes)?;
+        if bytes.len() < 33 || &bytes[..5] != b"TMCP\x01" {
+            return Err(io::Error::other("invalid pairing registry"));
+        }
+        let cipher = ChaCha20Poly1305::new_from_slice(key.as_slice())
+            .map_err(|_| io::Error::other("pairing key unavailable"))?;
+        let aad = serde_json::to_vec(&location.binding)?;
+        let plain = Zeroizing::new(
+            cipher
+                .decrypt(
+                    Nonce::from_slice(&bytes[5..17]),
+                    Payload {
+                        msg: &bytes[17..],
+                        aad: &aad,
+                    },
+                )
+                .map_err(|_| io::Error::other("pairing registry authentication failed"))?,
+        );
+        let document: Document = serde_json::from_slice(&plain)
+            .map_err(|_| io::Error::other("invalid pairing registry"))?;
+        if document.version != 1
+            || document.binding != location.binding
+            || document.clients.len() > MAX_CLIENTS
+        {
+            return Err(io::Error::other("invalid pairing scope"));
+        }
+        let mut ids = std::collections::HashSet::new();
+        for client in &document.clients {
+            if client.id.len() != 32
+                || !client.id.bytes().all(|b| b.is_ascii_hexdigit())
+                || !ids.insert(client.id.clone())
+                || client.credential.len() != 64
+                || !client.credential.bytes().all(|b| b.is_ascii_hexdigit())
+                || client.name.is_empty()
+                || client.name.chars().count() > 64
+                || client.name.chars().any(char::is_control)
+            {
+                return Err(io::Error::other("invalid pairing client"));
+            }
+        }
+        Ok(document)
     }
     pub fn owner(&self) -> Arc<fs::File> {
         self._owner.clone()
@@ -269,9 +293,35 @@ impl Store {
         bytes.extend_from_slice(&sealed);
         coincube_mcp::pairing::write_private(&self.location.directory.join("clients.enc"), &bytes)
     }
-    pub fn add(&mut self, name: String, scope: Scope) -> io::Result<String> {
+    /// A failed add preserves existing consent only when disk still matches it.
+    /// An exact replacement also requires the directory durability barrier before
+    /// it can be acknowledged. Unknown state must suspend/invalidate the registry.
+    fn reconcile_add(
+        &mut self,
+        next: Document,
+        confirm: impl FnOnce(&Path) -> io::Result<()>,
+    ) -> Result<(), AddError> {
+        match Self::read_document(&self.location, &self.key) {
+            Ok(saved) if saved == self.document => Err(AddError::Unchanged),
+            Ok(saved) if saved == next => {
+                confirm(&self.location.directory).map_err(|_| AddError::Uncertain)?;
+                self.document = next;
+                Ok(())
+            }
+            _ => Err(AddError::Uncertain),
+        }
+    }
+    pub fn add(&mut self, name: String, scope: Scope) -> Result<String, AddError> {
+        self.add_with(name, scope, Self::persist)
+    }
+    fn add_with(
+        &mut self,
+        name: String,
+        scope: Scope,
+        persist: impl FnOnce(&Self, &Document) -> io::Result<()>,
+    ) -> Result<String, AddError> {
         if self.document.clients.len() >= MAX_CLIENTS {
-            return Err(io::Error::other("pairing limit reached"));
+            return Err(AddError::Unchanged);
         }
         let mut random = [0u8; 32];
         rand::rngs::OsRng.fill_bytes(&mut random);
@@ -283,13 +333,16 @@ impl Store {
             scope,
             created_at: std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
-                .map_err(|_| io::Error::other("clock unavailable"))?
+                .map_err(|_| AddError::Unchanged)?
                 .as_secs(),
         };
         let mut next = self.document.clone();
         next.clients.push(client);
-        self.persist(&next)?;
-        self.document = next;
+        if persist(self, &next).is_err() {
+            self.reconcile_add(next, confirm_directory)?;
+        } else {
+            self.document = next;
+        }
         Ok(id)
     }
     pub fn remove(&mut self, id: &str) -> io::Result<()> {
@@ -338,6 +391,131 @@ mod tests {
     fn location(root: &Path, cube: &str) -> Location {
         fs::create_dir_all(root.join("regtest")).unwrap();
         Location::new(root, crate::chain::ChainId::Regtest, cube).unwrap()
+    }
+    fn fixture() -> (PathBuf, Store) {
+        let root = std::env::temp_dir().join(format!("mcp-add-recovery-{}", uuid::Uuid::new_v4()));
+        fs::create_dir(&root).unwrap();
+        let mut store = Store::open(
+            location(&root, "add-recovery"),
+            Zeroizing::new([41; 32]),
+            true,
+        )
+        .unwrap();
+        store.add("existing".into(), Scope::Proposal).unwrap();
+        (root, store)
+    }
+    fn next_document(store: &Store) -> Document {
+        let mut next = store.document.clone();
+        let mut client = next.clients[0].clone();
+        client.id = uuid::Uuid::new_v4().simple().to_string();
+        client.name = "new".into();
+        client.credential = hex::encode([47; 32]);
+        next.clients.push(client);
+        next
+    }
+    #[test]
+    fn failed_add_before_replacement_preserves_existing_client_and_allows_retry() {
+        let (root, mut store) = fixture();
+        let old = store.document.clone();
+        assert_eq!(
+            store.add_with("new".into(), Scope::Proposal, |_, _| {
+                Err(io::Error::other("write failed before replacement"))
+            }),
+            Err(AddError::Unchanged)
+        );
+        assert!(store.document == old);
+        assert!(Store::read_document(&store.location, &store.key).unwrap() == old);
+        // The existing registry/owner/key remain usable, including after restart.
+        let location = store.location.clone();
+        drop(store);
+        let mut store = Store::open(location, Zeroizing::new([41; 32]), false).unwrap();
+        assert!(store.document == old);
+        store.add("retry".into(), Scope::Proposal).unwrap();
+        assert_eq!(store.clients().len(), 2);
+        assert!(store.clients()[0] == old.clients[0]);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn failed_add_after_replacement_adopts_exact_client_after_durability_retry() {
+        let (root, mut store) = fixture();
+        let mut attempted = None;
+        let id = store
+            .add_with("new".into(), Scope::Proposal, |store, next| {
+                attempted = Some(next.clone());
+                store.persist(next)?;
+                Err(io::Error::other("directory sync failed after replacement"))
+            })
+            .unwrap();
+        let attempted = attempted.unwrap();
+        assert!(
+            store.document == attempted,
+            "do not regenerate consent or credentials"
+        );
+        assert_eq!(store.clients()[1].id, id);
+        let location = store.location.clone();
+        drop(store);
+        let store = Store::open(location, Zeroizing::new([41; 32]), false).unwrap();
+        assert!(store.document == attempted);
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn visible_add_with_failed_durability_retry_remains_uncertain() {
+        let (root, mut store) = fixture();
+        let old = store.document.clone();
+        let next = next_document(&store);
+        store.persist(&next).unwrap();
+        assert_eq!(
+            store.reconcile_add(next, |_| Err(io::Error::other(
+                "directory sync still failed"
+            ))),
+            Err(AddError::Uncertain)
+        );
+        assert!(
+            store.document == old,
+            "uncertain writes must not activate a new runtime"
+        );
+        drop(store);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn unknown_failed_add_state_is_never_reported_as_unchanged_or_successful() {
+        for failure in ["different", "invalid", "corrupt", "missing", "not-file"] {
+            let (root, mut store) = fixture();
+            let old = store.document.clone();
+            let next = next_document(&store);
+            let path = store.location.directory.join("clients.enc");
+            match failure {
+                "different" => {
+                    let mut other = next.clone();
+                    other.clients[0].name = "unexpected replacement".into();
+                    store.persist(&other).unwrap();
+                }
+                "invalid" => {
+                    let mut invalid = next.clone();
+                    invalid.clients[1].id = invalid.clients[0].id.clone();
+                    store.persist(&invalid).unwrap();
+                }
+                "corrupt" => fs::write(&path, b"invalid authenticated registry").unwrap(),
+                "missing" => fs::remove_file(&path).unwrap(),
+                "not-file" => {
+                    fs::remove_file(&path).unwrap();
+                    fs::create_dir(&path).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert_eq!(
+                store.reconcile_add(next, |_| panic!(
+                    "unknown state cannot reach durability retry"
+                )),
+                Err(AddError::Uncertain),
+                "{failure}"
+            );
+            assert!(store.document == old);
+            drop(store);
+            fs::remove_dir_all(root).unwrap();
+        }
     }
     #[test]
     fn registry_process_probe() {
