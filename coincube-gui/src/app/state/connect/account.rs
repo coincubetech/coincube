@@ -1812,6 +1812,10 @@ impl ConnectAccountPanel {
                 }
             }
 
+            // The Launcher owns Cube navigation. An in-Cube Connect panel
+            // cannot open another Cube or grant unlock authority itself.
+            ConnectAccountMessage::OpenRecoveryService(_) => {}
+
             ConnectAccountMessage::ReviewSignOut(show) => {
                 self.review_sign_out = show && self.user.is_some();
             }

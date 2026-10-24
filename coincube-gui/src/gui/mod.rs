@@ -186,6 +186,14 @@ fn route_guarded_tab_result(
 }
 
 impl GUI {
+    #[cfg(test)]
+    fn reviewer_unwrap_guarded_message(mut message: &tab::Message) -> &tab::Message {
+        while let tab::Message::AppAsync(_, inner) | tab::Message::ForkAsync(_, inner) = message {
+            message = inner;
+        }
+        message
+    }
+
     pub fn title(&self) -> String {
         match cfg!(debug_assertions) {
             true => format!("Tenshu v{} (development)", env!("CARGO_PKG_VERSION")),
@@ -290,6 +298,7 @@ impl GUI {
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner)) => match inner.as_ref() {
                 tab::Message::Launch(
                     home::Message::Run(root, _, chain, _)
+                    | home::Message::RunToRecovery(root, _, chain, _)
                     | home::Message::RunClaim(root, _, chain, _, _),
                 ) if chain.is_blake2b() => {
                     self.panes
@@ -1059,9 +1068,15 @@ impl GUI {
                             pane.close_tab(index); // waits for daemon stop
                             crate::app::session::close(); // zeroizes signer/PIN
                             self.focus = Some(pane_id);
-                            return pane
-                                .focus_launcher(&self.config)
-                                .map(move |message| Message::Pane(pane_id, message));
+                            let task = pane.focus_launcher(&self.config);
+                            // Lock makes the Launcher the primary tab even if
+                            // a legacy layout retained an unrelated Cube.
+                            if pane.focused_tab > 0 {
+                                let launcher = pane.tabs.remove(pane.focused_tab);
+                                pane.tabs.insert(0, launcher);
+                                pane.focused_tab = 0;
+                            }
+                            return task.map(move |message| Message::Pane(pane_id, message));
                         }
                     }
                 }
@@ -1130,7 +1145,10 @@ impl GUI {
                 };
                 let mut tasks = Vec::new();
                 if let Some((root, chain, cube, intent)) = match &msg {
-                    home::Message::Run(root, _, chain, cube) => Some((root, chain, cube, None)),
+                    home::Message::Run(root, _, chain, cube)
+                    | home::Message::RunToRecovery(root, _, chain, cube) => {
+                        Some((root, chain, cube, None))
+                    }
                     home::Message::RunClaim(root, _, chain, cube, intent) => {
                         Some((root, chain, cube, Some(intent)))
                     }
@@ -1207,6 +1225,31 @@ impl GUI {
                                         )
                                     });
                                 }
+                            }
+                            if matches!(&msg, home::Message::RunToRecovery(..)) {
+                                let tab_id = pane.tabs[index].id;
+                                let focus = pane
+                                    .update(
+                                        pane::Message::View(pane::ViewMessage::FocusTab(index)),
+                                        &self.config,
+                                    )
+                                    .map(move |message| Message::Pane(pane_id, message));
+                                let recovery = Task::done(Message::Pane(
+                                    pane_id,
+                                    pane::Message::tab(
+                                        tab_id,
+                                        tab::Message::Run(AppMessage::View(
+                                            crate::app::view::Message::Menu(
+                                                crate::app::menu::Menu::Cube(
+                                                    crate::app::menu::CubeSubMenu::Settings(
+                                                        crate::app::menu::CubeSettingsOption::Recovery,
+                                                    ),
+                                                ),
+                                            ),
+                                        )),
+                                    ),
+                                ));
+                                return Task::batch([focus, recovery]);
                             }
                             return pane
                                 .update(
@@ -3096,7 +3139,7 @@ impl GUI {
         match message {
             Message::Pane(_, pane::Message::View(pane::ViewMessage::ConnectSignedIn)) => true,
             Message::Pane(_, pane::Message::Tab(_, inner)) => matches!(
-                inner.as_ref(),
+                Self::reviewer_unwrap_guarded_message(inner),
                 tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
                     _
                 ))) | tab::Message::Launch(home::Message::View(home::ViewMessage::ConnectAccount(
@@ -3143,7 +3186,7 @@ impl GUI {
     /// exactly those through the real GUI and leave network bootstrap alone.
     pub(crate) fn reviewer_is_account_message(message: &Message) -> bool {
         matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
-            if matches!(inner.as_ref(), tab::Message::Run(AppMessage::View(
+            if matches!(Self::reviewer_unwrap_guarded_message(inner), tab::Message::Run(AppMessage::View(
                 crate::app::view::Message::ConnectAccount(_)))))
     }
     /// Whether a GUI message is a tab's `SetSession` completion — what a
@@ -3151,7 +3194,7 @@ impl GUI {
     /// real completion through the real broadcaster.
     pub(crate) fn reviewer_is_set_session(message: &Message) -> bool {
         matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
-            if matches!(inner.as_ref(), tab::Message::Run(AppMessage::View(
+            if matches!(Self::reviewer_unwrap_guarded_message(inner), tab::Message::Run(AppMessage::View(
                 crate::app::view::Message::ConnectAccount(
                     crate::app::view::ConnectAccountMessage::SetSession(..))))))
     }
@@ -3398,12 +3441,63 @@ mod single_open_lifecycle_tests {
                             root.clone(),
                             app::Config::new(false),
                             ChainId::Bitcoin,
-                            source_settings,
+                            source_settings.clone(),
                             intent,
                         )),
                     ),
                 )));
                 assert!(!app::claim_intent::take(&source_id));
+                assert_eq!(app_count(&gui), 1);
+
+                // The Account Recovery action reuses this exact App without
+                // another unlock and dispatches the existing management route.
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::View(pane::ViewMessage::OpenLauncher),
+                )));
+                let route = gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::RunToRecovery(
+                            root.clone(),
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            source_settings,
+                        )),
+                    ),
+                ));
+                use iced_runtime::futures::futures::StreamExt;
+                let recovery_message = runtime.block_on(async {
+                    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                        let mut stream = iced_runtime::task::into_stream(route)
+                            .expect("Recovery route emits a menu event");
+                        while let Some(action) = stream.next().await {
+                            if let iced_runtime::Action::Output(message) = action {
+                                if matches!(
+                                    &message,
+                                    Message::Pane(_, pane::Message::Tab(_, inner))
+                                        if matches!(inner.as_ref(), tab::Message::Run(
+                                            AppMessage::View(crate::app::view::Message::Menu(
+                                                crate::app::menu::Menu::Cube(
+                                                    crate::app::menu::CubeSubMenu::Settings(
+                                                        crate::app::menu::CubeSettingsOption::Recovery
+                                                    )
+                                                )
+                                            ))
+                                        ))
+                                ) {
+                                    return Some(message);
+                                }
+                            }
+                        }
+                        None
+                    })
+                    .await
+                    .expect("Recovery menu route completed")
+                    .expect("Recovery menu event")
+                });
+                drop(gui.update(recovery_message));
                 assert_eq!(app_count(&gui), 1);
 
                 let other = app::settings::CubeSettings::new_with_raw_id(

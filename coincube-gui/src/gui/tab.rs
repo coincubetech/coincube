@@ -656,6 +656,9 @@ pub struct Tab {
     /// the first eligible Vault Cube.
     pending_split_after_install: bool,
     pending_imported_claim: Option<crate::imported_claim::ImportedClaimRequest>,
+    /// An Account Recovery row may choose a destination before this Cube is
+    /// unlocked. It applies only to the exact Cube that completes admission.
+    pending_recovery_route: Option<(CoincubeDirectory, crate::chain::ChainId, String)>,
 }
 
 impl Tab {
@@ -673,6 +676,7 @@ impl Tab {
             next_fork_task: 0,
             pending_split_after_install: false,
             pending_imported_claim: None,
+            pending_recovery_route: None,
         }
     }
 
@@ -1050,8 +1054,11 @@ impl Tab {
         let was_app = matches!(&self.state, State::App(_));
         let was_fork_app =
             matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b());
-        let result = self.update_inner(message);
+        let mut result = self.update_inner(message);
         let is_app = matches!(&self.state, State::App(_));
+        if matches!(self.state, State::Home(_) | State::DuressActive(_)) {
+            self.pending_recovery_route = None;
+        }
         if was_app != is_app {
             self.app_generation = self.app_generation.wrapping_add(1);
         }
@@ -1065,6 +1072,25 @@ impl Tab {
             // A fork App that lost its client: its own arm tears it down; the
             // kind and origin only matter to the Bitcoin arm, not reached here.
             return self.invalidate_fork_session(AuthChange::LogOut, true);
+        }
+        if !was_app && is_app {
+            if let (Some((root, chain, cube_id)), State::App(app)) =
+                (self.pending_recovery_route.take(), &self.state)
+            {
+                if app.datadir() == &root
+                    && app.cube_settings().network == chain
+                    && app.cube_settings().id == cube_id
+                {
+                    result = Task::batch([
+                        result,
+                        Task::done(Message::Run(app::Message::View(app::view::Message::Menu(
+                            app::menu::Menu::Cube(app::menu::CubeSubMenu::Settings(
+                                app::menu::CubeSettingsOption::Recovery,
+                            )),
+                        )))),
+                    ]);
+                }
+            }
         }
         if matches!(&self.state, State::App(app) if app.cube_settings().network.is_blake2b()) {
             self.guard_fork_task(result)
@@ -1085,8 +1111,17 @@ impl Tab {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
+            Message::Launch(home::Message::RunToRecovery(root, config, chain, cube)) => {
+                self.pending_recovery_route = Some((root.clone(), chain, cube.id.clone()));
+                Message::Launch(home::Message::Run(root, config, chain, cube))
+            }
             Message::Launch(home::Message::RunClaim(root, config, chain, cube, intent)) => {
+                self.pending_recovery_route = None;
                 self.claim_open = Some(intent);
+                Message::Launch(home::Message::Run(root, config, chain, cube))
+            }
+            Message::Launch(home::Message::Run(root, config, chain, cube)) => {
+                self.pending_recovery_route = None;
                 Message::Launch(home::Message::Run(root, config, chain, cube))
             }
             Message::ForkInstallCompleted(generation, msg) => {

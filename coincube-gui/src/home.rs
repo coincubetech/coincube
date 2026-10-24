@@ -35,7 +35,13 @@ use crate::{
             global::{AccountTier, GlobalSettings},
             AuthConfig, BitcoinImport, CubeConnectState, CubeSettings, WalletSettings,
         },
-        state::{connect::ConnectAccountPanel, settings::general},
+        state::{
+            connect::{
+                account::{RecoveryServiceTarget, RecoveryServicesState},
+                ConnectAccountPanel,
+            },
+            settings::general,
+        },
         view::{BackupWalletMessage, ConnectAccountMessage, RecoveryKitMessage},
     },
     delete::{delete_wallet, DeleteError},
@@ -65,6 +71,43 @@ fn pending_advisory_notice(
 
 const NETWORKS: [ChainId; 5] = ChainId::LAUNCHER;
 
+/// A pre-unlock catalog action names the persisted Cube, never its position
+/// in a list that a background refresh may have reordered.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct CubeCatalogKey {
+    pub chain: ChainId,
+    pub cube_id: String,
+}
+
+fn catalog_display_name(name: &str) -> String {
+    let mut rendered = String::new();
+    let mut last_was_space = false;
+    for character in name.chars().filter(|character| {
+        !character.is_control()
+            && !matches!(*character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+    }) {
+        if character.is_whitespace() {
+            if !last_was_space && !rendered.is_empty() {
+                rendered.push(' ');
+            }
+            last_was_space = true;
+        } else {
+            rendered.push(character);
+            last_was_space = false;
+        }
+        if rendered.chars().count() >= 80 {
+            rendered.push('…');
+            break;
+        }
+    }
+    let rendered = rendered.trim();
+    if rendered.is_empty() {
+        "Unnamed Cube".to_string()
+    } else {
+        rendered.to_string()
+    }
+}
+
 /// Connect registration and remote-Cube matching must inspect every chain's
 /// settings directory, including BTCB2. `NETWORKS` is only the baseline
 /// launcher selector and intentionally excludes the two fork identities.
@@ -77,6 +120,68 @@ fn locally_stored_cubes(datadir: &CoincubeDirectory) -> Vec<CubeSettings> {
                 .unwrap_or_default()
         })
         .collect()
+}
+
+#[derive(Debug, Clone)]
+pub enum RecoveryServiceDestination {
+    Local(ChainId, CubeSettings, app::Config),
+    Remote(ChainId),
+}
+
+/// The Account row is only a selector. Resolve its server ID and network
+/// against a fresh authenticated response, then match the resulting UUID in
+/// that chain's local settings before admitting the ordinary unlock path.
+fn resolve_recovery_service_destination(
+    datadir: &CoincubeDirectory,
+    target: &RecoveryServiceTarget,
+    cubes: &[CubeResponse],
+) -> Result<RecoveryServiceDestination, String> {
+    let chain = ChainId::from_api_str(&target.network)
+        .ok_or_else(|| "Unsupported Connect Cube network".to_string())?;
+    let mut matches = cubes
+        .iter()
+        .filter(|cube| cube.id == target.cube_id && cube.network == target.network);
+    let server_cube = matches
+        .next()
+        .ok_or_else(|| "Connect Cube no longer belongs to this account".to_string())?;
+    if matches.next().is_some() || server_cube.uuid.trim().is_empty() {
+        return Err("Connect returned an ambiguous Cube identity".to_string());
+    }
+
+    let network_dir = datadir.network_directory(chain);
+    let local_cubes = match settings::Settings::from_file(&network_dir) {
+        Ok(settings) => settings.cubes,
+        Err(settings::SettingsError::NotFound) => {
+            return Ok(RecoveryServiceDestination::Remote(chain))
+        }
+        Err(error) => return Err(format!("Could not read local Cube settings: {error}")),
+    };
+    let mut local_matches = local_cubes
+        .iter()
+        .filter(|cube| cube.id == server_cube.uuid);
+    let Some(local_cube) = local_matches.next() else {
+        return Ok(RecoveryServiceDestination::Remote(chain));
+    };
+    if local_matches.next().is_some() || local_cube.network != chain {
+        return Err("Local Cube identity does not match its chain".to_string());
+    }
+    let config_path = network_dir.path().join(app::config::DEFAULT_FILE_NAME);
+    let config = match app::Config::from_file(&config_path) {
+        Ok(config) => config,
+        Err(app::config::ConfigError::NotFound) => {
+            let config = app::Config::new(false);
+            config.to_file(&config_path).map_err(|error| {
+                format!("Could not initialize local GUI configuration: {error}")
+            })?;
+            config
+        }
+        Err(error) => return Err(format!("Could not read local GUI configuration: {error}")),
+    };
+    Ok(RecoveryServiceDestination::Local(
+        chain,
+        local_cube.clone(),
+        config,
+    ))
 }
 
 #[derive(Debug, Clone)]
@@ -406,6 +511,8 @@ pub struct Home {
     account_tier: AccountTier,
     /// Account-level Connect panel (login, plan, security, etc.)
     pub connect_account: ConnectAccountPanel,
+    /// Reject older Account-row lookups after a newer selection.
+    recovery_open_request: u64,
     /// Heir "Recover a Vault" discovery surface state (COIN-377 / PR 1).
     pub recover_vault: RecoverVaultPanel,
     pub split_wallet: SplitWalletPanel,
@@ -567,6 +674,7 @@ impl Home {
                     &datadir_path,
                 )),
                 connect_account,
+                recovery_open_request: 0,
                 settings_error: None,
                 recover_vault: RecoverVaultPanel::new(),
                 split_wallet: SplitWalletPanel::new(),
@@ -720,6 +828,21 @@ impl Home {
             self.network,
             self.datadir_path.network_directory(self.network),
         )
+    }
+
+    fn catalog_index(&self, key: &CubeCatalogKey) -> Option<usize> {
+        let State::Cubes { cubes, source, .. } = &self.state else {
+            return None;
+        };
+        if *source != key.chain || self.network != key.chain {
+            return None;
+        }
+        let mut matches = cubes
+            .iter()
+            .enumerate()
+            .filter(|(_, cube)| cube.id == key.cube_id && cube.network == key.chain);
+        let (index, _) = matches.next()?;
+        matches.next().is_none().then_some(index)
     }
 
     /// Fetch the full server cube list and keep the ones with no local
@@ -1374,6 +1497,27 @@ impl Home {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        let message = match message {
+            Message::View(ViewMessage::RunCatalog(key)) => {
+                let Some(index) = self.catalog_index(&key) else {
+                    return Task::none();
+                };
+                Message::View(ViewMessage::Run(index))
+            }
+            Message::View(ViewMessage::RenameCatalog(key)) => {
+                let Some(index) = self.catalog_index(&key) else {
+                    return Task::none();
+                };
+                Message::View(ViewMessage::RenameCube(index))
+            }
+            Message::View(ViewMessage::DeleteCatalog(key)) => {
+                let Some(index) = self.catalog_index(&key) else {
+                    return Task::none();
+                };
+                Message::View(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(index)))
+            }
+            message => message,
+        };
         let message = match message {
             Message::FocusedCubes { for_chain, res } => {
                 if !matches!(self.active_section, HomeSection::Cubes)
@@ -3485,6 +3629,125 @@ impl Home {
                     }
                 })
             }
+            Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target),
+            )) => {
+                if !matches!(self.active_section, HomeSection::Connect(_))
+                    || !self.connect_account.is_authenticated()
+                    || !matches!(
+                        &self.connect_account.recovery_services,
+                        RecoveryServicesState::Ready(rows)
+                            if rows.iter().filter(|row| row.target == target).count() == 1
+                    )
+                {
+                    return Task::none();
+                }
+                let (Some(client), Some(user)) = (
+                    self.connect_account.authenticated_client(),
+                    self.connect_account.user.as_ref(),
+                ) else {
+                    return Task::none();
+                };
+                let user_id = user.id;
+                let session_generation = self.connect_account.session_generation();
+                self.recovery_open_request = self.recovery_open_request.wrapping_add(1);
+                let request = self.recovery_open_request;
+                self.connect_account.error = None;
+                let datadir = self.datadir_path.clone();
+                let resolve_target = target.clone();
+                Task::perform(
+                    async move {
+                        let cubes = client
+                            .list_cubes()
+                            .await
+                            .map_err(|error| error.to_string())?;
+                        resolve_recovery_service_destination(&datadir, &resolve_target, &cubes)
+                    },
+                    move |result| Message::RecoveryServiceResolved {
+                        target: target.clone(),
+                        session_generation,
+                        user_id,
+                        request,
+                        result,
+                    },
+                )
+            }
+            Message::RecoveryServiceResolved {
+                target,
+                session_generation,
+                user_id,
+                request,
+                result,
+            } => {
+                if request != self.recovery_open_request
+                    || session_generation != self.connect_account.session_generation()
+                    || !self.connect_account.is_authenticated()
+                    || self.connect_account.user.as_ref().map(|user| user.id) != Some(user_id)
+                    || !matches!(self.active_section, HomeSection::Connect(_))
+                    || !matches!(
+                        &self.connect_account.recovery_services,
+                        RecoveryServicesState::Ready(rows)
+                            if rows.iter().filter(|row| row.target == target).count() == 1
+                    )
+                {
+                    return Task::none();
+                }
+                let destination = match result {
+                    Ok(destination) => destination,
+                    Err(detail) => {
+                        self.connect_account.error =
+                            Some(crate::app::state::connect::account::PanelError::settled(
+                                crate::user_error::UserError::logged(
+                                    "Couldn't open this Cube",
+                                    "Refresh Recovery services, then try again.",
+                                    crate::user_error::CC_API_BADRESP,
+                                    false,
+                                    detail,
+                                ),
+                            ));
+                        return Task::none();
+                    }
+                };
+                let chain = match &destination {
+                    RecoveryServiceDestination::Local(chain, ..)
+                    | RecoveryServiceDestination::Remote(chain) => *chain,
+                };
+                if !(self.developer_mode
+                    || chain == ChainId::Bitcoin
+                    || chain == ChainId::BitcoinBlake2b
+                        && self.chain_availability(chain).is_available())
+                    || !self.chain_availability(chain).is_available()
+                {
+                    self.connect_account.error =
+                        Some(crate::app::state::connect::account::PanelError::settled(
+                            crate::user_error::UserError::new(
+                                "This Cube network is unavailable",
+                                "Enable its network in Global Settings before opening this Cube.",
+                                crate::user_error::CC_API_BADRESP,
+                                false,
+                            ),
+                        ));
+                    return Task::none();
+                }
+                self.connect_account.error = None;
+                match destination {
+                    RecoveryServiceDestination::Local(chain, cube, config) => Task::done(
+                        Message::RunToRecovery(self.datadir_path.clone(), config, chain, cube),
+                    ),
+                    RecoveryServiceDestination::Remote(chain) => {
+                        // A Connect record is not an unlock credential. Show
+                        // the existing remote-only restore card in the Cube
+                        // catalog; the user chooses its normal recovery flow.
+                        // Refresh the catalog as its earlier account-scoped
+                        // fetch may predate this newly selected server row.
+                        self.active_section = HomeSection::Cubes;
+                        Task::batch([
+                            self.update(Message::View(ViewMessage::SelectNetwork(chain))),
+                            self.fetch_remote_cubes(),
+                        ])
+                    }
+                }
+            }
             Message::View(ViewMessage::ConnectAccount(msg)) => {
                 // The banner CTAs navigate the panel to Plan & Billing by
                 // setting its `active_sub`, but the sidebar highlight follows
@@ -4811,12 +5074,12 @@ impl Home {
                                         let signed_in =
                                             self.connect_account.authenticated_client().is_some();
                                         let mut col =
-                                            cubes.iter().enumerate().fold(
+                                            cubes.iter().fold(
                                                 Column::new().spacing(20),
-                                                |col, (i, cube)| {
+                                                |col, cube| {
                                                     col.push(cubes_list_item(
                                                         cube,
-                                                        i,
+                                                        self.network,
                                                         signed_in,
                                                         self.cube_sync_hint(cube),
                                                     ))
@@ -5758,10 +6021,15 @@ fn vault_subtitle(cube: &CubeSettings) -> String {
 
 fn cubes_list_item<'a>(
     cube: &'a CubeSettings,
-    i: usize,
+    chain: ChainId,
     signed_in: bool,
     sync_error: Option<String>,
 ) -> Element<'a, ViewMessage> {
+    let key = CubeCatalogKey {
+        chain,
+        cube_id: cube.id.clone(),
+    };
+    let display_name = catalog_display_name(&cube.name);
     // Single tri-state cube icon (Phase 1, duress mode): the Cube's
     // relationship to Connect — Sovereign (outline) → Registered (filled,
     // half-tone) → Backed up (filled, full colour) — so users can tell at a
@@ -5823,12 +6091,12 @@ fn cubes_list_item<'a>(
                                 Row::new()
                                     .spacing(8)
                                     .align_y(Alignment::Center)
-                                    .push(p1_bold(&cube.name))
+                                    .push(p1_bold(display_name))
                                     .push(sync_indicator),
                             )
                             .push(p1_regular(vault_subtitle(cube)).style(theme::text::secondary)),
                     )
-                    .on_press(ViewMessage::Run(i))
+                    .on_press(ViewMessage::RunCatalog(key.clone()))
                     .padding(15)
                     .style(theme::button::container_border)
                     .width(Length::Fixed(500.0)),
@@ -5839,13 +6107,13 @@ fn cubes_list_item<'a>(
                 Button::new(icon::pencil_icon())
                     .style(theme::button::secondary)
                     .padding(10)
-                    .on_press(ViewMessage::RenameCube(i)),
+                    .on_press(ViewMessage::RenameCatalog(key.clone())),
             )
             .push_maybe((!cube.network.is_blake2b()).then(|| {
                 Button::new(icon::trash_icon())
                     .style(theme::button::secondary)
                     .padding(10)
-                    .on_press(ViewMessage::DeleteCube(DeleteCubeMessage::ShowModal(i)))
+                    .on_press(ViewMessage::DeleteCatalog(key))
             })),
     )
     .into()
@@ -5911,7 +6179,7 @@ fn remote_cube_list_item<'a>(cube: &'a RemoteCube) -> Element<'a, ViewMessage> {
     let card = Container::new(
         Column::new()
             .spacing(4)
-            .push(p1_bold(&cube.name).style(theme::text::secondary))
+            .push(p1_bold(catalog_display_name(&cube.name)).style(theme::text::secondary))
             .push(p1_regular(status_line).style(theme::text::secondary)),
     )
     .padding(15)
@@ -6459,6 +6727,13 @@ pub enum Message {
     /// Bubble successful preference writes to the GUI for every open tab.
     GlobalSettingsChanged,
     GlobalFeatureLoaded(u64, bool),
+    RecoveryServiceResolved {
+        target: RecoveryServiceTarget,
+        session_generation: u64,
+        user_id: u32,
+        request: u64,
+        result: Result<RecoveryServiceDestination, String>,
+    },
     View(ViewMessage),
     BeginClaimPair(app::claim_intent::ForkHandoff),
     ContinueForkClaim(app::claim_intent::ForkHandoff),
@@ -6495,6 +6770,14 @@ pub enum Message {
     /// found in and that this build can run that chain before anything is
     /// unlocked or started.
     Run(
+        CoincubeDirectory,
+        app::config::Config,
+        crate::chain::ChainId,
+        CubeSettings,
+    ),
+    /// Open the selected local Cube through its normal unlock path, then show
+    /// its existing Cube → Settings → Recovery management screen.
+    RunToRecovery(
         CoincubeDirectory,
         app::config::Config,
         crate::chain::ChainId,
@@ -6636,6 +6919,9 @@ pub enum ViewMessage {
     StartInstall(ChainId),
     Check,
     Run(usize),
+    RunCatalog(CubeCatalogKey),
+    RenameCatalog(CubeCatalogKey),
+    DeleteCatalog(CubeCatalogKey),
     DeleteCube(DeleteCubeMessage),
     ToggleRecoveryCheckBox,
     ToggleDeveloperMode(bool),
@@ -8909,6 +9195,150 @@ mod tests {
         }
     }
 
+    #[test]
+    fn launcher_catalog_uses_sanitized_names_and_chain_bound_ids() {
+        assert_eq!(
+            catalog_display_name("  Family\n\u{202e} Cube  "),
+            "Family Cube"
+        );
+        assert_eq!(catalog_display_name("\u{0000}\n"), "Unnamed Cube");
+
+        let mut home = home();
+        home.network = ChainId::Bitcoin;
+        home.state = State::Cubes {
+            cubes: vec![
+                CubeSettings::new_with_raw_id("b".into(), "B".into(), ChainId::Bitcoin),
+                CubeSettings::new_with_raw_id("a".into(), "A".into(), ChainId::Bitcoin),
+            ],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        let key = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: "a".into(),
+        };
+        assert_eq!(home.catalog_index(&key), Some(1));
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.reverse();
+        }
+        assert_eq!(home.catalog_index(&key), Some(0));
+        assert_eq!(
+            home.catalog_index(&CubeCatalogKey {
+                chain: ChainId::Testnet4,
+                cube_id: "a".into(),
+            }),
+            None
+        );
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes.push(cubes[0].clone());
+        }
+        assert_eq!(home.catalog_index(&key), None);
+    }
+
+    #[test]
+    fn recovery_service_open_resolves_exact_server_and_local_identity() {
+        let datadir = fresh_datadir();
+        let directory = datadir.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let local = CubeSettings::new_with_raw_id(
+            "local-uuid".to_string(),
+            "Local Cube".to_string(),
+            ChainId::Bitcoin,
+        );
+        std::fs::write(
+            directory.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![local],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let target = RecoveryServiceTarget {
+            cube_id: 193,
+            network: "mainnet".to_string(),
+        };
+        let mut server = registered_cube_response("local-uuid");
+        server.network = "mainnet".to_string();
+        assert!(matches!(
+            resolve_recovery_service_destination(&datadir, &target, &[server.clone()]).unwrap(),
+            RecoveryServiceDestination::Local(ChainId::Bitcoin, cube, _) if cube.id == "local-uuid"
+        ));
+        assert!(matches!(
+            resolve_recovery_service_destination(
+                &datadir,
+                &target,
+                &[CubeResponse {
+                    uuid: "other-device-uuid".to_string(),
+                    ..server.clone()
+                }],
+            )
+            .unwrap(),
+            RecoveryServiceDestination::Remote(ChainId::Bitcoin)
+        ));
+        let mut wrong_network = server.clone();
+        wrong_network.network = "testnet4".to_string();
+        assert!(resolve_recovery_service_destination(&datadir, &target, &[wrong_network]).is_err());
+        assert!(
+            resolve_recovery_service_destination(&datadir, &target, &[server.clone(), server])
+                .is_err()
+        );
+        std::fs::remove_dir_all(datadir.path()).unwrap();
+    }
+
+    #[test]
+    fn recovery_service_completion_only_opens_the_current_account_selection() {
+        let mut home = signed_in_home();
+        home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+        let target = RecoveryServiceTarget {
+            cube_id: 193,
+            network: "mainnet".to_string(),
+        };
+        let mut server = registered_cube_response("local-uuid");
+        server.network = "mainnet".to_string();
+        home.connect_account.recovery_services = RecoveryServicesState::Ready(vec![server.into()]);
+        home.recovery_open_request = 4;
+        let generation = home.connect_account.session_generation();
+        let result = || {
+            Ok(RecoveryServiceDestination::Local(
+                ChainId::Bitcoin,
+                CubeSettings::new_with_raw_id(
+                    "local-uuid".to_string(),
+                    "Local Cube".to_string(),
+                    ChainId::Bitcoin,
+                ),
+                app::Config::new(false),
+            ))
+        };
+
+        assert!(drain(home.update(Message::RecoveryServiceResolved {
+            target: target.clone(),
+            session_generation: generation,
+            user_id: 7,
+            request: 3,
+            result: result(),
+        }))
+        .is_empty());
+        assert!(drain(home.update(Message::RecoveryServiceResolved {
+            target: target.clone(),
+            session_generation: generation,
+            user_id: 8,
+            request: 4,
+            result: result(),
+        }))
+        .is_empty());
+        let outputs = drain(home.update(Message::RecoveryServiceResolved {
+            target,
+            session_generation: generation,
+            user_id: 7,
+            request: 4,
+            result: result(),
+        }));
+        assert!(
+            matches!(outputs.as_slice(), [Message::RunToRecovery(_, _, ChainId::Bitcoin, cube)] if cube.id == "local-uuid")
+        );
+    }
+
     /// The client-side limit check is advisory; the server is authoritative and
     /// can refuse a Cube that was already created locally. When it does, the
     /// Cubes list must stop promising a sync that will never happen.
@@ -9054,16 +9484,21 @@ mod tests {
     #[test]
     fn pure_home_view_helpers_build_for_local_remote_and_form_variants() {
         let mut local = cube("local-a", "Local A", Network::Bitcoin);
-        let _ = cubes_list_item(&local, 0, false, None);
+        let _ = cubes_list_item(&local, ChainId::Bitcoin, false, None);
         // Sovereign + signed in, with the server's refusal recorded: the
         // warning variant of the sync tooltip.
-        let _ = cubes_list_item(&local, 0, true, Some("Out of Cube slots".to_string()));
+        let _ = cubes_list_item(
+            &local,
+            ChainId::Bitcoin,
+            true,
+            Some("Out of Cube slots".to_string()),
+        );
 
         local.remote_synced = true;
-        let _ = cubes_list_item(&local, 1, true, None);
+        let _ = cubes_list_item(&local, ChainId::Bitcoin, true, None);
 
         local.recovery_kit_last_backed_up_descriptor_fingerprint = Some("hash".to_string());
-        let _ = cubes_list_item(&local, 2, true, None);
+        let _ = cubes_list_item(&local, ChainId::Bitcoin, true, None);
 
         let mut remote = remote_cube("remote-a", "Remote A", Network::Bitcoin);
         let _ = remote_cube_list_item(&remote);
