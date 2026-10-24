@@ -1008,11 +1008,11 @@ impl Tab {
             (State::App(app), Message::LockCubeToLauncher) => {
                 let datadir = app.datadir().clone();
                 let chain = app.cube_settings().network;
-                // Match the secure close path used by LockCube: revoke work
-                // tied to this session, wipe the cached signer/PIN, then
-                // drop App (and its wallet clients) before opening Home.
-                app.revoke_claim();
+                // Stop owned services as well as revoking Claim before this
+                // App is dropped. GUI dispatch already closed same-Cube
+                // siblings across panes.
                 crate::app::session::close();
+                app.stop();
                 let (home, command) = Home::new_for_chain(datadir, Some(chain));
                 self.state = State::Home(home);
                 command.map(Message::Launch)
@@ -4516,7 +4516,6 @@ pub fn create_app_with_remote_backend(
             cube_connect_owner: cube_settings.connect_owner.clone(),
             cube_owned_by_other_account: false,
             current_cube_backed_up: cube_settings.backed_up,
-            backup_warning_dismissed: false,
             spark_notice: None,
             has_p2p: false, // Set later by App::new based on mnemonic availability
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

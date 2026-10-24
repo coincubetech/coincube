@@ -433,7 +433,6 @@ mod shell_tests {
                 let cache = crate::app::cache::Cache {
                     cube_name: "Everyday".into(),
                     has_vault: true,
-                    backup_warning_dismissed: false,
                     theme_mode: mode,
                     ..Default::default()
                 };
@@ -575,7 +574,6 @@ mod shell_tests {
                     has_vault: true,
                     cube_switcher_open: true,
                     cube_lock_confirmation: confirmation,
-                    backup_warning_dismissed: false,
                     theme_mode: mode,
                     ..Default::default()
                 };

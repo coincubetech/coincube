@@ -290,7 +290,6 @@ pub enum Message {
     /// `false` = decline. Handled at the App level; the answer is persisted
     /// per-cube so the prompt never re-fires.
     RecoveryAlertsConsent(bool),
-    DismissBackupWarning,
     /// Close the Spark Stable Balance banner for this session
     /// (`Cache::spark_notice`). Handled at the App level.
     DismissSparkNotice,
