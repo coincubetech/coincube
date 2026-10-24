@@ -202,14 +202,6 @@ pub struct Cache {
     /// Cube. Drives the soft "not backed up" warning banners on the Vault
     /// and Liquid home screens. Mirrors `CubeSettings::backed_up`.
     pub current_cube_backed_up: bool,
-    /// Session-scoped dismissal of the "not backed up" banner. Defaults
-    /// to `false` for every new `Cache`, so each Tab (one Cube per Tab)
-    /// starts with the banner visible, and it's also reset if
-    /// `current_cube_backed_up` ever transitions back to `false`. Set to
-    /// `true` only by the user clicking the dismiss button. Cleared on
-    /// app restart — the reminder keeps surfacing until the user
-    /// actually backs up.
-    pub backup_warning_dismissed: bool,
     /// A Spark Stable Balance condition the user should know about,
     /// rendered as a banner at the top of every page by the `dashboard`
     /// wrapper. `None` when there is nothing to say or the user dismissed
@@ -431,7 +423,6 @@ impl std::default::Default for Cache {
             cube_connect_owner: None,
             cube_owned_by_other_account: false,
             current_cube_backed_up: false,
-            backup_warning_dismissed: false,
             spark_notice: None,
             has_p2p: false,
             p2p_test_coordinator: false,
