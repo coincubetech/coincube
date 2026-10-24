@@ -847,7 +847,9 @@ pub(crate) struct ClaimPairRequest {
 }
 
 pub struct App {
-    local_mcp: local_mcp::Settings,
+    // Pairing records grow independently of the tab's by-value state. Keep them
+    // on the heap so debug GUI transitions fit the Windows test-thread stack.
+    local_mcp: Box<local_mcp::Settings>,
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
     imported_kit_metadata: imported_kit_metadata::ImportedKitMetadata,
@@ -6572,15 +6574,18 @@ impl App {
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
+        self.refresh_mcp_pairings();
         if let Message::View(view::Message::LocalMcp(message)) = message {
             let supported = self.mcp_supported() || self.mcp_proposals_supported();
-            return match self.local_mcp.update(
+            let config = self.local_mcp.update(
                 message,
                 self.wallet.clone(),
                 self.daemon.clone(),
                 supported,
                 &self.cube_settings.id,
-            ) {
+            );
+            self.refresh_mcp_pairings();
+            return match config {
                 Some(config) => clipboard::write(config),
                 None => Task::none(),
             };
@@ -10291,15 +10296,35 @@ impl App {
             && session::generation_for(&self.cube_settings.id).is_some()
     }
 
+    fn refresh_mcp_pairings(&mut self) {
+        let supported = self.mcp_supported();
+        let proposal_supported = self.mcp_proposals_supported();
+        self.local_mcp.ensure_pairings(local_mcp::PairingContext {
+            root: self.datadir.path(),
+            chain: self.cube_settings.network,
+            cube_id: &self.cube_settings.id,
+            wallet: self.wallet.clone(),
+            daemon: self.daemon.clone(),
+            supported,
+            proposal_supported,
+        });
+    }
+
     #[cfg(feature = "mcp-proposals")]
     pub(crate) fn take_mcp_proposal(
         &mut self,
+        paired_client: Option<&str>,
     ) -> Option<(local_mcp::Settings, crate::installer::proposal::Session)> {
         if !self.mcp_proposals_supported() {
             return None;
         }
-        let proposal = self.local_mcp.proposal_session(&self.cube_settings.id)?;
-        Some((std::mem::take(&mut self.local_mcp), proposal))
+        let proposal = match paired_client {
+            Some(id) => self
+                .local_mcp
+                .paired_proposal_session(&self.cube_settings.id, id)?,
+            None => self.local_mcp.proposal_session(&self.cube_settings.id)?,
+        };
+        Some((*std::mem::take(&mut self.local_mcp), proposal))
     }
 
     fn mcp_supported(&self) -> bool {

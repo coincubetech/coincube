@@ -15,6 +15,8 @@ pub struct Adapter {
     pub socket: PathBuf,
     /// Private desktop-issued bearer credential; never a model tool argument.
     pub credential: String,
+    /// Stable private locator for a paired client; resolved for each operation.
+    pub pairing: Option<PathBuf>,
 }
 /// Attach typed schemas and read-only metadata; desktop grants still enforce access.
 fn tool<I: JsonSchema + 'static, O: JsonSchema + 'static>(
@@ -100,7 +102,13 @@ impl Adapter {
             return Err(ErrorData::invalid_params("invalid_input", None));
         }
         #[cfg(any(unix, windows))]
-        let result = crate::ipc::call(&self.socket, &self.credential, request).await;
+        let result = match &self.pairing {
+            Some(path) => match crate::pairing::resolve(path) {
+                Ok(socket) => crate::ipc::call(&socket, &self.credential, request).await,
+                Err(_) => Err(Error::Unavailable),
+            },
+            None => crate::ipc::call(&self.socket, &self.credential, request).await,
+        };
         #[cfg(not(any(unix, windows)))]
         let result: Result<Response, Error> = {
             let _ = request;

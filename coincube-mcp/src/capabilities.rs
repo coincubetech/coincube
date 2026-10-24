@@ -61,6 +61,9 @@ pub struct Capabilities {
     pub reads_require_existing_vault: bool,
     /// Every wallet-data operation needs explicit live desktop consent.
     pub wallet_data_requires_consent: bool,
+    /// Desktop can persist explicitly scoped client pairing across unlocks.
+    /// This is implementation metadata, never current client authorization.
+    pub persistent_client_pairing: bool,
     /// Implemented, bounded confirmed-history request limit.
     pub max_confirmed_transactions: u8,
     /// End-to-end proposal workflow through native consent; not a grant.
@@ -109,6 +112,7 @@ impl Capabilities {
             wallet_family: "bitcoin_vault_embedded".into(),
             reads_require_existing_vault: true,
             wallet_data_requires_consent: true,
+            persistent_client_pairing: true,
             max_confirmed_transactions: 50,
             wallet_proposals: cfg!(feature = "native-proposals"),
             proposal_support: cfg!(feature = "native-proposals").then(|| ProposalSupport {

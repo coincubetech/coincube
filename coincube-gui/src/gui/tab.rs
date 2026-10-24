@@ -151,7 +151,7 @@ impl State {
 /// live outside any network directory. Re-checking existence each call makes
 /// this robust to an interrupted wipe: whatever remains is targeted again.
 fn duress_wipe_targets(root: &std::path::Path) -> Vec<std::path::PathBuf> {
-    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "settings.json"];
+    const CUBE_MATERIAL: &[&str] = &["data", "mnemonics", "settings.json", "mcp-pairings"];
     let mut targets = Vec::new();
 
     // A duress wipe must never leave seeds or PIN hashes behind because a virus
@@ -2355,9 +2355,13 @@ impl Tab {
             (State::App(app), Message::Run(msg)) => {
                 match msg {
                     #[cfg(feature = "mcp-proposals")]
-                    app::Message::View(app::view::Message::LocalMcp(
-                        app::local_mcp::Message::ReviewProposal,
-                    )) => {
+                    app::Message::View(app::view::Message::LocalMcp(ref review))
+                        if matches!(
+                            review,
+                            app::local_mcp::Message::ReviewProposal
+                                | app::local_mcp::Message::ReviewPairedProposal(_)
+                        ) =>
+                    {
                         if !app.mcp_proposals_supported() {
                             return Task::none();
                         }
@@ -2376,7 +2380,14 @@ impl Tab {
                             None,
                         ) {
                             Ok((mut install, _)) => {
-                                let Some((settings, session)) = app.take_mcp_proposal() else {
+                                let client = match review {
+                                    app::local_mcp::Message::ReviewPairedProposal(id) => {
+                                        Some(id.as_str())
+                                    }
+                                    _ => None,
+                                };
+                                let Some((settings, session)) = app.take_mcp_proposal(client)
+                                else {
                                     return Task::none();
                                 };
                                 let task = install.use_mcp_proposal(settings, session);
@@ -4739,6 +4750,7 @@ mod duress_wipe_target_tests {
         touch(&net.join("connect.json"));
         // A second network is covered too.
         touch(&root.join("testnet").join("mnemonics").join("seed"));
+        touch(&net.join("mcp-pairings").join("fixture").join("clients.enc"));
         // bitcoind (root-level, not a network dir): the blockchain is preserved,
         // but inbound-over-Tor identifying material (Tor data + onion key) is
         // obliterated — see Decision 4.
@@ -4763,6 +4775,10 @@ mod duress_wipe_target_tests {
         let targets = duress_wipe_targets(&root);
 
         assert!(targets.contains(&net.join("data")), "data/ must be wiped");
+        assert!(
+            targets.contains(&net.join("mcp-pairings")),
+            "durable client authorization must be wiped"
+        );
         assert!(
             targets.contains(&net.join("mnemonics")),
             "mnemonics/ (seeds) must be wiped"

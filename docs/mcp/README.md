@@ -3,8 +3,9 @@
 This first slice supports **Bitcoin Vaults using Tenshu's embedded daemon on
 macOS, Linux and Windows**. It reads the existing wallet engine. It does not support
 Liquid, Spark, imported non-Vault policies, Bitcoin Blake2b or external daemons
-yet. MCP starts disabled and every new unlocked Cube session
-requires explicit approval. No Connect API or Keychain changes are needed.
+yet. MCP starts disabled. Explicitly paired clients keep their selected scope until
+revoked; protected access pauses while the Cube is locked or Tenshu is closed.
+No Connect API or mobile Keychain changes are needed.
 
 ## Feature testing on `mcp`
 
@@ -45,15 +46,16 @@ publishing; the check covers initialization, discovery, authenticated fixture
 reads and clean shutdown. Do not copy a development executable into an
 already signed application bundle.
 
-## Enable and approve a client
+## Pair a client until revoked
 
 1. Open and unlock the desired Cube normally. Go to **Cube → Settings → AI access**.
-2. Enable MCP for this session. Read the financial-data disclosure.
+2. Enable AI access for this Cube. Read the financial-data disclosure.
 3. Enter a client label, explicitly select this Cube's Vault, and select each read
    capability you want to grant. The label is for your reference, not an authenticated
    application identity.
-4. Choose **Approve client for one hour**. No client is authorized merely by enabling
-   the toggle. The grant is a random bearer credential issued by Tenshu.
+4. Choose **Pair client until revoked**. Enabling the toggle alone grants no access.
+   Tenshu saves the exact client scope and a random bearer credential in a
+   device-keystore-protected encrypted registry.
 5. Choose **Copy private client configuration** and paste it into your trusted MCP
    host's local configuration. It contains a credential: never paste it into a chat,
    issue, shared document or repository. Clear your clipboard after setup.
@@ -65,17 +67,36 @@ The adapter must be installed beside it. The GUI shows the authorized client and
 successful-read count; this is not a verified host identity or a persistent-connection
 indicator (IPC connections are per request).
 
-One grant per unlocked Cube is supported. Give separate Cubes separate host entries.
-Do not share a grant among clients: anyone holding it can use its exact scope.
-Approving again or changing any scope/client setting revokes the old grant.
-**Revoke access now**, disabling MCP, locking/closing the Cube, changing the wallet
-or backend, or exiting Tenshu ends access. Grants expire after one hour; enablement
-and credentials are never persisted. After unlocking/reapproval, replace the host's
-old configuration and reconnect. Revocation cannot erase data already sent to a host.
+Up to 16 independently revocable clients can be paired per Cube. Give separate
+clients and Cubes separate host entries. Anyone holding a copied configuration
+can impersonate that client within its exact scope while the Cube is available.
+The registry is bound to the canonical data directory, chain, Cube, wallet storage
+identity and descriptor; a replaced Vault does not inherit its permissions.
+
+Pairing survives normal lock, close, backend suspension and restart. Each unlocked
+session publishes a fresh private endpoint through the same private reconnect
+locator; the adapter resolves it on every call. Existing client configuration
+continues working after ordinary unlock/relaunch. The assistant cannot unlock a
+Cube, and no wallet data is returned while it is locked/closed. Disabling AI access
+pauses stored clients; it does not forget them. Draft permission fields configure
+a new pairing; they never silently expand an existing client's scope. To change
+a client's permissions in this slice, revoke its row and pair it again explicitly.
+
+**Revoke this client** removes that client's durable authorization and stops its
+runtime immediately. Revoking cannot erase information already given to the AI
+provider. Pairing files are also removed on Cube deletion and duress wipe; the
+keystore wrapping item can remain inert. Storage/authentication failures restore
+no access. If a durable revocation write fails, Tenshu suspends all clients and
+tries to invalidate only this registry's wrapping key; an error explicitly states
+when durable revocation could not be confirmed. Do not treat that error as success.
+
+Legacy configurations with TENSHU_MCP_SOCKET retain their one-hour session-only
+semantics and are never silently upgraded. Pair again through the new UI once
+to obtain a persistent configuration.
 
 ## STDIO client configuration
 
-The GUI produces this shape, with actual paths and a fresh credential:
+The GUI produces this shape, with actual paths and a private pairing credential:
 
 ```json
 {
@@ -83,8 +104,8 @@ The GUI produces this shape, with actual paths and a fresh credential:
     "tenshu": {
       "command": "/Applications/Tenshu.app/Contents/MacOS/tenshu-mcp",
       "env": {
-        "TENSHU_MCP_SOCKET": "/tmp/tenshu-mcp-SESSION/rpc",
-        "TENSHU_MCP_CREDENTIAL": "REPLACE_WITH_THE_PRIVATE_GRANT_FROM_TENSHU"
+        "TENSHU_MCP_PAIRING": "/PRIVATE_DATADIR/regtest/mcp-pairings/CUBE_SCOPE/CLIENT.endpoint",
+        "TENSHU_MCP_CREDENTIAL": "REPLACE_WITH_THE_PRIVATE_PAIRING_FROM_TENSHU"
       }
     }
   }
@@ -92,7 +113,7 @@ The GUI produces this shape, with actual paths and a fresh credential:
 ```
 
 On Windows the copied command ends in `tenshu-mcp.exe`; the MSI installs it beside
-`coincube.exe`. `TENSHU_MCP_SOCKET` is a local pipe name such as
+`coincube.exe`. The private locator resolves to a local pipe name such as
 `\\.\pipe\tenshu-mcp-PID-RANDOM`, not a TCP address. Keep the generated name unchanged:
 the adapter validates its format and checks the pipe server's OS process ID
 before sending the credential. The pipe DACL permits only the current Windows
@@ -219,8 +240,8 @@ cargo fmt --all -- --check
 
 Before production release, complete packaged-client acceptance on each platform with
 Maple and Claude, verify signed packaging, and obtain independent security review.
-Windows named-pipe security is included in this extension. Next add richer client
-credential management. Any later unsigned transaction proposal needs a separate
+Windows named-pipe and pairing-file security are included. Any later unsigned
+transaction proposal needs a separate
 capability, scoped operation ID and trusted desktop review. Signing remains with
 existing user/Keychain mechanisms; it cannot be an extension of this read dispatch.
 
@@ -256,10 +277,12 @@ build flag and bounded topology limits; that report is never live consent.
    generation, live grant and exact review snapshot must all pass. There is no
    approve/install/sign/broadcast MCP operation. This first demo accepts only an
    external loopback Bitcoin Core/Knots RPC on port 28443 and no Connect/provider
-   enrollment. Creating the Vault consumes/revokes the proposal grant.
-6. Completion returns to the launcher. Unlock afresh and approve a new read
-   grant to inspect the installed policy/balance. Old proposal IDs/tokens never
-   become wallet-read authority. Lock before admission discards setup; lock
+   enrollment. Creating consumes the current proposal runtime authorization,
+   without deleting persistent client pairing.
+6. Completion returns to the launcher. Unlock afresh. A proposal-only pairing
+   stays registered but does not gain permission to read the new Vault. Explicitly
+   pair a read-scoped client to inspect its policy/balance; future setup workflow
+   orchestration is a later slice. Old proposal IDs never become wallet-read authority. Lock before admission discards setup; lock
    after admission hides setup content while admitted native completion may
    finish. A grant revocation cannot undo already-admitted durable work.
 

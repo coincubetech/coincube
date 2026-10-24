@@ -25,7 +25,7 @@ use tokio::{
     task::JoinSet,
 };
 #[cfg(windows)]
-mod windows;
+pub(crate) mod windows;
 
 /// Maximum serialized request frame size, including the newline, in bytes.
 pub const REQUEST_LIMIT: usize = 4096;
@@ -54,7 +54,7 @@ pub struct Grant {
     session_valid: Box<dyn Fn() -> bool + Send + Sync>,
     credential: String,
     scope: Scope,
-    expires: Instant,
+    expires: Option<Instant>,
     revoked: AtomicBool,
     native_admission: Mutex<()>,
     /// Completed successful operations; this is not a connected-client count.
@@ -89,10 +89,42 @@ impl Grant {
             session_valid: Box::new(|| true),
             credential: bytes.iter().map(|b| format!("{b:02x}")).collect(),
             scope,
-            expires: Instant::now() + duration,
+            expires: Some(Instant::now() + duration),
             revoked: AtomicBool::new(false),
             native_admission: Mutex::new(()),
             successful_calls: AtomicU64::new(0),
+        }
+    }
+    /// Restore an explicitly paired read client. The trusted host must enforce
+    /// live session identity; durable pairing is never an unattended unlock.
+    pub fn paired(
+        wallet_id: String,
+        capabilities: [bool; 3],
+        credential: String,
+        valid: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        if credential.len() != 64 || !credential.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(io::Error::other("invalid pairing credential"));
+        }
+        let mut grant = Self::new(wallet_id, capabilities, Duration::from_secs(1));
+        grant.credential = credential;
+        grant.expires = None;
+        Ok(grant.with_session_guard(valid))
+    }
+    /// Restore a preparation-only pairing without preserving proposal approval.
+    pub fn paired_proposals(
+        credential: String,
+        valid: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        let mut grant = Self::paired(String::new(), [false; 3], credential, valid)?;
+        grant.scope = Scope::Proposal;
+        Ok(grant)
+    }
+    async fn wait_expiry(&self) {
+        if let Some(expiry) = self.expires {
+            tokio::time::sleep_until(tokio::time::Instant::from_std(expiry)).await;
+        } else {
+            std::future::pending::<()>().await;
         }
     }
     /// Bind authorization to the desktop's live unlocked-session generation.
@@ -120,7 +152,7 @@ impl Grant {
             .map_err(|_| Error::AccessDenied)?;
         if !matches!(self.scope, Scope::Proposal)
             || self.revoked.load(Ordering::SeqCst)
-            || Instant::now() >= self.expires
+            || self.expires.is_some_and(|expiry| Instant::now() >= expiry)
         {
             return Err(Error::AccessDenied);
         }
@@ -129,7 +161,7 @@ impl Grant {
         let value = admit()?;
         // A slow native validation/metadata fsync cannot extend the grant's
         // monotonic lifetime. No wallet operation may begin on this error.
-        if Instant::now() >= self.expires {
+        if self.expires.is_some_and(|expiry| Instant::now() >= expiry) {
             self.revoked.store(true, Ordering::SeqCst);
             return Err(Error::AccessDenied);
         }
@@ -140,7 +172,7 @@ impl Grant {
     /// Require an unrevoked grant, unexpired lifetime and valid desktop session.
     pub fn active(&self) -> bool {
         !self.revoked.load(Ordering::SeqCst)
-            && Instant::now() < self.expires
+            && self.expires.is_none_or(|expiry| Instant::now() < expiry)
             && (self.session_valid)()
     }
     /// Check live authorization, constant-time credential equality, scope and input.
@@ -220,10 +252,9 @@ impl Server {
                 return;
             };
             let mut workers = JoinSet::new();
-            let expiry = tokio::time::Instant::from_std(permission.expires);
             loop {
                 tokio::select! {
-                    _ = tokio::time::sleep_until(expiry) => { permission.revoke(); break; }
+                    _ = permission.wait_expiry() => { permission.revoke(); break; }
                     Some(_) = workers.join_next(), if !workers.is_empty() => {}
                     connection = listener.accept(), if workers.len() < 8 => {
                         let Ok((stream, _)) = connection else { permission.revoke(); break; };

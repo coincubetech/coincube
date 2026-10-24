@@ -254,6 +254,7 @@ async fn sdk_proposals_are_state_changing_strict_and_do_not_upgrade_read_access(
     use coincube_mcp::adapter::{Adapter, tools};
     let server = server(Arc::new(Store::default()));
     let adapter = Adapter {
+        pairing: None,
         socket: server.socket.clone(),
         credential: server.grant.credential().into(),
     };

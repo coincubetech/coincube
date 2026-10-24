@@ -27,6 +27,186 @@ use windows_sys::Win32::{
 
 const PREFIX: &str = r"\\.\pipe\tenshu-mcp-";
 
+fn user_sid() -> io::Result<String> {
+    use windows_sys::Win32::Security::{TOKEN_USER, TokenUser};
+    unsafe {
+        let mut token = ptr::null_mut();
+        if OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut token) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let token = OwnedHandle::from_raw_handle(token);
+        let mut size = 0;
+        GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut size,
+        );
+        if size < size_of::<TOKEN_USER>() as u32 || size > 65536 {
+            return Err(io::Error::other("user identity unavailable"));
+        }
+        let mut bytes = vec![0usize; (size as usize).div_ceil(size_of::<usize>())];
+        if GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            bytes.as_mut_ptr().cast(),
+            size,
+            &mut size,
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        sid_text((&*bytes.as_ptr().cast::<TOKEN_USER>()).User.Sid)
+    }
+}
+
+// SAFETY: caller supplies an OS-validated SID that remains alive during conversion.
+unsafe fn sid_text(sid: *mut c_void) -> io::Result<String> {
+    unsafe {
+        let mut text = ptr::null_mut();
+        if ConvertSidToStringSidW(sid, &mut text) == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        let _allocation = LocalAllocation(text.cast());
+        let mut len = 0;
+        while len < 256 && *text.add(len) != 0 {
+            len += 1;
+        }
+        if len == 256 {
+            return Err(io::Error::other("invalid identity"));
+        }
+        String::from_utf16(std::slice::from_raw_parts(text, len))
+            .map_err(|_| io::Error::other("invalid identity"))
+    }
+}
+
+/// Pairing files use the user SID, not a transient logon SID, across restarts.
+pub(crate) fn protect_new_path(path: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Security::Authorization::{SE_FILE_OBJECT, SetNamedSecurityInfoW};
+    use windows_sys::Win32::Security::{
+        ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetSecurityDescriptorOwner,
+        OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
+    };
+    let sid = user_sid()?;
+    let sddl: Vec<u16> = format!("O:{sid}D:P(A;;FA;;;{sid})")
+        .encode_utf16()
+        .chain(Some(0))
+        .collect();
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let mut descriptor = ptr::null_mut();
+        if ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            SDDL_REVISION_1,
+            &mut descriptor,
+            ptr::null_mut(),
+        ) == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        let _allocation = LocalAllocation(descriptor);
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl: *mut ACL = ptr::null_mut();
+        if GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) == 0
+            || present == 0
+            || dacl.is_null()
+        {
+            return Err(io::Error::other("private ACL unavailable"));
+        }
+        let mut owner = ptr::null_mut();
+        if GetSecurityDescriptorOwner(descriptor, &mut owner, &mut defaulted) == 0
+            || owner.is_null()
+        {
+            return Err(io::Error::other("private owner unavailable"));
+        }
+        let error = SetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION
+                | DACL_SECURITY_INFORMATION
+                | PROTECTED_DACL_SECURITY_INFORMATION,
+            owner,
+            ptr::null_mut(),
+            dacl,
+            ptr::null_mut(),
+        );
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+    }
+    check_private_path(path)
+}
+
+pub(crate) fn check_private_path(path: &Path) -> io::Result<()> {
+    use std::os::windows::{ffi::OsStrExt, fs::MetadataExt};
+    use windows_sys::Win32::Security::Authorization::{GetNamedSecurityInfoW, SE_FILE_OBJECT};
+    use windows_sys::Win32::Security::{
+        ACCESS_ALLOWED_ACE, DACL_SECURITY_INFORMATION, GetAce, GetSecurityDescriptorControl,
+        GetSecurityDescriptorDacl, INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, SE_DACL_PROTECTED,
+    };
+    use windows_sys::Win32::Storage::FileSystem::FILE_ALL_ACCESS;
+    if std::fs::symlink_metadata(path)?.file_attributes() & 0x400 != 0 {
+        return Err(io::Error::other("reparse path denied"));
+    }
+    let sid = user_sid()?;
+    let name: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+    unsafe {
+        let (mut descriptor, mut owner) = (ptr::null_mut(), ptr::null_mut());
+        let error = GetNamedSecurityInfoW(
+            name.as_ptr(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | OWNER_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            &mut descriptor,
+        );
+        if error != 0 {
+            return Err(io::Error::from_raw_os_error(error as i32));
+        }
+        let _allocation = LocalAllocation(descriptor);
+        if owner.is_null() || sid_text(owner)? != sid {
+            return Err(io::Error::other("private owner mismatch"));
+        }
+        // Inspect the binary ACL. SDDL is a display format and can render a
+        // well-known account as an alias instead of its numeric SID.
+        let (mut control, mut revision) = (0, 0);
+        let (mut present, mut defaulted) = (0, 0);
+        let mut dacl = ptr::null_mut();
+        if GetSecurityDescriptorControl(descriptor, &mut control, &mut revision) == 0
+            || control & SE_DACL_PROTECTED == 0
+            || GetSecurityDescriptorDacl(descriptor, &mut present, &mut dacl, &mut defaulted) == 0
+            || present == 0
+            || dacl.is_null()
+            || (*dacl).AceCount != 1
+        {
+            return Err(io::Error::other("shared pairing path denied"));
+        }
+        let mut ace = ptr::null_mut();
+        if GetAce(dacl, 0, &mut ace) == 0 || ace.is_null() {
+            return Err(io::Error::other("private ACE unavailable"));
+        }
+        let header = &*ace.cast::<windows_sys::Win32::Security::ACE_HEADER>();
+        // Check the type/size before interpreting the allowed-ACE layout.
+        if header.AceType != 0 || usize::from(header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
+            return Err(io::Error::other("private ACE unavailable"));
+        }
+        let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+        // ACCESS_ALLOWED_ACE_TYPE is zero. Only the owner may access this path.
+        if ace.Header.AceType != 0
+            || u32::from(ace.Header.AceFlags) & INHERIT_ONLY_ACE != 0
+            || ace.Mask != FILE_ALL_ACCESS
+            || sid_text(ptr::addr_of!(ace.SidStart).cast_mut().cast())? != sid
+        {
+            return Err(io::Error::other("shared pairing path denied"));
+        }
+    }
+    Ok(())
+}
+
 struct LocalAllocation(*mut c_void);
 impl Drop for LocalAllocation {
     fn drop(&mut self) {
@@ -142,10 +322,9 @@ pub(super) fn start(reader: Arc<dyn Reader>, grant: Grant) -> io::Result<Server>
     let path = socket.clone();
     let task = tokio::spawn(async move {
         let mut workers = JoinSet::new();
-        let expiry = tokio::time::Instant::from_std(permission.expires);
         loop {
             tokio::select! {
-                _ = tokio::time::sleep_until(expiry) => { permission.revoke(); break; }
+                _ = permission.wait_expiry() => { permission.revoke(); break; }
                 Some(_) = workers.join_next(), if !workers.is_empty() => {}
                 connected = listener.connect(), if workers.len() < 8 => {
                     if connected.is_err() { permission.revoke(); break; }

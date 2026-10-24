@@ -35,17 +35,19 @@ new adapter executable.
 - `tenshu-mcp`: STDIO binary launched by the AI host; one fixed typed request per
   authenticated local IPC connection, no wallet engine, database or AI SDK.
 - Cube Settings → AI access: opt-in, wallet scope and capability selection,
-  expiring access credential, configuration and immediate revocation.
+  persistent client pairing, private configuration and immediate revocation.
 
 MVP supports macOS/Linux/Windows and the embedded Bitcoin Vault daemon only. External
 daemon clients log raw RPC responses at debug level and are excluded; imported
 non-Vault policies, Liquid, Spark and Bitcoin Blake2b are also excluded. Unix sockets live in a randomly created mode-0700
 session directory; no TCP/HTTP listener exists. A 256-bit random bearer secret,
 separate from all wallet/Connect credentials, authenticates each request. Client
-names are display labels, never authentication. The UI issues one client grant
-per unlocked Cube; replacing it revokes the previous grant. Grants expire after
-one hour and are never persisted. Unlock/restart requires fresh consent. Other
-Cubes require separate grants. Windows uses a protected named pipe with logon-session ACLs and server-PID
+names are display labels, never authentication. The UI can pair up to 16 clients
+per Cube with independently selected scopes. Pairing persists until revoked;
+lock/close/backend transitions suspend runtime access. After ordinary unlock,
+fresh session-guarded runtimes resume the same pairing without replacing client
+configuration. Legacy direct-socket grants retain their one-hour lifetime and
+are not upgraded. Other Cubes require separate pairings. Windows uses a protected named pipe with logon-session ACLs and server-PID
 verification (see the extension below); there is no TCP fallback.
 
 ## Trust and threat model
@@ -54,22 +56,65 @@ AI hosts, models, tool arguments and metadata are untrusted. Wallet data may lea
 the device through the host even though this server is local. Consent explicitly
 covers one Vault and selected read capabilities. Credentials belong in private
 host configuration, never prompts or tool responses. Theft of a credential permits
-its scoped reads until expiration/revocation. This does not defend against malware
+its scoped reads while available until revocation (or expiry for legacy grants).
+This does not defend against malware
 running as the user's OS account that can inspect application memory or control
 its UI; filesystem permissions alone are not client authentication.
 
-A non-secret session generation prevents a grant from reviving when the same Cube
-is reopened. Synchronous daemon/SQLite reads run in a bounded blocking pool; the
+A non-secret session generation invalidates every old runtime when the Cube
+locks. Restoring a persistent pairing creates a new runtime after unlock; it
+does not revive a revoked old runtime. Synchronous daemon/SQLite reads run in a bounded blocking pool; the
 worker retains its permit even if its async request times out.
 The desktop gate validates credential, expiry, wallet and capability immediately
 before service access and again before releasing results. Revocation closes the
 listener and cancels queued operations. Lock/close/backend change revokes the
-grant synchronously. A request already delivered to a client cannot be recalled.
+runtime synchronously without deleting pairing. A request already delivered to a client cannot be recalled.
 Requests/responses and concurrency are bounded and reads have deadlines. Generic
 errors contain no daemon messages, descriptors, filesystem paths or wallet
 existence hints. Explicit response DTOs omit seeds, keys, xpubs, descriptors,
 addresses, scripts, labels and PSBTs. Unknown commands cannot reach wallet APIs.
 User-controlled text never controls routing or authorization.
+
+### Persistent pairing storage and reconnect
+
+`app/local_mcp/pairings.rs` stores an authenticated ChaCha20-Poly1305 encrypted
+registry under each network's `mcp-pairings` directory. The dedicated wrapping
+key uses the existing device-secret OS-keystore backend with a separate account
+derived from canonical datadir, chain and Cube identity; it is never the seed,
+PIN or Cube unlock key. Existing ciphertext with a missing/unavailable wrapping
+key is not reset. Context and schema are authenticated; each read pairing also
+pins the exact wallet storage ID and descriptor digest. The real reader checks
+the daemon's chain and descriptor before returning wallet data.
+
+A cross-process exclusive owner lock covers registry mutation and the entire
+runtime endpoint lifetime. Atomic private-file publication gives each client a
+stable non-secret `.endpoint` locator. The companion resolves it for every call;
+it never falls back to a remembered endpoint after errors. Locator permissions,
+ownership and redirected paths are checked before transmitting credentials.
+Windows storage uses a protected user-SID DACL (surviving logon changes); runtime
+pipes retain their narrower logon-SID ACL and OS server-PID check. No TCP listener
+or extra remote trust is introduced.
+
+New pairing is persisted before usable configuration is exposed. Explicit revoke
+stops runtimes first and atomically removes the chosen stored client; other clients
+retain their credentials. A failed client addition rereads and authenticates the
+registry under the same owner lock: exact unchanged storage preserves existing
+clients and reports the add error; the exact intended replacement is accepted
+only after retrying the directory durability barrier. Unreadable or unexpected
+storage, failed durability confirmation, and failed removal/enable-state writes
+stop all runtimes and attempt to invalidate this registry's dedicated wrapping key
+so stale ciphertext cannot restore access. If both storage and keystore invalidation fail, the UI
+explicitly reports that durable revocation is unconfirmed. This error is not a
+successful revoke. Cube deletion and duress wipe remove ciphertext and locators;
+keystore deletion is not required on the critical wipe path.
+
+Proposal pairing stays separate from read scope. Its session-local proposal store
+and one-shot native approval are discarded/consumed as before. Persistent pairing
+does not make drafts durable, auto-renew a consumed proposal in the same runtime,
+or grant reads of a newly created Vault. Those setup workflow extensions are later
+slices. Backup restoration of pairing state and same-user malware are not claimed
+to be rollback-proof; protect the client configuration and use explicit revoke
+or reset when it may have leaked.
 
 ## Tools and semantics
 
