@@ -318,8 +318,12 @@ async fn sign_tx_rejects_unsigned_echo_through_fake_phone() {
         Fingerprint::default(),
         None,
         paired,
-        TEST_DESCRIPTOR.to_string(),
-        coincube_core::chain::ChainId::Regtest,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(
+            TEST_DESCRIPTOR,
+            coincube_core::chain::ChainId::Regtest,
+        )
+        .expect("vault policy"),
+        coincube_gui::dir::CoincubeDirectory::new(std::env::temp_dir()),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     let mut psbt = empty_psbt();
@@ -404,8 +408,9 @@ async fn signer_against_chain_response(
         Fingerprint::default(),
         None,
         paired,
-        TEST_DESCRIPTOR.to_string(),
-        chain,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(TEST_DESCRIPTOR, chain)
+            .expect("vault policy"),
+        coincube_gui::dir::CoincubeDirectory::new(std::env::temp_dir()),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)
