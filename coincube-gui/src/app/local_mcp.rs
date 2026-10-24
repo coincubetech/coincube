@@ -67,6 +67,9 @@ pub enum Message {
     /// Explicit separate consent for an empty Regtest Cube's proposal session.
     #[cfg(feature = "mcp-proposals")]
     Proposals(bool),
+    /// Explicit public-key assembly consent, separate from topology-only access.
+    #[cfg(feature = "mcp-proposals")]
+    Creation(bool),
     /// Native-only transition into the existing key selection builder.
     #[cfg(feature = "mcp-proposals")]
     ReviewProposal,
@@ -85,6 +88,8 @@ pub struct Settings {
     failed: bool,
     #[cfg(feature = "mcp-proposals")]
     proposals_allowed: bool,
+    #[cfg(feature = "mcp-proposals")]
+    creation_allowed: bool,
     #[cfg(feature = "mcp-proposals")]
     proposals: Option<Arc<wire::proposal::Store>>,
     #[cfg(any(unix, windows))]
@@ -129,6 +134,10 @@ impl Settings {
                         .join(", ")
                 }
                 pairings::Scope::Proposal => "Regtest wallet proposals only".into(),
+                pairings::Scope::WalletCreation => {
+                    "Regtest wallet preparation with public keys; native creation approval required"
+                        .into()
+                }
             };
             content = content.push(
                 column![
@@ -164,9 +173,19 @@ impl Settings {
                 .and_then(|s| s.pending().ok())
                 .flatten()
             {
-                content = content.push(text(format!("{}: 3-of-5 primary, recovery {}-of-{} after {} blocks. Keys are not yet selected.", client.name,
-                    proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks)))
-                    .push(button("Review proposal and select keys in Tenshu").on_press(msg(Message::ReviewPairedProposal(client.id.clone()))));
+                let keys_ready = runtime
+                    .and_then(|v| v.proposals.as_ref())
+                    .is_some_and(|store| {
+                        store
+                            .creation_input(&proposal.proposal_id)
+                            .ok()
+                            .flatten()
+                            .is_some()
+                    });
+                content = content.push(text(format!("{}: 3-of-5 primary, recovery {}-of-{} after {} blocks. {}", client.name,
+                    proposal.topology.recovery.quorum.threshold, proposal.topology.recovery.quorum.key_count, proposal.topology.recovery.relative_delay_blocks,
+                    if keys_ready { "Public keys and descriptor validated. Device ownership and backups still require your verification." } else { "Keys are not yet selected." })))
+                    .push(button(if keys_ready { "Review prepared wallet in Tenshu" } else { "Review proposal and select keys in Tenshu" }).on_press(msg(Message::ReviewPairedProposal(client.id.clone()))));
             }
         }
         content.into()
@@ -275,8 +294,11 @@ impl Settings {
             let cube = cube_id.to_owned();
             let guard = move || super::session::generation_for(&cube) == Some(generation);
             #[cfg(feature = "mcp-proposals")]
-            let proposals = matches!(client.scope, pairings::Scope::Proposal)
-                .then(|| Arc::new(wire::proposal::Store::default()));
+            let proposals = matches!(
+                client.scope,
+                pairings::Scope::Proposal | pairings::Scope::WalletCreation
+            )
+            .then(|| Arc::new(wire::proposal::Store::default()));
             let built: Option<(Arc<dyn wire::Reader>, wire::ipc::Grant)> = match &client.scope {
                 pairings::Scope::Read {
                     wallet: expected_wallet,
@@ -323,6 +345,24 @@ impl Settings {
                             .map(|grant| {
                                 let reader: Arc<dyn wire::Reader> =
                                     proposals.as_ref().expect("proposal store").clone();
+                                (reader, grant)
+                            })
+                    }
+                    #[cfg(not(feature = "mcp-proposals"))]
+                    {
+                        None
+                    }
+                }
+                pairings::Scope::WalletCreation if proposal_supported => {
+                    #[cfg(feature = "mcp-proposals")]
+                    {
+                        wire::ipc::Grant::paired_creation(client.credential.clone(), guard)
+                            .ok()
+                            .map(|grant| {
+                                let reader: Arc<dyn wire::Reader> =
+                                    Arc::new(crate::installer::creation::CreationReader::new(
+                                        proposals.as_ref().expect("creation store").clone(),
+                                    ));
                                 (reader, grant)
                             })
                     }
@@ -395,13 +435,17 @@ impl Settings {
             }
             #[cfg(feature = "mcp-proposals")]
             (None, None)
-                if self.proposals_allowed
+                if (self.proposals_allowed || self.creation_allowed)
                     && self
                         .pairing_location
                         .as_ref()
                         .is_some_and(|v| v.chain_matches(crate::chain::ChainId::Regtest)) =>
             {
-                pairings::Scope::Proposal
+                if self.creation_allowed {
+                    pairings::Scope::WalletCreation
+                } else {
+                    pairings::Scope::Proposal
+                }
             }
             _ => return,
         };
@@ -489,6 +533,17 @@ impl Settings {
             Message::Proposals(value) => {
                 self.revoke_legacy();
                 self.proposals_allowed = value;
+                if value {
+                    self.creation_allowed = false;
+                }
+            }
+            #[cfg(feature = "mcp-proposals")]
+            Message::Creation(value) => {
+                self.revoke_legacy();
+                self.creation_allowed = value;
+                if value {
+                    self.proposals_allowed = false;
+                }
             }
             Message::Revoke => self.revoke(),
             Message::Pair => {
@@ -748,9 +803,9 @@ impl Settings {
 impl Settings {
     fn proposal_view(&self) -> Element<'_, view::Message> {
         let msg = |m| view::Message::LocalMcp(m);
-        let mut content = column![h3("AI wallet proposals — Regtest experiment"),
-            text("A trusted local client may prepare one 3-of-5 topology with explicitly chosen recovery. It cannot choose keys, approve, create, sign or send coins. Your AI provider may receive the topology."),
-            text("Choose and verify actual keys in Tenshu. Review the compiled descriptor and authorize creation here. Pairing survives lock and restart; each proposal session ends on lock/close or when creation is admitted. Wallet reads require their own permission."),
+        let mut content = column![h3("AI wallet preparation — Regtest experiment"),
+            text("Choose topology-only access, or allow the assistant to assemble public account keys for a 3-of-5 wallet with explicitly chosen recovery. Your AI provider may receive the public keys you give it. Neither permission allows secrets, signing, sending coins or creation approval."),
+            text("Tenshu validates the descriptor and fills its builder. You verify keys on the source devices, handle hardware, seed backups and PIN/passkey steps, and authorize creation here. Pairing survives lock and restart; each draft ends on lock/close or creation admission. Wallet reads require their own permission."),
             checkbox(self.enabled).label("Enable AI access for this Cube").on_toggle(move |v| msg(Message::Enable(v)))].spacing(16);
         if self.enabled {
             content = content
@@ -764,8 +819,13 @@ impl Settings {
                         .on_toggle(move |v| msg(Message::Proposals(v))),
                 )
                 .push(
-                    button("Pair proposal client until revoked").on_press_maybe(
-                        (self.proposals_allowed && !self.client_name.trim().is_empty())
+                    checkbox(self.creation_allowed)
+                        .label("Allow this client to prepare a Regtest wallet using public account keys")
+                        .on_toggle(move |v| msg(Message::Creation(v))),
+                )
+                .push(
+                    button("Pair setup client until revoked").on_press_maybe(
+                        ((self.proposals_allowed || self.creation_allowed) && !self.client_name.trim().is_empty())
                             .then(|| msg(Message::Pair)),
                     ),
                 );
@@ -852,7 +912,9 @@ impl VaultReader {
     async fn read_wallet(&self, request: wire::Request) -> Result<wire::Response, wire::Error> {
         if matches!(
             &request,
-            wire::Request::PrepareProposal(_) | wire::Request::Proposal(_)
+            wire::Request::PrepareProposal(_)
+                | wire::Request::PrepareCreation(_)
+                | wire::Request::Proposal(_)
         ) {
             return Err(wire::Error::AccessDenied);
         }
@@ -874,9 +936,9 @@ impl VaultReader {
             return Err(wire::Error::Unavailable);
         }
         match request {
-            wire::Request::PrepareProposal(_) | wire::Request::Proposal(_) => {
-                Err(wire::Error::AccessDenied)
-            }
+            wire::Request::PrepareProposal(_)
+            | wire::Request::PrepareCreation(_)
+            | wire::Request::Proposal(_) => Err(wire::Error::AccessDenied),
             wire::Request::List(_) => Ok(wire::Response::List(wire::WalletList {
                 wallets: vec![wire::WalletMetadata {
                     wallet_id: self.wallet_id.clone(),
@@ -1732,6 +1794,113 @@ mod tests {
 #[cfg(all(test, feature = "mcp-proposals"))]
 mod proposal_consent_tests {
     use super::*;
+    #[test]
+    fn proposal_creation_pairing_restores_scope_but_never_old_drafts() {
+        let _guard = crate::app::session::test_guard();
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let root = crate::installer::proposal::tests::TestDir::new();
+            std::fs::create_dir(root.path().join("regtest")).unwrap();
+            let cube = "public-key-pairing-fixture";
+            let location =
+                pairings::Location::new(root.path(), crate::chain::ChainId::Regtest, cube).unwrap();
+            let mut settings = Settings {
+                enabled: true,
+                proposals_allowed: true,
+                pairing_location: Some(location.clone()),
+                pairing_store: Some(
+                    pairings::Store::open(
+                        location.clone(),
+                        zeroize::Zeroizing::new([46; 32]),
+                        true,
+                    )
+                    .unwrap(),
+                ),
+                ..Settings::default()
+            };
+            crate::app::session::open_without_pin(cube);
+            let refresh = |settings: &mut Settings| {
+                settings.ensure_pairings(PairingContext {
+                    root: root.path(),
+                    chain: crate::chain::ChainId::Regtest,
+                    cube_id: cube,
+                    wallet: None,
+                    daemon: None,
+                    supported: false,
+                    proposal_supported: true,
+                })
+            };
+            settings.update(Message::Creation(true), None, None, true, cube);
+            assert!(!settings.proposals_allowed);
+            settings.update(
+                Message::ClientName("Creation fixture".into()),
+                None,
+                None,
+                true,
+                cube,
+            );
+            settings.update(Message::Pair, None, None, true, cube);
+            refresh(&mut settings);
+            assert_eq!(settings.paired.len(), 1);
+            let credential = settings.paired[0].server.grant.credential().to_owned();
+            let socket = settings.paired[0].server.socket.clone();
+            let input = crate::installer::creation::tests::input();
+            let wire::Response::Proposal(first) = wire::ipc::call(
+                &socket,
+                &credential,
+                wire::Request::PrepareCreation(input.clone()),
+            )
+            .await
+            .unwrap() else {
+                panic!("validated proposal")
+            };
+            assert!(first.descriptor_validated);
+            assert!(
+                wire::ipc::call(&socket, &credential, wire::Request::List(wire::Empty {}))
+                    .await
+                    .is_err()
+            );
+            crate::app::session::close();
+            assert!(wire::ipc::call(
+                &socket,
+                &credential,
+                wire::Request::PrepareCreation(input.clone())
+            )
+            .await
+            .is_err());
+            settings.revoke();
+            crate::app::session::open_without_pin(cube);
+            refresh(&mut settings);
+            assert_eq!(settings.paired.len(), 1);
+            let socket = &settings.paired[0].server.socket;
+            assert_eq!(settings.paired[0].server.grant.credential(), credential);
+            assert!(wire::ipc::call(
+                socket,
+                &credential,
+                wire::Request::Proposal(wire::proposal::ProposalInput {
+                    proposal_id: first.proposal_id.clone()
+                })
+            )
+            .await
+            .is_err());
+            let wire::Response::Proposal(second) =
+                wire::ipc::call(socket, &credential, wire::Request::PrepareCreation(input))
+                    .await
+                    .unwrap()
+            else {
+                panic!("fresh validated proposal")
+            };
+            assert_ne!(first.proposal_id, second.proposal_id);
+            drop(settings);
+            let stored =
+                pairings::Store::open(location, zeroize::Zeroizing::new([46; 32]), false).unwrap();
+            assert!(matches!(
+                stored.clients()[0].scope,
+                pairings::Scope::WalletCreation
+            ));
+            drop(stored);
+            crate::app::session::close();
+        });
+    }
     #[test]
     fn pairing_management_and_failed_add_preserve_other_clients_pending_proposals() {
         let _guard = crate::app::session::test_guard();

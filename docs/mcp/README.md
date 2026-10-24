@@ -299,3 +299,64 @@ Cube Recovery Kit encryption key is not a Vault signing key. Do not label a
 manually entered key as phone-attested, or claim that a backup/recovery rehearsal
 passed because a key or descriptor exists. Phone/Connect-dependent setup is a
 separate manual checkpoint when unavailable in the isolated offline demo.
+
+
+## AI-assisted wallet preparation (Regtest experiment)
+
+With the `mcp-proposals` GUI feature and matching `native-proposals` companion,
+a separately paired client can call `tenshu_prepare_wallet_creation`. It assembles
+one immutable 3-of-5 primary policy with an explicitly chosen timed recovery path
+and public account-key assignments. The desktop compiles the actual P2WSH
+descriptor using the existing wallet engine and fills the native builder. It does
+not create a wallet or assert that devices, independent custody or backups were
+verified.
+
+In an unlocked empty Regtest Cube, open AI access, select **Allow this client to
+prepare a Regtest wallet using public account keys**, and choose **Pair setup
+client until revoked**. This is a distinct durable scope. Existing balance/history/
+policy and topology-only clients do not gain this permission. Each client still
+needs the user's ordinary Cube unlock; drafts and approval do not survive lock.
+
+Arguments are a JSON object with `request_id`, `topology` and `keys`:
+
+```json
+{
+  "request_id": "inheritance-demo-1",
+  "topology": {
+    "primary": {"threshold": 3, "key_count": 5},
+    "recovery": {
+      "quorum": {"threshold": 2, "key_count": 3},
+      "relative_delay_blocks": 144
+    }
+  },
+  "keys": {
+    "primary": ["[fingerprint]tpub…", "[fingerprint]tpub…", "[fingerprint]tpub…", "[fingerprint]tpub…", "[fingerprint]tpub…"],
+    "recovery": ["[fingerprint]tpub…", "[fingerprint]tpub…", "[fingerprint]tpub…"]
+  }
+}
+```
+
+Replace the placeholders with public account xpubs supplied for this setup. Only
+origin-bearing test-network account keys without derivation suffixes or wildcards
+are accepted; the origin path must match the account depth. All assignments need
+distinct fingerprints and underlying account keys in this first slice. Distinct
+fingerprints are not proof of separate ownership. Private keys, seed phrases,
+PINs, arbitrary descriptors, filesystem paths and network overrides are not inputs.
+No hardware command, secret access or remote request is performed by this tool.
+
+The returned minimized proposal identifies the topology and native descriptor
+validation result, without returning xpubs or descriptors. Exact retries return
+the same proposal; changed keys, topology or retry identity conflict. Use
+`tenshu_get_wallet_proposal` with its opaque ID to inspect that session's state.
+Then open **Review prepared wallet in Tenshu**. The ordinary builder is populated
+with the public keys and manual/unverified provenance. The user verifies hardware
+and fingerprints, handles seed/backup/PIN/passkey steps, reviews the exact
+configuration, and chooses **Create this Regtest Vault** in Tenshu. Actual key
+changes require a fresh proposal; aliases and other native configuration are
+bound by the final native review. No MCP call can approve creation or skip these
+steps. The existing local node restriction and once-only creation admission apply.
+
+Creation consumes the proposal session and does not grant read access to the new
+Vault. Wallet reads require their own explicit pairing scope. This experimental
+acceptance is separate from hardware-device, named-client and production-release
+validation; it does not enable production wallet creation.

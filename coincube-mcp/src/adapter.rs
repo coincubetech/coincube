@@ -65,6 +65,10 @@ pub fn tools() -> Vec<Tool> {
             "tenshu_get_wallet_proposal",
             "Read only the current preparation grant's proposal. A topology draft is not a validated descriptor or created wallet.",
         ),
+        tool::<proposal::CreationInput, proposal::Proposal>(
+            "tenshu_prepare_wallet_creation",
+            "Assemble one immutable Regtest 3-of-5 wallet proposal from origin-bearing public account xpubs and explicitly chosen recovery. Requires separate wallet-preparation pairing. Tenshu validates the actual descriptor and fills its builder. The user must verify hardware/keys/backups and authorize creation in Tenshu. Never supply seeds, private keys or PINs; never creates a wallet itself.",
+        ).annotate(ToolAnnotations::new().read_only(false).destructive(false).idempotent(true).open_world(false)),
     ]
 }
 /// Decode typed arguments while withholding raw serialization error details.
@@ -95,6 +99,7 @@ impl Adapter {
             "tenshu_get_transactions" => crate::Request::History(parse(arguments)?),
             "tenshu_get_wallet_policy_summary" => crate::Request::Policy(parse(arguments)?),
             "tenshu_prepare_wallet_proposal" => crate::Request::PrepareProposal(parse(arguments)?),
+            "tenshu_prepare_wallet_creation" => crate::Request::PrepareCreation(parse(arguments)?),
             "tenshu_get_wallet_proposal" => crate::Request::Proposal(parse(arguments)?),
             _ => return Err(ErrorData::invalid_params("unknown_tool", None)),
         };

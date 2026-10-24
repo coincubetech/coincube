@@ -80,6 +80,49 @@ impl PrepareInput {
     }
 }
 
+/// Public account-key assignments supplied by an explicitly paired setup client.
+/// Device ownership and backups must still be verified by the user in Tenshu.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct PublicKeys {
+    /// Five origin-bearing test-network account xpubs, without suffixes.
+    #[schemars(length(min = 5, max = 5))]
+    pub primary: Vec<String>,
+    /// Account xpubs for the explicitly chosen recovery quorum.
+    #[schemars(length(min = 1, max = 5))]
+    pub recovery: Vec<String>,
+}
+
+/// Prepare an actual key-bound policy, never approve or install a wallet.
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CreationInput {
+    /// Client-local immutable retry identity, not a path or credential.
+    #[schemars(length(min = 1, max = 64), regex(pattern = "^[A-Za-z0-9_-]+$"))]
+    pub request_id: String,
+    /// The same bounded Regtest topology as the initial proposal experiment.
+    pub topology: Topology,
+    /// Public account keys only. Native parsing and compilation are mandatory.
+    pub keys: PublicKeys,
+}
+impl CreationInput {
+    /// Bound allocations/work independently of the host's JSON schema checks.
+    pub fn valid(&self) -> bool {
+        opaque_input(&self.request_id)
+            && self.topology.valid()
+            && self.keys.primary.len() == 5
+            && self.keys.recovery.len() == usize::from(self.topology.recovery.quorum.key_count)
+            && self
+                .keys
+                .primary
+                .iter()
+                .chain(&self.keys.recovery)
+                .all(|key| {
+                    !key.is_empty() && key.len() <= 256 && key.bytes().all(|b| b.is_ascii_graphic())
+                })
+    }
+}
+
 /// Read only a proposal returned by the current preparation grant.
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -128,6 +171,7 @@ pub struct Proposal {
 struct Draft {
     input: PrepareInput,
     proposal: Proposal,
+    creation: Option<CreationInput>,
 }
 struct State {
     revoked: bool,
@@ -171,7 +215,7 @@ impl Store {
             return Err(Error::InvalidInput);
         }
         if let Some(draft) = &state.draft {
-            return if draft.input == input {
+            return if draft.creation.is_none() && draft.input == input {
                 Ok(draft.proposal.clone())
             } else {
                 Err(Error::ProposalConflict)
@@ -191,8 +235,68 @@ impl Store {
         state.draft = Some(Draft {
             input,
             proposal: proposal.clone(),
+            creation: None,
         });
         Ok(proposal)
+    }
+
+    /// Only the trusted desktop supplies the actual descriptor validator.
+    /// Validation and immutable insertion share the draft lock. No wire field
+    /// can assert that compilation, device verification or approval succeeded.
+    pub fn prepare_creation(
+        &self,
+        input: CreationInput,
+        validate: impl FnOnce(&CreationInput) -> Result<(), Error>,
+    ) -> Result<Proposal, Error> {
+        let mut state = self.state.lock().map_err(|_| Error::Unavailable)?;
+        if state.revoked {
+            return Err(Error::AccessDenied);
+        }
+        if !input.valid() {
+            return Err(Error::InvalidInput);
+        }
+        if let Some(draft) = &state.draft {
+            return if draft.creation.as_ref() == Some(&input) {
+                Ok(draft.proposal.clone())
+            } else {
+                Err(Error::ProposalConflict)
+            };
+        }
+        validate(&input)?;
+        let mut random = [0u8; 16];
+        rand::rngs::OsRng.fill_bytes(&mut random);
+        let proposal = Proposal {
+            proposal_id: random.iter().map(|b| format!("{b:02x}")).collect(),
+            revision: 1,
+            network: "regtest".into(),
+            script_type: "p2wsh".into(),
+            topology: input.topology,
+            state: ProposalState::ReadyForNativeReview,
+            descriptor_validated: true,
+        };
+        state.draft = Some(Draft {
+            input: PrepareInput {
+                request_id: input.request_id.clone(),
+                topology: input.topology,
+            },
+            proposal: proposal.clone(),
+            creation: Some(input),
+        });
+        Ok(proposal)
+    }
+
+    /// Native-only projection for the builder. Never returned through MCP.
+    pub fn creation_input(&self, id: &str) -> Result<Option<CreationInput>, Error> {
+        let state = self.state.lock().map_err(|_| Error::Unavailable)?;
+        if state.revoked {
+            return Err(Error::AccessDenied);
+        }
+        state
+            .draft
+            .as_ref()
+            .filter(|draft| draft.proposal.proposal_id == id)
+            .map(|draft| draft.creation.clone())
+            .ok_or(Error::AccessDenied)
     }
 
     /// Native inbox projection. It contains only the same minimized public DTO.

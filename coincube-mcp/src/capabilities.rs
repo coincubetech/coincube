@@ -95,8 +95,13 @@ pub struct ProposalSupport {
     pub max_recovery_keys: u8,
     /// Relative positive delay in blocks, not a guaranteed calendar duration.
     pub max_relative_delay_blocks: u16,
-    /// Real keys are selected in the trusted Tenshu builder, never MCP args.
+    /// Whether every proposal requires manual public-key entry in Tenshu.
+    /// False when separately consented public-key assembly is supported.
     pub native_key_selection_required: bool,
+    /// A separately paired setup client can supply public account-key assignments.
+    pub public_key_assembly: bool,
+    /// Compilation never verifies physical devices, custody or backup possession.
+    pub manual_key_verification_required: bool,
     /// Actual descriptor review and creation approval happen only inside Tenshu.
     pub native_creation_authorization_required: bool,
     /// No automated assertion of key ownership or a successful backup rehearsal.
@@ -122,7 +127,9 @@ impl Capabilities {
                 recovery_required: true,
                 max_recovery_keys: 5,
                 max_relative_delay_blocks: 65535,
-                native_key_selection_required: true,
+                native_key_selection_required: false,
+                public_key_assembly: true,
+                manual_key_verification_required: true,
                 native_creation_authorization_required: true,
                 key_or_backup_verification: "manual_required".into(),
                 owner_recovery_key_is_vault_signer: false,

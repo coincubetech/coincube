@@ -94,6 +94,8 @@ pub(super) enum Scope {
         capabilities: [bool; 3],
     },
     Proposal,
+    /// Separately consented public-key assembly; never native creation approval.
+    WalletCreation,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
