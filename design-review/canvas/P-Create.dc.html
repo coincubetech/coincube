@@ -756,10 +756,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["network","cube","passkey","backup","register","vaultType","vaultIntro","keys","backend","alias","done"],"default":"network","section":"Review"},"network":{"editor":"enum","options":["bitcoin","blake2b","testnet4","signet","regtest","blake2bTestnet4"],"default":"bitcoin","section":"Review"},"developerMode":{"editor":"boolean","default":false,"section":"Review"},"blake2bAccess":{"editor":"enum","options":["notGranted","grantedBetaOff","grantedBetaOn"],"default":"grantedBetaOff","section":"Review"},"unlockMethod":{"editor":"enum","options":["pin","passkey"],"default":"pin","section":"Review"},"backupChoice":{"editor":"enum","options":["choose","phrase","verify","kit","saving","later"],"default":"choose","section":"Review"},"vaultTemplate":{"editor":"enum","options":["none","simple","expanding","multisigInheritance","multisigBackup","expandingBackup","custom"],"default":"simple","section":"Review"},"backend":{"editor":"enum","options":["connect","advanced","local","installing","own"],"default":"connect","section":"Review"},"error":{"editor":"enum","options":["none","name","pinIncomplete","pinConfirm","pinMismatch","limit","passkey","words","kitPassword","kitSignedOut","kitFailed","noBackupAck","register","keys","node","download"],"default":"none","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p);
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { lv: null };
   }
   renderVals() {
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage
     let DEV = false; try { DEV = localStorage.getItem('tenshu.proto.dev') === '1'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
@@ -986,7 +988,7 @@ class Component extends DCLogic {
     ].concat(nodeRow ? [nodeRow] : []).map((r) => ({ k: r[0], v: r[1], tone: r[2] }));
 
     return {
-      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      themeClass: this.props.forceTheme ? (this.props.forceTheme === 'light' ? 'light' : '') : ((THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : ''),
       motionClass: P.reducedMotion ? 'reduced' : '',
       steps, cubeName,
       netName: N.label, netIsB2b: b2b && !N.test, netNotB2b: !(b2b && !N.test), netHasTag: !!N.tag, b2bFam: b2b, notB2bFam: !b2b, netTag: N.tag, netTagCls: N.test ? 'test' : 'b2b',

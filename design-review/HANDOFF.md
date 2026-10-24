@@ -6,8 +6,9 @@ Read this file first, then the review doc, then the inventory.
 
 | What | Where |
 | --- | --- |
-| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v86) |
-| Artboard sources (30 linked screens, plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index in `canvas/canvas.json` |
+| Live prototype (clickable, needs a signed-in claude.ai browser) | https://claude.ai/artifact/4DkSWQshpyXVu2kVrbneRz (canvas v113) |
+| Exported screenshots of every screen, dark and light (open without a browser session) | `screens/dark/`, `screens/light/`, index in `screens/README.md` |
+| Artboard sources (35 linked screens plus their light twins, plain HTML + CSS + a small script each) | `canvas/*.dc.html`, index in `canvas/canvas.json` |
 | Earlier exploration boards the prototype was distilled from (superseded) | `archive/explorations/` |
 | Every decision Robert made, in order, with reasons | `tenshu-launcher-and-settings-review.md` |
 | Feature coverage matrix (88 rows: existing feature → screen) | `tenshu-feature-inventory.md` |
@@ -24,8 +25,11 @@ Precedence when sources disagree: review doc > artboard source > brief.
   per-screen state. `data-props` on that script lists the review "levers" (the
   states Robert reviewed). `{{ holes }}` are filled from `renderVals()`.
 - The files reference `./support.js` and the Claude Design runtime, which are not
-  in this repo. They do not render standalone. Use the live link for pixels and the
-  files for exact copy, spacing, colours and state logic.
+  in this repo. They do not render standalone. Use `screens/` (or the live link)
+  for pixels and the files for exact copy, spacing, colours and state logic. Each
+  screenshot shows the board's default state with the device settings at their
+  defaults (Dark, Developer mode off, Bitcoin Blake2b off, Launcher style Cubes);
+  other states are levers in the source.
 - The canvas holds only the linked prototype, in six rows: Launcher & account;
   Create, restore, delete; Inside a Cube; Vault tools & signing; Settings &
   protection; Marketplace. Every link stays inside this set. The earlier
