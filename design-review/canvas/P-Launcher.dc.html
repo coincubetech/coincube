@@ -649,6 +649,8 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 class Component extends DCLogic {
   constructor(p) {
     super(p);
+    // prototype-only: the player keeps this artboard mounted; re-render when App preferences changes a device setting
+    try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); window.addEventListener('focus', bump); document.addEventListener('visibilitychange', bump); } catch (e) {}
     const lever = (this.props && this.props.startPhase) || 'browse';
     // lever = the startPhase value the current state was made under; when the lever changes, it wins (Everyday selected)
     this.state = { filter: 'all', networkMenu: false, selected: 1, phase: lever, method: 'pin', lever: lever, prev: null, handoff: false, hideBalances: false, keyMode: 'closed' };

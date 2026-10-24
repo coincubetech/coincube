@@ -431,7 +431,7 @@ class Component extends DCLogic {
 
     // the theme lever acts as the OS setting; System follows it
     const effTheme = s.appearance === 'system' ? L.os : s.appearance;
-    try { localStorage.setItem('tenshu.proto.launcher', s.style === 'list' ? 'list' : 'cubes'); } catch (e) {}
+    try { const want = s.style === 'list' ? 'list' : 'cubes'; if (localStorage.getItem('tenshu.proto.launcher') !== want) { localStorage.setItem('tenshu.proto.launcher', want); window.dispatchEvent(new CustomEvent('tenshu-proto')); } } catch (e) {}
     const reduced = s.motion === 'reduced' || (s.motion === 'system' && L.osReduced);
 
     const SECS = [
@@ -492,9 +492,9 @@ class Component extends DCLogic {
       showDeveloper: sec === 'Developer',
       dev: !!s.dev,
       devWord: s.dev ? 'On' : 'Off',
-      toggleDev: () => { try { if (s.dev) localStorage.removeItem('tenshu.proto.dev'); else localStorage.setItem('tenshu.proto.dev', '1'); } catch (e) {} go({ dev: !s.dev }); },
+      toggleDev: () => { try { if (s.dev) localStorage.removeItem('tenshu.proto.dev'); else localStorage.setItem('tenshu.proto.dev', '1'); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} go({ dev: !s.dev }); },
       b2b: B2B, b2bWord: B2B ? 'On' : 'Off',
-      toggleB2b: () => { try { if (B2B) localStorage.removeItem('tenshu.proto.b2b'); else localStorage.setItem('tenshu.proto.b2b', '1'); } catch (e) {} go({}); },
+      toggleB2b: () => { try { if (B2B) localStorage.removeItem('tenshu.proto.b2b'); else localStorage.setItem('tenshu.proto.b2b', '1'); window.dispatchEvent(new CustomEvent('tenshu-proto')); } catch (e) {} go({}); },
       showDiagnostics: sec === 'Diagnostics',
       copied: !!s.copied,
       copySummary: () => go({ copied: true }),
