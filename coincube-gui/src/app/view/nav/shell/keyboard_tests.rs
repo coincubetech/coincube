@@ -712,6 +712,7 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
                 ..ShellState::default()
             };
             for (case, state, target) in [
+                ("launcher-return", ShellState::default(), LAUNCHER_RETURN_ID),
                 ("switcher", ShellState::default(), CUBE_SWITCHER_ID),
                 ("settings", ShellState::default(), SETTINGS_ID),
                 ("lock-cancel", review, CUBE_LOCK_CANCEL_ID),
@@ -747,6 +748,14 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
                     .find(|(id, _)| id == &Id::new(target))
                     .unwrap()
                     .1;
+                assert!(
+                    control.y >= 4.0,
+                    "{case} top focus ring clips at {width}x{height} {mode:?}",
+                    case = case,
+                    width = width,
+                    height = height,
+                    mode = mode
+                );
                 let expected_sidebar = if width == 1024 {
                     COMPACT_WIDTH
                 } else {
@@ -810,6 +819,144 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
                     image::save_buffer(
                         std::path::Path::new(&directory).join(format!(
                             "tenshu-keyboard-focus-{case}-{mode:?}-{width}x{height}.png"
+                        )),
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn selected_successor_does_not_paint_over_focused_nav_ring() {
+    load_fonts();
+    for (mode, theme) in [
+        (
+            coincube_ui::theme::palette::ThemeMode::Dark,
+            theme::Theme::dark(),
+        ),
+        (
+            coincube_ui::theme::palette::ThemeMode::Light,
+            theme::Theme::light(),
+        ),
+    ] {
+        for (width, height) in [(1024, 768), (1440, 900)] {
+            let mut ctx = fixture_context();
+            ctx.theme_mode = mode;
+            for (case, menu, focused_id) in [
+                (
+                    "backup-after-activity",
+                    Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery)),
+                    "tenshu.shell.nav.Activity",
+                ),
+                (
+                    "vault-after-spark",
+                    Menu::Vault(VaultSubMenu::Overview),
+                    "tenshu.shell.nav.Spark",
+                ),
+            ] {
+                let mut element = shell_with_input(&ctx, &menu, ShellState::default());
+                let mut renderer = <iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(14.0),
+                    Some("tiny-skia"),
+                )
+                .await
+                .unwrap();
+                let mut tree = Tree::new(element.as_widget());
+                let size = Size::new(width as f32, height as f32);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
+                operate(
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &renderer,
+                    focusable::focus::<()>(Id::new(focused_id)),
+                );
+                let snapshot = focus_snapshot(&mut element, &mut tree, &node, &renderer);
+                assert_eq!(snapshot.focused, vec![Id::new(focused_id)]);
+                let control = snapshot
+                    .bounds
+                    .iter()
+                    .find(|(id, _)| id == &Id::new(focused_id))
+                    .unwrap()
+                    .1;
+                let redraw = Event::Window(iced::window::Event::RedrawRequested(
+                    std::time::Instant::now(),
+                ));
+                assert!(send(
+                    &mut element,
+                    &mut tree,
+                    &node,
+                    &renderer,
+                    redraw,
+                    mouse::Cursor::Unavailable,
+                    size
+                )
+                .is_empty());
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &theme,
+                    &iced::advanced::renderer::Style {
+                        text_color: theme.colors.shell.ink,
+                    },
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &Rectangle::with_size(size),
+                );
+                let pixels = renderer.screenshot(
+                    Size::new(width, height),
+                    1.0,
+                    theme.colors.shell.background,
+                );
+                let focus = theme.colors.shell.focus;
+                let expected =
+                    [focus.r, focus.g, focus.b].map(|component| (component * 255.0) as u8);
+                let center_x = (control.x + control.width / 2.0) as u32;
+                let center_y = (control.y + control.height / 2.0) as u32;
+                let samples = [
+                    ("top", center_x, (control.y - 3.0) as u32),
+                    (
+                        "bottom",
+                        center_x,
+                        (control.y + control.height + 3.0) as u32,
+                    ),
+                    ("left", (control.x - 3.0) as u32, center_y),
+                    ("right", (control.x + control.width + 3.0) as u32, center_y),
+                ];
+                for (edge, x, y) in samples {
+                    let i = ((y * width + x) * 4) as usize;
+                    let actual = [pixels[i], pixels[i + 1], pixels[i + 2]];
+                    assert!(
+                        actual
+                            .iter()
+                            .zip(expected)
+                            .all(|(actual, expected)| actual.abs_diff(expected) <= 2),
+                        "{case} {mode:?} {width}x{height} focused {edge} ring was covered: {actual:?} != {expected:?}",
+                        case = case,
+                        mode = mode,
+                        width = width,
+                        height = height,
+                        edge = edge,
+                        actual = actual,
+                        expected = expected
+                    );
+                }
+                if let Ok(directory) = std::env::var("SHELL_KEYBOARD_PREVIEW_DIR") {
+                    std::fs::create_dir_all(&directory).unwrap();
+                    image::save_buffer(
+                        std::path::Path::new(&directory).join(format!(
+                            "tenshu-keyboard-adjacent-{case}-{mode:?}-{width}x{height}.png"
                         )),
                         &pixels,
                         width,

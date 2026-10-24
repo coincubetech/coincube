@@ -180,6 +180,7 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             .padding([0, 16]),
     )
     .height(Length::Fixed(TOP_BAR_HEIGHT))
+    .align_y(iced::alignment::Vertical::Center)
     .width(Length::Fill)
     .style(theme::container::shell_top)
     .into()
@@ -528,7 +529,9 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
     let overview = Menu::Cube(CubeSubMenu::Overview);
     let backup = Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery));
     let activity = activity_route(ctx);
-    let mut top: Column<Message> = Column::new().spacing(2).padding([0, 10]);
+    // A focused row paints 4px beyond its hit bounds. Later selected rows
+    // have opaque fills, so they need this clearance to keep the ring visible.
+    let mut top: Column<Message> = Column::new().spacing(4).padding([0, 10]);
     top = top
         .push(route("Overview", Some(home_icon()), menu, overview, false))
         .push(nav_row(
@@ -554,7 +557,7 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
 
     // The scroll viewport clips drawing outside its content. Reserve more
     // than the focus ring's 4px outer extent at its first and last actions.
-    let mut middle: Column<Message> = Column::new().spacing(2).padding([6, 10]);
+    let mut middle: Column<Message> = Column::new().spacing(4).padding([6, 10]);
     middle = middle.push(section("WALLETS"));
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
