@@ -107,8 +107,12 @@ async fn main() {
         fingerprint,
         None,
         paired,
-        descriptor.into(),
-        coincube_core::chain::ChainId::Regtest,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(
+            descriptor,
+            coincube_core::chain::ChainId::Regtest,
+        )
+        .expect("vault policy"),
+        desktop_dir,
         Some(Arc::new(key)),
     );
     let mut psbt = Psbt::deserialize(

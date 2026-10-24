@@ -63,6 +63,7 @@ fn binding_for_tr_desc() -> coincube_gui::phone_signer::pairing_store::SignerBin
         xpub: key.xkey.to_string(),
         fingerprint: key.origin.as_ref().expect("origin").0,
         descriptor_sha256: Sha256::digest(large_psbt::TR_DESC.as_bytes()).to_vec(),
+        imported_scope: None,
     }
 }
 
@@ -311,8 +312,12 @@ async fn signer_against_echo_phone() -> (PhoneSigner, tokio::task::JoinHandle<Op
         Fingerprint::default(),
         None,
         paired,
-        large_psbt::TR_DESC.to_string(),
-        coincube_core::chain::ChainId::Regtest,
+        coincube_gui::phone_signer::policy::PhonePolicy::vault(
+            large_psbt::TR_DESC,
+            coincube_core::chain::ChainId::Regtest,
+        )
+        .expect("vault policy"),
+        coincube_gui::dir::CoincubeDirectory::new(std::env::temp_dir()),
         Some(Arc::new(fresh_transport_key("desktop"))),
     );
     (signer, handle)
