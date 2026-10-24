@@ -240,6 +240,34 @@ fn accent_text(theme: &theme::Theme) -> iced::widget::text::Style {
     }
 }
 
+/// The shared orange outline with a readable resting label. The shared label
+/// orange is 2.6:1 on the light card, below 4.5:1 for 14px text, so the active
+/// label uses the shell's accent ink. Hovered, pressed and disabled are the
+/// shared style unchanged.
+fn new_address_style(theme: &theme::Theme, status: iced_button::Status) -> iced_button::Style {
+    let style = theme::button::orange_outline(theme, status);
+    if matches!(status, iced_button::Status::Active) {
+        iced_button::Style {
+            text_color: theme.colors.shell.accent_ink,
+            ..style
+        }
+    } else {
+        style
+    }
+}
+
+/// The card's generate action is primary until the first address exists,
+/// then the readable outline.
+fn generate_style(
+    has_address: bool,
+) -> fn(&theme::Theme, iced_button::Status) -> iced_button::Style {
+    if has_address {
+        new_address_style
+    } else {
+        theme::button::primary
+    }
+}
+
 fn truncate_middle(address: &str) -> String {
     let len = address.chars().count();
     if len > 2 * NUM_ADDR_CHARS {
@@ -532,13 +560,11 @@ pub fn receive<'a>(
     };
 
     let generate = {
-        let (label, style): (
-            _,
-            fn(&theme::Theme, iced_button::Status) -> iced_button::Style,
-        ) = if addresses.is_empty() {
-            ("Generate address", theme::button::primary)
+        let style = generate_style(!addresses.is_empty());
+        let label = if addresses.is_empty() {
+            "Generate address"
         } else {
-            ("New address", theme::button::orange_outline)
+            "New address"
         };
         if generating {
             action(generate_id(), "Generating address…", None, None, style)
@@ -1532,5 +1558,99 @@ mod tests {
                 Message::Close
             ));
         }
+    }
+
+    /// sRGB relative luminance, as WCAG 2.x defines it.
+    fn luminance(color: iced::Color) -> f32 {
+        let linear = |v: f32| {
+            if v <= 0.04045 {
+                v / 12.92
+            } else {
+                ((v + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        0.2126 * linear(color.r) + 0.7152 * linear(color.g) + 0.0722 * linear(color.b)
+    }
+
+    fn contrast(a: iced::Color, b: iced::Color) -> f32 {
+        let (a, b) = (luminance(a), luminance(b));
+        (a.max(b) + 0.05) / (a.min(b) + 0.05)
+    }
+
+    /// `top` composited over an opaque `bottom`.
+    fn over(top: iced::Color, bottom: iced::Color) -> iced::Color {
+        let mix = |t: f32, b: f32| t * top.a + b * (1.0 - top.a);
+        iced::Color::from_rgb(
+            mix(top.r, bottom.r),
+            mix(top.g, bottom.g),
+            mix(top.b, bottom.b),
+        )
+    }
+
+    /// The label against what is actually behind it: the button background
+    /// composited over the card's `shell.panel`.
+    fn label_contrast(style: iced_button::Style, panel: iced::Color) -> f32 {
+        let background = match style.background {
+            Some(iced::Background::Color(color)) => over(color, panel),
+            None => panel,
+            Some(other) => panic!("unexpected button background {:?}", other),
+        };
+        contrast(over(style.text_color, background), background)
+    }
+
+    #[test]
+    fn new_address_label_is_readable_on_the_card_in_both_themes() {
+        use iced_button::Status;
+        // The production selector for the card footer once an address exists.
+        let style = generate_style(true);
+        for (appearance, th) in themes() {
+            let panel = th.colors.shell.panel;
+            for status in [Status::Active, Status::Hovered, Status::Pressed] {
+                let ratio = label_contrast(style(&th, status), panel);
+                assert!(ratio >= 4.5, "{} {:?}: {:.3}:1", appearance, status, ratio);
+            }
+            // Only the resting label changes; disabled keeps its palette and
+            // alpha.
+            assert_eq!(
+                style(&th, Status::Active),
+                iced_button::Style {
+                    text_color: th.colors.shell.accent_ink,
+                    ..theme::button::orange_outline(&th, Status::Active)
+                },
+                "{}",
+                appearance
+            );
+            for status in [Status::Hovered, Status::Pressed, Status::Disabled] {
+                assert_eq!(
+                    style(&th, status),
+                    theme::button::orange_outline(&th, status),
+                    "{} {:?}",
+                    appearance,
+                    status
+                );
+            }
+            // Before any address exists the footer keeps the primary style.
+            for status in [
+                Status::Active,
+                Status::Hovered,
+                Status::Pressed,
+                Status::Disabled,
+            ] {
+                assert_eq!(
+                    generate_style(false)(&th, status),
+                    theme::button::primary(&th, status),
+                    "{} {:?}",
+                    appearance,
+                    status
+                );
+            }
+        }
+        // The shared resting style this replaces fails on the light card.
+        let light = theme::Theme::light();
+        let old = label_contrast(
+            theme::button::orange_outline(&light, Status::Active),
+            light.colors.shell.panel,
+        );
+        assert!(old < 4.5, "{:.3}:1", old);
     }
 }
