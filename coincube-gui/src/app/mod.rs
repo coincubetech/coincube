@@ -5413,6 +5413,28 @@ impl App {
         self.start_pending_split()
     }
 
+    #[cfg(test)]
+    pub(crate) fn reviewer_pending_split_target(&self) -> Option<&str> {
+        match self.split_handoff.as_ref() {
+            Some(SplitHandoff::Waiting(intent) | SplitHandoff::Reserving(intent)) => {
+                Some(intent.target_cube_id())
+            }
+            Some(SplitHandoff::Review { intent, .. }) => Some(intent.target_cube_id()),
+            None => None,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_pending_split_generation(&self) -> Option<u64> {
+        match self.split_handoff.as_ref() {
+            Some(SplitHandoff::Waiting(intent) | SplitHandoff::Reserving(intent)) => {
+                Some(intent.scan_generation())
+            }
+            Some(SplitHandoff::Review { intent, .. }) => Some(intent.scan_generation()),
+            None => None,
+        }
+    }
+
     /// #568 B5c-2 (P5, the go-live): "Start split" on the sweep review, the
     /// one way a new split begins. It requires the Review handoff, the
     /// account's Bitcoin Blake2b server grant, the review's context (Cube,
@@ -11465,7 +11487,7 @@ fn restart_daemon_blocking_guarded(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Serves a Split target reservation: records the call order and the
@@ -11502,6 +11524,9 @@ mod tests {
             pub coins: Vec<model::ListCoinsEntry>,
             pub polls: Polls,
             pub calls: Mutex<Vec<String>>,
+            pub backend: DaemonBackend,
+            pub stop_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+            pub config: Option<coincubed::config::Config>,
         }
 
         impl SplitTargetDaemon {
@@ -11522,16 +11547,18 @@ mod tests {
         #[async_trait::async_trait]
         impl Daemon for SplitTargetDaemon {
             fn backend(&self) -> DaemonBackend {
-                DaemonBackend::EmbeddedCoincubed(None)
+                self.backend.clone()
             }
             fn config(&self) -> Option<&coincubed::config::Config> {
-                None
+                self.config.as_ref()
             }
             async fn is_alive(&self, _: &CoincubeDirectory, _: Network) -> Result<(), DaemonError> {
                 unreachable!()
             }
             async fn stop(&self) -> Result<(), DaemonError> {
-                unreachable!()
+                self.stop_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(())
             }
             async fn get_info(&self) -> Result<model::GetInfoResult, DaemonError> {
                 // Taken after the reservation, so the receive index covers it.
@@ -11735,6 +11762,9 @@ mod tests {
                 coins,
                 polls,
                 calls: Default::default(),
+                backend: DaemonBackend::EmbeddedCoincubed(None),
+                stop_calls: Default::default(),
+                config: None,
             });
             let reservation = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -12162,6 +12192,53 @@ mod tests {
         app
     }
 
+    /// Attach a finite embedded Claim resource to a real Bitcoin App so GUI
+    /// retirement tests can observe the actual context stop boundary.
+    pub(crate) fn reviewer_attach_counted_claim_context(
+        source: &mut App,
+    ) -> Arc<std::sync::atomic::AtomicUsize> {
+        let target = split_app(source.datadir.path(), false, false);
+        let wallet = target.wallet.as_ref().unwrap().clone();
+        let settings = target
+            .cube_settings
+            .clone()
+            .with_vault(settings::VaultIdentity::new(
+                wallet.id(),
+                wallet.main_descriptor.as_vault(),
+            ));
+        let descriptor = wallet.main_descriptor.as_vault().unwrap().clone();
+        let stop_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let daemon = Arc::new(split_target::SplitTargetDaemon {
+            descriptor,
+            index: 0,
+            coins: Vec::new(),
+            polls: split_target::Polls::Never,
+            calls: Default::default(),
+            backend: DaemonBackend::EmbeddedCoincubed(None),
+            stop_calls: stop_calls.clone(),
+            config: None,
+        });
+        let mut cache = target.cache.clone();
+        cache.datadir_path = source.datadir.clone();
+        source.claim_pair_context = Some(Box::new(
+            claim_pair_context::ClaimPairContext::new(
+                cache::AppGeneration::next(),
+                source.cache.app_generation,
+                source.datadir.clone(),
+                source.cube_settings.id.clone(),
+                settings,
+                wallet,
+                daemon,
+                cache,
+                None,
+                None,
+                None,
+            )
+            .expect("synthetic paired owner"),
+        ));
+        stop_calls
+    }
+
     #[test]
     fn imported_policy_loads_as_the_existing_vault_wallet() {
         use coincube_core::{chain::ChainId, wallet_descriptor::ImportedWalletDescriptor};
@@ -12504,7 +12581,16 @@ mod tests {
         target_client.set_token("rotated-target-bearer");
         let mut target_cache = target.cache.clone();
         target_cache.datadir_path = source.datadir.clone();
-        let target_daemon = target.daemon.as_ref().unwrap().clone();
+        let target_daemon = Arc::new(split_target::SplitTargetDaemon {
+            descriptor: wallet.main_descriptor.as_vault().unwrap().clone(),
+            index: 0,
+            coins: Vec::new(),
+            polls: split_target::Polls::Never,
+            calls: Default::default(),
+            backend: DaemonBackend::EmbeddedCoincubed(None),
+            stop_calls: Default::default(),
+            config: Some(target.daemon.as_ref().unwrap().config().unwrap().clone()),
+        });
         let source_owner = source.cache.app_generation;
         let intent = crate::home::ClaimOpenIntent::new(
             source_owner,
@@ -12612,10 +12698,40 @@ mod tests {
         wrong_request.session.client.base_url = "https://other.example/".into();
         assert!(source.claim_fork_daemon(&wrong_request).is_none());
 
-        source.refuse_current_split_handoff(&target_settings.id);
+        // Enter the real Split admission boundary with a scan bound to a
+        // different bearer. This must revoke the current paired operation,
+        // including its owned node, before a later scan can readmit it.
+        split_intent::arm_fresh_for_test(&target_settings.id);
+        source.split_handoff = Some(SplitHandoff::Waiting(
+            split_intent::take_for_open(&target_settings.id, target_settings.network).unwrap(),
+        ));
+        let stale_generation = source.split_handoff_generation;
+        use iced::futures::StreamExt;
+        let refusal_task = source.start_pending_split();
+        let refusal = runtime.block_on(async {
+            let mut outputs = Vec::new();
+            let mut stream = iced_runtime::task::into_stream(refusal_task)
+                .expect("current refusal emits an error");
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    outputs.push(message);
+                }
+            }
+            outputs
+        });
+        assert!(refusal.iter().any(|message| matches!(message,
+            Message::View(view::Message::ShowError(error))
+                if error.contains("Split was cancelled"))));
         assert!(source.claim_pair_context.is_none());
         assert!(!binding.current(), "refusal revoked the old operation");
         assert!(!lock_dir.exists(), "refusal stopped its owned node");
+        assert_eq!(
+            target_daemon
+                .stop_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "the embedded daemon is stopped exactly once"
+        );
         source.refuse_current_split_handoff(&target_settings.id);
         assert!(
             !lock_dir.exists(),
@@ -12637,11 +12753,401 @@ mod tests {
         );
         admit(&mut source, &next).expect("fresh operation can re-admit");
         assert!(source.claim_pair_context.is_some());
+        assert_eq!(
+            source
+                .update(Message::SplitTargetPrepared {
+                    generation: stale_generation,
+                    result: Err("obsolete reservation".into()),
+                })
+                .units(),
+            0
+        );
+        assert!(
+            source.claim_pair_context.is_some(),
+            "old completion cannot stop new owner"
+        );
         source.revoke_claim();
         assert!(!lock_dir.exists());
+        assert_eq!(
+            target_daemon
+                .stop_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "one stop for each admitted owned operation"
+        );
+        let external = Arc::new(split_target::SplitTargetDaemon {
+            descriptor: wallet.main_descriptor.as_vault().unwrap().clone(),
+            index: 0,
+            coins: Vec::new(),
+            polls: split_target::Polls::Never,
+            calls: Default::default(),
+            backend: DaemonBackend::ExternalCoincubed,
+            stop_calls: Default::default(),
+            config: Some(target.daemon.as_ref().unwrap().config().unwrap().clone()),
+        });
+        source
+            .admit_claim_pair_context(
+                &next,
+                wallet.clone(),
+                external.clone(),
+                target_cache.clone(),
+                target_settings.clone(),
+                Some(target_client.clone()),
+                Some(7),
+                None,
+            )
+            .expect("external paired operation can be admitted");
+        split_intent::arm_fresh_for_test(&target_settings.id);
+        source.split_handoff = Some(SplitHandoff::Waiting(
+            split_intent::take_for_open(&target_settings.id, target_settings.network).unwrap(),
+        ));
+        let external_refusal_task = source.start_pending_split();
+        assert!(runtime.block_on(async {
+            let mut stream = iced_runtime::task::into_stream(external_refusal_task)
+                .expect("external refusal emits an error");
+            while let Some(action) = stream.next().await {
+                if matches!(
+                    action,
+                    iced_runtime::Action::Output(Message::View(view::Message::ShowError(_)))
+                ) {
+                    return true;
+                }
+            }
+            false
+        }));
+        assert!(source.claim_pair_context.is_none());
+        assert_eq!(
+            external
+                .stop_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an external/shared daemon is never stopped by paired refusal"
+        );
         drop(source);
         drop(target);
         std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn imported_split_start_accepts_verified_target_rotation_and_refuses_changed_authority() {
+        let result = std::thread::Builder::new()
+            .name("imported-split-authority".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = crate::app::session::test_guard();
+                let path = std::env::temp_dir()
+                    .join(format!("imported-split-authority-{}", uuid::Uuid::new_v4()));
+                let root = CoincubeDirectory::new(path.clone());
+                let (source_cube, target_cube) =
+                    crate::services::bitcoin_import::pairing::tests::pair();
+                for cube in [&source_cube, &target_cube] {
+                    let attachment = cube
+                        .bitcoin_import
+                        .as_ref()
+                        .unwrap()
+                        .active_attachment()
+                        .unwrap();
+                    let directory = root.network_directory(cube.network);
+                    directory.init().unwrap();
+                    let metadata = settings::WalletSettings {
+                        name: "Synthetic external signer".into(),
+                        alias: None,
+                        descriptor_checksum: attachment.wallet_id.descriptor_checksum.clone(),
+                        pinned_at: attachment.wallet_id.timestamp,
+                        keys: Vec::new(),
+                        hardware_wallets: Vec::new(),
+                        remote_backend_auth: None,
+                        start_internal_bitcoind: Some(false),
+                        pending_rescan: None,
+                        keychain_keys_recorded: false,
+                    };
+                    std::fs::write(
+                        directory.path().join(settings::SETTINGS_FILE_NAME),
+                        serde_json::to_vec(&settings::Settings {
+                            cubes: vec![cube.clone()],
+                            wallets: vec![metadata],
+                            ..Default::default()
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                }
+                crate::imported_claim::tests::prepare_storage(&root, &source_cube);
+                let (mut source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                source.cube_settings = source_cube.clone();
+                source.cache.cube_id = source_cube.id.clone();
+                let mut source_client =
+                    crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+                source_client.set_token("imported-source-bearer");
+                source
+                    .panels
+                    .connect
+                    .install_admitted_client(source_client.clone());
+                source.panels.connect.account.user = Some(crate::services::coincube::User {
+                    id: 7,
+                    email: "synthetic@example.invalid".into(),
+                    email_verified: Some(true),
+                });
+                source.panels.connect.account.step =
+                    state::connect::account::ConnectFlowStep::Dashboard;
+                source.panels.connect.account.bitcoin_blake2b_opt_in = true;
+                source.panels.connect.account.features = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "plans": [], "bitcoinBlake2bEnabled": true,
+                    }))
+                    .unwrap(),
+                );
+                let mut target_client = source_client.clone();
+                target_client.set_token("verified-rotated-target-bearer");
+                let attachment = source_cube
+                    .bitcoin_import
+                    .as_ref()
+                    .unwrap()
+                    .active_attachment()
+                    .unwrap();
+                let selected = crate::imported_claim::ImportedClaimSource {
+                    cube_id: source_cube.id.clone(),
+                    name: source_cube.name.clone(),
+                    external: attachment.descriptor.receive_descriptor().to_string(),
+                    internal: attachment.descriptor.change_descriptor().to_string(),
+                    address_window: attachment.initial_lookahead,
+                };
+                let request = crate::imported_claim::ImportedClaimRequest::new(
+                    selected.clone(),
+                    &source_client,
+                )
+                .unwrap();
+                request.validate(&root, &source_client).unwrap();
+                let target_wallet = Arc::new(Wallet::from_imported_cube(&target_cube).unwrap());
+                let target_cache = Cache {
+                    fiat_chain: crate::chain::ChainId::BitcoinBlake2b,
+                    network: bitcoin::Network::Bitcoin,
+                    datadir_path: root.clone(),
+                    ..Cache::default()
+                };
+                let daemon = split_backend_daemon(&path, true);
+                let admit = |source: &mut App, verified_account| {
+                    source.claim_pair_context = Some(Box::new(
+                        claim_pair_context::ClaimPairContext::new(
+                            cache::AppGeneration::next(),
+                            source.cache.app_generation,
+                            root.clone(),
+                            source_cube.id.clone(),
+                            target_cube.clone(),
+                            target_wallet.clone(),
+                            daemon.clone(),
+                            target_cache.clone(),
+                            Some(target_client.clone()),
+                            verified_account,
+                            None,
+                        )
+                        .unwrap(),
+                    ));
+                };
+                let intent = |target_id: String| {
+                    let external = crate::services::foreign_scan::ScanDescriptor::parse(
+                        crate::services::foreign_scan::Branch::External,
+                        &selected.external,
+                    )
+                    .unwrap();
+                    split_intent::SplitIntent::new(
+                        target_id,
+                        crate::chain::ChainId::BitcoinBlake2b,
+                        0,
+                        &source_client,
+                        split_intent::funded_scan_for_test(1, &external),
+                        external,
+                        Some(
+                            crate::services::foreign_scan::ScanDescriptor::parse(
+                                crate::services::foreign_scan::Branch::Internal,
+                                &selected.internal,
+                            )
+                            .unwrap(),
+                        ),
+                    )
+                    .unwrap()
+                    .bind_imported_source(selected.clone(), &source_client)
+                    .unwrap()
+                };
+                let refusal_errors = |task: Task<Message>| {
+                    use iced::futures::StreamExt;
+                    runtime.block_on(async {
+                        let mut errors = Vec::new();
+                        let mut stream =
+                            iced_runtime::task::into_stream(task).expect("refusal emits a task");
+                        while let Some(action) = stream.next().await {
+                            if let iced_runtime::Action::Output(Message::View(
+                                view::Message::ShowError(error),
+                            )) = action
+                            {
+                                errors.push(error);
+                            }
+                        }
+                        errors
+                    })
+                };
+                admit(&mut source, Some(7));
+                source.split_handoff = Some(SplitHandoff::Waiting(intent(target_cube.id.clone())));
+                let pending = source.start_pending_split();
+                assert!(
+                    pending.units() > 0,
+                    "verified target rotation starts reservation"
+                );
+                assert!(matches!(
+                    source.split_handoff,
+                    Some(SplitHandoff::Reserving(_))
+                ));
+                drop(pending);
+
+                // Deliver the public reservation and funded scan to the real
+                // current-generation consumer. The production reservation
+                // task would query a node and fee source, so it is dropped;
+                // None means no fee quote was claimed by this fixture.
+                let reservation = {
+                    let descriptor = target_wallet.main_descriptor.clone();
+                    let funded = match source.split_handoff.as_ref() {
+                        Some(SplitHandoff::Reserving(intent)) => intent.report.coins()[0].clone(),
+                        _ => panic!("current reservation keeps its funded scan"),
+                    };
+                    let funded_address = descriptor
+                        .receive_descriptor()
+                        .derive(0)
+                        .unwrap()
+                        .address(bitcoin::Network::Bitcoin)
+                        .unwrap();
+                    let address = descriptor
+                        .receive_descriptor()
+                        .derive(1)
+                        .unwrap()
+                        .address(bitcoin::Network::Bitcoin)
+                        .unwrap();
+                    assert_ne!(address.script_pubkey(), funded.output.script_pubkey);
+                    assert_eq!(funded_address.script_pubkey(), funded.output.script_pubkey);
+                    crate::services::foreign_psbt::TargetReservation {
+                        reserved: crate::daemon::model::GetAddressResult::new(
+                            address,
+                            bitcoin::bip32::ChildNumber::from_normal_idx(1).unwrap(),
+                        ),
+                        requested_at: 100,
+                        info: crate::daemon::model::GetInfoResult {
+                            version: String::new(),
+                            network: bitcoin::Network::Bitcoin,
+                            chain_id: Some(crate::chain::ChainId::BitcoinBlake2b),
+                            block_height: 100,
+                            sync: 1.0,
+                            descriptors: coincubed::commands::GetInfoDescriptors {
+                                main: descriptor,
+                            },
+                            rescan_progress: None,
+                            refused_reorg_depth: None,
+                            chain_divergence: false,
+                            timestamp: 0,
+                            last_poll_timestamp: Some(101),
+                            history_sync: Default::default(),
+                            imported_wallet: None,
+                            receive_index: 1,
+                            change_index: 0,
+                        },
+                        coins: vec![crate::daemon::model::ListCoinsEntry {
+                            amount: funded.output.value,
+                            outpoint: funded.outpoint,
+                            address: funded_address,
+                            block_height: funded.block_height.map(|height| {
+                                <i32 as std::convert::TryFrom<u32>>::try_from(height).unwrap()
+                            }),
+                            derivation_index: bitcoin::bip32::ChildNumber::from_normal_idx(0)
+                                .unwrap(),
+                            spend_info: None,
+                            is_immature: false,
+                            is_change: false,
+                            is_from_self: false,
+                        }],
+                    }
+                };
+                let generation = source.split_handoff_generation;
+                assert_eq!(
+                    source
+                        .update(Message::SplitTargetPrepared {
+                            generation,
+                            result: Ok((Box::new(reservation), None)),
+                        })
+                        .units(),
+                    0
+                );
+                match source.split_handoff.as_ref() {
+                    Some(SplitHandoff::Review {
+                        sweep,
+                        economics: None,
+                        ..
+                    }) => {
+                        assert_eq!(sweep.inputs, 1);
+                        assert_eq!(sweep.total.to_sat(), 100_000);
+                    }
+                    _ => panic!("authenticated imported target reaches funded review"),
+                }
+                let ports_task = source.update(Message::View(view::Message::StartSplit));
+                assert!(
+                    source.split_panel.is_some(),
+                    "StartSplit admitted the real panel"
+                );
+                assert!(source.split_handoff.is_none());
+                let port_results = task_messages(ports_task);
+                assert_eq!(port_results.len(), 1, "one scoped ports completion");
+                for message in port_results {
+                    assert!(matches!(message, Message::SplitPortsBuilt(..)));
+                    // Installing ports invokes the real panel begin boundary.
+                    // Drop its later reservation task before it can call Connect.
+                    drop(source.update(message));
+                }
+                assert_eq!(
+                    source.split_panel.as_ref().unwrap().stage(),
+                    &state::vault::split::Stage::Working(
+                        state::vault::split::Work::ReservingFunding
+                    ),
+                );
+                source.revoke_claim();
+
+                admit(&mut source, None);
+                source.split_handoff = Some(SplitHandoff::Waiting(intent(target_cube.id.clone())));
+                assert!(refusal_errors(source.start_pending_split())
+                    .iter()
+                    .any(|error| error.contains("Split was cancelled")));
+                assert!(
+                    source.claim_pair_context.is_none(),
+                    "local target requires exact bearer"
+                );
+
+                admit(&mut source, Some(7));
+                source.split_handoff = Some(SplitHandoff::Waiting(intent("wrong-target".into())));
+                assert!(refusal_errors(source.start_pending_split())
+                    .iter()
+                    .any(|error| error.contains("Split was cancelled")));
+                assert!(
+                    source.claim_pair_context.is_some(),
+                    "foreign-target refusal preserves the current owner's context"
+                );
+                assert!(source.split_handoff.is_none());
+                source.revoke_claim();
+
+                admit(&mut source, Some(7));
+                source.split_handoff = Some(SplitHandoff::Waiting(intent(target_cube.id.clone())));
+                source.on_global_auth_change(crate::gui::tab::AuthChange::LogOut, false);
+                assert!(source.claim_pair_context.is_none());
+                assert!(source.claim_connect_session().is_none());
+                assert_eq!(source.start_pending_split().units(), 0);
+                drop(source);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
     }
 
     #[test]
@@ -13600,6 +14106,9 @@ mod tests {
             coins: Vec::new(),
             polls: split_target::Polls::OnRequest,
             calls: Default::default(),
+            backend: DaemonBackend::EmbeddedCoincubed(None),
+            stop_calls: Default::default(),
+            config: None,
         });
         let reservation = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -16021,6 +16530,89 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    /// A completed imported wallet whose real preparation gate succeeds.
+    /// The daemon stays unstarted; the completed scan is a synthetic reply.
+    pub(crate) fn imported_app_ready_for_claim(root_path: &std::path::Path) -> App {
+        let root = CoincubeDirectory::new(root_path.to_path_buf());
+        let (cube, _, client) = crate::imported_claim::tests::fixture();
+        let attachment = cube
+            .bitcoin_import
+            .as_ref()
+            .unwrap()
+            .active_attachment()
+            .unwrap();
+        let directory = root.network_directory(crate::chain::ChainId::Bitcoin);
+        directory.init().unwrap();
+        std::fs::write(
+            directory.path().join(settings::SETTINGS_FILE_NAME),
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![cube.clone()],
+                wallets: vec![settings::WalletSettings {
+                    name: "Synthetic imported signer".into(),
+                    alias: None,
+                    descriptor_checksum: attachment.wallet_id.descriptor_checksum.clone(),
+                    pinned_at: attachment.wallet_id.timestamp,
+                    keys: Vec::new(),
+                    hardware_wallets: Vec::new(),
+                    remote_backend_auth: None,
+                    start_internal_bitcoind: Some(false),
+                    pending_rescan: None,
+                    keychain_keys_recorded: false,
+                }],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        crate::imported_claim::tests::prepare_storage(&root, &cube);
+        let data = directory.coincubed_data_directory(&attachment.wallet_id);
+        let config =
+            coincubed::config::Config::from_file(Some(data.path().join("daemon.toml"))).unwrap();
+        let daemon: Arc<dyn Daemon + Sync + Send> =
+            Arc::new(EmbeddedDaemon::unstarted_for_test(config, None));
+        let wallet = Arc::new(Wallet::from_imported_cube(&cube).unwrap());
+        let (mut app, startup) = App::new_inner(
+            Cache {
+                network: bitcoin::Network::Bitcoin,
+                fiat_chain: crate::chain::ChainId::Bitcoin,
+                cube_id: cube.id.clone(),
+                btcb2_server_enabled: true,
+                ..Cache::default()
+            },
+            wallet,
+            None,
+            None,
+            Config::new(false),
+            daemon,
+            root,
+            None,
+            cube,
+            None,
+        );
+        drop(startup);
+        app.panels
+            .imported_bitcoin
+            .as_mut()
+            .unwrap()
+            .reviewer_accept_completed_scan();
+        app.panels.connect.install_admitted_client(client);
+        app.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "synthetic@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        app.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        app.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        app.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        assert!(app.prepare_imported_claim().is_ok());
+        app
     }
 
     pub(crate) fn bitcoin_app_with_id(root: &std::path::Path, id: &str) -> App {

@@ -3280,6 +3280,27 @@ mod shared_adoption_generation_tests {
             let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
                 .app_generation_token()
                 .unwrap();
+            // FocusTab's deferred Init is produced by Pane, before the App
+            // can start any account work. Hold this actual Pane output across
+            // the same-ID Lock/reopen transaction as well.
+            let held_focus = runtime.block_on(first_output(gui.update(Message::Pane(
+                pane_id,
+                pane::Message::View(pane::ViewMessage::FocusTab(0)),
+            ))));
+            let Message::Pane(_, pane::Message::Tab(1, focus_inner)) = &held_focus else {
+                panic!("FocusTab did not return the originating App task");
+            };
+            let tab::Message::AppAsync(focus_generation, focus_result) = focus_inner.as_ref()
+            else {
+                panic!("FocusTab task was not generation guarded");
+            };
+            assert_eq!(*focus_generation, old_generation);
+            assert!(matches!(
+                focus_result.as_ref(),
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::Init
+                )))
+            ));
             let old_result = runtime.block_on(first_output(gui.update(init())));
             old_request.assert();
             let Message::Pane(_, pane::Message::Tab(1, old_inner)) = &old_result else {
@@ -3369,6 +3390,8 @@ mod shared_adoption_generation_tests {
             assert_eq!(app.connect_user_id_for_test(), Some(22));
             assert_eq!(app.current_menu_for_test(), &menu);
             assert_eq!(app.has_claim_pair_context(), had_claim_context);
+            assert_eq!(gui.update(held_focus).units(), 0);
+            assert_eq!(gui.reviewer_app_mut(0).connect_user_id_for_test(), Some(22));
             drop(gui);
             std::fs::remove_dir_all(root_path).ok();
         }
@@ -4212,6 +4235,131 @@ mod claim_return_routing_tests {
     use iced::futures::StreamExt;
 
     #[test]
+    fn missing_imported_credentials_error_cannot_cross_same_tab_reopen() {
+        let result = std::thread::Builder::new()
+            .name("held-imported-credentials".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let path = std::env::temp_dir().join(format!(
+                    "held-imported-credentials-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                let source = app::claim_step1_tests::imported_app_ready_for_claim(&path);
+                let source_id = source.cube_settings().id.clone();
+                let root = source.datadir().clone();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                    .app_generation_token()
+                    .unwrap();
+                let held = runtime.block_on(async {
+                    let task = gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Run(AppMessage::View(view::Message::StartImportedClaim)),
+                        ),
+                    ));
+                    let mut stream = iced_runtime::task::into_stream(task)
+                        .expect("missing credentials emit a Pane error task");
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(message) = action {
+                            return message;
+                        }
+                    }
+                    panic!("missing-credential error was not emitted")
+                });
+                assert!(
+                    matches!(&held, Message::Pane(_, pane::Message::Tab(1, inner))
+                    if matches!(inner.as_ref(), tab::Message::AppAsync(generation, nested)
+                        if *generation == old_generation
+                            && matches!(nested.as_ref(), tab::Message::Run(
+                                AppMessage::View(view::Message::ShowError(error))
+                            ) if error.contains("Unlock the source Cube"))))
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(1, tab::Message::LockCube),
+                )));
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::Home(_)
+                ));
+                let replacement_path = std::env::temp_dir().join(format!(
+                    "imported-credentials-new-owner-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                let replacement =
+                    app::claim_step1_tests::bitcoin_app_with_id(&replacement_path, &source_id);
+                let cache = replacement.cache().clone();
+                let wallet = std::sync::Arc::new(replacement.wallet().unwrap().clone());
+                let daemon = app::claim_step1_tests::fixture_daemon(&replacement);
+                let settings = replacement.cube_settings().clone();
+                drop(replacement);
+                let breez = std::sync::Arc::new(app::breez_liquid::BreezClient::disconnected(
+                    settings.network.bitcoin_network(),
+                ));
+                let (loader, startup) = crate::loader::Loader::new(
+                    CoincubeDirectory::new(replacement_path.clone()),
+                    app::Config::new(false),
+                    settings.network.bitcoin_network(),
+                    None,
+                    None,
+                    None,
+                    settings.clone(),
+                    Some(breez.clone()),
+                    None,
+                );
+                drop(startup);
+                gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Loader(loader);
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Load(crate::loader::Message::BreezLoaded {
+                            breez,
+                            spark_backend: None,
+                            cache,
+                            wallet,
+                            config: app::Config::new(false),
+                            daemon,
+                            datadir: CoincubeDirectory::new(replacement_path.clone()),
+                            bitcoind: None,
+                            cube_settings: settings,
+                        }),
+                    ),
+                )));
+                assert_ne!(
+                    gui.panes.get(pane_id).unwrap().tabs[0]
+                        .app_generation_token()
+                        .unwrap(),
+                    old_generation
+                );
+                assert_eq!(gui.update(held).units(), 0);
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::App(_)
+                ));
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+                std::fs::remove_dir_all(replacement_path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
     fn automatic_deposit_checks_refresh_the_paired_cube_binding() {
         use crate::app::state::vault::claim::{ClaimEvent, DepositStatus};
         use crate::services::foreign_scan::AddressFunds;
@@ -4249,6 +4397,117 @@ mod claim_return_routing_tests {
                     .build()
                     .unwrap()
                     .block_on(check_routes())
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn held_direct_return_cannot_navigate_a_same_id_reopened_app() {
+        let result = std::thread::Builder::new()
+            .name("held-direct-return".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let (source, handoff, path) =
+                    app::claim_step1_tests::returning_claim_fixture(false);
+                let source_id = source.cube_settings().id.clone();
+                let root = source.datadir().clone();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                    .app_generation_token()
+                    .unwrap();
+                app::session::open(source_id.clone(), zeroize::Zeroizing::new("2468".into()));
+                let held = runtime.block_on(async {
+                    let task = gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
+                    ));
+                    let mut stream = iced_runtime::task::into_stream(task).unwrap();
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(message) = action {
+                            return message;
+                        }
+                    }
+                    panic!("direct Return must emit an App route")
+                });
+                assert!(
+                    matches!(&held, Message::Pane(_, pane::Message::Tab(1, inner))
+                    if matches!(inner.as_ref(), tab::Message::AppAsync(generation, _)
+                        if *generation == old_generation))
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(1, tab::Message::LockCube),
+                )));
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::Home(_)
+                ));
+
+                // The ordinary synthetic Loader completion reuses the tab ID
+                // and creates a distinct App owner, as in the shared-client
+                // hold regression. No keychain or daemon process starts.
+                let replacement = app::claim_step1_tests::bitcoin_app_with_id(&path, &source_id);
+                let cache = replacement.cache().clone();
+                let wallet = std::sync::Arc::new(replacement.wallet().unwrap().clone());
+                let daemon = app::claim_step1_tests::fixture_daemon(&replacement);
+                let settings = replacement.cube_settings().clone();
+                drop(replacement);
+                let breez = std::sync::Arc::new(app::breez_liquid::BreezClient::disconnected(
+                    settings.network.bitcoin_network(),
+                ));
+                let (loader, startup) = crate::loader::Loader::new(
+                    root.clone(),
+                    app::Config::new(false),
+                    settings.network.bitcoin_network(),
+                    None,
+                    None,
+                    None,
+                    settings.clone(),
+                    Some(breez.clone()),
+                    None,
+                );
+                drop(startup);
+                gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Loader(loader);
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::Load(crate::loader::Message::BreezLoaded {
+                            breez,
+                            spark_backend: None,
+                            cache,
+                            wallet,
+                            config: app::Config::new(false),
+                            daemon,
+                            datadir: root,
+                            bitcoind: None,
+                            cube_settings: settings,
+                        }),
+                    ),
+                )));
+                let current_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                    .app_generation_token()
+                    .unwrap();
+                assert_ne!(old_generation, current_generation);
+                let menu = gui.reviewer_app_mut(0).current_menu_for_test().clone();
+                assert_eq!(gui.update(held).units(), 0);
+                assert_eq!(gui.reviewer_app_mut(0).current_menu_for_test(), &menu);
+                drop(gui);
+                app::session::close();
+                std::fs::remove_dir_all(path).ok();
             })
             .unwrap()
             .join();
@@ -4379,6 +4638,747 @@ mod single_open_lifecycle_tests {
     use crate::{app, chain::ChainId};
 
     #[test]
+    fn rejected_return_preserves_both_contexts_and_accepted_return_retires_only_the_legacy_owner() {
+        let result = std::thread::Builder::new()
+            .name("return-counted-owners".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let (mut source, handoff, path) =
+                    app::claim_step1_tests::returning_claim_fixture(false);
+                let root = source.datadir().clone();
+                let source_settings = source.cube_settings().clone();
+                let source_id = source_settings.id.clone();
+                let owner = source.cache().app_generation;
+                let source_stops = app::tests::reviewer_attach_counted_claim_context(&mut source);
+                let (mut legacy, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let legacy_stops = app::tests::reviewer_attach_counted_claim_context(&mut legacy);
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_claim_gui(source, legacy);
+                let pane_id = gui.focus.unwrap();
+                gui.panes
+                    .get_mut(pane_id)
+                    .unwrap()
+                    .tabs
+                    .push(tab::Tab::new(3, tab::State::Home(home)));
+                app::session::open(source_id.clone(), zeroize::Zeroizing::new("2468".into()));
+                let rejected = home::ClaimOpenIntent::new(
+                    app::cache::AppGeneration::next(),
+                    &root,
+                    source_id.clone(),
+                    handoff.fork_cube().to_owned(),
+                    home::ClaimRoute::Return(handoff.clone()),
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        3,
+                        tab::Message::Launch(home::Message::RunClaim(
+                            root.clone(),
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            source_settings.clone(),
+                            rejected,
+                        )),
+                    ),
+                )));
+                assert_eq!(
+                    gui.panes
+                        .get(pane_id)
+                        .unwrap()
+                        .tabs
+                        .iter()
+                        .filter(|tab| matches!(tab.state, tab::State::App(_)))
+                        .count(),
+                    2,
+                );
+                assert_eq!(source_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(legacy_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+                app::claim_intent::arm(source_id.clone());
+                let accepted = home::ClaimOpenIntent::new(
+                    owner,
+                    &root,
+                    source_id.clone(),
+                    handoff.fork_cube().to_owned(),
+                    home::ClaimRoute::Return(handoff),
+                );
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        3,
+                        tab::Message::Launch(home::Message::RunClaim(
+                            root.clone(),
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            source_settings,
+                            accepted,
+                        )),
+                    ),
+                )));
+                assert_eq!(source_stops.load(std::sync::atomic::Ordering::SeqCst), 0);
+                assert_eq!(legacy_stops.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert_eq!(
+                    gui.panes
+                        .get(pane_id)
+                        .unwrap()
+                        .tabs
+                        .iter()
+                        .filter(|tab| matches!(tab.state, tab::State::App(_)))
+                        .count(),
+                    1,
+                );
+                assert_eq!(app::session::current_cube_id(), Some(source_id));
+                drop(gui);
+                app::session::close();
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn accepted_create_import_and_restore_retire_the_old_app_before_installer() {
+        let result = std::thread::Builder::new()
+            .name("installer-admission-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                for flow in [
+                    crate::installer::UserFlow::CreateWallet,
+                    crate::installer::UserFlow::AddWallet,
+                    crate::installer::UserFlow::RestoreFromRecoveryKit { cube_uuid: None },
+                ] {
+                    let path = std::env::temp_dir()
+                        .join(format!("installer-admission-{}", uuid::Uuid::new_v4()));
+                    let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                    let source_id = source.cube_settings().id.clone();
+                    let root = source.datadir().clone();
+                    let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                    drop(startup);
+                    let mut gui = GUI::reviewer_app_home_gui(source, home);
+                    let pane_id = gui.focus.unwrap();
+                    let login_settings = app::settings::WalletSettings {
+                        name: "Synthetic remote shell".into(),
+                        alias: None,
+                        descriptor_checksum: "remote-shell".into(),
+                        pinned_at: None,
+                        keys: Vec::new(),
+                        hardware_wallets: Vec::new(),
+                        remote_backend_auth: Some(app::settings::AuthConfig::new(
+                            "test@example.invalid".into(),
+                            "remote-wallet".into(),
+                        )),
+                        start_internal_bitcoind: None,
+                        pending_rescan: None,
+                        keychain_keys_recorded: false,
+                    };
+                    let (login, startup) = crate::services::connect::login::CoincubeLiteLogin::new(
+                        root.clone(),
+                        bitcoin::Network::Bitcoin,
+                        login_settings,
+                        None,
+                        None,
+                    );
+                    drop(startup);
+                    gui.panes
+                        .get_mut(pane_id)
+                        .unwrap()
+                        .tabs
+                        .push(tab::Tab::new(3, tab::State::Login(login)));
+                    app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            2,
+                            tab::Message::Launch(home::Message::Install(
+                                root,
+                                ChainId::Bitcoin,
+                                flow,
+                                None,
+                            )),
+                        ),
+                    )));
+                    let pane = gui.panes.get(pane_id).unwrap();
+                    assert!(pane
+                        .tabs
+                        .iter()
+                        .all(|tab| !matches!(tab.state, tab::State::App(_))));
+                    assert!(pane
+                        .tabs
+                        .iter()
+                        .all(|tab| !matches!(tab.state, tab::State::Login(_))));
+                    assert!(pane
+                        .tabs
+                        .iter()
+                        .any(|tab| matches!(tab.state, tab::State::Installer(_))));
+                    assert!(!app::session::is_open());
+                    drop(gui);
+                    std::fs::remove_dir_all(path).ok();
+                }
+
+                let path = std::env::temp_dir().join(format!(
+                    "split-installer-admission-{}",
+                    uuid::Uuid::new_v4()
+                ));
+                let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let source_id = source.cube_settings().id.clone();
+                let root = source.datadir().clone();
+                let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                drop(home.update(home::Message::GlobalFeatureLoaded(0, true)));
+                let mut client =
+                    crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+                client.set_token("synthetic-split-session");
+                home.connect_account.install_admitted_client(client.clone());
+                home.connect_account.user = Some(crate::services::coincube::User {
+                    id: 7,
+                    email: "synthetic@example.invalid".into(),
+                    email_verified: Some(true),
+                });
+                home.connect_account.step =
+                    crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+                home.connect_account.bitcoin_blake2b_opt_in = true;
+                home.connect_account.features = Some(
+                    serde_json::from_value(serde_json::json!({
+                        "plans": [], "bitcoinBlake2bEnabled": true,
+                    }))
+                    .unwrap(),
+                );
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::InstallForSplit(root, client)),
+                    ),
+                )));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert!(pane
+                    .tabs
+                    .iter()
+                    .all(|tab| !matches!(tab.state, tab::State::App(_))));
+                assert!(pane
+                    .tabs
+                    .iter()
+                    .any(|tab| matches!(tab.state, tab::State::Installer(_))));
+                assert!(!app::session::is_open());
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn accepted_remote_cube_open_retires_old_owner_before_login_screen() {
+        let result = std::thread::Builder::new()
+            .name("remote-login-admission".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let path = std::env::temp_dir()
+                    .join(format!("remote-login-admission-{}", uuid::Uuid::new_v4()));
+                let (mut source, wallet) = app::claim_step1_tests::bitcoin_app(&path);
+                let stopped = app::tests::reviewer_attach_counted_claim_context(&mut source);
+                let source_id = source.cube_settings().id.clone();
+                let root = source.datadir().clone();
+                let target =
+                    app::settings::CubeSettings::new("Remote Cube".into(), ChainId::Bitcoin)
+                        .with_vault(app::settings::VaultIdentity::new(
+                            wallet.id(),
+                            wallet.main_descriptor.as_vault(),
+                        ));
+                let remote_settings = app::settings::WalletSettings {
+                    name: "Remote Vault".into(),
+                    alias: None,
+                    descriptor_checksum: wallet.descriptor_checksum.clone(),
+                    pinned_at: wallet.pinned_at,
+                    keys: Vec::new(),
+                    hardware_wallets: Vec::new(),
+                    remote_backend_auth: Some(app::settings::AuthConfig::new(
+                        "test@example.invalid".into(),
+                        "remote-wallet".into(),
+                    )),
+                    start_internal_bitcoind: None,
+                    pending_rescan: None,
+                    keychain_keys_recorded: false,
+                };
+                let directory = root.network_directory(ChainId::Bitcoin);
+                directory.init().unwrap();
+                std::fs::write(
+                    directory.path().join(app::settings::SETTINGS_FILE_NAME),
+                    serde_json::to_vec(&app::settings::Settings {
+                        cubes: vec![target.clone()],
+                        wallets: vec![remote_settings.clone()],
+                        ..Default::default()
+                    })
+                    .unwrap(),
+                )
+                .unwrap();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::Run(
+                            root.clone(),
+                            app::Config::new(false),
+                            ChainId::Bitcoin,
+                            target.clone(),
+                        )),
+                    ),
+                )));
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                assert!(!app::session::is_open());
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::PinEntry(_)
+                ));
+                // The public unlock callback is synthetic; the real Tab
+                // completion chooses Login from the saved remote wallet type.
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::BreezClientLoadedAfterPin {
+                            connect_client: None,
+                            migration_error: None,
+                            enc_key_error: None,
+                            breez_client: Err(app::breez_liquid::BreezError::SignerError(
+                                "fixture".into(),
+                            )),
+                            spark_backend: None,
+                            config: app::Config::new(false),
+                            datadir: root.clone(),
+                            network: bitcoin::Network::Bitcoin,
+                            cube: target,
+                            wallet_settings: Some(remote_settings),
+                            internal_bitcoind: None,
+                            backup: None,
+                        },
+                    ),
+                )));
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::Login(_)
+                ));
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn deleting_a_cube_retires_its_live_app_and_process_session_first() {
+        let result = std::thread::Builder::new()
+            .name("delete-admission-owner".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let path =
+                    std::env::temp_dir().join(format!("delete-admission-{}", uuid::Uuid::new_v4()));
+                let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let cube_id = source.cube_settings().id.clone();
+                let (home, startup) = home::Home::new_for_chain(source.datadir().clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                app::session::open(cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        2,
+                        tab::Message::Launch(home::Message::View(home::ViewMessage::DeleteCube(
+                            home::DeleteCubeMessage::Confirm(cube_id),
+                        ))),
+                    ),
+                )));
+                assert!(!app::session::is_open());
+                assert!(gui
+                    .panes
+                    .iter()
+                    .flat_map(|(_, pane)| pane.tabs.iter())
+                    .all(|tab| !matches!(tab.state, tab::State::App(_))));
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn cold_local_and_connect_fork_constructors_consume_gui_staged_foreign_split() {
+        let result = std::thread::Builder::new()
+            .name("cold-fork-split-handoff".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                for connect in [false, true] {
+                    let path = std::env::temp_dir()
+                        .join(format!("cold-fork-split-{}", uuid::Uuid::new_v4()));
+                    let root = CoincubeDirectory::new(path.clone());
+                    std::fs::create_dir_all(root.path()).unwrap();
+                    crate::app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(
+                        &crate::app::settings::global::GlobalSettings::path(&root),
+                        true,
+                    )
+                    .unwrap();
+                    let (mut config, wallet_settings) =
+                        crate::chain::managed_local_fixture(&root, ChainId::BitcoinBlake2b);
+                    let mut client = crate::services::coincube::CoincubeClient::for_test(
+                        "https://connect.example/",
+                    );
+                    client.set_token("synthetic-target-session");
+                    if connect {
+                        config.bitcoin_backend = Some(coincubed::config::BitcoinBackend::Esplora(
+                            coincubed::config::EsploraConfig {
+                                addr: format!(
+                                    "{}/api/v1/esplora/{}",
+                                    client.base_url.trim_end_matches('/'),
+                                    crate::installer::connect_esplora_path(ChainId::BitcoinBlake2b),
+                                ),
+                                token: client.token().map(str::to_owned),
+                                fallback_addr: None,
+                                fallback_token: None,
+                                secondary_fallback_addr: None,
+                                secondary_fallback_token: None,
+                            },
+                        ));
+                        let config_path = root
+                            .network_directory(ChainId::BitcoinBlake2b)
+                            .coincubed_data_directory(&wallet_settings.wallet_id())
+                            .path()
+                            .join("daemon.toml");
+                        std::fs::write(config_path, toml::to_string(&config).unwrap()).unwrap();
+                    }
+                    let wallet = std::sync::Arc::new(
+                        crate::app::wallet::Wallet::new(
+                            config.main_descriptor.as_vault().unwrap().clone(),
+                        )
+                        .with_chain(ChainId::BitcoinBlake2b)
+                        .load_from_settings(wallet_settings.clone())
+                        .unwrap(),
+                    );
+                    let daemon = std::sync::Arc::new(
+                        crate::daemon::embedded::EmbeddedDaemon::unstarted_for_test(config, None),
+                    );
+                    let signer =
+                        coincube_core::signer::MasterSigner::generate(bitcoin::Network::Bitcoin)
+                            .unwrap();
+                    let cek = std::sync::Arc::new(
+                        crate::services::connect::crypto::CubeEncryptionKey::derive(
+                            &signer,
+                            bitcoin::Network::Bitcoin,
+                        ),
+                    );
+                    let cube = app::settings::CubeSettings::new(
+                        "Foreign target".into(),
+                        ChainId::BitcoinBlake2b,
+                    )
+                    .with_vault(app::settings::VaultIdentity::new(
+                        wallet.id(),
+                        wallet.main_descriptor.as_vault(),
+                    ));
+                    std::fs::write(
+                        root.network_directory(ChainId::BitcoinBlake2b)
+                            .path()
+                            .join(app::settings::SETTINGS_FILE_NAME),
+                        serde_json::to_vec(&app::settings::Settings {
+                            cubes: vec![cube.clone()],
+                            wallets: vec![wallet_settings.clone()],
+                            ..Default::default()
+                        })
+                        .unwrap(),
+                    )
+                    .unwrap();
+                    let target_id = cube.id.clone();
+                    let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+                    drop(startup);
+                    drop(home.update(home::Message::GlobalFeatureLoaded(0, true)));
+                    home.connect_account.bitcoin_blake2b_opt_in = true;
+                    if connect {
+                        home.connect_account.install_admitted_client(client.clone());
+                        home.connect_account.user = Some(crate::services::coincube::User {
+                            id: 7,
+                            email: "synthetic@example.invalid".into(),
+                            email_verified: Some(true),
+                        });
+                        home.connect_account.step =
+                            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+                        home.connect_account.bitcoin_blake2b_opt_in = true;
+                        home.connect_account.features = Some(
+                            serde_json::from_value(serde_json::json!({
+                                "plans": [], "bitcoinBlake2bEnabled": true,
+                            }))
+                            .unwrap(),
+                        );
+                    }
+                    let pane = pane::Pane::new_with_tab(tab::State::Home(home));
+                    let (panes, pane_id) = pane_grid::State::new(pane);
+                    let mut gui = GUI {
+                        panes,
+                        focus: Some(pane_id),
+                        config: Config::new(root.clone(), None),
+                        window_id: None,
+                        window_init: None,
+                        window_config: None,
+                        global_cache: GlobalCache::default(),
+                        theme_mode: Default::default(),
+                    };
+                    if connect {
+                        // Return from an accepted ordinary Split prerequisite
+                        // install before continuing the same scan through the
+                        // cold fork Loader::Synced constructor.
+                        drop(gui.update(Message::Pane(
+                            pane_id,
+                            pane::Message::tab(
+                                1,
+                                tab::Message::Launch(home::Message::InstallForSplit(
+                                    root.clone(),
+                                    client.clone(),
+                                )),
+                            ),
+                        )));
+                        assert!(matches!(
+                            gui.panes.get(pane_id).unwrap().tabs[0].state,
+                            tab::State::Installer(_)
+                        ));
+                        let install_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                            .reviewer_fork_session_generation();
+                        drop(gui.update(Message::Pane(
+                            pane_id,
+                            pane::Message::tab(
+                                1,
+                                tab::Message::ForkInstallCompleted(
+                                    install_generation,
+                                    crate::installer::Message::CubeSaved(
+                                        Ok((cube.clone(), None, None)),
+                                        None,
+                                        None,
+                                    ),
+                                ),
+                            ),
+                        )));
+                        let tab::State::Home(returned) =
+                            &mut gui.panes.get_mut(pane_id).unwrap().tabs[0].state
+                        else {
+                            panic!("saved Split prerequisite must return to the scanner")
+                        };
+                        assert!(
+                            returned.reviewer_split_resume_pending(),
+                            "accepted install must arm a fresh scanner resume"
+                        );
+                        drop(returned.update(home::Message::GlobalFeatureLoaded(0, true)));
+                        assert!(returned.reviewer_split_resume_pending());
+                        returned
+                            .connect_account
+                            .install_admitted_client(client.clone());
+                        returned.connect_account.user = Some(crate::services::coincube::User {
+                            id: 7,
+                            email: "synthetic@example.invalid".into(),
+                            email_verified: Some(true),
+                        });
+                        returned.connect_account.step =
+                            crate::app::state::connect::account::ConnectFlowStep::Dashboard;
+                        returned.connect_account.bitcoin_blake2b_opt_in = true;
+                        let generation = returned.connect_account.session_generation();
+                        drop(
+                            returned.update(home::Message::View(
+                                home::ViewMessage::ConnectAccount(
+                                    crate::app::view::ConnectAccountMessage::FeaturesLoaded(
+                                        Some(
+                                            serde_json::from_value(serde_json::json!({
+                                                "plans": [], "bitcoinBlake2bEnabled": true,
+                                            }))
+                                            .unwrap(),
+                                        ),
+                                        generation,
+                                    ),
+                                ),
+                            )),
+                        );
+                        assert!(
+                            returned.reviewer_split_wallet_active(),
+                            "returned scanner did not resume Split: error={:?} pending={} authenticated={} features={} availability={:?}",
+                            returned.error(),
+                            returned.reviewer_split_resume_pending(),
+                            returned.connect_account.is_authenticated(),
+                            returned.connect_account.features.is_some(),
+                            returned.connect_chain_availability(ChainId::BitcoinBlake2b),
+                        );
+                    }
+                    app::session::open("former-source", zeroize::Zeroizing::new("2468".into()));
+                    app::split_intent::arm_fresh_for_test(&target_id);
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Launch(home::Message::Run(
+                                root.clone(),
+                                app::Config::new(false),
+                                ChainId::BitcoinBlake2b,
+                                cube.clone(),
+                            )),
+                        ),
+                    )));
+                    assert!(!app::session::is_open(), "the former session was retired");
+                    assert!(matches!(
+                        gui.panes.get(pane_id).unwrap().tabs[0].state,
+                        tab::State::PinEntry(_)
+                    ));
+                    assert!(
+                        app::split_intent::take_for_open(&target_id, ChainId::BitcoinBlake2b)
+                            .is_none(),
+                        "scan is privately staged through unlock"
+                    );
+
+                    // Supply the accepted unlock/daemon result without
+                    // invoking a keychain, native node, or network. The event
+                    // still enters through GUI and Tab's real Loader::Synced arm.
+                    let (loader, startup) = if connect {
+                        crate::loader::Loader::new_for_chain(
+                            root.clone(),
+                            app::Config::new(false),
+                            wallet_settings,
+                            cube.clone(),
+                            client,
+                            cek,
+                        )
+                    } else {
+                        crate::loader::Loader::new_local_fork(
+                            root.clone(),
+                            app::Config::new(false),
+                            wallet_settings,
+                            cube.clone(),
+                            cek,
+                        )
+                    };
+                    drop(startup);
+                    gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::Loader(loader);
+                    let reopened_cube = cube.clone();
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            1,
+                            tab::Message::Load(crate::loader::Message::Synced(Ok((
+                                wallet,
+                                app::cache::Cache {
+                                    fiat_chain: ChainId::BitcoinBlake2b,
+                                    ..Default::default()
+                                },
+                                daemon,
+                                None,
+                                None,
+                                cube,
+                            )))),
+                        ),
+                    )));
+                    let tab::State::App(opened) = &gui.panes.get(pane_id).unwrap().tabs[0].state
+                    else {
+                        panic!(
+                            "accepted fork must construct the selected App; connect={}",
+                            connect
+                        )
+                    };
+                    assert_eq!(
+                        opened.reviewer_pending_split_target(),
+                        Some(target_id.as_str())
+                    );
+                    assert!(
+                        app::split_intent::take_for_open(&target_id, ChainId::BitcoinBlake2b)
+                            .is_none(),
+                        "constructor consumed the one-use scan"
+                    );
+                    let owner = opened.cache().app_generation;
+                    assert_eq!(opened.reviewer_pending_split_generation(), Some(1));
+
+                    let (mut home, startup) = home::Home::new_for_chain(root.clone(), None);
+                    drop(startup);
+                    drop(home.update(home::Message::GlobalFeatureLoaded(0, true)));
+                    home.connect_account.bitcoin_blake2b_opt_in = true;
+                    let pane = gui.panes.get_mut(pane_id).unwrap();
+                    pane.tabs.push(tab::Tab::new(2, tab::State::Home(home)));
+                    pane.focused_tab = 1;
+                    app::session::open(target_id.clone(), zeroize::Zeroizing::new("2468".into()));
+                    app::split_intent::arm_fresh_for_test_generation(&target_id, 2);
+                    drop(gui.update(Message::Pane(
+                        pane_id,
+                        pane::Message::tab(
+                            2,
+                            tab::Message::Launch(home::Message::Run(
+                                root.clone(),
+                                app::Config::new(false),
+                                ChainId::BitcoinBlake2b,
+                                reopened_cube,
+                            )),
+                        ),
+                    )));
+                    let tab::State::App(resumed) = &gui.panes.get(pane_id).unwrap().tabs[0].state
+                    else {
+                        panic!("already-open target must keep its App")
+                    };
+                    assert_eq!(resumed.cache().app_generation, owner);
+                    assert_eq!(resumed.reviewer_pending_split_generation(), Some(2));
+                    drop(gui);
+                    app::session::close();
+                    std::fs::remove_dir_all(path).ok();
+                }
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
     fn current_remote_duress_closes_the_retained_home_but_stale_duress_cannot_close_a_new_owner() {
         let result = std::thread::Builder::new()
             .name("remote-duress-owner-barrier".into())
@@ -4392,7 +5392,8 @@ mod single_open_lifecycle_tests {
                 let _guard = app::session::test_guard();
                 let path = std::env::temp_dir()
                     .join(format!("remote-duress-owner-{}", uuid::Uuid::new_v4()));
-                let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let (mut source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let stopped = app::tests::reviewer_attach_counted_claim_context(&mut source);
                 let source_id = source.cube_settings().id.clone();
                 let (home, startup) = home::Home::new_for_chain(source.datadir().clone(), None);
                 drop(startup);
@@ -4420,6 +5421,7 @@ mod single_open_lifecycle_tests {
                 assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
                 assert_eq!(pane.focused_tab, 0);
                 assert!(!app::session::is_open());
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
 
                 let new_path = std::env::temp_dir()
                     .join(format!("remote-duress-new-owner-{}", uuid::Uuid::new_v4()));
@@ -4453,10 +5455,62 @@ mod single_open_lifecycle_tests {
                     tab::State::App(_)
                 ));
                 assert_eq!(app::session::current_cube_id(), Some(new_id));
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
                 drop(gui);
                 app::session::close();
                 std::fs::remove_dir_all(path).ok();
                 std::fs::remove_dir_all(new_path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
+    #[test]
+    fn local_duress_completion_uses_the_same_public_owner_barrier() {
+        let result = std::thread::Builder::new()
+            .name("local-duress-owner-barrier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let path = std::env::temp_dir()
+                    .join(format!("local-duress-owner-{}", uuid::Uuid::new_v4()));
+                let (mut source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let stopped = app::tests::reviewer_attach_counted_claim_context(&mut source);
+                let source_id = source.cube_settings().id.clone();
+                let root = source.datadir().clone();
+                let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                gui.panes.get_mut(pane_id).unwrap().focused_tab = 1;
+                app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::DuressActivated {
+                            datadir: root,
+                            network: bitcoin::Network::Bitcoin,
+                            queue_pending: false,
+                        },
+                    ),
+                )));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert_eq!(pane.tabs.len(), 1);
+                assert_eq!(pane.focused_tab, 0);
+                assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                assert!(!app::session::is_open());
+                assert_eq!(stopped.load(std::sync::atomic::Ordering::SeqCst), 1);
+                drop(gui);
+                std::fs::remove_dir_all(path).ok();
             })
             .unwrap()
             .join();
@@ -4542,7 +5596,7 @@ mod single_open_lifecycle_tests {
                     handoff.fork_cube().to_owned(),
                     home::ClaimRoute::Return(handoff),
                 );
-                drop(gui.update(Message::Pane(
+                let return_task = gui.update(Message::Pane(
                     pane_id,
                     pane::Message::tab(
                         2,
@@ -4554,9 +5608,33 @@ mod single_open_lifecycle_tests {
                             intent,
                         )),
                     ),
-                )));
+                ));
+                use iced_runtime::futures::futures::StreamExt;
+                let returned = runtime.block_on(async {
+                    let mut stream = iced_runtime::task::into_stream(return_task)
+                        .expect("typed Return emits its App route");
+                    while let Some(action) = stream.next().await {
+                        if let iced_runtime::Action::Output(message) = action {
+                            if matches!(&message, Message::Pane(_, pane::Message::Tab(_, inner))
+                                if matches!(GUI::reviewer_unwrap_guarded_message(inner),
+                                    tab::Message::Run(AppMessage::View(
+                                        crate::app::view::Message::Menu(
+                                            crate::app::menu::Menu::Vault(
+                                                crate::app::menu::VaultSubMenu::Claim))))))
+                            {
+                                return message;
+                            }
+                        }
+                    }
+                    panic!("typed Return did not reach the Claim panel")
+                });
+                drop(gui.update(returned));
                 assert!(!app::claim_intent::take(&source_id));
                 assert_eq!(app_count(&gui), 1);
+                assert_eq!(
+                    gui.reviewer_app_mut(0).current_menu_for_test(),
+                    &crate::app::menu::Menu::Vault(crate::app::menu::VaultSubMenu::Claim)
+                );
 
                 // The Account Recovery action reuses this exact App without
                 // another unlock and dispatches the existing management route.
@@ -4576,7 +5654,6 @@ mod single_open_lifecycle_tests {
                         )),
                     ),
                 ));
-                use iced_runtime::futures::futures::StreamExt;
                 let recovery_message = runtime.block_on(async {
                     tokio::time::timeout(std::time::Duration::from_secs(2), async {
                         let mut stream = iced_runtime::task::into_stream(route)

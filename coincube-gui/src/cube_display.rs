@@ -3,14 +3,12 @@
 pub(crate) fn name(raw: &str) -> String {
     const LIMIT: usize = 80;
     let mut rendered = String::new();
-    let mut last_was_space = false;
+    let mut used = 0;
+    let mut pending_space = false;
     let mut truncated = false;
     for character in raw.chars() {
         if character.is_whitespace() {
-            if !last_was_space && !rendered.is_empty() {
-                rendered.push(' ');
-                last_was_space = true;
-            }
+            pending_space = !rendered.is_empty();
             continue;
         }
         if character.is_control()
@@ -26,16 +24,26 @@ pub(crate) fn name(raw: &str) -> String {
         {
             continue;
         }
-        if rendered.chars().count() == LIMIT {
+        if pending_space {
+            if used == LIMIT {
+                truncated = true;
+                break;
+            }
+            rendered.push(' ');
+            used += 1;
+            pending_space = false;
+        }
+        if used == LIMIT {
             truncated = true;
             break;
         }
         rendered.push(character);
-        last_was_space = false;
+        used += 1;
     }
-    let mut rendered = rendered.trim().to_string();
     if truncated {
-        rendered.pop();
+        if used == LIMIT {
+            rendered.pop();
+        }
         rendered.push('…');
     }
     if rendered.is_empty() {
@@ -66,5 +74,26 @@ mod tests {
         assert!(shown.ends_with('…'));
         assert_eq!(stored.chars().count(), 300);
         assert_eq!(name(&"界".repeat(80)), "界".repeat(80));
+    }
+
+    #[test]
+    fn separators_and_multibyte_names_share_the_display_budget() {
+        let exact = "a".repeat(80);
+        assert_eq!(
+            name(&(exact.clone() + " " + &"b".repeat(300)))
+                .chars()
+                .count(),
+            80
+        );
+        assert_eq!(
+            name(&(exact + " " + &"b".repeat(300))).chars().last(),
+            Some('…')
+        );
+        assert_eq!(
+            name(&("界".repeat(79) + "  text")),
+            format!("{}…", "界".repeat(79))
+        );
+        assert_eq!(name(&("界".repeat(79) + "  ")), "界".repeat(79));
+        assert_eq!(name(" \u{200b}\u{0000} "), "Unnamed Cube");
     }
 }

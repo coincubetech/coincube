@@ -1220,6 +1220,11 @@ impl Tab {
         matches!(self.state, State::App(_)).then_some(self.app_generation)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reviewer_fork_session_generation(&self) -> u64 {
+        self.fork_session_generation
+    }
+
     /// The sole emission boundary for App work started outside Tab::update.
     /// GUI/Pane may ask the current App to produce a Task, but its eventual
     /// result must re-enter through the generation checked by GUI::update.
@@ -2597,14 +2602,33 @@ impl Tab {
                         )));
                     }
                     if cube_settings.network.is_blake2b() {
-                        let opened = if loader.requires_connect() {
+                        let client = if loader.requires_connect() {
                             let Some(client) = loader.connect_client.clone() else {
+                                self.pending_split_intent = None;
                                 return Task::done(Message::Load(loader::Message::Failure(
                                     crate::daemon::DaemonError::Unexpected(
                                         "Connect session lost; reopen this Cube".into(),
                                     ),
                                 )));
                             };
+                            Some(client)
+                        } else {
+                            None
+                        };
+                        // The fork constructors consume the one-use Split slot
+                        // inside App::new_inner. BreezLoaded is never reached by
+                        // this path, so transfer the private scan immediately
+                        // before the accepted constructor and clear it afterward.
+                        app::split_intent::clear();
+                        if let Some(intent) = self.pending_split_intent.take() {
+                            if intent.target_source() == cube_settings.network
+                                && intent.target_cube_id() == cube_settings.id
+                                && intent.is_internally_current()
+                            {
+                                app::split_intent::arm(intent);
+                            }
+                        }
+                        let opened = if let Some(client) = client {
                             App::new_for_chain_with_node(
                                 cache,
                                 wallet,
@@ -2628,6 +2652,7 @@ impl Tab {
                                 bitcoind,
                             )
                         };
+                        app::split_intent::clear();
                         match opened {
                             Ok((app, task)) => {
                                 self.state = State::App(app);
@@ -6744,6 +6769,116 @@ mod fork_completion_tests {
     use super::*;
     use crate::app::settings::CubeSettings;
     use crate::chain::ChainId;
+
+    #[test]
+    fn terminal_fork_revoke_clears_old_claim_and_admits_a_new_valid_start() {
+        let result = std::thread::Builder::new()
+            .name("terminal-claim-restart".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let (source, handoff, path) =
+                    app::claim_step1_tests::returning_claim_fixture(false);
+                let root = source.datadir().clone();
+                let target = app::settings::Settings::from_file(
+                    &root.network_directory(ChainId::BitcoinBlake2b),
+                )
+                .unwrap()
+                .cubes
+                .remove(0);
+                let owner = source.cache().app_generation;
+                let old = home::ClaimOpenIntent::new(
+                    owner,
+                    &root,
+                    source.cube_settings().id.clone(),
+                    target.id.clone(),
+                    home::ClaimRoute::Begin(handoff.clone()),
+                );
+                assert!(old.validates(&source, &root, ChainId::BitcoinBlake2b, &target));
+                let (mut installer, startup) = Installer::new(
+                    root.clone(),
+                    bitcoin::Network::Bitcoin,
+                    None,
+                    installer::UserFlow::CreateWallet,
+                    false,
+                    None,
+                    None,
+                    None,
+                    false,
+                    None,
+                )
+                .unwrap();
+                drop(startup);
+                installer.context.bitcoin_config.chain = ChainId::BitcoinBlake2b;
+                let mut tab = Tab::new(1, State::Installer(Box::new(installer)));
+                tab.set_claim_open(old.clone());
+                let old_fork_generation = tab.fork_session_generation;
+                app::settings::global::GlobalSettings::update_bitcoin_blake2b_beta(
+                    &app::settings::global::GlobalSettings::path(&root),
+                    true,
+                )
+                .unwrap();
+                drop(tab.invalidate_fork_state(AuthChange::LogOut, false, true));
+                assert!(matches!(tab.state, State::Home(_)));
+                assert!(
+                    tab.claim_open.is_none(),
+                    "terminal Home discards old Claim metadata"
+                );
+                let State::Home(home) = &mut tab.state else {
+                    unreachable!()
+                };
+                drop(home.update(home::Message::GlobalFeatureLoaded(0, true)));
+
+                let next = home::ClaimOpenIntent::new(
+                    owner,
+                    &root,
+                    source.cube_settings().id.clone(),
+                    target.id.clone(),
+                    home::ClaimRoute::Begin(handoff),
+                );
+                assert_ne!(next.operation, old.operation);
+                assert!(next.validates(&source, &root, ChainId::BitcoinBlake2b, &target));
+                drop(tab.update(Message::Launch(home::Message::RunClaim(
+                    root,
+                    app::Config::new(false),
+                    ChainId::BitcoinBlake2b,
+                    target.clone(),
+                    next.clone(),
+                ))));
+                assert!(matches!(tab.state, State::PinEntry(_)));
+                assert_eq!(
+                    tab.claim_open.as_ref().map(|i| i.operation),
+                    Some(next.operation)
+                );
+                assert_eq!(
+                    tab.update(Message::ForkInstallCompleted(
+                        old_fork_generation,
+                        installer::Message::CubeSaved(Ok((target, None, None)), None, None),
+                    ))
+                    .units(),
+                    0,
+                    "the delayed old completion cannot replace the new operation"
+                );
+                assert!(matches!(tab.state, State::PinEntry(_)));
+                assert_eq!(
+                    tab.claim_open.as_ref().map(|i| i.operation),
+                    Some(next.operation)
+                );
+                drop(tab);
+                drop(source);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
 
     #[test]
     fn sibling_connect_refresh_is_adopted_without_another_keyring_refresh() {

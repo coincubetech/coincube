@@ -1192,6 +1192,16 @@ impl Home {
         self.resume_split_after_install = true;
     }
 
+    #[cfg(test)]
+    pub(crate) fn reviewer_split_wallet_active(&self) -> bool {
+        matches!(self.active_section, HomeSection::SplitWallet)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_split_resume_pending(&self) -> bool {
+        self.resume_split_after_install
+    }
+
     /// Enter Split only once every server-controlled prerequisite has been
     /// re-established in this fresh Home. A loaded feature response without an
     /// explicit `true` is terminal and clears the intent fail-closed.
@@ -1328,13 +1338,21 @@ impl Home {
         self.connect_account.bitcoin_blake2b_opt_in =
             GlobalSettings::load_bitcoin_blake2b_beta(&path);
         self.refresh_displayed_networks();
+        let awaiting_connect_features = self.resume_split_after_install
+            && self.connect_account.bitcoin_blake2b_opt_in
+            && self.connect_account.features.is_none();
         if !self
             .connect_chain_availability(ChainId::BitcoinBlake2b)
             .is_available()
         {
-            self.pending_fork_claim = None;
-            self.imported_claim = None;
-            self.resume_split_after_install = false;
+            // A fresh post-install Home receives the global feature result
+            // independently of Connect's session and feature responses. The
+            // missing account result is not a refusal of the pending Split.
+            if !awaiting_connect_features {
+                self.pending_fork_claim = None;
+                self.imported_claim = None;
+                self.resume_split_after_install = false;
+            }
             self.split_wallet.cancel();
             if matches!(self.active_section, HomeSection::SplitWallet) {
                 self.active_section = HomeSection::Cubes;

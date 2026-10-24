@@ -400,12 +400,10 @@ impl Pane {
             Some((cube, crate::signer::Signer::new(signer), pin))
         });
         let Some((source, signer, pin)) = credentials else {
-            return Task::done(Message::tab(
+            return self.show_app_error(
                 source_tab,
-                tab::Message::Run(app::Message::View(app::view::Message::ShowError(
-                    "Unlock the source Cube with its PIN again before claiming.".into(),
-                ))),
-            ));
+                "Unlock the source Cube with its PIN again before claiming.".into(),
+            );
         };
         let backend =
             coincubed::config::BitcoinBackend::Esplora(crate::installer::connect_esplora_config(
@@ -562,14 +560,14 @@ impl Pane {
                     let tab = &self.tabs[i];
                     if let tab::State::App(app) = &tab.state {
                         if app.can_adopt_shared_connect_session() {
-                            return Task::done(Message::tab(
-                                tab.id,
-                                tab::Message::Run(app::Message::View(
+                            let id = tab.id;
+                            return tab
+                                .emit_app_task(Task::done(app::Message::View(
                                     app::view::Message::ConnectAccount(
                                         app::view::ConnectAccountMessage::Init,
                                     ),
-                                )),
-                            ));
+                                )))
+                                .map(move |message| Message::tab(id, message));
                         }
                     }
                     if let tab::State::Home(home) = &tab.state {
