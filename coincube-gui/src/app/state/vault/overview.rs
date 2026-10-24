@@ -35,6 +35,7 @@ pub struct Payments {
     list: Vec<Payment>,
     is_last_page: bool,
     loaded_page_count: usize,
+    last_error: Option<String>,
 }
 
 pub struct VaultOverview {
@@ -138,6 +139,7 @@ impl State for VaultOverview {
                     converter,
                     &self.expiring_coins,
                     &self.payments.list,
+                    &cache.cube_id,
                     self.payments.is_last_page,
                     self.processing,
                     // "Loading transactions" while the very first page fetch
@@ -146,7 +148,9 @@ impl State for VaultOverview {
                     // keeps `list` populated, so it won't flash to loading.
                     self.payments.list.is_empty()
                         && self.payments.loaded_page_count == 0
-                        && self.warning.is_none(),
+                        && self.payments.last_error.is_none(),
+                    self.payments.loaded_page_count > 0,
+                    self.payments.last_error.as_deref(),
                     &self.sync_status,
                     self.show_rescan_prompt,
                     self.awaiting_rescan_date,
@@ -206,10 +210,12 @@ impl State for VaultOverview {
             Message::Payments(res) => match res {
                 Err(e) => {
                     let err_msg = crate::user_error::report(&e);
+                    self.payments.last_error = Some(err_msg.clone());
                     self.warning = Some(e);
                     return Task::done(Message::View(view::Message::ShowError(err_msg)));
                 }
                 Ok(events) => {
+                    self.payments.last_error = None;
                     self.warning = None;
                     // Detect new incoming payment by comparing newest tx
                     if let Some(newest) = events.first() {
