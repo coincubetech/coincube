@@ -14,6 +14,8 @@ pub mod foreign_psbt;
 pub mod foreign_scan;
 pub mod foreign_split_inventory;
 pub mod foreign_wallet_source;
+#[cfg(test)] // R15a compatibility proof; R15b wires the reviewed adapter into Send.
+pub(crate) mod imported_signer;
 pub mod psbt_file;
 pub mod public_account_source;
 pub mod public_hardware_source;
