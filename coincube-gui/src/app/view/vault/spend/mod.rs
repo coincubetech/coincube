@@ -168,6 +168,11 @@ const PREPARE_ID: &str = "tenshu.vault.send.prepare";
 const FEERATE_PRESETS: [(&str, usize); 3] =
     [("Slow (~4h)", 24), ("Normal (~1h)", 6), ("Fast (~10m)", 1)];
 
+/// A focused preset's ring extends 4px beyond its bounds: a 2px gap, then a
+/// 2px stroke. A later preset paints an opaque fill when selected, so presets
+/// keep at least that much space between them for the ring to stay visible.
+const PRESET_SPACING: u32 = 4;
+
 fn feerate_preset_id(block_target: usize) -> Id {
     Id::from(format!("tenshu.vault.send.feerate-preset.{block_target}"))
 }
@@ -598,7 +603,7 @@ pub fn create_spend_tx<'a>(
                                 selected_feerate_target,
                             )
                         }))
-                        .spacing(2),
+                        .spacing(PRESET_SPACING),
                     )
                     .padding(2)
                     .style(|theme: &theme::Theme| {
@@ -1578,17 +1583,21 @@ mod tests {
             self.click_at(bounds)
         }
 
-        /// Optional synthetic capture for root's visual review; off by default.
-        fn capture(&mut self, scenario: &str, appearance: &str, theme: &theme::Theme) {
-            let Ok(directory) = std::env::var("R07A_CAPTURE_DIR") else {
-                return;
-            };
-            let viewport = Rectangle::with_size(self.size);
-            self.send(
+        /// Redraw, then draw the whole window and return its RGBA pixels.
+        fn render(&mut self, theme: &theme::Theme) -> Vec<u8> {
+            let redraw = self.send(
                 Event::Window(iced::window::Event::RedrawRequested(
                     std::time::Instant::now(),
                 )),
                 mouse::Cursor::Unavailable,
+            );
+            // Only the dashboard's initial viewport notice may appear; see
+            // `rendering_emits_only_the_dashboard_viewport_notice_...`.
+            assert!(
+                redraw.is_empty()
+                    || matches!(redraw.as_slice(), [Message::Scroll(offset)] if *offset == 0.0),
+                "{:?}",
+                redraw
             );
             self.element.as_widget().draw(
                 &self.tree,
@@ -1599,14 +1608,22 @@ mod tests {
                 },
                 Layout::new(&self.node),
                 mouse::Cursor::Unavailable,
-                &viewport,
+                &Rectangle::with_size(self.size),
             );
-            let (width, height) = (self.size.width as u32, self.size.height as u32);
-            let pixels = self.renderer.screenshot(
-                Size::new(width, height),
+            self.renderer.screenshot(
+                Size::new(self.size.width as u32, self.size.height as u32),
                 1.0,
                 theme.colors.general.background,
-            );
+            )
+        }
+
+        /// Optional synthetic capture for root's visual review; off by default.
+        fn capture(&mut self, scenario: &str, appearance: &str, theme: &theme::Theme) {
+            let Ok(directory) = std::env::var("R07A_CAPTURE_DIR") else {
+                return;
+            };
+            let pixels = self.render(theme);
+            let (width, height) = (self.size.width as u32, self.size.height as u32);
             std::fs::create_dir_all(&directory).expect("create disposable capture directory");
             image::save_buffer(
                 std::path::Path::new(&directory).join(format!(
@@ -1619,6 +1636,32 @@ mod tests {
             )
             .expect("save synthetic R07a capture");
         }
+    }
+
+    /// Optionally save `region` cropped from a full-window render.
+    fn save_crop(name: &str, pixels: &[u8], window_width: u32, region: Rectangle) {
+        let Ok(directory) = std::env::var("R07A_CAPTURE_DIR") else {
+            return;
+        };
+        let (x0, y0) = (region.x as u32, region.y as u32);
+        let (x1, y1) = (
+            (region.x + region.width) as u32,
+            (region.y + region.height) as u32,
+        );
+        let mut crop = Vec::with_capacity(((x1 - x0) * (y1 - y0) * 4) as usize);
+        for y in y0..y1 {
+            let start = ((y * window_width + x0) * 4) as usize;
+            crop.extend_from_slice(&pixels[start..start + ((x1 - x0) * 4) as usize]);
+        }
+        std::fs::create_dir_all(&directory).expect("create disposable capture directory");
+        image::save_buffer(
+            std::path::Path::new(&directory).join(name),
+            &crop,
+            x1 - x0,
+            y1 - y0,
+            image::ColorType::Rgba8,
+        )
+        .expect("save synthetic R07a crop");
     }
 
     fn preset(block_target: usize) -> Id {
@@ -2122,6 +2165,126 @@ mod tests {
         assert!(harness.label_bounds(label).contains(point));
         let up = harness.release_at(point);
         assert!(up.is_empty(), "{:?}", up);
+    }
+
+    /// A focused preset's ring stays visible when its right neighbour is
+    /// selected. The neighbour paints after the ring with an opaque fill, so
+    /// the presets keep `PRESET_SPACING` (the ring's 4px outset) between them.
+    /// Samples 3px outside each edge of the focused control in the actual
+    /// dashboard render, like the shell's
+    /// `selected_successor_does_not_paint_over_focused_nav_ring`.
+    #[test]
+    fn selected_right_neighbour_does_not_paint_over_focused_preset_ring() {
+        for (appearance, mode, theme) in themes() {
+            let fixture = Fixture::new(mode, 3);
+            for outer in [COMPACT, WIDE] {
+                for (focused, selected) in [(24, 6), (6, 1)] {
+                    let context = format!(
+                        "{} {:?} focus {} selected {}",
+                        appearance, outer, focused, selected
+                    );
+                    let scenario = Scenario {
+                        selected: Some(selected),
+                        ..Scenario::valid_send()
+                    };
+                    let mut harness = Harness::new(compose(&fixture, &scenario), outer);
+                    harness.focus(preset(focused));
+                    assert_eq!(harness.focused_id(), Some(preset(focused)), "{}", context);
+                    let probe = harness.probe();
+                    let bounds = |target: usize| {
+                        probe
+                            .focus
+                            .iter()
+                            .find(|entry| entry.id == Some(preset(target)))
+                            .map(|entry| entry.bounds)
+                            .unwrap_or_else(|| panic!("preset {} is not rendered", target))
+                    };
+                    let control = bounds(focused);
+                    let neighbour = bounds(selected);
+                    let segment = Rectangle {
+                        x: bounds(24).x - 12.0,
+                        y: control.y - 12.0,
+                        width: bounds(1).x + bounds(1).width - bounds(24).x + 24.0,
+                        height: control.height + 24.0,
+                    };
+                    // The selected preset is painted after the focused one.
+                    assert!(
+                        neighbour.x > control.x + control.width,
+                        "{}: {:?} {:?}",
+                        context,
+                        control,
+                        neighbour
+                    );
+                    // Every sample must land inside the rendered window.
+                    assert!(
+                        segment.x >= 0.0
+                            && segment.y >= 0.0
+                            && segment.x + segment.width <= outer.0 as f32
+                            && segment.y + segment.height <= outer.1 as f32,
+                        "{}: segment {:?} outside the window",
+                        context,
+                        segment
+                    );
+
+                    let pixels = harness.render(&theme);
+                    let pixel = |x: u32, y: u32| {
+                        let i = ((y * outer.0 + x) * 4) as usize;
+                        [pixels[i], pixels[i + 1], pixels[i + 2]]
+                    };
+                    let has_color = |actual: [u8; 3], color: iced::Color| {
+                        let expected =
+                            [color.r, color.g, color.b].map(|component| (component * 255.0) as u8);
+                        actual
+                            .iter()
+                            .zip(expected)
+                            .all(|(actual, expected)| actual.abs_diff(expected) <= 2)
+                    };
+                    // The neighbour really has the opaque selected fill.
+                    let fill = pixel(
+                        (neighbour.x + 2.0) as u32,
+                        (neighbour.y + neighbour.height / 2.0) as u32,
+                    );
+                    assert!(
+                        has_color(fill, theme.colors.shell.selected),
+                        "{}: neighbour fill {:?}",
+                        context,
+                        fill
+                    );
+                    let center_x = (control.x + control.width / 2.0) as u32;
+                    let center_y = (control.y + control.height / 2.0) as u32;
+                    for (edge, x, y) in [
+                        ("top", center_x, (control.y - 3.0) as u32),
+                        (
+                            "bottom",
+                            center_x,
+                            (control.y + control.height + 3.0) as u32,
+                        ),
+                        ("left", (control.x - 3.0) as u32, center_y),
+                        ("right", (control.x + control.width + 3.0) as u32, center_y),
+                    ] {
+                        let actual = pixel(x, y);
+                        assert!(
+                            has_color(actual, theme.colors.shell.focus),
+                            "{}: {} ring edge covered at ({}, {}): {:?}",
+                            context,
+                            edge,
+                            x,
+                            y,
+                            actual
+                        );
+                    }
+                    save_crop(
+                        &format!(
+                            "r07a-preset-ring-focus{}-selected{}-{}-{}x{}-synthetic-crop.png",
+                            focused, selected, appearance, outer.0, outer.1
+                        ),
+                        &pixels,
+                        outer.0,
+                        segment,
+                    );
+                }
+            }
+        }
     }
 
     /// Iced's TextInput reports `text_input` before `focusable`; the
