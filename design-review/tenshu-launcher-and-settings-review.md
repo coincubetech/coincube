@@ -781,3 +781,9 @@ While exporting, two regressions of mine surfaced. (1) Removing the cross-tab li
 **Robert:** add Codex/ChatGPT, and support Grok.
 
 **Applied:** AI access and Settings › AI access list a paired "Codex · ChatGPT" client (Spark only, read plus prepare unsigned transactions), and the pairing step offers Claude Desktop, Codex · ChatGPT, Maple AI Desktop, Grok and Other MCP host. The pairing step's radio buttons now select correctly (they always showed the last option).
+
+## Fix: Strict mode text overlapped the caption (2026-10-24, canvas v121)
+
+**Robert:** the text under Strict mode in Payment checks needs cleanup.
+
+**Cause and fix:** four Settings rows that align to the top used the class `top`, which is also the top bar's class, so those rows were forced to the top bar's 56 px height and panel background and their descriptions spilled over the next text. The modifier is now `atop`. Strict mode and the other three rows now grow with their text. For Codex: nothing to carry over beyond rows that size to their content.
