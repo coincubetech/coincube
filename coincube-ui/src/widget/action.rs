@@ -19,6 +19,19 @@ use iced::mouse;
 use iced::widget::button;
 use iced::{Border, Color, Event, Length, Padding, Rectangle, Size, Vector};
 
+const FOCUS_RING_GAP: f32 = 2.0;
+const FOCUS_RING_WIDTH: f32 = 2.0;
+const FOCUS_RING_OUTSET: f32 = FOCUS_RING_GAP + FOCUS_RING_WIDTH;
+
+fn focus_outer_bounds(bounds: Rectangle) -> Rectangle {
+    Rectangle {
+        x: bounds.x - FOCUS_RING_OUTSET,
+        y: bounds.y - FOCUS_RING_OUTSET,
+        width: bounds.width + FOCUS_RING_OUTSET * 2.0,
+        height: bounds.height + FOCUS_RING_OUTSET * 2.0,
+    }
+}
+
 /// Move focus in visual tree order, then reveal it inside the named scrollable.
 /// The second operation runs after Iced's focus operation completes.
 pub fn focus_next_visible<Message: Send + 'static>(
@@ -113,9 +126,10 @@ impl Operation<ScrollDelta> for FocusedScrollDelta {
         }
         let screen_top = bounds.y - scroll.translation.y;
         let screen_bottom = screen_top + bounds.height;
-        // A margin can be impossible for the final item at maximum scroll.
-        // The focus ring is drawn inside these bounds, so exact visibility is enough.
-        let reveal_margin = 0.0;
+        // The ring's outer edge is four pixels beyond the hit target. Shell
+        // scroll content reserves this space at both ends so it can be shown
+        // even when the first or last action is focused.
+        let reveal_margin = FOCUS_RING_OUTSET;
         let delta = if screen_top < scroll.bounds.y + reveal_margin {
             screen_top - scroll.bounds.y - reveal_margin
         } else if screen_bottom > scroll.bounds.y + scroll.bounds.height - reveal_margin {
@@ -444,11 +458,11 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
             use iced::advanced::Renderer as _;
             renderer.fill_quad(
                 renderer::Quad {
-                    bounds: layout.bounds(),
+                    bounds: focus_outer_bounds(layout.bounds()),
                     border: Border {
-                        color: theme.colors.shell.accent_ink,
-                        width: 2.0,
-                        radius: self.focus_radius.into(),
+                        color: theme.colors.shell.focus,
+                        width: FOCUS_RING_WIDTH,
+                        radius: (self.focus_radius + FOCUS_RING_OUTSET).into(),
                     },
                     ..Default::default()
                 },
@@ -500,7 +514,7 @@ mod tests {
     use iced::advanced::renderer::Headless;
     use iced::advanced::widget::operation::focusable;
     use iced::advanced::Layout;
-    use iced::widget::{column, scrollable, text, text_input};
+    use iced::widget::{column, container, scrollable, text, text_input};
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Message {
@@ -741,6 +755,81 @@ mod tests {
     }
 
     #[test]
+    fn focus_ring_uses_shell_palette_with_two_pixel_gap_and_stroke() {
+        load_fonts();
+        for theme in [Theme::dark(), Theme::light()] {
+            let mut renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+                font::REGULAR,
+                14.into(),
+                Some("tiny-skia"),
+            ))
+            .unwrap();
+            let mut element: Element<'_, Message> = container(
+                Action::new("ring", text("Focus"), Message::Focus)
+                    .width(Length::Fixed(100.0))
+                    .height(Length::Fixed(32.0))
+                    .on_press(Message::First),
+            )
+            .padding(12)
+            .into();
+            let mut tree = Tree::new(element.as_widget());
+            let size = Size::new(160.0, 56.0);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(Size::ZERO, size),
+            );
+            let control = node.children()[0].bounds();
+            assert_eq!(focus_outer_bounds(control).y, control.y - 4.0);
+            run_operation(
+                &mut element,
+                &mut tree,
+                &node,
+                &renderer,
+                focusable::focus::<()>(Id::new("ring")),
+            );
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &renderer::Style {
+                    text_color: theme.colors.shell.ink,
+                },
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &Rectangle::with_size(size),
+            );
+            let pixels =
+                renderer.screenshot(Size::new(160, 56), 1.0, theme.colors.shell.background);
+            let sample = |x: u32, y: u32| {
+                let i = ((y * 160 + x) * 4) as usize;
+                [pixels[i], pixels[i + 1], pixels[i + 2]]
+            };
+            let x = (control.x + control.width / 2.0) as u32;
+            let y = control.y as u32;
+            let focus = theme.colors.shell.focus;
+            let expected = [focus.r, focus.g, focus.b].map(|component| (component * 255.0) as u8);
+            let ring = sample(x, y - 3);
+            assert!(
+                ring.iter()
+                    .zip(expected)
+                    .all(|(actual, expected)| actual.abs_diff(expected) <= 2),
+                "2px outer ring must use shell focus token: {ring:?} != {expected:?}"
+            );
+            assert_ne!(
+                sample(x, y - 1),
+                ring,
+                "2px gap must separate control and ring"
+            );
+            assert_ne!(
+                sample(x, y - 5),
+                ring,
+                "stroke must end 4px outside control"
+            );
+        }
+    }
+
+    #[test]
     fn focused_middle_action_is_revealed_by_scroll_operation() {
         load_fonts();
         let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
@@ -758,7 +847,8 @@ mod tests {
                     .on_press(Message::Second)
                     .height(Length::Fixed(32.0)),
             ]
-            .spacing(24),
+            .spacing(24)
+            .padding([6, 10]),
         )
         .id("scroll")
         .height(Length::Fixed(40.0))
@@ -810,6 +900,48 @@ mod tests {
             )
             .is_none(),
             "focused action should now be fully visible"
+        );
+        run_operation(
+            &mut element,
+            &mut state,
+            &node,
+            &renderer,
+            focusable::focus::<()>(Id::new("first")),
+        );
+        let delta = run_operation(
+            &mut element,
+            &mut state,
+            &node,
+            &renderer,
+            FocusedScrollDelta::new(Id::new("scroll")),
+        )
+        .expect("first action's outer ring needs a reverse scroll delta");
+        assert!(delta.y < 0.0);
+        run_operation(
+            &mut element,
+            &mut state,
+            &node,
+            &renderer,
+            operation::scrollable::scroll_by::<()>(
+                delta.id,
+                operation::scrollable::AbsoluteOffset { x: 0.0, y: delta.y },
+            ),
+        );
+        node = element.as_widget_mut().layout(
+            &mut state,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(260.0, 40.0)),
+        );
+        assert!(
+            run_operation(
+                &mut element,
+                &mut state,
+                &node,
+                &renderer,
+                FocusedScrollDelta::new(Id::new("scroll")),
+            )
+            .is_none(),
+            "first action's outer ring should be fully visible"
         );
     }
 

@@ -3,10 +3,10 @@ use crate::app::view::nav::split::ShellSplit;
 use iced::advanced::{
     layout,
     renderer::Headless,
-    widget::{operation::focusable, operation::Focusable, Id, Operation, Tree},
+    widget::{operation, operation::focusable, operation::Focusable, Id, Operation, Tree},
     Layout,
 };
-use iced::{keyboard, mouse, Event, Rectangle, Size};
+use iced::{keyboard, mouse, Event, Rectangle, Size, Vector};
 
 fn fixture_context() -> NavContext<'static> {
     static STATUS: ConnectionStatus = ConnectionStatus::Inactive;
@@ -97,6 +97,42 @@ fn focus_snapshot(
         .as_widget_mut()
         .operate(tree, Layout::new(node), renderer, &mut snapshot);
     snapshot
+}
+
+#[derive(Default)]
+struct MiddleEdgeSnapshot {
+    viewport: Option<Rectangle>,
+    content: Option<Rectangle>,
+    first: Option<Rectangle>,
+    last: Option<Rectangle>,
+}
+
+impl Operation for MiddleEdgeSnapshot {
+    fn traverse(&mut self, f: &mut dyn FnMut(&mut dyn Operation)) {
+        f(self);
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        _: Vector,
+        _: &mut dyn operation::Scrollable,
+    ) {
+        if id == Some(&Id::new(MIDDLE_SCROLL_ID)) {
+            self.viewport = Some(bounds);
+            self.content = Some(content_bounds);
+        }
+    }
+
+    fn focusable(&mut self, id: Option<&Id>, bounds: Rectangle, _: &mut dyn Focusable) {
+        match id {
+            Some(id) if id == &Id::new("tenshu.shell.nav.Spark") => self.first = Some(bounds),
+            Some(id) if id == &Id::new(VAULT_TOOLS_ID) => self.last = Some(bounds),
+            _ => {}
+        }
+    }
 }
 
 fn load_fonts() {
@@ -604,6 +640,56 @@ fn production_lock_review_rebuild_focuses_cancel_then_restores_lock_trigger() {
     assert!(escape_intent(state).is_none());
 }
 
+#[test]
+fn middle_scroll_reserves_full_outer_ring_at_both_content_edges() {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let ctx = fixture_context();
+    for (width, height) in [(1024.0, 768.0), (1440.0, 900.0)] {
+        let mut element = shell_tree(&ctx, ShellState::default());
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, Size::new(width, height)),
+        );
+        let mut edges = MiddleEdgeSnapshot::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut edges);
+        let viewport = edges.viewport.expect("production middle scroll viewport");
+        let content = edges.content.expect("production middle scroll content");
+        let first = edges.first.expect("first enabled middle action");
+        let last = edges.last.expect("last enabled middle action");
+        assert!(
+            first.y - viewport.y >= 4.0,
+            "first ring clips at {width}x{height}",
+            width = width,
+            height = height
+        );
+        assert!(
+            content.y + content.height - last.y - last.height >= 4.0,
+            "last ring clips at maximum scroll for {width}x{height}",
+            width = width,
+            height = height
+        );
+        for action in [first, last] {
+            assert!(
+                action.x - viewport.x >= 4.0
+                    && viewport.x + viewport.width - action.x - action.width >= 4.0,
+                "middle action's horizontal ring clips at {width}x{height}",
+                width = width,
+                height = height
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn focused_shell_capture_uses_production_compact_and_full_split() {
     load_fonts();
@@ -620,48 +706,56 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
         for (width, height) in [(1024, 768), (1440, 900)] {
             let mut ctx = fixture_context();
             ctx.theme_mode = mode;
-            let mut element = shell_tree(&ctx, ShellState::default());
-            let mut renderer = <iced::Renderer as Headless>::new(
-                coincube_ui::font::REGULAR,
-                iced::Pixels(14.0),
-                Some("tiny-skia"),
-            )
-            .await
-            .unwrap();
-            let mut tree = Tree::new(element.as_widget());
-            let size = Size::new(width as f32, height as f32);
-            let node = element.as_widget_mut().layout(
-                &mut tree,
-                &renderer,
-                &layout::Limits::new(Size::ZERO, size),
-            );
-            operate(
-                &mut element,
-                &mut tree,
-                &node,
-                &renderer,
-                focusable::focus::<()>(Id::new(CUBE_SWITCHER_ID)),
-            );
-            assert_eq!(
+            let review = ShellState {
+                switcher_open: true,
+                lock_confirmation: true,
+                ..ShellState::default()
+            };
+            for (case, state, target) in [
+                ("switcher", ShellState::default(), CUBE_SWITCHER_ID),
+                ("settings", ShellState::default(), SETTINGS_ID),
+                ("lock-cancel", review, CUBE_LOCK_CANCEL_ID),
+                ("lock-confirm", review, "tenshu.cube.lock.confirm"),
+            ] {
+                let mut element = shell_tree(&ctx, state);
+                let mut renderer = <iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(14.0),
+                    Some("tiny-skia"),
+                )
+                .await
+                .unwrap();
+                let mut tree = Tree::new(element.as_widget());
+                let size = Size::new(width as f32, height as f32);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, size),
+                );
                 operate(
                     &mut element,
                     &mut tree,
                     &node,
                     &renderer,
-                    focusable::find_focused()
-                ),
-                Some(Id::new(CUBE_SWITCHER_ID))
-            );
-            let expected_sidebar = if width == 1024 {
-                COMPACT_WIDTH
-            } else {
-                FULL_WIDTH
-            };
-            assert_eq!(
-                node.children()[1].children()[0].bounds().width,
-                expected_sidebar
-            );
-            if let Ok(directory) = std::env::var("SHELL_KEYBOARD_PREVIEW_DIR") {
+                    focusable::focus::<()>(Id::new(target)),
+                );
+                let focused = focus_snapshot(&mut element, &mut tree, &node, &renderer);
+                assert_eq!(focused.focused, vec![Id::new(target)]);
+                let control = focused
+                    .bounds
+                    .iter()
+                    .find(|(id, _)| id == &Id::new(target))
+                    .unwrap()
+                    .1;
+                let expected_sidebar = if width == 1024 {
+                    COMPACT_WIDTH
+                } else {
+                    FULL_WIDTH
+                };
+                assert_eq!(
+                    node.children()[1].children()[0].bounds().width,
+                    expected_sidebar
+                );
                 let redraw = Event::Window(iced::window::Event::RedrawRequested(
                     std::time::Instant::now(),
                 ));
@@ -686,21 +780,44 @@ async fn focused_shell_capture_uses_production_compact_and_full_split() {
                     mouse::Cursor::Unavailable,
                     &Rectangle::with_size(size),
                 );
-                std::fs::create_dir_all(&directory).unwrap();
-                image::save_buffer(
-                    std::path::Path::new(&directory).join(format!(
-                        "tenshu-keyboard-focus-{mode:?}-{width}x{height}.png"
-                    )),
-                    &renderer.screenshot(
-                        Size::new(width, height),
-                        1.0,
-                        theme.colors.shell.background,
-                    ),
-                    width,
-                    height,
-                    image::ColorType::Rgba8,
-                )
-                .unwrap();
+                let pixels = renderer.screenshot(
+                    Size::new(width, height),
+                    1.0,
+                    theme.colors.shell.background,
+                );
+                let x = (control.x + control.width / 2.0) as u32;
+                let y = (control.y - 3.0) as u32;
+                let i = ((y * width + x) * 4) as usize;
+                let actual = [pixels[i], pixels[i + 1], pixels[i + 2]];
+                let focus = theme.colors.shell.focus;
+                let expected =
+                    [focus.r, focus.g, focus.b].map(|component| (component * 255.0) as u8);
+                assert!(
+                    actual
+                        .iter()
+                        .zip(expected)
+                        .all(|(actual, expected)| actual.abs_diff(expected) <= 2),
+                    "focus ring clipped or wrong color for {case} at {width}x{height} {mode:?}: {actual:?} != {expected:?}",
+                    case = case,
+                    width = width,
+                    height = height,
+                    mode = mode,
+                    actual = actual,
+                    expected = expected
+                );
+                if let Ok(directory) = std::env::var("SHELL_KEYBOARD_PREVIEW_DIR") {
+                    std::fs::create_dir_all(&directory).unwrap();
+                    image::save_buffer(
+                        std::path::Path::new(&directory).join(format!(
+                            "tenshu-keyboard-focus-{case}-{mode:?}-{width}x{height}.png"
+                        )),
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
             }
         }
     }

@@ -552,7 +552,9 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             false,
         ));
 
-    let mut middle: Column<Message> = Column::new().spacing(2).padding([0, 10]);
+    // The scroll viewport clips drawing outside its content. Reserve more
+    // than the focus ring's 4px outer extent at its first and last actions.
+    let mut middle: Column<Message> = Column::new().spacing(2).padding([6, 10]);
     middle = middle.push(section("WALLETS"));
     if !ctx.network.is_blake2b() {
         let spark_reason = features::spark(ctx.network).reason().map(str::to_owned);
