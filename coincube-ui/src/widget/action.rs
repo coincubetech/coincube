@@ -140,13 +140,23 @@ pub struct Action<'a, Message> {
     id: Id,
     button: Button<'a, Message>,
     on_press: Option<Message>,
+    on_focus: Message,
     focus_radius: f32,
 }
 
 impl<'a, Message: Clone + 'a> Action<'a, Message> {
-    pub fn new(id: impl Into<Id>, content: impl Into<Element<'a, Message>>) -> Self {
+    /// `focus_intent` is required: the owner must apply Iced's whole-tree
+    /// `operation::focus(id)` when the pointer presses this action. A local
+    /// focus flag alone cannot blur controls behind a capturing split widget.
+    pub fn new(
+        id: impl Into<Id>,
+        content: impl Into<Element<'a, Message>>,
+        focus_intent: impl FnOnce(Id) -> Message,
+    ) -> Self {
+        let id = id.into();
         Self {
-            id: id.into(),
+            on_focus: focus_intent(id.clone()),
+            id,
             button: Button::new(content),
             on_press: None,
             focus_radius: 8.0,
@@ -212,6 +222,8 @@ struct State {
     id: Id,
     focused: bool,
     held: Option<ActivationKey>,
+    pointer_active: bool,
+    pointer_suppressed: bool,
 }
 
 impl Focusable for State {
@@ -239,6 +251,8 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
             id: self.id.clone(),
             focused: false,
             held: None,
+            pointer_active: false,
+            pointer_suppressed: false,
         })
     }
 
@@ -252,9 +266,15 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
         let state = tree.state.downcast_mut::<State>();
         if state.id != self.id || self.on_press.is_none() {
             state.unfocus();
+            state.pointer_active = false;
+            state.pointer_suppressed = false;
             state.id = self.id.clone();
+            // The wrapped Button's pressed state must not survive a semantic
+            // replacement or become actionable again after a disabled pass.
+            tree.children[0] = Tree::new(&self.button as &dyn Widget<Message, Theme, Renderer>);
+        } else {
+            tree.diff_children(&[&self.button as &dyn Widget<Message, Theme, Renderer>]);
         }
-        tree.diff_children(&[&self.button as &dyn Widget<Message, Theme, Renderer>]);
     }
 
     fn size(&self) -> Size<Length> {
@@ -301,28 +321,74 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
         shell: &mut Shell<'_, Message>,
         viewport: &Rectangle,
     ) {
-        if matches!(
+        let pointer_press = matches!(
             event,
             Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left))
-        ) {
+                | Event::Touch(iced::touch::Event::FingerPressed { .. })
+        );
+        let pointer_release = matches!(
+            event,
+            Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left))
+                | Event::Touch(iced::touch::Event::FingerLifted { .. })
+        );
+        let cancel_pointer = matches!(
+            event,
+            Event::Window(iced::window::Event::Unfocused)
+                | Event::Touch(iced::touch::Event::FingerLost { .. })
+        );
+        if pointer_press {
             let state = tree.state.downcast_mut::<State>();
             if self.on_press.is_some() && cursor.is_over(layout.bounds()) {
                 state.focus();
+                state.pointer_active = true;
+                state.pointer_suppressed = state.held.is_some();
+                shell.publish(self.on_focus.clone());
             } else {
                 state.unfocus();
             }
         }
 
+        let suppress_release =
+            pointer_release && tree.state.downcast_ref::<State>().pointer_suppressed;
+        if cancel_pointer && tree.state.downcast_ref::<State>().pointer_active {
+            // The native Button only resets its pressed state on release or
+            // touch loss. If the window blurs mid-click, cancel it without
+            // publishing a stale click when the user returns.
+            let mut canceled_messages = Vec::new();
+            self.button.update(
+                &mut tree.children[0],
+                &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+                layout,
+                mouse::Cursor::Unavailable,
+                renderer,
+                clipboard,
+                &mut Shell::new(&mut canceled_messages),
+                viewport,
+            );
+            debug_assert!(canceled_messages.is_empty());
+        }
         self.button.update(
             &mut tree.children[0],
             event,
             layout,
-            cursor,
+            if suppress_release {
+                mouse::Cursor::Unavailable
+            } else {
+                cursor
+            },
             renderer,
             clipboard,
             shell,
             viewport,
         );
+        if pointer_release || cancel_pointer {
+            let state = tree.state.downcast_mut::<State>();
+            state.pointer_active = false;
+            state.pointer_suppressed = false;
+        }
+        if cancel_pointer {
+            tree.state.downcast_mut::<State>().held = None;
+        }
         if shell.is_event_captured() || self.on_press.is_none() {
             return;
         }
@@ -338,18 +404,17 @@ impl<Message: Clone + 'static> Widget<Message, Theme, Renderer> for Action<'_, M
                 if let Some(activation) = ActivationKey::from_key(key) {
                     if state.held.is_none() {
                         state.held = Some(activation);
+                        if state.pointer_active {
+                            state.pointer_suppressed = true;
+                        }
                         shell.publish(self.on_press.as_ref().unwrap().clone());
                         shell.capture_event();
                     }
                 }
             }
-            Event::Keyboard(keyboard::Event::KeyReleased { key, .. }) => {
-                if state.held == ActivationKey::from_key(key) {
-                    state.held = None;
-                }
-            }
-            Event::Window(iced::window::Event::Unfocused) => {
-                // The release may go to another app after a window switch.
+            Event::Keyboard(keyboard::Event::KeyReleased { key, .. })
+                if state.held == ActivationKey::from_key(key) =>
+            {
                 state.held = None;
             }
             _ => {}
@@ -441,6 +506,7 @@ mod tests {
     enum Message {
         First,
         Second,
+        Focus(Id),
         Input(String),
         Submitted,
     }
@@ -456,15 +522,15 @@ mod tests {
 
     fn tree() -> Element<'static, Message> {
         column![
-            Action::new("first", text("First"))
+            Action::new("first", text("First"), Message::Focus)
                 .on_press(Message::First)
                 .width(Length::Fixed(180.0)),
-            Action::new("disabled", text("Disabled")).on_press_maybe(None),
+            Action::new("disabled", text("Disabled"), Message::Focus).on_press_maybe(None),
             text_input("Enter submits", "")
                 .id("input")
                 .on_input(Message::Input)
                 .on_submit(Message::Submitted),
-            Action::new("second", text("Second")).on_press(Message::Second),
+            Action::new("second", text("Second"), Message::Focus).on_press(Message::Second),
         ]
         .spacing(10)
         .into()
@@ -685,10 +751,10 @@ mod tests {
         .unwrap();
         let mut element: Element<'_, Message> = scrollable(
             column![
-                Action::new("first", text("First"))
+                Action::new("first", text("First"), Message::Focus)
                     .on_press(Message::First)
                     .height(Length::Fixed(32.0)),
-                Action::new("second", text("Second"))
+                Action::new("second", text("Second"), Message::Focus)
                     .on_press(Message::Second)
                     .height(Length::Fixed(32.0)),
             ]
@@ -799,5 +865,224 @@ mod tests {
             vec![Message::First],
             "a fresh key press after returning to the window must activate"
         );
+    }
+
+    #[test]
+    fn overlapping_pointer_and_keyboard_activation_emits_once() {
+        load_fonts();
+        let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            14.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> = Action::new("first", text("First"), Message::Focus)
+            .on_press(Message::First)
+            .into();
+        let mut state = Tree::new(element.as_widget());
+        let size = Size::new(260.0, 80.0);
+        let node = element.as_widget_mut().layout(
+            &mut state,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let cursor = mouse::Cursor::Available(node.bounds().center());
+        let mut dispatch = |event, cursor| {
+            let mut messages = Vec::new();
+            element.as_widget_mut().update(
+                &mut state,
+                &event,
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+            messages
+        };
+        let press = Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left));
+        let release = Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left));
+        let enter_down = key_event(key::Named::Enter, false, true);
+        let enter_up = key_event(key::Named::Enter, false, false);
+
+        assert_eq!(
+            dispatch(press.clone(), cursor),
+            vec![Message::Focus(Id::new("first"))]
+        );
+        assert_eq!(dispatch(enter_down.clone(), cursor), vec![Message::First]);
+        assert!(dispatch(release.clone(), cursor).is_empty());
+        assert!(dispatch(enter_up.clone(), cursor).is_empty());
+
+        assert_eq!(dispatch(enter_down.clone(), cursor), vec![Message::First]);
+        assert_eq!(
+            dispatch(press.clone(), cursor),
+            vec![Message::Focus(Id::new("first"))]
+        );
+        assert!(dispatch(release.clone(), cursor).is_empty());
+        assert!(dispatch(enter_up.clone(), cursor).is_empty());
+
+        assert_eq!(
+            dispatch(press.clone(), cursor),
+            vec![Message::Focus(Id::new("first"))]
+        );
+        assert_eq!(
+            dispatch(key_event(key::Named::Space, false, true), cursor),
+            vec![Message::First]
+        );
+        assert!(dispatch(release.clone(), cursor).is_empty());
+        assert!(dispatch(key_event(key::Named::Space, false, false), cursor).is_empty());
+
+        assert_eq!(
+            dispatch(press.clone(), cursor),
+            vec![Message::Focus(Id::new("first"))]
+        );
+        assert_eq!(dispatch(release.clone(), cursor), vec![Message::First]);
+        assert_eq!(
+            dispatch(press.clone(), cursor),
+            vec![Message::Focus(Id::new("first"))]
+        );
+        assert!(dispatch(Event::Window(iced::window::Event::Unfocused), cursor).is_empty());
+        assert!(dispatch(release, cursor).is_empty());
+        let finger = iced::touch::Finger(1);
+        let position = node.bounds().center();
+        assert_eq!(
+            dispatch(
+                Event::Touch(iced::touch::Event::FingerPressed {
+                    id: finger,
+                    position
+                }),
+                cursor,
+            ),
+            vec![Message::Focus(Id::new("first"))]
+        );
+        assert!(dispatch(
+            Event::Touch(iced::touch::Event::FingerLost {
+                id: finger,
+                position
+            }),
+            cursor,
+        )
+        .is_empty());
+        assert!(dispatch(
+            Event::Touch(iced::touch::Event::FingerLifted {
+                id: finger,
+                position
+            }),
+            cursor,
+        )
+        .is_empty());
+        assert_eq!(dispatch(enter_down, cursor), vec![Message::First]);
+    }
+
+    #[test]
+    fn replaced_or_disabled_action_drops_focus_and_pressed_state() {
+        load_fonts();
+        let renderer = iced::futures::executor::block_on(<Renderer as Headless>::new(
+            font::REGULAR,
+            14.into(),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let size = Size::new(260.0, 80.0);
+        let mut element: Element<'_, Message> = Action::new("first", text("First"), Message::Focus)
+            .on_press(Message::First)
+            .into();
+        let mut state = Tree::new(element.as_widget());
+        let mut node = element.as_widget_mut().layout(
+            &mut state,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let cursor = mouse::Cursor::Available(node.bounds().center());
+        run_operation(
+            &mut element,
+            &mut state,
+            &node,
+            &renderer,
+            focusable::focus::<()>(Id::new("first")),
+        );
+        let mut messages = Vec::new();
+        element.as_widget_mut().update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+            Layout::new(&node),
+            cursor,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &Rectangle::with_size(size),
+        );
+        assert_eq!(messages, vec![Message::Focus(Id::new("first"))]);
+
+        element = Action::new("replacement", text("Second"), Message::Focus)
+            .on_press(Message::Second)
+            .into();
+        state.diff(element.as_widget());
+        node = element.as_widget_mut().layout(
+            &mut state,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        assert_eq!(
+            run_operation(
+                &mut element,
+                &mut state,
+                &node,
+                &renderer,
+                focusable::find_focused()
+            ),
+            None
+        );
+        messages.clear();
+        element.as_widget_mut().update(
+            &mut state,
+            &Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            Layout::new(&node),
+            cursor,
+            &renderer,
+            &mut iced::advanced::clipboard::Null,
+            &mut Shell::new(&mut messages),
+            &Rectangle::with_size(size),
+        );
+        assert!(
+            messages.is_empty(),
+            "replacement must not inherit a pending click"
+        );
+
+        run_operation(
+            &mut element,
+            &mut state,
+            &node,
+            &renderer,
+            focusable::focus::<()>(Id::new("replacement")),
+        );
+        element = Action::new("replacement", text("Disabled"), Message::Focus)
+            .on_press_maybe(None)
+            .into();
+        state.diff(element.as_widget());
+        node = element.as_widget_mut().layout(
+            &mut state,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        assert_eq!(
+            run_operation(
+                &mut element,
+                &mut state,
+                &node,
+                &renderer,
+                focusable::find_focused()
+            ),
+            None
+        );
+        assert!(send_event(
+            &mut element,
+            &mut state,
+            &node,
+            &renderer,
+            key_event(key::Named::Enter, false, true)
+        )
+        .is_empty());
     }
 }

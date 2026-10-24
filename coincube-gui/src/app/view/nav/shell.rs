@@ -116,6 +116,7 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
         row![cube_icon().size(17), text("Tenshu").size(15)]
             .spacing(8)
             .align_y(Alignment::Center),
+        Message::FocusAction,
     )
     .padding([7, 8])
     .style(theme::button::shell_brand)
@@ -128,10 +129,14 @@ pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
             .into()
     } else {
         container(
-            Action::new("tenshu.connect.sign-in", status("Signed out", false))
-                .padding([6, 11])
-                .style(theme::button::shell_nav)
-                .on_press(Message::OpenConnectSignIn),
+            Action::new(
+                "tenshu.connect.sign-in",
+                status("Signed out", false),
+                Message::FocusAction,
+            )
+            .padding([6, 11])
+            .style(theme::button::shell_nav)
+            .on_press(Message::OpenConnectSignIn),
         )
         .style(theme::container::shell_chip)
         .into()
@@ -217,7 +222,7 @@ fn nav_row<'a>(
             _ => format!("tenshu.shell.nav.{label}"),
         }
     };
-    let mut button = Action::new(id, body)
+    let mut button = Action::new(id, body, Message::FocusAction)
         .width(Length::Fill)
         .padding([9, 10])
         .style(if active {
@@ -321,6 +326,7 @@ fn identity<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message>
         ]
         .spacing(9)
         .align_y(Alignment::Center),
+        Message::FocusAction,
     )
     .padding([8, 10])
     .width(Length::Fill)
@@ -369,18 +375,26 @@ fn switcher_menu<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Mes
             .push(
                 row![
                     container(
-                        Action::new("tenshu.cube.lock.confirm", text("Lock").size(13))
-                            .padding([6, 12])
-                            .style(theme::button::primary)
-                            .focus_radius(25.0)
-                            .on_press(Message::LockCubeToLauncher)
+                        Action::new(
+                            "tenshu.cube.lock.confirm",
+                            text("Lock").size(13),
+                            Message::FocusAction
+                        )
+                        .padding([6, 12])
+                        .style(theme::button::primary)
+                        .focus_radius(25.0)
+                        .on_press(Message::LockCubeToLauncher)
                     )
                     .id("cube-lock-confirm"),
                     container(
-                        Action::new(CUBE_LOCK_CANCEL_ID, text("Cancel").size(13))
-                            .padding([6, 12])
-                            .style(theme::button::shell_nav)
-                            .on_press(Message::CancelCubeLock)
+                        Action::new(
+                            CUBE_LOCK_CANCEL_ID,
+                            text("Cancel").size(13),
+                            Message::FocusAction
+                        )
+                        .padding([6, 12])
+                        .style(theme::button::shell_nav)
+                        .on_press(Message::CancelCubeLock)
                     )
                     .id("cube-lock-cancel"),
                 ]

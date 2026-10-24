@@ -8838,7 +8838,7 @@ impl App {
             Message::View(view::Message::AskCubeLock) => {
                 self.cache.cube_switcher_open = true;
                 self.cache.cube_lock_confirmation = true;
-                return Task::none();
+                return iced::widget::operation::focus(view::nav::shell::CUBE_LOCK_CANCEL_ID);
             }
             Message::View(view::Message::CancelCubeLock) => {
                 self.cache.cube_lock_confirmation = false;
@@ -8847,6 +8847,9 @@ impl App {
             Message::View(view::Message::ToggleVaultTools) => {
                 self.cache.vault_tools_open = !self.cache.vault_tools_open;
                 return iced::widget::operation::focus(view::nav::shell::VAULT_TOOLS_ID);
+            }
+            Message::View(view::Message::FocusAction(id)) => {
+                return iced::widget::operation::focus(id.clone());
             }
             Message::View(view::Message::Menu(menu)) => {
                 // Always honor the navigation even when the current

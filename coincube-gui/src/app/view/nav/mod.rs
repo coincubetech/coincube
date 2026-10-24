@@ -519,7 +519,11 @@ mod shell_tests {
                         &iced::Rectangle::with_size(size),
                     );
                 }
-                assert!(matches!(messages.as_slice(), [Message::OpenLauncher]));
+                assert!(matches!(
+                    messages.as_slice(),
+                    [Message::FocusAction(id), Message::OpenLauncher]
+                        if id == &Id::new(shell::LAUNCHER_RETURN_ID)
+                ));
                 if let Ok(directory) = std::env::var("SIDEBAR_PREVIEW_DIR") {
                     redraw(&mut element, &mut tree, &node, &renderer, size);
                     std::fs::create_dir_all(&directory).unwrap();
@@ -731,15 +735,20 @@ mod shell_tests {
                     }
                     let activated = matches!(
                         (expected, messages.as_slice()),
-                        ("lock", [Message::LockCubeToLauncher])
-                            | ("cancel", [Message::CancelCubeLock])
+                        (
+                            "lock",
+                            [Message::FocusAction(_), Message::LockCubeToLauncher]
+                        ) | ("cancel", [Message::FocusAction(_), Message::CancelCubeLock])
                             | (
                                 "settings",
-                                [Message::Menu(Menu::Cube(
-                                    crate::app::menu::CubeSubMenu::Settings(
-                                        crate::app::menu::CubeSettingsOption::General,
-                                    )
-                                ))],
+                                [
+                                    Message::FocusAction(_),
+                                    Message::Menu(Menu::Cube(
+                                        crate::app::menu::CubeSubMenu::Settings(
+                                            crate::app::menu::CubeSettingsOption::General,
+                                        )
+                                    ))
+                                ],
                             )
                     );
                     assert!(
