@@ -399,6 +399,7 @@ class Component extends DCLogic {
   renderVals() {
     // prototype-only: Developer mode (App preferences › Developer) is shared across artboards in localStorage
     let DEV = false; try { DEV = localStorage.getItem('tenshu.proto.dev') === '1'; } catch (e) {}
+    let LSTYLE = 'cubes'; try { if (localStorage.getItem('tenshu.proto.launcher') === 'list') LSTYLE = 'list'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props;
@@ -406,7 +407,7 @@ class Component extends DCLogic {
     const key = [L.section, L.os, L.osReduced, L.hide].join('|');
     // a lever change resets live state to the lever values; otherwise live state wins
     const s = this.state.lv !== key
-      ? { section: L.section, hide: L.hide, appearance: 'system', style: 'cubes', testNets: false, motion: 'system', dev: DEV, review: null, copied: false, repairAsked: false, vers: false }
+      ? { section: L.section, hide: L.hide, appearance: 'system', style: LSTYLE, testNets: false, motion: 'system', dev: DEV, review: null, copied: false, repairAsked: false, vers: false }
       : this.state;
     const go = (patch) => this.setState(Object.assign({}, s, { lv: key }, patch));
 
@@ -430,6 +431,7 @@ class Component extends DCLogic {
 
     // the theme lever acts as the OS setting; System follows it
     const effTheme = s.appearance === 'system' ? L.os : s.appearance;
+    try { localStorage.setItem('tenshu.proto.launcher', s.style === 'list' ? 'list' : 'cubes'); } catch (e) {}
     const reduced = s.motion === 'reduced' || (s.motion === 'system' && L.osReduced);
 
     const SECS = [
