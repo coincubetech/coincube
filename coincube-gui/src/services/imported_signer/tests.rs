@@ -1,21 +1,33 @@
 use super::*;
 use coincube_core::{
     chain::ChainId,
+    imported_keys::{verify_imported_account, VerifiedImportedKey},
     imported_spend::{create_imported_spend, finalize_imported_spend},
     miniscript::bitcoin::{
         self,
         absolute::LockTime,
-        bip32::{DerivationPath, Xpub},
+        bip32::{ChildNumber, DerivationPath, Xpriv, Xpub},
+        psbt::Psbt,
+        secp256k1::Secp256k1,
         sighash::EcdsaSighashType,
         Address, Amount, Network, OutPoint, ScriptBuf, Transaction, TxIn, TxOut,
     },
+    miniscript::{DescriptorPublicKey, ForEachKey},
     spend::{AddrInfo, CandidateCoin, SpendOutputAddress, SpendTxFees, TxGetter},
 };
 use std::str::FromStr;
+use zeroize::Zeroizing;
 
-fn account(seed: u8, path: &str) -> (Xpriv, String) {
+fn account(seed: u8, path: &str) -> (String, Xpriv, String) {
     let secp = Secp256k1::new();
-    let root = Xpriv::new_master(Network::Regtest, &[seed; 32]).unwrap();
+    let phrase = bip39::Mnemonic::from_entropy(&[seed; 16])
+        .unwrap()
+        .to_string();
+    let root = Xpriv::new_master(
+        Network::Regtest,
+        &bip39::Mnemonic::parse(&phrase).unwrap().to_seed(""),
+    )
+    .unwrap();
     let path = DerivationPath::from_str(path).unwrap();
     let xpub = Xpub::from_priv(&secp, &root.derive_priv(&secp, &path).unwrap());
     let key = format!(
@@ -23,10 +35,38 @@ fn account(seed: u8, path: &str) -> (Xpriv, String) {
         root.fingerprint(&secp),
         path.to_string().trim_start_matches("m/")
     );
-    (root, key)
+    (phrase, root, key)
 }
 
-fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
+fn verified(wallet: &ImportedWalletDescriptor, phrase: &str) -> VerifiedImportedKey {
+    let mut paths = Vec::new();
+    wallet.receive_descriptor().for_each_key(|key| {
+        if let DescriptorPublicKey::XPub(xpub) = key {
+            if let Some((_, path)) = &xpub.origin {
+                paths.push(path.clone());
+            }
+        }
+        true
+    });
+    paths
+        .into_iter()
+        .find_map(|path| {
+            verify_imported_account(
+                wallet,
+                &path,
+                Zeroizing::new(phrase.into()),
+                Zeroizing::new(String::new()),
+            )
+            .ok()
+        })
+        .expect("synthetic phrase matches one exact account")
+}
+
+fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<String>, Psbt) {
+    fixture_branch(kind, false)
+}
+
+fn fixture_branch(kind: &str, is_change: bool) -> (ImportedWalletDescriptor, Vec<String>, Psbt) {
     let multisig = kind.starts_with("wsh");
     let path = if multisig {
         "m/48h/1h/0h/2h"
@@ -36,7 +76,7 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
     let accounts: Vec<_> = (1..=if multisig { 3 } else { 1 })
         .map(|seed| account(seed, path))
         .collect();
-    let keys: Vec<_> = accounts.iter().map(|(_, key)| key.as_str()).collect();
+    let keys: Vec<_> = accounts.iter().map(|(_, _, key)| key.as_str()).collect();
     let render = |branch| match kind {
         "pkh" => format!("pkh({}/{branch}/*)", keys[0]),
         "wpkh" => format!("wpkh({}/{branch}/*)", keys[0]),
@@ -59,11 +99,14 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
     };
     let wallet =
         ImportedWalletDescriptor::parse(&render(0), Some(&render(1)), ChainId::Regtest).unwrap();
-    let receive = wallet
-        .receive_descriptor()
-        .at_derivation_index(0)
-        .unwrap()
-        .script_pubkey();
+    let receive = (if is_change {
+        wallet.change_descriptor()
+    } else {
+        wallet.receive_descriptor()
+    })
+    .at_derivation_index(0)
+    .unwrap()
+    .script_pubkey();
     let previous = Transaction {
         version: bitcoin::transaction::Version::TWO,
         lock_time: LockTime::ZERO,
@@ -87,7 +130,7 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
         },
         amount: Amount::from_sat(150_000),
         deriv_index: ChildNumber::Normal { index: 0 },
-        is_change: false,
+        is_change,
         must_select: true,
         sequence: None,
         ancestor_info: None,
@@ -105,7 +148,7 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
             is_change: true,
         }),
     };
-    let (recipient, _) = account(99, "m/84h/1h/0h");
+    let (_, recipient, _) = account(99, "m/84h/1h/0h");
     let recipient_key = Xpub::from_priv(
         &Secp256k1::new(),
         &recipient
@@ -142,7 +185,7 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
     .psbt;
     (
         wallet,
-        accounts.into_iter().map(|(root, _)| root).collect(),
+        accounts.into_iter().map(|(phrase, _, _)| phrase).collect(),
         psbt,
     )
 }
@@ -151,36 +194,48 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<Xpriv>, Psbt) {
 fn all_supported_shapes_sign_and_finalize_with_exact_wallet_keys() {
     let secp = Secp256k1::new();
     for kind in ["pkh", "wpkh", "sh(wpkh)", "wsh(multi)", "wsh(sortedmulti)"] {
-        let (wallet, roots, original) = fixture(kind);
-        let wallet_id = wallet.identity(wallet.chain()).unwrap();
-        let first = sign_imported_psbt(&wallet, &original, &original, &roots[0]).unwrap();
-        let signed = if kind.starts_with("wsh") {
-            sign_imported_psbt(&wallet, &original, &first, &roots[1]).unwrap()
-        } else {
-            first
-        };
-        let finalized = finalize_imported_spend(&wallet, &original, &signed, &secp).unwrap();
-        assert!(finalized.fee().to_sat() > 0, "{}", kind);
-        assert_eq!(
-            wallet.identity(wallet.chain()).unwrap(),
-            wallet_id,
-            "{kind}"
-        );
-        assert_eq!(original.inputs[0].partial_sigs.len(), 0, "{kind}");
-        assert_eq!(
-            signed.inputs[0].partial_sigs.len(),
-            if kind.starts_with("wsh") { 2 } else { 1 },
-            "{kind}"
-        );
+        for is_change in [false, true] {
+            let (wallet, roots, original) = fixture_branch(kind, is_change);
+            let wallet_id = wallet.identity(wallet.chain()).unwrap();
+            let first =
+                sign_imported_psbt(&wallet, &original, &original, &verified(&wallet, &roots[0]))
+                    .unwrap();
+            let signed = if kind.starts_with("wsh") {
+                sign_imported_psbt(&wallet, &original, &first, &verified(&wallet, &roots[1]))
+                    .unwrap()
+            } else {
+                first
+            };
+            let finalized = finalize_imported_spend(&wallet, &original, &signed, &secp).unwrap();
+            assert!(finalized.fee().to_sat() > 0, "{}", kind);
+            assert_eq!(
+                wallet.identity(wallet.chain()).unwrap(),
+                wallet_id,
+                "{kind}"
+            );
+            assert_eq!(original.inputs[0].partial_sigs.len(), 0, "{kind}");
+            assert_eq!(
+                signed.inputs[0].partial_sigs.len(),
+                if kind.starts_with("wsh") { 2 } else { 1 },
+                "{kind}"
+            );
+        }
     }
 }
 
 #[test]
 fn rejects_wrong_root_path_foreign_input_and_changed_economics() {
     let (wallet, roots, original) = fixture("wpkh");
-    let wrong = Xpriv::new_master(Network::Regtest, &[77; 32]).unwrap();
+    let wrong = bip39::Mnemonic::from_entropy(&[77; 16])
+        .unwrap()
+        .to_string();
     assert!(matches!(
-        sign_imported_psbt(&wallet, &original, &original, &wrong),
+        verify_imported_account(
+            &wallet,
+            &DerivationPath::from_str("m/84h/1h/0h").unwrap(),
+            Zeroizing::new(wrong),
+            Zeroizing::new(String::new())
+        ),
         Err(ImportedSignError::KeyDoesNotMatchWallet)
     ));
     let change_purpose =
@@ -203,7 +258,12 @@ fn rejects_wrong_root_path_foreign_input_and_changed_economics() {
     )
     .unwrap();
     assert!(matches!(
-        bind_key(&changed_origin, &roots[0], &Secp256k1::new()),
+        verify_imported_account(
+            &changed_origin,
+            &DerivationPath::from_str("m/84h/1h/0h").unwrap(),
+            Zeroizing::new(roots[0].clone()),
+            Zeroizing::new(String::new())
+        ),
         Err(ImportedSignError::KeyDoesNotMatchWallet)
     ));
 
@@ -211,21 +271,35 @@ fn rejects_wrong_root_path_foreign_input_and_changed_economics() {
     for (_, path) in wrong_path.inputs[0].bip32_derivation.values_mut() {
         *path = DerivationPath::from_str("m/84h/1h/0h/0/77").unwrap();
     }
-    assert!(sign_imported_psbt(&wallet, &original, &wrong_path, &roots[0]).is_err());
+    assert!(sign_imported_psbt(
+        &wallet,
+        &original,
+        &wrong_path,
+        &verified(&wallet, &roots[0])
+    )
+    .is_err());
 
     let mut foreign = original.clone();
     foreign.unsigned_tx.input[0].previous_output.vout = 99;
-    assert!(sign_imported_psbt(&wallet, &original, &foreign, &roots[0]).is_err());
+    assert!(
+        sign_imported_psbt(&wallet, &original, &foreign, &verified(&wallet, &roots[0])).is_err()
+    );
 
-    let signed = sign_imported_psbt(&wallet, &original, &original, &roots[0]).unwrap();
+    let signed =
+        sign_imported_psbt(&wallet, &original, &original, &verified(&wallet, &roots[0])).unwrap();
     for output in [0, 1] {
         let mut changed = signed.clone();
         changed.unsigned_tx.output[output].value -= Amount::from_sat(1);
-        assert!(sign_imported_psbt(&wallet, &original, &changed, &roots[0]).is_err());
+        assert!(
+            sign_imported_psbt(&wallet, &original, &changed, &verified(&wallet, &roots[0]))
+                .is_err()
+        );
     }
     let mut changed = signed.clone();
     changed.inputs[0].non_witness_utxo.as_mut().unwrap().output[0].value -= Amount::from_sat(1);
-    assert!(sign_imported_psbt(&wallet, &original, &changed, &roots[0]).is_err());
+    assert!(
+        sign_imported_psbt(&wallet, &original, &changed, &verified(&wallet, &roots[0])).is_err()
+    );
     let mut changed = signed.clone();
     changed.inputs[0]
         .partial_sigs
@@ -233,12 +307,87 @@ fn rejects_wrong_root_path_foreign_input_and_changed_economics() {
         .next()
         .unwrap()
         .sighash_type = EcdsaSighashType::None;
-    assert!(sign_imported_psbt(&wallet, &original, &changed, &roots[0]).is_err());
+    assert!(
+        sign_imported_psbt(&wallet, &original, &changed, &verified(&wallet, &roots[0])).is_err()
+    );
 
     let mut malformed = original.clone();
     malformed.inputs[0].non_witness_utxo = None;
-    assert!(sign_imported_psbt(&wallet, &malformed, &malformed, &roots[0]).is_err());
+    assert!(sign_imported_psbt(
+        &wallet,
+        &malformed,
+        &malformed,
+        &verified(&wallet, &roots[0])
+    )
+    .is_err());
     assert!(malformed.inputs[0].partial_sigs.is_empty());
+}
+
+#[test]
+fn account_authority_rejects_wrong_passphrase_account_policy_and_chain() {
+    let (wallet, phrases, original) = fixture("wpkh");
+    let phrase = &phrases[0];
+    let path = DerivationPath::from_str("m/84h/1h/0h").unwrap();
+    assert!(matches!(
+        verify_imported_account(
+            &wallet,
+            &path,
+            Zeroizing::new(phrase.clone()),
+            Zeroizing::new("wrong passphrase".into()),
+        ),
+        Err(ImportedSignError::KeyDoesNotMatchWallet)
+    ));
+    assert!(matches!(
+        verify_imported_account(
+            &wallet,
+            &DerivationPath::from_str("m/84h/1h/1h").unwrap(),
+            Zeroizing::new(phrase.clone()),
+            Zeroizing::new(String::new()),
+        ),
+        Err(ImportedSignError::KeyDoesNotMatchWallet)
+    ));
+    let key = verified(&wallet, phrase);
+    let receive = wallet.receive_descriptor().to_string();
+    let change = wallet.change_descriptor().to_string();
+    fn no_checksum(value: &str) -> &str {
+        value.split('#').next().unwrap()
+    }
+    let other_policy = ImportedWalletDescriptor::parse(
+        &format!("sh({})", no_checksum(&receive)),
+        Some(&format!("sh({})", no_checksum(&change))),
+        ChainId::Regtest,
+    )
+    .unwrap();
+    assert!(matches!(
+        sign_imported_psbt(&other_policy, &original, &original, &key),
+        Err(ImportedSignError::WrongWallet)
+    ));
+    let other_chain = ImportedWalletDescriptor::parse(
+        no_checksum(&receive),
+        Some(no_checksum(&change)),
+        ChainId::Testnet,
+    )
+    .unwrap();
+    assert!(matches!(
+        sign_imported_psbt(&other_chain, &original, &original, &key),
+        Err(ImportedSignError::WrongWallet)
+    ));
+    let fork = ImportedWalletDescriptor::parse(
+        no_checksum(&receive),
+        Some(no_checksum(&change)),
+        ChainId::BitcoinBlake2bTestnet4,
+    )
+    .unwrap();
+    assert!(matches!(
+        verify_imported_account(
+            &fork,
+            &path,
+            Zeroizing::new(phrase.clone()),
+            Zeroizing::new(String::new()),
+        ),
+        Err(ImportedSignError::UnsupportedChain)
+    ));
+    assert!(original.inputs[0].partial_sigs.is_empty());
 }
 
 #[test]
@@ -257,19 +406,28 @@ fn upstream_partial_signing_error_does_not_escape_adapter() {
     construction.inputs.push(second_input);
     construction.unsigned_tx.output[1].value += Amount::from_sat(150_001);
 
-    let secp = Secp256k1::new();
-    let scoped = ScopedKey {
-        root: &roots[0],
-        origins: bind_key(&wallet, &roots[0], &secp).unwrap(),
-    };
+    // Upstream mutates input zero before failing on input one. Core signs a
+    // clone, so that partially mutated PSBT cannot escape on error.
+    let root = Xpriv::new_master(
+        Network::Regtest,
+        &bip39::Mnemonic::parse(&roots[0]).unwrap().to_seed(""),
+    )
+    .unwrap();
     let mut upstream = construction.clone();
-    assert!(upstream.sign(&scoped, &secp).is_err());
+    assert!(upstream.sign(&root, &Secp256k1::new()).is_err());
     assert!(!upstream.inputs[0].partial_sigs.is_empty());
+
     assert!(construction
         .inputs
         .iter()
         .all(|input| input.partial_sigs.is_empty()));
-    assert!(sign_imported_psbt(&wallet, &construction, &construction, &roots[0]).is_err());
+    assert!(sign_imported_psbt(
+        &wallet,
+        &construction,
+        &construction,
+        &verified(&wallet, &roots[0])
+    )
+    .is_err());
     assert!(construction
         .inputs
         .iter()

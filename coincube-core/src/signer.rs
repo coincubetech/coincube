@@ -20,12 +20,12 @@ use std::{
 
 use miniscript::bitcoin::{
     self,
-    bip32::{self, Error as Bip32Error, Fingerprint},
+    bip32::{self, ChildNumber, DerivationPath, Error as Bip32Error, Fingerprint},
     ecdsa,
     hashes::Hash,
     key::TapTweak,
-    psbt::{Input as PsbtIn, Psbt},
-    secp256k1, sighash,
+    psbt::{GetKey, Input as PsbtIn, KeyRequest, Psbt},
+    secp256k1, sighash, PrivateKey,
 };
 
 // The seed file's wire format, AEAD, and KDF live in [`crate::seed_crypt`].
@@ -189,6 +189,77 @@ impl SessionSigner {
         let xpub = bip32::Xpub::from_priv(secp, &derived);
         scrub_xpriv(&mut derived);
         xpub
+    }
+
+    pub(crate) fn try_xpub_at(
+        &self,
+        der_path: &bip32::DerivationPath,
+        secp: &secp256k1::Secp256k1<impl secp256k1::Signing>,
+    ) -> Result<bip32::Xpub, bip32::Error> {
+        let mut derived = self.master_xpriv.derive_priv(secp, der_path)?;
+        let xpub = bip32::Xpub::from_priv(secp, &derived);
+        scrub_xpriv(&mut derived);
+        Ok(xpub)
+    }
+
+    /// Sign only ordinary receive/change children of one already verified
+    /// imported account. The root never leaves this type. The generic BDK
+    /// signer may mutate before returning an error, so it sees a clone only.
+    pub(crate) fn sign_imported_scoped(
+        &self,
+        psbt: &Psbt,
+        fingerprint: Fingerprint,
+        account_path: &DerivationPath,
+    ) -> Result<Psbt, ()> {
+        struct Scoped<'a> {
+            root: &'a bip32::Xpriv,
+            fingerprint: Fingerprint,
+            account_path: &'a DerivationPath,
+        }
+        impl GetKey for Scoped<'_> {
+            type Error = secp256k1::Error;
+
+            fn get_key<C: secp256k1::Signing>(
+                &self,
+                request: KeyRequest,
+                secp: &secp256k1::Secp256k1<C>,
+            ) -> Result<Option<PrivateKey>, Self::Error> {
+                let KeyRequest::Bip32((fingerprint, path)) = request else {
+                    return Ok(None);
+                };
+                if fingerprint != self.fingerprint
+                    || !path.as_ref().starts_with(self.account_path.as_ref())
+                    || path.len() != self.account_path.len() + 2
+                    || !matches!(
+                        path[self.account_path.len()],
+                        ChildNumber::Normal { index: 0 | 1 }
+                    )
+                    || !path[self.account_path.len() + 1].is_normal()
+                {
+                    return Ok(None);
+                }
+                let mut derived = self
+                    .root
+                    .derive_priv(secp, &path)
+                    .map_err(|_| secp256k1::Error::InvalidSecretKey)?;
+                let key = derived.to_priv();
+                scrub_xpriv(&mut derived);
+                Ok(Some(key))
+            }
+        }
+        let secp = secp256k1::Secp256k1::new();
+        let mut signed = psbt.clone();
+        signed
+            .sign(
+                &Scoped {
+                    root: &self.master_xpriv,
+                    fingerprint,
+                    account_path,
+                },
+                &secp,
+            )
+            .map_err(|_| ())?;
+        Ok(signed)
     }
 
     /// Sign every foreign P2WPKH, P2SH-P2WPKH, P2PKH or P2WSH `multi` input

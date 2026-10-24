@@ -261,7 +261,7 @@ fn aad_bytes(header: &[u8; HEADER_LEN], cube_id: &str) -> Vec<u8> {
 
 /// Argon2id → 32-byte AES key. Rejects out-of-range wire parameters before
 /// allocating anything.
-fn derive_key(
+pub(crate) fn derive_key(
     password: &str,
     salt: &[u8],
     params: KdfParams,

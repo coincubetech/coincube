@@ -6,6 +6,8 @@ pub mod claim_finalize;
 pub mod claim_spend;
 pub mod descriptors;
 pub mod foreign_split;
+pub mod imported_key_crypt;
+pub mod imported_keys;
 pub mod imported_spend;
 pub mod psbt_unified;
 pub mod public_wallet_pair;
