@@ -205,6 +205,48 @@ fn route_guarded_tab_result(
 }
 
 impl GUI {
+    /// The process owns one secret session and idle clock. A new public Cube
+    /// admission must retire every old secret-bearing surface before its
+    /// constructor or unlock callback can run, even when no App tab remains.
+    fn retire_public_owners(&mut self) {
+        for (_, pane) in self.panes.iter_mut() {
+            pane.close_tabs_matching(|tab| {
+                matches!(
+                    tab.state,
+                    tab::State::App(_)
+                        | tab::State::Loader(_)
+                        | tab::State::Installer(_)
+                        | tab::State::Login(_)
+                        | tab::State::PinEntry(_)
+                        | tab::State::PasskeyUnlock(_)
+                )
+            });
+        }
+        crate::app::session::close();
+    }
+
+    /// A scoped Claim is the sole exception to full public-owner teardown.
+    /// Its source App keeps the one live process session; every legacy second
+    /// App or in-progress unlock/installer must still release its resources.
+    fn retire_other_public_owners(&mut self, owner: crate::app::cache::AppGeneration) {
+        for (_, pane) in self.panes.iter_mut() {
+            pane.close_tabs_matching(|tab| {
+                let source = matches!(&tab.state, tab::State::App(app)
+                    if app.cache().app_generation == owner);
+                !source
+                    && matches!(
+                        tab.state,
+                        tab::State::App(_)
+                            | tab::State::Loader(_)
+                            | tab::State::Installer(_)
+                            | tab::State::Login(_)
+                            | tab::State::PinEntry(_)
+                            | tab::State::PasskeyUnlock(_)
+                    )
+            });
+        }
+    }
+
     #[cfg(test)]
     fn reviewer_unwrap_guarded_message(mut message: &tab::Message) -> &tab::Message {
         while let tab::Message::AppAsync(_, inner) | tab::Message::ForkAsync(_, inner) = message {
@@ -403,7 +445,6 @@ impl GUI {
                     .get_mut(origin_pane)
                     .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == origin_tab))
                 {
-                    let app_generation = tab.app_generation_token();
                     let adopted = match &mut tab.state {
                         tab::State::Home(home)
                             if home.connect_account.can_adopt_shared_session() =>
@@ -411,13 +452,8 @@ impl GUI {
                             Some(home.adopt_connect_client(client).map(tab::Message::Launch))
                         }
                         tab::State::App(app) if app.can_adopt_shared_connect_session() => {
-                            let generation = app_generation.expect("adopting App has a generation");
-                            Some(app.adopt_shared_connect_client(client).map(move |message| {
-                                tab::Message::AppAsync(
-                                    generation,
-                                    Box::new(tab::Message::Run(message)),
-                                )
-                            }))
+                            let task = app.adopt_shared_connect_client(client);
+                            Some(tab.emit_app_task(task))
                         }
                         _ => None,
                     };
@@ -900,38 +936,31 @@ impl GUI {
                                 && handoff.matches_root(app.datadir())
                                 && app.cube_settings().id == handoff.bitcoin_cube() =>
                         {
-                            Some((pane_id, tab.id, tab.app_generation_token()?))
+                            Some((pane_id, tab.id))
                         }
                         _ => None,
                     })
                 });
-                if let Some((pane_id, tab_id, generation)) = retained {
+                if let Some((pane_id, tab_id)) = retained {
                     let task = self
                         .panes
                         .get_mut(pane_id)
                         .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == tab_id))
-                        .and_then(|tab| match &mut tab.state {
-                            tab::State::App(app) => Some(app.begin_claim_pair_phase(handoff)),
-                            _ => None,
+                        .map(|tab| {
+                            let result = match &mut tab.state {
+                                tab::State::App(app) => app.begin_claim_pair_phase(handoff),
+                                _ => Err("The Claim source Cube closed.".into()),
+                            };
+                            tab.emit_app_task(result.unwrap_or_else(|error| {
+                                Task::done(AppMessage::View(crate::app::view::Message::ShowError(
+                                    error,
+                                )))
+                            }))
                         })
-                        .unwrap_or_else(|| Err("The Claim source Cube closed.".into()))
-                        .unwrap_or_else(|error| {
-                            Task::done(AppMessage::View(crate::app::view::Message::ShowError(
-                                error,
-                            )))
-                        });
+                        .unwrap_or_else(Task::none);
                     self.focus = Some(pane_id);
                     return task.map(move |message| {
-                        Message::Pane(
-                            pane_id,
-                            pane::Message::tab(
-                                tab_id,
-                                tab::Message::AppAsync(
-                                    generation,
-                                    Box::new(tab::Message::Run(message)),
-                                ),
-                            ),
-                        )
+                        Message::Pane(pane_id, pane::Message::tab(tab_id, message))
                     });
                 }
                 if let Some(pane) = self.panes.get_mut(origin) {
@@ -976,13 +1005,11 @@ impl GUI {
                                     ))
                                 },
                             );
+                            let task = pane.tabs[index].emit_app_task(task);
                             pane.focused_tab = index;
                             self.focus = Some(pane_id);
                             return task.map(move |message| {
-                                Message::Pane(
-                                    pane_id,
-                                    pane::Message::tab(tab_id, tab::Message::Run(message)),
-                                )
+                                Message::Pane(pane_id, pane::Message::tab(tab_id, message))
                             });
                         }
                     }
@@ -1018,17 +1045,17 @@ impl GUI {
                 for (&pane_id, pane) in self.panes.iter() {
                     for tab in &pane.tabs {
                         if matches!(&tab.state, tab::State::App(_)) {
-                            tasks.push(Task::done(Message::Pane(
-                                pane_id,
-                                pane::Message::tab(
-                                    tab.id,
-                                    tab::Message::Run(AppMessage::View(
-                                        crate::app::view::Message::ConnectAccount(
-                                            crate::app::view::ConnectAccountMessage::Init,
-                                        ),
-                                    )),
-                                ),
-                            )));
+                            let tab_id = tab.id;
+                            tasks.push(
+                                tab.emit_app_task(Task::done(AppMessage::View(
+                                    crate::app::view::Message::ConnectAccount(
+                                        crate::app::view::ConnectAccountMessage::Init,
+                                    ),
+                                )))
+                                .map(move |message| {
+                                    Message::Pane(pane_id, pane::Message::tab(tab_id, message))
+                                }),
+                            );
                         }
                     }
                 }
@@ -1054,31 +1081,29 @@ impl GUI {
                 self.update(Message::ToggleTheme)
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
-                if matches!(inner.as_ref(), tab::Message::LockCubeToLauncher)
-                    || self.panes.get(pane_id).is_some_and(|pane| {
-                        let Some(source) = pane.tabs.iter().find(|tab| tab.id == tab_id) else {
-                            return false;
-                        };
-                        let valid_lock = match inner.as_ref() {
-                            tab::Message::LockCube => true,
-                            tab::Message::AppAsync(generation, nested) => {
-                                source.app_generation_token() == Some(*generation)
-                                    && matches!(nested.as_ref(), tab::Message::LockCube)
-                            }
-                            _ => false,
-                        };
-                        valid_lock
-                            && (matches!(
-                                pane.tabs.get(pane.focused_tab).map(|tab| &tab.state),
-                                Some(tab::State::Home(_))
-                            ) || match &source.state {
-                                tab::State::App(app) => pane.tabs.iter().any(|tab| {
-                                    tab.claim_open_owner() == Some(app.cache().app_generation)
-                                }),
-                                _ => false,
-                            })
-                    }) =>
+                if matches!(
+                    inner.as_ref(),
+                    tab::Message::LockCubeToLauncher | tab::Message::LockCube
+                ) =>
             {
+                let to_launcher = matches!(inner.as_ref(), tab::Message::LockCubeToLauncher)
+                    || self.panes.get(pane_id).is_some_and(|pane| {
+                        let owner =
+                            pane.tabs.iter().find(|tab| tab.id == tab_id).and_then(
+                                |tab| match &tab.state {
+                                    tab::State::App(app) => Some(app.cache().app_generation),
+                                    _ => None,
+                                },
+                            );
+                        matches!(
+                            pane.tabs.get(pane.focused_tab).map(|tab| &tab.state),
+                            Some(tab::State::Home(_))
+                        ) || owner.is_some_and(|owner| {
+                            pane.tabs
+                                .iter()
+                                .any(|tab| tab.claim_open_owner() == Some(owner))
+                        })
+                    });
                 let identity = self
                     .panes
                     .get(pane_id)
@@ -1100,7 +1125,16 @@ impl GUI {
                     pane.close_tabs_matching(|sibling| {
                         !(other_id == pane_id && sibling.id == tab_id)
                             && (sibling.claim_open_owner() == Some(owner)
-                                || sibling.matches_cube_identity(&root, chain, &cube_id))
+                                || sibling.matches_cube_identity(&root, chain, &cube_id)
+                                || matches!(
+                                    sibling.state,
+                                    tab::State::App(_)
+                                        | tab::State::Loader(_)
+                                        | tab::State::Installer(_)
+                                        | tab::State::Login(_)
+                                        | tab::State::PinEntry(_)
+                                        | tab::State::PasskeyUnlock(_)
+                                ))
                     });
                     if pane.tabs.is_empty() {
                         empty_panes.push(other_id);
@@ -1115,6 +1149,13 @@ impl GUI {
                 if let Some(pane) = self.panes.get_mut(pane_id) {
                     if let Some(index) = pane.tabs.iter().position(|tab| tab.id == tab_id) {
                         if matches!(pane.tabs[index].state, tab::State::App(_)) {
+                            if !to_launcher {
+                                crate::app::session::close();
+                                self.focus = Some(pane_id);
+                                return pane
+                                    .update(pane::Message::tab(tab_id, *inner), &self.config)
+                                    .map(move |message| Message::Pane(pane_id, message));
+                            }
                             pane.close_tab(index); // waits for daemon stop
                             crate::app::session::close(); // zeroizes signer/PIN
                             self.focus = Some(pane_id);
@@ -1133,8 +1174,20 @@ impl GUI {
                 Task::none()
             }
             Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
-                if matches!(inner.as_ref(), tab::Message::DuressActivated { .. }) =>
+                if matches!(inner.as_ref(), tab::Message::DuressActivated { .. })
+                    || matches!(
+                        inner.as_ref(),
+                        tab::Message::Run(AppMessage::View(
+                            crate::app::view::Message::DuressLockRemote
+                        ))
+                    ) =>
             {
+                let remote = matches!(
+                    inner.as_ref(),
+                    tab::Message::Run(AppMessage::View(
+                        crate::app::view::Message::DuressLockRemote
+                    ))
+                );
                 let result = {
                     let Some(pane) = self.panes.get_mut(pane_id) else {
                         return Task::none();
@@ -1142,6 +1195,9 @@ impl GUI {
                     let Some(index) = pane.tabs.iter().position(|tab| tab.id == tab_id) else {
                         return Task::none();
                     };
+                    if remote && !matches!(pane.tabs[index].state, tab::State::App(_)) {
+                        return Task::none();
+                    }
                     pane.tabs[index].stop();
                     pane.update(pane::Message::Tab(tab_id, inner), &self.config)
                 };
@@ -1151,6 +1207,8 @@ impl GUI {
                     other_pane.close_tabs_matching(|tab| other_id != pane_id || tab.id != tab_id);
                 }
                 crate::app::session::close();
+                crate::app::claim_intent::clear();
+                crate::app::split_intent::clear();
                 if let Some(pane) = self.panes.get_mut(pane_id) {
                     pane.focused_tab = pane
                         .tabs
@@ -1191,6 +1249,37 @@ impl GUI {
                     unreachable!();
                 };
                 let mut tasks = Vec::new();
+                let public_exit = matches!(
+                    msg,
+                    home::Message::Run(..)
+                        | home::Message::RunToRecovery(..)
+                        | home::Message::RunClaim(..)
+                        | home::Message::Install(..)
+                        | home::Message::InstallForSplit(..)
+                );
+                if public_exit {
+                    let admission = self
+                        .panes
+                        .get(p)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == t))
+                        .map_or_else(
+                            || Err("The Launcher destination closed.".to_string()),
+                            |tab| tab.validate_home_exit(&msg),
+                        );
+                    if let Err(error) = admission {
+                        if let Some(tab::State::Home(home)) = self
+                            .panes
+                            .get_mut(p)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == t))
+                            .map(|tab| &mut tab.state)
+                        {
+                            home.set_error(error);
+                        }
+                        return Task::none();
+                    }
+                }
+                let mut retain_claim_source = false;
+                let mut staged_split = None;
                 if let Some((root, chain, cube, intent)) = match &msg {
                     home::Message::Run(root, _, chain, cube)
                     | home::Message::RunToRecovery(root, _, chain, cube) => {
@@ -1204,11 +1293,16 @@ impl GUI {
                     let claim_route = intent.is_some_and(|intent| {
                         self.panes.iter().any(|(_, pane)| {
                             pane.tabs.iter().any(|tab| match &tab.state {
-                                tab::State::App(app) => intent.validates(app, root, *chain, cube),
+                                tab::State::App(app) => {
+                                    crate::app::session::current_cube_id().as_deref()
+                                        == Some(app.cube_settings().id.as_str())
+                                        && intent.validates(app, root, *chain, cube)
+                                }
                                 _ => false,
                             })
                         })
                     });
+                    retain_claim_source = claim_route;
                     if intent.is_some() && !claim_route {
                         crate::app::claim_intent::clear();
                         crate::app::split_intent::clear();
@@ -1231,27 +1325,71 @@ impl GUI {
                         if already_opening {
                             return Task::none();
                         }
+                        // A restricted Claim may keep only its exact source
+                        // App. Legacy other Cube surfaces cannot share the
+                        // source's one process session through this exception.
+                        self.retire_other_public_owners(intent.owner);
+                    }
+                    if !claim_route && intent.is_none() && chain.is_blake2b() {
+                        staged_split = crate::app::split_intent::take_for_open(&cube.id, *chain);
                     }
                     // Opening the same Cube from the Launcher resumes its live
                     // App. In particular this must not ask for its PIN again.
-                    let existing = self.panes.iter().find_map(|(&pane_id, pane)| {
-                        pane.tabs
-                            .iter()
-                            .enumerate()
-                            .find_map(|(index, tab)| match &tab.state {
-                                tab::State::App(app)
-                                    if app.datadir() == root
-                                        && app.cube_settings().network == *chain
-                                        && app.cube_settings().id == cube.id =>
-                                {
-                                    Some((pane_id, index))
-                                }
-                                _ => None,
-                            })
-                    });
+                    let secret_owners = self
+                        .panes
+                        .iter()
+                        .flat_map(|(_, pane)| pane.tabs.iter())
+                        .filter(|tab| {
+                            matches!(
+                                tab.state,
+                                tab::State::App(_)
+                                    | tab::State::Loader(_)
+                                    | tab::State::Installer(_)
+                                    | tab::State::Login(_)
+                                    | tab::State::PinEntry(_)
+                                    | tab::State::PasskeyUnlock(_)
+                            )
+                        })
+                        .count();
+                    // A retained App can resume only while it is the sole
+                    // public owner of the exact live process session. Legacy
+                    // duplicate tabs, or an App outliving its session, go
+                    // through the normal close-then-unlock admission instead.
+                    let existing = (secret_owners == 1
+                        && crate::app::session::current_cube_id().as_deref()
+                            == Some(cube.id.as_str()))
+                    .then(|| {
+                        self.panes.iter().find_map(|(&pane_id, pane)| {
+                            pane.tabs
+                                .iter()
+                                .enumerate()
+                                .find_map(|(index, tab)| match &tab.state {
+                                    tab::State::App(app)
+                                        if app.datadir() == root
+                                            && app.cube_settings().network == *chain
+                                            && app.cube_settings().id == cube.id =>
+                                    {
+                                        Some((pane_id, index))
+                                    }
+                                    _ => None,
+                                })
+                        })
+                    })
+                    .flatten();
                     if let Some((pane_id, index)) = existing {
                         self.focus = Some(pane_id);
                         if let Some(pane) = self.panes.get_mut(pane_id) {
+                            if let Some(split) = staged_split.take() {
+                                if let tab::State::App(app) = &mut pane.tabs[index].state {
+                                    let task = app.resume_foreign_split_intent(split);
+                                    let tab_id = pane.tabs[index].id;
+                                    let task = pane.tabs[index].emit_app_task(task);
+                                    pane.focused_tab = index;
+                                    return task.map(move |message| {
+                                        Message::Pane(pane_id, pane::Message::tab(tab_id, message))
+                                    });
+                                }
+                            }
                             if let Some(home::ClaimRoute::Return(handoff)) =
                                 intent.map(|intent| &intent.route)
                             {
@@ -1264,12 +1402,10 @@ impl GUI {
                                             ))
                                         });
                                     let tab_id = pane.tabs[index].id;
+                                    let task = pane.tabs[index].emit_app_task(task);
                                     pane.focused_tab = index;
                                     return task.map(move |message| {
-                                        Message::Pane(
-                                            pane_id,
-                                            pane::Message::tab(tab_id, tab::Message::Run(message)),
-                                        )
+                                        Message::Pane(pane_id, pane::Message::tab(tab_id, message))
                                     });
                                 }
                             }
@@ -1281,21 +1417,19 @@ impl GUI {
                                         &self.config,
                                     )
                                     .map(move |message| Message::Pane(pane_id, message));
-                                let recovery = Task::done(Message::Pane(
-                                    pane_id,
-                                    pane::Message::tab(
-                                        tab_id,
-                                        tab::Message::Run(AppMessage::View(
-                                            crate::app::view::Message::Menu(
-                                                crate::app::menu::Menu::Cube(
-                                                    crate::app::menu::CubeSubMenu::Settings(
-                                                        crate::app::menu::CubeSettingsOption::Recovery,
-                                                    ),
+                                let recovery = pane.tabs[index]
+                                    .emit_app_task(Task::done(AppMessage::View(
+                                        crate::app::view::Message::Menu(
+                                            crate::app::menu::Menu::Cube(
+                                                crate::app::menu::CubeSubMenu::Settings(
+                                                    crate::app::menu::CubeSettingsOption::Recovery,
                                                 ),
                                             ),
-                                        )),
-                                    ),
-                                ));
+                                        ),
+                                    )))
+                                    .map(move |message| {
+                                        Message::Pane(pane_id, pane::Message::tab(tab_id, message))
+                                    });
                                 return Task::batch([focus, recovery]);
                             }
                             return pane
@@ -1311,23 +1445,76 @@ impl GUI {
                     // must remain available to sign the counterpart. Ordinary
                     // Cube switching closes the old wallet and secret session
                     // synchronously before the new Home::Run reaches unlock.
-                    if !claim_route {
-                        let mut closed = false;
-                        for (_, pane) in self.panes.iter_mut() {
-                            closed |= pane.close_tabs_matching(|tab| {
-                                matches!(
-                                    tab.state,
-                                    tab::State::App(_)
-                                        | tab::State::Loader(_)
-                                        | tab::State::Installer(_)
-                                        | tab::State::Login(_)
-                                        | tab::State::PinEntry(_)
-                                        | tab::State::PasskeyUnlock(_)
-                                )
-                            });
+                }
+                if let home::Message::InstallForSplit(root, _) = &msg {
+                    let imported_operation = self.panes.get(p).is_some_and(|pane| {
+                        pane.tabs.iter().find(|tab| tab.id == t).is_some_and(|tab| {
+                            matches!(&tab.state, tab::State::Home(home) if home.imported_claim_request().is_some())
+                        })
+                    });
+                    retain_claim_source = self.panes.get(p).is_some_and(|pane| {
+                        pane.tabs.iter().find(|tab| tab.id == t).is_some_and(|tab| {
+                            let tab::State::Home(home) = &tab.state else {
+                                return false;
+                            };
+                            let (Some(owner), Some(request)) =
+                                (home.imported_claim_owner(), home.imported_claim_request())
+                            else {
+                                return false;
+                            };
+                            self.panes.iter().any(|(_, pane)| {
+                                pane.tabs.iter().any(|tab| match &tab.state {
+                                    tab::State::App(app) => {
+                                        app.cache().app_generation == owner
+                                            && app.datadir() == root
+                                            && app.cube_settings().id == request.source.cube_id
+                                            && crate::app::session::current_cube_id().as_deref()
+                                                == Some(app.cube_settings().id.as_str())
+                                            && app.prepare_imported_claim().is_ok_and(
+                                                |(current, client)| {
+                                                    current.source == request.source
+                                                        && request.validate(root, &client).is_ok()
+                                                },
+                                            )
+                                    }
+                                    _ => false,
+                                })
+                            })
+                        })
+                    });
+                    if imported_operation && !retain_claim_source {
+                        if let Some(tab::State::Home(home)) = self
+                            .panes
+                            .get_mut(p)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == t))
+                            .map(|tab| &mut tab.state)
+                        {
+                            home.set_error("The imported Claim source closed or changed. Open Claim from that Cube again.");
                         }
-                        if closed {
-                            crate::app::session::close();
+                        return Task::none();
+                    }
+                    if retain_claim_source {
+                        if let Some(owner) = self.panes.get(p).and_then(|pane| {
+                            pane.tabs.iter().find(|tab| tab.id == t).and_then(|tab| {
+                                match &tab.state {
+                                    tab::State::Home(home) => home.imported_claim_owner(),
+                                    _ => None,
+                                }
+                            })
+                        }) {
+                            self.retire_other_public_owners(owner);
+                        }
+                    }
+                }
+                if public_exit && !retain_claim_source {
+                    self.retire_public_owners();
+                    if let Some(intent) = staged_split {
+                        if let Some(tab) = self
+                            .panes
+                            .get_mut(p)
+                            .and_then(|pane| pane.tabs.iter_mut().find(|tab| tab.id == t))
+                        {
+                            tab.stage_split_intent(intent);
                         }
                     }
                 }
@@ -1335,6 +1522,7 @@ impl GUI {
                     home::DeleteCubeMessage::Confirm(..),
                 )) = &msg
                 {
+                    self.retire_public_owners();
                     // When a cube is deleted, close all App and Loader tabs since they won't be valid anymore
                     let mut panes_to_close = Vec::<pane_grid::Pane>::new();
                     for (id, pane) in self.panes.iter_mut() {
@@ -1392,14 +1580,12 @@ impl GUI {
                         tab::State::App(app)
                             if app.cache().app_generation == resources.intent.owner =>
                         {
-                            Some((pane_id, tab.id, tab.app_generation_token()?))
+                            Some((pane_id, tab.id))
                         }
                         _ => None,
                     })
                 });
-                let Some((source_pane, source_tab, source_generation)) =
-                    source.filter(|_| loader_present)
-                else {
+                let Some((source_pane, source_tab)) = source.filter(|_| loader_present) else {
                     resources.stop_owned();
                     crate::app::claim_intent::clear();
                     crate::app::split_intent::clear();
@@ -1437,18 +1623,18 @@ impl GUI {
                         }
                     }
                     self.focus = Some(source_pane);
-                    return Task::done(Message::Pane(
-                        source_pane,
-                        pane::Message::tab(
-                            source_tab,
-                            tab::Message::AppAsync(
-                                source_generation,
-                                Box::new(tab::Message::Run(AppMessage::View(
-                                    crate::app::view::Message::ShowError(error),
-                                ))),
-                            ),
-                        ),
-                    ));
+                    return self
+                        .panes
+                        .get(source_pane)
+                        .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == source_tab))
+                        .map_or_else(Task::none, |tab| {
+                            tab.emit_app_task(Task::done(AppMessage::View(
+                                crate::app::view::Message::ShowError(error),
+                            )))
+                            .map(move |message| {
+                                Message::Pane(source_pane, pane::Message::tab(source_tab, message))
+                            })
+                        });
                 }
                 if let Some(pane) = self.panes.get_mut(loader_pane) {
                     if let Some(index) = pane.tabs.iter().position(|tab| tab.id == loader_tab) {
@@ -1502,18 +1688,16 @@ impl GUI {
                     home::ClaimRoute::Return(_) => Ok(Task::none()),
                 };
                 match start {
-                    Ok(task) => task.map(move |message| {
-                        Message::Pane(
-                            source_pane,
-                            pane::Message::tab(
-                                source_tab,
-                                tab::Message::AppAsync(
-                                    source_generation,
-                                    Box::new(tab::Message::Run(message)),
-                                ),
-                            ),
-                        )
-                    }),
+                    Ok(task) => {
+                        let task = self
+                            .panes
+                            .get(source_pane)
+                            .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == source_tab))
+                            .map_or_else(Task::none, |tab| tab.emit_app_task(task));
+                        task.map(move |message| {
+                            Message::Pane(source_pane, pane::Message::tab(source_tab, message))
+                        })
+                    }
                     Err(error) => {
                         if let Some(tab::State::App(app)) = self
                             .panes
@@ -3347,6 +3531,104 @@ mod lock_cube_dispatch_tests {
     use super::*;
 
     #[test]
+    fn admitted_destination_closes_orphaned_process_session() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("cube-orphaned-session-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let pane = pane::Pane::new_with_tab(tab::State::Home(home));
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        let mut gui = GUI {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root.clone(), None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        };
+        crate::app::session::open("orphaned", zeroize::Zeroizing::new("2468".into()));
+        let destination = crate::app::settings::CubeSettings::new_with_raw_id(
+            "next-cube".into(),
+            "Next Cube".into(),
+            crate::chain::ChainId::Bitcoin,
+        );
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                1,
+                tab::Message::Launch(home::Message::Run(
+                    root,
+                    crate::app::Config::new(false),
+                    crate::chain::ChainId::Bitcoin,
+                    destination,
+                )),
+            ),
+        )));
+        assert!(!crate::app::session::is_open());
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn refused_public_destination_keeps_the_current_app_and_session() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("cube-refused-switch-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let source_id = source.cube_settings().id.clone();
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let mut gui = GUI::reviewer_app_home_gui(source, home);
+        let pane_id = gui.focus.unwrap();
+        crate::app::session::open(source_id.clone(), zeroize::Zeroizing::new("2468".into()));
+
+        let mismatched = crate::app::settings::CubeSettings::new_with_raw_id(
+            "wrong-chain".into(),
+            "Wrong chain".into(),
+            crate::chain::ChainId::BitcoinBlake2b,
+        );
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                2,
+                tab::Message::Launch(home::Message::Run(
+                    root,
+                    crate::app::Config::new(false),
+                    crate::chain::ChainId::Bitcoin,
+                    mismatched,
+                )),
+            ),
+        )));
+        assert!(matches!(
+            &gui.panes.get(pane_id).unwrap().tabs[0].state,
+            tab::State::App(app) if app.cube_settings().id == source_id
+        ));
+        assert_eq!(crate::app::session::current_cube_id(), Some(source_id));
+        let tab::State::Home(home) = &gui.panes.get(pane_id).unwrap().tabs[1].state else {
+            panic!("the Launcher must report the refusal");
+        };
+        assert!(home.error().is_some_and(|error| error.contains("folder")));
+        drop(gui);
+        crate::app::session::close();
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn ordinary_switch_survives_recursive_removal_of_an_earlier_claim_loader() {
         let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3428,7 +3710,7 @@ mod lock_cube_dispatch_tests {
     }
 
     #[test]
-    fn lock_closes_same_cube_across_panes_but_preserves_an_unrelated_cube() {
+    fn lock_retires_every_secret_owner_before_clearing_the_shared_session() {
         let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -3445,7 +3727,6 @@ mod lock_cube_dispatch_tests {
         let same_pane_sibling =
             crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
         let (unrelated, _) = crate::app::claim_step1_tests::bitcoin_app(&root_path);
-        let unrelated_id = unrelated.cube_settings().id.clone();
         let mut first_pane = pane::Pane::new_with_tab(tab::State::App(first));
         first_pane
             .tabs
@@ -3504,6 +3785,8 @@ mod lock_cube_dispatch_tests {
             global_cache: GlobalCache::default(),
             theme_mode: Default::default(),
         };
+        crate::app::session::open(same_cube_id.clone(), zeroize::Zeroizing::new("2468".into()));
+        assert_eq!(crate::app::session::current_cube_id(), Some(same_cube_id));
 
         drop(gui.update(Message::Pane(
             origin,
@@ -3513,18 +3796,17 @@ mod lock_cube_dispatch_tests {
         assert!(matches!(pane.tabs[0].state, tab::State::Home(_)));
         assert_eq!(
             pane.tabs.len(),
-            2,
-            "matching App, Loader and Installer siblings were stopped and removed"
+            1,
+            "no App, Loader or Installer may retain a cleared global session"
         );
-        assert!(matches!(&pane.tabs[1].state, tab::State::App(app)
-            if app.cube_settings().id == unrelated_id));
         assert!(gui.panes.get(other).is_none(), "empty sibling pane closed");
         assert_eq!(gui.focus, Some(origin));
+        assert!(!crate::app::session::is_open());
         drop(gui.update(Message::Pane(
             origin,
             pane::Message::tab(4, tab::Message::Load(crate::loader::Message::None)),
         )));
-        assert_eq!(gui.panes.get(origin).unwrap().tabs.len(), 2);
+        assert_eq!(gui.panes.get(origin).unwrap().tabs.len(), 1);
 
         drop(gui);
         let _ = std::fs::remove_dir_all(root_path);
@@ -3900,6 +4182,23 @@ impl GUI {
                 crate::app::view::Message::ConnectAccount(
                     crate::app::view::ConnectAccountMessage::SetSession(..))))))
     }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_is_claim_or_session_loaded(message: &Message) -> bool {
+        matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
+            if matches!(Self::reviewer_unwrap_guarded_message(inner),
+                tab::Message::Run(AppMessage::Claim(_)
+                    | AppMessage::View(crate::app::view::Message::ConnectAccount(
+                        crate::app::view::ConnectAccountMessage::SessionLoaded { .. })))))
+    }
+
+    #[cfg(test)]
+    pub(crate) fn reviewer_is_session_loaded(message: &Message) -> bool {
+        matches!(message, Message::Pane(_, pane::Message::Tab(_, inner))
+            if matches!(Self::reviewer_unwrap_guarded_message(inner),
+                tab::Message::Run(AppMessage::View(crate::app::view::Message::ConnectAccount(
+                    crate::app::view::ConnectAccountMessage::SessionLoaded { .. })))))
+    }
 }
 
 #[cfg(test)]
@@ -3997,6 +4296,11 @@ mod claim_return_routing_tests {
                     global_cache: GlobalCache::default(),
                     theme_mode: Default::default(),
                 };
+                let source_id = match &gui.panes.get(target).unwrap().tabs[index].state {
+                    tab::State::App(app) => app.cube_settings().id.clone(),
+                    _ => unreachable!(),
+                };
+                app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
                 let task = gui.update(Message::Pane(
                     origin,
                     pane::Message::View(pane::ViewMessage::OpenBitcoinClaim(handoff)),
@@ -4020,7 +4324,9 @@ mod claim_return_routing_tests {
                         outputs += 1;
                         match message {
                             Message::Pane(pane_id, pane::Message::Tab(id, inner)) => {
-                                let tab::Message::Run(message) = *inner else {
+                                let tab::Message::Run(message) =
+                                    GUI::reviewer_unwrap_guarded_message(&inner)
+                                else {
                                     panic!("unexpected tab route")
                                 };
                                 assert_eq!(
@@ -4030,7 +4336,7 @@ mod claim_return_routing_tests {
                                 );
                                 if wrong_wallet {
                                     assert!(
-                                        matches!(message, AppMessage::View(view::Message::ShowError(ref error))
+                                        matches!(message, AppMessage::View(view::Message::ShowError(error))
                                         if error.contains("does not match"))
                                     );
                                 } else {
@@ -4041,6 +4347,15 @@ mod claim_return_routing_tests {
                                         )))
                                     ));
                                 }
+                                // Deliver the actual guarded task result. A
+                                // route that only *looks* correct before
+                                // generation validation is not acceptance.
+                                drop(
+                                    gui.update(Message::Pane(
+                                        pane_id,
+                                        pane::Message::Tab(id, inner),
+                                    )),
+                                );
                             }
                             other => panic!("unexpected return route: {:?}", other),
                         }
@@ -4051,6 +4366,7 @@ mod claim_return_routing_tests {
                     "exactly one navigation or refusal, no duplicate startup"
                 );
                 drop(gui);
+                app::session::close();
                 std::fs::remove_dir_all(path).unwrap();
             }
         }
@@ -4061,6 +4377,93 @@ mod claim_return_routing_tests {
 mod single_open_lifecycle_tests {
     use super::*;
     use crate::{app, chain::ChainId};
+
+    #[test]
+    fn current_remote_duress_closes_the_retained_home_but_stale_duress_cannot_close_a_new_owner() {
+        let result = std::thread::Builder::new()
+            .name("remote-duress-owner-barrier".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let _guard = app::session::test_guard();
+                let path = std::env::temp_dir()
+                    .join(format!("remote-duress-owner-{}", uuid::Uuid::new_v4()));
+                let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+                let source_id = source.cube_settings().id.clone();
+                let (home, startup) = home::Home::new_for_chain(source.datadir().clone(), None);
+                drop(startup);
+                let mut gui = GUI::reviewer_app_home_gui(source, home);
+                let pane_id = gui.focus.unwrap();
+                let old_generation = gui.panes.get(pane_id).unwrap().tabs[0]
+                    .app_generation_token()
+                    .unwrap();
+                gui.panes.get_mut(pane_id).unwrap().focused_tab = 1;
+                app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::AppAsync(
+                            old_generation,
+                            Box::new(tab::Message::Run(AppMessage::View(
+                                crate::app::view::Message::DuressLockRemote,
+                            ))),
+                        ),
+                    ),
+                )));
+                let pane = gui.panes.get(pane_id).unwrap();
+                assert_eq!(pane.tabs.len(), 1, "the retained Launcher is closed");
+                assert!(matches!(pane.tabs[0].state, tab::State::DuressActive(_)));
+                assert_eq!(pane.focused_tab, 0);
+                assert!(!app::session::is_open());
+
+                let new_path = std::env::temp_dir()
+                    .join(format!("remote-duress-new-owner-{}", uuid::Uuid::new_v4()));
+                let (new_owner, _) = app::claim_step1_tests::bitcoin_app(&new_path);
+                let new_id = new_owner.cube_settings().id.clone();
+                // Test-only replacement on the same tab identity models a
+                // later admitted owner. The real App→Duress transition already
+                // advanced Tab's generation before this stale result arrives.
+                gui.panes.get_mut(pane_id).unwrap().tabs[0].state = tab::State::App(new_owner);
+                assert_ne!(
+                    gui.panes.get(pane_id).unwrap().tabs[0]
+                        .app_generation_token()
+                        .unwrap(),
+                    old_generation
+                );
+                app::session::open(new_id.clone(), zeroize::Zeroizing::new("2468".into()));
+                drop(gui.update(Message::Pane(
+                    pane_id,
+                    pane::Message::tab(
+                        1,
+                        tab::Message::AppAsync(
+                            old_generation,
+                            Box::new(tab::Message::Run(AppMessage::View(
+                                crate::app::view::Message::DuressLockRemote,
+                            ))),
+                        ),
+                    ),
+                )));
+                assert!(matches!(
+                    gui.panes.get(pane_id).unwrap().tabs[0].state,
+                    tab::State::App(_)
+                ));
+                assert_eq!(app::session::current_cube_id(), Some(new_id));
+                drop(gui);
+                app::session::close();
+                std::fs::remove_dir_all(path).ok();
+                std::fs::remove_dir_all(new_path).ok();
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
 
     #[test]
     fn launcher_resumes_one_app_and_switch_closes_it_before_unlock() {
@@ -4084,6 +4487,10 @@ mod single_open_lifecycle_tests {
                 drop(startup);
                 let mut gui = GUI::reviewer_app_home_gui(source, home);
                 let pane_id = gui.focus.unwrap();
+                app::session::open(
+                    source_id.clone(),
+                    zeroize::Zeroizing::new("2468".into()),
+                );
                 let app_count = |gui: &GUI| {
                     gui.panes
                         .iter()
@@ -4179,7 +4586,7 @@ mod single_open_lifecycle_tests {
                                 if matches!(
                                     &message,
                                     Message::Pane(_, pane::Message::Tab(_, inner))
-                                        if matches!(inner.as_ref(), tab::Message::Run(
+                                        if matches!(GUI::reviewer_unwrap_guarded_message(inner), tab::Message::Run(
                                             AppMessage::View(crate::app::view::Message::Menu(
                                                 crate::app::menu::Menu::Cube(
                                                     crate::app::menu::CubeSubMenu::Settings(

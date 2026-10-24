@@ -4826,6 +4826,11 @@ impl App {
         self.claim_pair_context.is_some()
     }
 
+    pub(crate) fn dismiss_shell_disclosures(&mut self) {
+        self.cache.cube_switcher_open = false;
+        self.cache.cube_lock_confirmation = false;
+    }
+
     /// Admit only the wallet/daemon payload from a restricted fork load into
     /// the Bitcoin source. The caller must have kept the source App alive and
     /// must never construct a second App from this payload.
@@ -5090,22 +5095,26 @@ impl App {
     }
 
     fn split_context_valid(&self, intent: &split_intent::SplitIntent) -> bool {
-        let (settings, wallet, bound) = if let Some(context) = &self.claim_pair_context {
-            (&context.settings, &context.wallet, context.client.as_ref())
+        let (settings, wallet) = if let Some(context) = &self.claim_pair_context {
+            if context.owner != self.cache.app_generation
+                || context.root != self.datadir
+                || context.source_cube != self.cube_settings.id
+            {
+                return false;
+            }
+            (&context.settings, &context.wallet)
         } else {
             let Some(wallet) = self.wallet.as_ref() else {
                 return false;
             };
-            (
-                &self.cube_settings,
-                wallet,
-                self.fork_connect_client.as_ref(),
-            )
+            (&self.cube_settings, wallet)
         };
-        let Some(bound) = bound else {
+        let Some(source) = self.panels.connect.account.authenticated_client() else {
             return false;
         };
-        let current = self.panels.connect.account.authenticated_client();
+        let Some(target_session) = self.split_target_session() else {
+            return false;
+        };
         let wallet_fingerprint = wallet.id_fingerprint().to_string();
         settings.network == crate::chain::ChainId::BitcoinBlake2b
             && wallet.chain == settings.network
@@ -5113,16 +5122,17 @@ impl App {
             && intent.target_cube_id() == settings.id
             && intent.is_internally_current()
             && if wallet.is_imported() {
-                self.paired_imported_split_context_valid(intent, settings, wallet, bound)
+                self.paired_imported_split_context_valid(intent, settings, wallet, &source)
             } else {
                 intent.imported_claim.is_none()
                     && settings.vault_wallet_id.as_ref() == Some(&wallet.id())
                     && settings.vault_fingerprint.as_deref() == Some(wallet_fingerprint.as_str())
             }
-            && intent.matches_client(bound)
-            && current
-                .as_ref()
-                .is_some_and(|client| intent.matches_client(client))
+            // The scan and imported request always bind the source session.
+            // A separately /user-verified remote target may rotate its bearer,
+            // while an unverified/local target must still be the exact client.
+            && intent.matches_client(&source)
+            && (self.claim_pair_context.is_some() || intent.matches_client(&target_session.client))
     }
 
     fn paired_imported_split_context_valid(
@@ -5130,7 +5140,7 @@ impl App {
         intent: &split_intent::SplitIntent,
         settings: &settings::CubeSettings,
         wallet: &Wallet,
-        client: &crate::services::coincube::CoincubeClient,
+        source_client: &crate::services::coincube::CoincubeClient,
     ) -> bool {
         let Some(request) = &intent.imported_claim else {
             return false;
@@ -5151,7 +5161,7 @@ impl App {
             return false;
         };
         source.id == request.source.cube_id
-            && request.validate(&self.datadir, client).is_ok()
+            && request.validate(&self.datadir, source_client).is_ok()
             && attachment.wallet_id == wallet.id()
             && &attachment.descriptor == imported
             && imported.receive_descriptor().to_string() == request.source.external
@@ -5168,24 +5178,25 @@ impl App {
     /// once; the new session's ports are built in a task (#625 F3c) and
     /// installed by [`Message::SplitPortsBuilt`], unless a later refresh or
     /// a revocation came first.
-    fn refresh_split_session(&mut self) -> Task<Message> {
-        let session = self
+    fn split_target_session(&self) -> Option<state::vault::claim::ConnectSession> {
+        let source = self.claim_connect_session()?;
+        let target = self
             .claim_pair_context
             .as_ref()
             .and_then(|context| context.client.clone())
-            .or_else(|| self.fork_connect_client.clone())
-            .filter(|_| self.panels.connect.account.bitcoin_blake2b_enabled())
-            .and_then(|bound| {
-                let current = self.panels.connect.account.authenticated_client()?;
-                if current.base_url != bound.base_url || current.token() != bound.token() {
-                    return None;
-                }
-                let account = self.panels.connect.account.user.as_ref()?.id.to_string();
-                Some(state::vault::claim::ConnectSession {
-                    client: bound,
-                    account,
-                })
-            });
+            .or_else(|| self.fork_connect_client.clone())?;
+        let matches = self.claim_pair_context.as_ref().map_or_else(
+            || target.base_url == source.client.base_url && target.token() == source.client.token(),
+            |context| context.matches_session(&source),
+        );
+        matches.then_some(state::vault::claim::ConnectSession {
+            client: target,
+            account: source.account,
+        })
+    }
+
+    fn refresh_split_session(&mut self) -> Task<Message> {
+        let session = self.split_target_session();
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
@@ -5301,6 +5312,22 @@ impl App {
         split_intent::clear();
     }
 
+    /// A refusal of the current paired operation must stop its owned fork
+    /// resources, rather than only discarding its one-use scan. A stale result
+    /// for another target cannot take a newer context.
+    fn refuse_current_split_handoff(&mut self, target_cube: &str) {
+        let owns_context = self.claim_pair_context.as_ref().is_some_and(|context| {
+            context.owner == self.cache.app_generation
+                && context.root == self.datadir
+                && context.source_cube == self.cube_settings.id
+                && context.fork_cube == target_cube
+        });
+        self.revoke_split_handoff();
+        if owns_context {
+            self.stop_claim_pair_context();
+        }
+    }
+
     /// Revalidate and begin the read-only destination review. The account's
     /// authenticated feature response often arrives after the Cube opens, so a
     /// missing response waits; an explicit false response destroys the intent.
@@ -5316,12 +5343,14 @@ impl App {
         if !self.panels.connect.account.bitcoin_blake2b_enabled()
             || !self.split_context_valid(intent)
         {
-            self.revoke_split_handoff();
+            let target = intent.target_cube_id().to_owned();
+            self.refuse_current_split_handoff(&target);
             return Task::done(Message::View(view::Message::ShowError(
                 "Split was cancelled because its Cube, Vault, account session, or feature grant changed. Scan again."
                     .to_string(),
             )));
         }
+        let target_cube = intent.target_cube_id().to_owned();
         let (daemon, wallet, client) = if let Some(context) = &self.claim_pair_context {
             (
                 Some(context.daemon.clone()),
@@ -5336,11 +5365,11 @@ impl App {
             )
         };
         let Some(daemon) = daemon else {
-            self.revoke_split_handoff();
+            self.refuse_current_split_handoff(&target_cube);
             return Task::none();
         };
         let Some(wallet) = wallet else {
-            self.revoke_split_handoff();
+            self.refuse_current_split_handoff(&target_cube);
             return Task::none();
         };
         let Some(SplitHandoff::Waiting(intent)) = self.split_handoff.take() else {
@@ -5363,6 +5392,27 @@ impl App {
         )
     }
 
+    /// A selected foreign Split target that is already unlocked resumes in
+    /// its existing App. The one-use scan is consumed by GUI only for this
+    /// exact Cube; the normal session/account checks still run here.
+    pub(crate) fn resume_foreign_split_intent(
+        &mut self,
+        intent: split_intent::SplitIntent,
+    ) -> Task<Message> {
+        if self.claim_pair_context.is_some()
+            || self.cube_settings.network != intent.target_source()
+            || self.cube_settings.id != intent.target_cube_id()
+            || !intent.is_internally_current()
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                "The selected Split destination changed. Scan again.".into(),
+            )));
+        }
+        self.revoke_split_handoff();
+        self.split_handoff = Some(SplitHandoff::Waiting(intent));
+        self.start_pending_split()
+    }
+
     /// #568 B5c-2 (P5, the go-live): "Start split" on the sweep review, the
     /// one way a new split begins. It requires the Review handoff, the
     /// account's Bitcoin Blake2b server grant, the review's context (Cube,
@@ -5380,6 +5430,7 @@ impl App {
         let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {
             return Task::none();
         };
+        let target_cube = intent.target_cube_id().to_owned();
         let (target_settings, target_wallet) = if let Some(context) = &self.claim_pair_context {
             (context.settings.clone(), Some(context.wallet.clone()))
         } else {
@@ -5407,7 +5458,7 @@ impl App {
             }
         };
         if let Some(reason) = refusal {
-            self.revoke_split_handoff();
+            self.refuse_current_split_handoff(&target_cube);
             return Task::done(Message::View(view::Message::ShowError(reason)));
         }
         let (Some(SplitHandoff::Review { intent, target, .. }), Some(wallet)) =
@@ -5416,7 +5467,7 @@ impl App {
             return Task::none();
         };
         if target.cube_id() != target_settings.id || target.vault_id() != &wallet.id() {
-            self.revoke_split_handoff();
+            self.refuse_current_split_handoff(intent.target_cube_id());
             return Task::done(Message::View(view::Message::ShowError(
                 SPLIT_START_CANCELLED.to_string(),
             )));
@@ -5432,7 +5483,7 @@ impl App {
         ) {
             Ok(binding) => binding,
             Err(_) => {
-                self.revoke_split_handoff();
+                self.refuse_current_split_handoff(intent.target_cube_id());
                 return Task::done(Message::View(view::Message::ShowError(
                     SPLIT_START_CANCELLED.to_string(),
                 )));
@@ -7432,7 +7483,7 @@ impl App {
                 if !self.panels.connect.account.bitcoin_blake2b_enabled()
                     || !self.split_context_valid(&intent)
                 {
-                    self.revoke_split_handoff();
+                    self.refuse_current_split_handoff(intent.target_cube_id());
                     return Task::done(Message::View(view::Message::ShowError(
                         "Split was cancelled because its target or authenticated session changed. Scan again."
                             .to_string(),
@@ -7497,7 +7548,7 @@ impl App {
                         return Task::none();
                     }
                     Err(error) => {
-                        self.revoke_split_handoff();
+                        self.refuse_current_split_handoff(intent.target_cube_id());
                         return Task::done(Message::View(view::Message::ShowError(error)));
                     }
                 }
@@ -12405,6 +12456,192 @@ mod tests {
             Some(&fork),
             Some(7)
         ));
+    }
+
+    #[test]
+    fn admitted_claim_context_owns_its_node_and_can_be_readmitted_after_refusal() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let (mut source, handoff, path) =
+            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let target = split_app(&path, false, true);
+        let target_settings = settings::Settings::from_file(
+            &source
+                .datadir
+                .network_directory(crate::chain::ChainId::BitcoinBlake2b),
+        )
+        .unwrap()
+        .cubes
+        .remove(0);
+        let wallet = target.wallet.as_ref().unwrap().clone();
+        assert_eq!(target_settings.vault_wallet_id.as_ref(), Some(&wallet.id()));
+
+        let mut source_client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        source_client.set_token("source-bearer");
+        source
+            .panels
+            .connect
+            .install_admitted_client(source_client.clone());
+        source.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "source@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        source.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        source.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        source.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        let mut target_client = source_client.clone();
+        target_client.set_token("rotated-target-bearer");
+        let mut target_cache = target.cache.clone();
+        target_cache.datadir_path = source.datadir.clone();
+        let target_daemon = target.daemon.as_ref().unwrap().clone();
+        let source_owner = source.cache.app_generation;
+        let intent = crate::home::ClaimOpenIntent::new(
+            source_owner,
+            &source.datadir,
+            source.cube_settings.id.clone(),
+            target_settings.id.clone(),
+            crate::home::ClaimRoute::Begin(handoff),
+        );
+        assert_eq!(
+            source
+                .admit_claim_pair_context(
+                    &intent,
+                    wallet.clone(),
+                    target_daemon.clone(),
+                    target_cache.clone(),
+                    target_settings.clone(),
+                    Some(target_client.clone()),
+                    None,
+                    None,
+                )
+                .unwrap_err(),
+            "The paired Claim backend has a different account session."
+        );
+        let mut wrong_provider = target_client.clone();
+        wrong_provider.base_url = "https://other.example/".into();
+        assert_eq!(
+            source
+                .admit_claim_pair_context(
+                    &intent,
+                    wallet.clone(),
+                    target_daemon.clone(),
+                    target_cache.clone(),
+                    target_settings.clone(),
+                    Some(wrong_provider),
+                    Some(7),
+                    None,
+                )
+                .unwrap_err(),
+            "The paired Claim backend has a different account session."
+        );
+        assert!(source.claim_pair_context.is_none());
+        let node_config = coincubed::config::BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+            addr: "127.0.0.1:1".parse().unwrap(),
+        };
+        let lock_dir = source
+            .datadir
+            .bitcoind_directory()
+            .path()
+            .join("locks/bitcoin");
+        let admit = |source: &mut App, intent: &crate::home::ClaimOpenIntent| {
+            let node = Bitcoind::for_test(
+                node_config.clone(),
+                &source.datadir,
+                bitcoin::Network::Bitcoin,
+            );
+            assert!(lock_dir.exists(), "the scoped operation owns a node lock");
+            source.admit_claim_pair_context(
+                intent,
+                wallet.clone(),
+                target_daemon.clone(),
+                target_cache.clone(),
+                target_settings.clone(),
+                Some(target_client.clone()),
+                Some(7),
+                Some(node),
+            )
+        };
+        admit(&mut source, &intent).expect("real context admission");
+        let context = source.claim_pair_context.as_ref().expect("admitted owner");
+        assert_eq!(context.owner, source_owner);
+        assert_eq!(context.fork_cube, target_settings.id);
+        let current = source
+            .claim_connect_session()
+            .expect("source still signed in");
+        assert!(context.matches_session(&current));
+        assert_eq!(
+            context.client.as_ref().unwrap().token(),
+            Some("rotated-target-bearer")
+        );
+        let request = ClaimPairRequest {
+            root: source.datadir.clone(),
+            fork_cube: target_settings.id.clone(),
+            descriptor: wallet.inheritance_descriptor().unwrap().clone(),
+            session: current.clone(),
+        };
+        let binding = source
+            .claim_fork_daemon(&request)
+            .expect("rotated target binding");
+        assert!(binding.current());
+        let mut wrong_source = current.clone();
+        wrong_source.account = "8".into();
+        assert!(!context.matches_session(&wrong_source));
+        let mut wrong_request = ClaimPairRequest {
+            root: request.root.clone(),
+            fork_cube: request.fork_cube.clone(),
+            descriptor: request.descriptor.clone(),
+            session: wrong_source,
+        };
+        assert!(source.claim_fork_daemon(&wrong_request).is_none());
+        wrong_request.session = current;
+        wrong_request.session.client.base_url = "https://other.example/".into();
+        assert!(source.claim_fork_daemon(&wrong_request).is_none());
+
+        source.refuse_current_split_handoff(&target_settings.id);
+        assert!(source.claim_pair_context.is_none());
+        assert!(!binding.current(), "refusal revoked the old operation");
+        assert!(!lock_dir.exists(), "refusal stopped its owned node");
+        source.refuse_current_split_handoff(&target_settings.id);
+        assert!(
+            !lock_dir.exists(),
+            "repeat refusal cannot stop another owner"
+        );
+        let next = crate::home::ClaimOpenIntent::new(
+            source_owner,
+            &source.datadir,
+            source.cube_settings.id.clone(),
+            target_settings.id.clone(),
+            crate::home::ClaimRoute::Begin(
+                crate::app::claim_intent::ForkHandoff::new(
+                    &source.datadir,
+                    source.cube_settings.id.clone(),
+                    target_settings.id.clone(),
+                )
+                .unwrap(),
+            ),
+        );
+        admit(&mut source, &next).expect("fresh operation can re-admit");
+        assert!(source.claim_pair_context.is_some());
+        source.revoke_claim();
+        assert!(!lock_dir.exists());
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(path).ok();
     }
 
     #[test]

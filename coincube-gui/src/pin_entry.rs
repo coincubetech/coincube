@@ -458,7 +458,10 @@ impl PinEntry {
             .push(Space::new().width(Length::FillPortion(8)))
             .push(Space::new().width(Length::FillPortion(2)));
 
-        let title = h3(format!("Enter PIN for {}", self.cube.name));
+        let title = h3(format!(
+            "Enter PIN for {}",
+            crate::cube_display::name(&self.cube.name)
+        ));
 
         let mut content = Column::new()
             .spacing(30)

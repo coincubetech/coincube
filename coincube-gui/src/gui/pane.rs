@@ -74,6 +74,18 @@ pub struct Pane {
 }
 
 impl Pane {
+    fn show_app_error(&self, source_tab: usize, error: String) -> Task<Message> {
+        self.tabs
+            .iter()
+            .find(|tab| tab.id == source_tab)
+            .map_or_else(Task::none, |tab| {
+                tab.emit_app_task(Task::done(app::Message::View(
+                    app::view::Message::ShowError(error),
+                )))
+                .map(move |message| Message::tab(source_tab, message))
+            })
+    }
+
     fn open_claim_installer(&mut self, source_tab: usize) -> Task<Message> {
         let owner = self
             .tabs
@@ -161,12 +173,7 @@ impl Pane {
         };
         let (installer, task, intent) = match prepared {
             Ok(prepared) => prepared,
-            Err(error) => {
-                return Task::done(Message::tab(
-                    source_tab,
-                    tab::Message::Run(app::Message::View(app::view::Message::ShowError(error))),
-                ));
-            }
+            Err(error) => return self.show_app_error(source_tab, error),
         };
         self.tabs_created += 1;
         let id = self.tabs_created;
@@ -381,12 +388,7 @@ impl Pane {
         };
         let (root, request, client) = match prepared {
             Ok(prepared) => prepared,
-            Err(error) => {
-                return Task::done(Message::tab(
-                    source_tab,
-                    tab::Message::Run(app::Message::View(app::view::Message::ShowError(error))),
-                ))
-            }
+            Err(error) => return self.show_app_error(source_tab, error),
         };
         let credentials = self.tabs.iter().find(|t| t.id == source_tab).and_then(|t| {
             let tab::State::App(app) = &t.state else {
@@ -468,14 +470,7 @@ impl Pane {
                 };
                 let (root, request, client) = match prepared {
                     Ok(v) => v,
-                    Err(error) => {
-                        return Task::done(Message::tab(
-                            source_tab,
-                            tab::Message::Run(app::Message::View(app::view::Message::ShowError(
-                                error,
-                            ))),
-                        ))
-                    }
+                    Err(error) => return self.show_app_error(source_tab, error),
                 };
                 let owner = self.tabs.iter().find(|t| t.id == source_tab).and_then(|t| {
                     let tab::State::App(app) = &t.state else {
@@ -621,6 +616,11 @@ impl Pane {
                 return self.focus_home_tab_with(nav, cfg);
             }
             Message::View(ViewMessage::OpenLauncher) => {
+                for tab in &mut self.tabs {
+                    if let tab::State::App(app) = &mut tab.state {
+                        app.dismiss_shell_disclosures();
+                    }
+                }
                 return self.focus_launcher(cfg);
             }
             Message::View(ViewMessage::OpenPlanBilling) => {

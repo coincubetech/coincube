@@ -846,6 +846,35 @@ mod tests {
 
     static SEQ: AtomicU64 = AtomicU64::new(0);
 
+    /// Stops only this disposable child, even if setup or an assertion unwinds.
+    /// The registry test lock is declared before this guard, so it remains held
+    /// until the child has been deregistered and reaped.
+    #[cfg(unix)]
+    struct DisposableManagedChild(Tor);
+
+    #[cfg(unix)]
+    impl Drop for DisposableManagedChild {
+        fn drop(&mut self) {
+            let registered = registry()
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .as_ref()
+                .is_some_and(|owner| Arc::ptr_eq(&owner.process, &self.0.process));
+            if registered {
+                let owner = registry()
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .take();
+                if let Some(owner) = owner {
+                    owner.stop();
+                }
+            } else {
+                // Also covers a panic between spawn and registration.
+                self.0.stop();
+            }
+        }
+    }
+
     fn temp_datadir(tag: &str) -> CoincubeDirectory {
         let seq = SEQ.fetch_add(1, Ordering::SeqCst);
         let base = std::env::temp_dir().join(format!(
@@ -879,10 +908,11 @@ mod tests {
             control: 9051,
             socks: 9050,
         };
-        register_managed_tor(Tor {
+        let cleanup = DisposableManagedChild(Tor {
             ports,
             process: process.clone(),
         });
+        register_managed_tor(cleanup.0.clone());
         let alive = || process.lock().unwrap().try_wait().unwrap().is_none();
         let (mut app, _) = crate::app::claim_step1_tests::bitcoin_app(root.path());
         app.stop();
@@ -911,6 +941,37 @@ mod tests {
         assert!(!alive(), "global teardown is idempotent");
         drop(gui);
         std::fs::remove_dir_all(root.path()).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn disposable_managed_child_is_reaped_on_unwind() {
+        let _registry = registry_test_guard();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let process = Arc::new(Mutex::new(child));
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe({
+            let process = process.clone();
+            move || {
+                let cleanup = DisposableManagedChild(Tor {
+                    ports: TorPorts {
+                        control: 9051,
+                        socks: 9050,
+                    },
+                    process,
+                });
+                register_managed_tor(cleanup.0.clone());
+                assert!(managed_tor_ports().is_some());
+                panic!("simulated setup failure after registration");
+            }
+        }));
+        assert!(result.is_err());
+        assert_eq!(managed_tor_ports(), None);
+        assert!(process.lock().unwrap().try_wait().unwrap().is_some());
     }
 
     #[test]

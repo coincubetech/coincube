@@ -80,32 +80,7 @@ pub struct CubeCatalogKey {
 }
 
 fn catalog_display_name(name: &str) -> String {
-    let mut rendered = String::new();
-    let mut last_was_space = false;
-    for character in name.chars().filter(|character| {
-        !character.is_control()
-            && !matches!(*character, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-    }) {
-        if character.is_whitespace() {
-            if !last_was_space && !rendered.is_empty() {
-                rendered.push(' ');
-            }
-            last_was_space = true;
-        } else {
-            rendered.push(character);
-            last_was_space = false;
-        }
-        if rendered.chars().count() >= 80 {
-            rendered.push('…');
-            break;
-        }
-    }
-    let rendered = rendered.trim();
-    if rendered.is_empty() {
-        "Unnamed Cube".to_string()
-    } else {
-        rendered.to_string()
-    }
+    crate::cube_display::name(name)
 }
 
 /// Connect registration and remote-Cube matching must inspect every chain's
@@ -1079,9 +1054,26 @@ impl Home {
         self.error = Some(msg.into());
     }
 
+    /// A Recovery Services selection belongs to the Overview visit that
+    /// started it. Leaving that route invalidates even a result delivered
+    /// after the user returns to Overview.
+    fn leave_recovery_services(&mut self) {
+        if matches!(
+            self.active_section,
+            HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+        ) {
+            self.recovery_open_request = self.recovery_open_request.wrapping_add(1);
+        }
+    }
+
     /// The top-level error currently shown on the home screen, if any.
     pub fn error(&self) -> Option<&str> {
         self.error.as_deref()
+    }
+
+    pub(crate) fn imported_claim_owner(&self) -> Option<app::cache::AppGeneration> {
+        self.imported_claim.as_ref()?;
+        self.claim_owner
     }
 
     pub fn subscription(&self) -> Subscription<Message> {
@@ -3177,6 +3169,12 @@ impl Home {
                 } else {
                     section
                 };
+                if !matches!(
+                    section,
+                    HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+                ) {
+                    self.leave_recovery_services();
+                }
                 if matches!(section, HomeSection::SplitWallet) {
                     self.imported_claim = None;
                     self.resume_split_after_install = false;
@@ -3468,11 +3466,17 @@ impl Home {
                         );
                         return Task::done(Message::RunClaim(datadir, cfg, source, cube, intent));
                     }
-                    app::split_intent::clear();
-                    self.set_error(
-                        "The imported source Cube closed. Open Claim from that wallet again.",
-                    );
-                    return Task::none();
+                    if self.imported_claim.is_some() {
+                        app::split_intent::clear();
+                        self.set_error(
+                            "The imported source Cube closed. Open Claim from that wallet again.",
+                        );
+                        return Task::none();
+                    }
+                    // An ordinary foreign-wallet Split has no retained source
+                    // App. GUI stages this exact one-use scan on the admitted
+                    // destination tab before it closes the prior session.
+                    return Task::done(Message::Run(datadir, cfg, source, cube));
                 }
                 let client = self.connect_account.authenticated_client();
                 let generation = self.connect_account.session_generation();
@@ -3644,8 +3648,10 @@ impl Home {
             Message::View(ViewMessage::ConnectAccount(
                 ConnectAccountMessage::OpenRecoveryService(target),
             )) => {
-                if !matches!(self.active_section, HomeSection::Connect(_))
-                    || !self.connect_account.is_authenticated()
+                if !matches!(
+                    self.active_section,
+                    HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+                ) || !self.connect_account.is_authenticated()
                     || !matches!(
                         &self.connect_account.recovery_services,
                         RecoveryServicesState::Ready(rows)
@@ -3695,7 +3701,10 @@ impl Home {
                     || session_generation != self.connect_account.session_generation()
                     || !self.connect_account.is_authenticated()
                     || self.connect_account.user.as_ref().map(|user| user.id) != Some(user_id)
-                    || !matches!(self.active_section, HomeSection::Connect(_))
+                    || !matches!(
+                        self.active_section,
+                        HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+                    )
                     || !matches!(
                         &self.connect_account.recovery_services,
                         RecoveryServicesState::Ready(rows)
@@ -3747,6 +3756,19 @@ impl Home {
                         Message::RunToRecovery(self.datadir_path.clone(), config, chain, cube),
                     ),
                     RecoveryServiceDestination::Remote(chain) => {
+                        if chain.is_blake2b() {
+                            self.connect_account.error = Some(
+                                crate::app::state::connect::account::PanelError::settled(
+                                    crate::user_error::UserError::new(
+                                        "This Cube cannot be opened here",
+                                        "This remote Bitcoin Blake2b Cube is not available in the local Cube catalog. Recover it on its original device.",
+                                        crate::user_error::CC_API_BADRESP,
+                                        false,
+                                    ),
+                                ),
+                            );
+                            return Task::none();
+                        }
                         // A Connect record is not an unlock credential. Show
                         // the existing remote-only restore card in the Cube
                         // catalog; the user chooses its normal recovery flow.
@@ -3772,6 +3794,7 @@ impl Home {
                     ConnectAccountMessage::OpenPlanBilling
                         | ConnectAccountMessage::RenewCurrentPlan
                 ) {
+                    self.leave_recovery_services();
                     self.active_section =
                         HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling);
                 }
@@ -9513,6 +9536,139 @@ mod tests {
         assert!(
             matches!(outputs.as_slice(), [Message::RunToRecovery(_, _, ChainId::Bitcoin, cube)] if cube.id == "local-uuid")
         );
+    }
+
+    #[test]
+    fn remote_fork_recovery_selection_stays_on_connect_with_a_truthful_error() {
+        for chain in [ChainId::BitcoinBlake2b, ChainId::BitcoinBlake2bTestnet4] {
+            let mut home = signed_in_home();
+            enable_btcb2(&mut home);
+            home.global_blake2b_enabled = true;
+            home.developer_mode = true; // testnet4 is available only in developer mode
+            home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+            let original_network = home.network;
+            let target = RecoveryServiceTarget {
+                cube_id: 193,
+                network: settings::network_to_api_string(chain),
+            };
+            let mut server = registered_cube_response("remote-only-fork");
+            server.network = target.network.clone();
+            home.connect_account.recovery_services =
+                RecoveryServicesState::Ready(vec![server.into()]);
+            drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target.clone()),
+            ))));
+            let request = home.recovery_open_request;
+            assert!(drain(home.update(Message::RecoveryServiceResolved {
+                target,
+                session_generation: home.connect_account.session_generation(),
+                user_id: 7,
+                request,
+                result: Ok(RecoveryServiceDestination::Remote(chain)),
+            }))
+            .is_empty());
+            assert!(matches!(
+                home.active_section,
+                HomeSection::Connect(app::menu::ConnectSubMenu::Overview)
+            ));
+            assert_eq!(home.network, original_network);
+            let error = &home.connect_account.error.as_ref().unwrap().user;
+            assert!(error.guidance.contains("original device"));
+            assert!(!error.retryable);
+        }
+    }
+
+    #[test]
+    fn remote_bitcoin_recovery_selection_opens_the_catalog() {
+        let mut home = signed_in_home();
+        home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+        let target = RecoveryServiceTarget {
+            cube_id: 193,
+            network: "mainnet".to_string(),
+        };
+        let mut server = registered_cube_response("remote-bitcoin");
+        server.network = target.network.clone();
+        home.connect_account.recovery_services = RecoveryServicesState::Ready(vec![server.into()]);
+        drop(home.update(Message::View(ViewMessage::ConnectAccount(
+            ConnectAccountMessage::OpenRecoveryService(target.clone()),
+        ))));
+        let request = home.recovery_open_request;
+        // The fetch Task is allowed to remain pending; the selected route must
+        // already be the remote-only catalog that can display this chain.
+        drop(home.update(Message::RecoveryServiceResolved {
+            target,
+            session_generation: home.connect_account.session_generation(),
+            user_id: 7,
+            request,
+            result: Ok(RecoveryServiceDestination::Remote(ChainId::Bitcoin)),
+        }));
+        assert_eq!(home.active_section, HomeSection::Cubes);
+        assert_eq!(home.network, ChainId::Bitcoin);
+        assert!(home.connect_account.error.is_none());
+    }
+
+    #[test]
+    fn recovery_selection_is_invalidated_on_security_plan_and_leave_return() {
+        for leave in [
+            HomeSection::Connect(app::menu::ConnectSubMenu::Security),
+            HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling),
+        ] {
+            let mut home = signed_in_home();
+            home.active_section = HomeSection::Connect(app::menu::ConnectSubMenu::Overview);
+            let target = RecoveryServiceTarget {
+                cube_id: 193,
+                network: "mainnet".to_string(),
+            };
+            let mut server = registered_cube_response("local-uuid");
+            server.network = "mainnet".to_string();
+            home.connect_account.recovery_services =
+                RecoveryServicesState::Ready(vec![server.into()]);
+            drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target.clone()),
+            ))));
+            let old_request = home.recovery_open_request;
+            let session_generation = home.connect_account.session_generation();
+            if matches!(
+                leave,
+                HomeSection::Connect(app::menu::ConnectSubMenu::PlanBilling)
+            ) {
+                drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                    ConnectAccountMessage::OpenPlanBilling,
+                ))));
+            } else {
+                drop(home.update(Message::View(ViewMessage::GoToSection(leave))));
+            }
+            assert_ne!(home.recovery_open_request, old_request);
+            let completion = |request| Message::RecoveryServiceResolved {
+                target: target.clone(),
+                session_generation,
+                user_id: 7,
+                request,
+                result: Ok(RecoveryServiceDestination::Remote(ChainId::Bitcoin)),
+            };
+            assert!(drain(home.update(completion(old_request))).is_empty());
+            assert_ne!(home.active_section, HomeSection::Cubes);
+            drop(home.update(Message::View(ViewMessage::GoToSection(
+                HomeSection::Connect(app::menu::ConnectSubMenu::Overview),
+            ))));
+            assert!(drain(home.update(completion(old_request))).is_empty());
+            assert_ne!(home.active_section, HomeSection::Cubes);
+            // Returning to Overview refreshes the row list. Model that
+            // completion before making a new selection; the old selection
+            // must still remain invalid across the page visit.
+            let mut server = registered_cube_response("local-uuid");
+            server.network = "mainnet".to_string();
+            home.connect_account.recovery_services =
+                RecoveryServicesState::Ready(vec![server.into()]);
+            drop(home.update(Message::View(ViewMessage::ConnectAccount(
+                ConnectAccountMessage::OpenRecoveryService(target.clone()),
+            ))));
+            assert!(home.recovery_open_request > old_request);
+            // A fresh selection on the returned Overview is still actionable.
+            let fresh = home.recovery_open_request;
+            drop(home.update(completion(fresh)));
+            assert_eq!(home.active_section, HomeSection::Cubes);
+        }
     }
 
     /// The client-side limit check is advisory; the server is authoritative and

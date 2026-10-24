@@ -781,7 +781,10 @@ pub fn recovery_services_ux<'a>(
                 col = col.push(
                     container(
                         Column::new()
-                            .push(text::p1_bold(&row.name).style(theme::text::primary))
+                            .push(
+                                text::p1_bold(crate::cube_display::name(&row.name))
+                                    .style(theme::text::primary),
+                            )
                             .push(text::p2_regular(network).style(theme::text::secondary))
                             .push(text::p2_regular(kit).style(theme::text::primary))
                             .push(text::p2_regular(eligibility).style(theme::text::secondary))

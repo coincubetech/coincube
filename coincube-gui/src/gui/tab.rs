@@ -828,6 +828,9 @@ pub struct Tab {
     /// the first eligible Vault Cube.
     pending_split_after_install: bool,
     pending_imported_claim: Option<crate::imported_claim::ImportedClaimRequest>,
+    /// One-use foreign Split scan retained by this admitted unlock only. The
+    /// process-global slot is cleared at the old-session teardown barrier.
+    pending_split_intent: Option<app::split_intent::SplitIntent>,
     /// An Account Recovery row may choose a destination before this Cube is
     /// unlocked. It applies only to the exact Cube that completes admission.
     pending_recovery_route: Option<(CoincubeDirectory, crate::chain::ChainId, String)>,
@@ -880,6 +883,7 @@ impl Tab {
             next_fork_task: 0,
             pending_split_after_install: false,
             pending_imported_claim: None,
+            pending_split_intent: None,
             pending_recovery_route: None,
         }
     }
@@ -1195,6 +1199,10 @@ impl Tab {
             _ => {}
         }
         if let Some(state) = replacement {
+            if matches!(state, State::Home(_)) {
+                self.claim_open = None;
+                self.pending_split_intent = None;
+            }
             self.state = state;
         }
         command
@@ -1210,6 +1218,93 @@ impl Tab {
 
     pub(crate) fn app_generation_token(&self) -> Option<u64> {
         matches!(self.state, State::App(_)).then_some(self.app_generation)
+    }
+
+    /// The sole emission boundary for App work started outside Tab::update.
+    /// GUI/Pane may ask the current App to produce a Task, but its eventual
+    /// result must re-enter through the generation checked by GUI::update.
+    /// Synchronous user events still enter Tab::update directly.
+    pub(crate) fn emit_app_task(&self, task: Task<app::Message>) -> Task<Message> {
+        let Some(generation) = self.app_generation_token() else {
+            drop(task);
+            return Task::none();
+        };
+        task.map(move |message| Message::AppAsync(generation, Box::new(Message::Run(message))))
+    }
+
+    pub(crate) fn stage_split_intent(&mut self, intent: app::split_intent::SplitIntent) {
+        self.pending_split_intent = Some(intent);
+    }
+
+    /// Pure admission checks shared by GUI's teardown barrier and this Tab's
+    /// Home transition. A refused destination must leave the current public
+    /// Cube and its process session untouched.
+    pub(crate) fn validate_home_exit(&self, message: &home::Message) -> Result<(), String> {
+        let State::Home(home) = &self.state else {
+            return Err("The Launcher destination is no longer open.".into());
+        };
+        match message {
+            home::Message::Run(root, _, chain, cube)
+            | home::Message::RunToRecovery(root, _, chain, cube)
+            | home::Message::RunClaim(root, _, chain, cube, _) => {
+                if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
+                    return Err("The selected Cube belongs to another data directory.".into());
+                }
+                if cube.network != *chain {
+                    return Err(format!(
+                        "This Cube's settings say it lives on {}, but it was found in the {} folder. Tenshu won't open it until the two agree.",
+                        cube.network.label(),
+                        chain.label(),
+                    ));
+                }
+                if let Some(reason) = home.chain_availability(cube.network).reason() {
+                    return Err(reason.to_string());
+                }
+                if let crate::services::unlock::creation_gate::CreationGate::Blocked(reason) =
+                    crate::services::unlock::creation_gate::evaluate_for_cube(cube, None)
+                {
+                    return Err(format!(
+                        "{reason}\n\n{}",
+                        crate::services::unlock::creation_gate::not_a_backup_copy(
+                            cube.is_passkey_cube()
+                        )
+                    ));
+                }
+                if cube.is_passkey_cube() && !crate::feature_flags::PASSKEY_ENABLED {
+                    return Err("This Cube is unlocked with a passkey, and passkey unlock is turned off in this build. Restore it from your Recovery Kit and its recovery password, or use a build with COINCUBE_ENABLE_PASSKEY set.".into());
+                }
+                if cube
+                    .bitcoin_import
+                    .as_deref()
+                    .and_then(app::settings::BitcoinImport::active_attachment)
+                    .is_some()
+                    && bitcoin_wallet_settings_for_cube(root, *chain, cube).is_none()
+                {
+                    return Err("This Cube's imported wallet registration is missing or inconsistent. Restore the wallet from its Recovery Kit before opening it.".into());
+                }
+                Ok(())
+            }
+            home::Message::Install(root, chain, _, _) => {
+                if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
+                    return Err("The installation belongs to another data directory.".into());
+                }
+                home.chain_availability(*chain)
+                    .reason()
+                    .map_or(Ok(()), |reason| Err(reason.to_string()))
+            }
+            home::Message::InstallForSplit(root, client) => {
+                if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
+                    return Err("The Split destination belongs to another data directory.".into());
+                }
+                if let Some(request) = home.imported_claim_request() {
+                    request.validate(root, client)?;
+                }
+                home.connect_chain_availability(crate::chain::ChainId::BitcoinBlake2b)
+                    .reason()
+                    .map_or(Ok(()), |reason| Err(reason.to_string()))
+            }
+            _ => Err("This is not a Cube admission.".into()),
+        }
     }
 
     fn guard_fork_task(&mut self, task: Task<Message>) -> Task<Message> {
@@ -1342,6 +1437,26 @@ impl Tab {
             }
             msg => msg,
         };
+
+        if let Message::Launch(ref launch) = message {
+            if matches!(
+                launch,
+                home::Message::Run(..)
+                    | home::Message::RunToRecovery(..)
+                    | home::Message::RunClaim(..)
+                    | home::Message::Install(..)
+                    | home::Message::InstallForSplit(..)
+            ) {
+                if let Err(error) = self.validate_home_exit(launch) {
+                    if let State::Home(home) = &mut self.state {
+                        home.set_error(error);
+                    }
+                    app::split_intent::clear();
+                    self.pending_split_intent = None;
+                    return Task::none();
+                }
+            }
+        }
 
         let result = match (&mut self.state, message) {
             (State::App(app), Message::LockCubeToLauncher) => {
@@ -2632,7 +2747,15 @@ impl Tab {
                             )
                         });
 
-                    let (app, command) = match App::new(
+                    if let Some(intent) = self.pending_split_intent.take() {
+                        if intent.target_source() == cube_settings.network
+                            && intent.target_cube_id() == cube_settings.id
+                            && intent.is_internally_current()
+                        {
+                            app::split_intent::arm(intent);
+                        }
+                    }
+                    let admitted_app = App::new(
                         cache,
                         wallet,
                         breez,
@@ -2643,7 +2766,11 @@ impl Tab {
                         bitcoind,
                         cube_settings,
                         connect_auth,
-                    ) {
+                    );
+                    // App::new consumes only its exact target. Never leave a
+                    // staged operation globally armed after an error.
+                    app::split_intent::clear();
+                    let (app, command) = match admitted_app {
                         Ok(app) => app,
                         Err(error) => {
                             let error = match error {
@@ -3401,6 +3528,7 @@ impl Tab {
                     }
                 }
                 crate::pin_entry::Message::Back => {
+                    self.pending_split_intent = None;
                     if self.claim_open.take().is_some() {
                         app::split_intent::clear();
                         return Task::done(Message::ClaimInstallCancelled);
@@ -3680,6 +3808,7 @@ impl Tab {
                     )
                 }
                 crate::passkey_unlock::Message::Back => {
+                    self.pending_split_intent = None;
                     // As for PIN Back: abandoning the unlock clears Split.
                     app::split_intent::clear();
                     // Dropping the screen drops any in-flight ceremony, which
@@ -4043,6 +4172,7 @@ impl Tab {
     }
 
     pub fn stop(&mut self) {
+        self.pending_split_intent = None;
         self.claim_open = None;
         match &mut self.state {
             State::Loader(s) => s.stop(),
