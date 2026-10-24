@@ -578,14 +578,18 @@ pub fn remove_unpaired_by_peer(
 ) -> std::io::Result<bool> {
     let _guard = super::pairing_transaction::WRITER.lock().unwrap();
     let dialled = |p: &PairedPhone| {
-        &p.cert_pin == cert_pin
-            && p.paired_at_unix == paired_at_unix
-            && (p
-                .signer_binding
-                .as_ref()
-                .and_then(|binding| binding.imported_scope.as_ref())
-                .is_none()
-                || pairing_revision.is_some() && p.imported_pairing_revision() == pairing_revision)
+        let imported_scope = p
+            .signer_binding
+            .as_ref()
+            .and_then(|binding| binding.imported_scope.as_ref());
+        let same_admission = match (imported_scope, pairing_revision) {
+            (None, None) => true,
+            (Some(scope), Some(revision)) if !revision.is_empty() => {
+                scope.pairing_revision.as_deref() == Some(revision)
+            }
+            _ => false,
+        };
+        &p.cert_pin == cert_pin && p.paired_at_unix == paired_at_unix && same_admission
     };
     if !load_visible(dir)?.phones.iter().any(dialled) {
         return Ok(false);

@@ -542,6 +542,44 @@ fn imported_pairing_revision_revokes_same_second_pending_response_and_cached_han
 }
 
 #[test]
+fn late_imported_unpair_cannot_remove_same_second_vault_replacement() {
+    let (input, _) = fixture();
+    let policy = policy(case(&input, "sortedmulti_first"));
+    let imported = phone(&input, &policy);
+    let dir = crate::dir::CoincubeDirectory::new(
+        std::env::temp_dir().join(format!("imported-to-vault-{}", uuid::Uuid::new_v4())),
+    );
+    std::fs::create_dir_all(dir.path()).unwrap();
+    pairing_store::upsert(&dir, imported.clone()).unwrap();
+
+    // Same TLS identity and display second, but a freshly admitted Vault
+    // pairing has no imported revision. The old imported reader must not
+    // revoke this replacement; the Vault reader still may remove its own row.
+    let mut vault = imported.clone();
+    vault.signer_binding.as_mut().unwrap().imported_scope = None;
+    pairing_store::upsert(&dir, vault.clone()).unwrap();
+    assert!(!pairing_store::remove_unpaired_by_peer(
+        &dir,
+        &imported.cert_pin,
+        imported.paired_at_unix,
+        imported.imported_pairing_revision(),
+    )
+    .unwrap());
+    assert_eq!(
+        serde_json::to_value(&pairing_store::load(&dir).unwrap().phones).unwrap(),
+        serde_json::to_value(vec![vault.clone()]).unwrap()
+    );
+    assert!(pairing_store::remove_unpaired_by_peer(
+        &dir,
+        &vault.cert_pin,
+        vault.paired_at_unix,
+        None,
+    )
+    .unwrap());
+    assert!(pairing_store::load(&dir).unwrap().phones.is_empty());
+}
+
+#[test]
 fn cached_live_imported_handle_is_replaced_for_another_valid_account() {
     let (input, _) = fixture();
     let vector = case(&input, "sortedmulti_first");
