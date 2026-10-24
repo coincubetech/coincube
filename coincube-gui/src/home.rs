@@ -573,8 +573,9 @@ pub struct Home {
     /// both outcomes, so an entry means "the last attempt failed, for this
     /// reason" and its absence means "no attempt has failed".
     cube_sync_errors: std::collections::HashMap<String, String>,
-    /// Rename cube modal: (cube index, new name input)
-    rename_cube_modal: Option<(usize, String)>,
+    /// Rename cube modal: stable chain and Cube ID, plus the name input.
+    /// A background catalog refresh may reorder the list while it is open.
+    rename_cube_modal: Option<(CubeCatalogKey, String)>,
     /// Pending remote rename: stashed after local rename succeeds so the
     /// `CubeRenamed` handler can fire the API update.
     pending_remote_rename: Option<PendingRemoteRename>,
@@ -3508,7 +3509,13 @@ impl Home {
             Message::View(ViewMessage::RenameCube(index)) => {
                 if let State::Cubes { cubes, .. } = &self.state {
                     if let Some(cube) = cubes.get(index) {
-                        self.rename_cube_modal = Some((index, cube.name.clone()));
+                        self.rename_cube_modal = Some((
+                            CubeCatalogKey {
+                                chain: cube.network,
+                                cube_id: cube.id.clone(),
+                            },
+                            cube.name.clone(),
+                        ));
                     }
                 }
                 Task::none()
@@ -3520,13 +3527,18 @@ impl Home {
                 Task::none()
             }
             Message::View(ViewMessage::RenameCubeConfirm) => {
-                let Some((index, ref new_name)) = self.rename_cube_modal else {
+                let Some((ref key, ref new_name)) = self.rename_cube_modal else {
                     return Task::none();
                 };
                 let new_name = new_name.trim().to_string();
                 if new_name.is_empty() {
                     return Task::none();
                 }
+                let Some(index) = self.catalog_index(key) else {
+                    self.rename_cube_modal = None;
+                    self.error = Some("This Cube is no longer in the current catalog. Review the list and try again.".into());
+                    return Task::none();
+                };
                 let Some(cube) = (if let State::Cubes { cubes, .. } = &self.state {
                     cubes.get(index).cloned()
                 } else {
@@ -9002,15 +9014,179 @@ mod tests {
         };
 
         let _ = home.update(Message::View(ViewMessage::RenameCube(0)));
-        assert_eq!(home.rename_cube_modal, Some((0, "Local A".to_string())));
+        let key = CubeCatalogKey {
+            chain: ChainId::Bitcoin,
+            cube_id: "local-a".into(),
+        };
+        assert_eq!(
+            home.rename_cube_modal,
+            Some((key.clone(), "Local A".to_string()))
+        );
 
         let _ = home.update(Message::View(ViewMessage::RenameCubeNameEdited(
             "Renamed".to_string(),
         )));
-        assert_eq!(home.rename_cube_modal, Some((0, "Renamed".to_string())));
+        assert_eq!(home.rename_cube_modal, Some((key, "Renamed".to_string())));
 
         let _ = home.update(Message::View(ViewMessage::RenameCubeCancel));
         assert!(home.rename_cube_modal.is_none());
+    }
+
+    #[test]
+    fn rename_confirmation_resolves_the_same_cube_after_reorder_and_refuses_removal() {
+        let datadir = fresh_datadir();
+        let directory = datadir.network_directory(ChainId::Bitcoin);
+        std::fs::create_dir_all(directory.path()).unwrap();
+        let first = CubeSettings::new_with_raw_id("first".into(), "First".into(), ChainId::Bitcoin);
+        let second =
+            CubeSettings::new_with_raw_id("second".into(), "Second".into(), ChainId::Bitcoin);
+        let settings_path = directory.path().join(settings::SETTINGS_FILE_NAME);
+        std::fs::write(
+            &settings_path,
+            serde_json::to_vec(&settings::Settings {
+                cubes: vec![first.clone(), second.clone()],
+                ..Default::default()
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        let mut home = Home::new_for_chain(datadir.clone(), Some(ChainId::Bitcoin)).0;
+        home.state = State::Cubes {
+            cubes: vec![first.clone(), second.clone()],
+            create_cube: false,
+            source: ChainId::Bitcoin,
+        };
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: first.id.clone(),
+            }))),
+        );
+        drop(home.update(Message::View(ViewMessage::RenameCubeNameEdited(
+            "Renamed first".into(),
+        ))));
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![second.clone(), first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        assert!(matches!(&home.state, State::Cubes { cubes, .. }
+            if cubes.first().is_some_and(|cube| cube.id == second.id)));
+        let output = drain(home.update(Message::View(ViewMessage::RenameCubeConfirm)));
+        assert!(matches!(output.as_slice(), [Message::CubeRenamed(Ok(()))]));
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == first.id)
+                .unwrap()
+                .name,
+            "Renamed first"
+        );
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == second.id)
+                .unwrap()
+                .name,
+            "Second"
+        );
+
+        enable_btcb2(&mut home);
+        assert!(home.connect_account.is_authenticated());
+
+        // The row may disappear while the dialog remains open. No local or
+        // remote rename is then scheduled for whichever row took its place.
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: second.id.clone(),
+            }))),
+        );
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        assert!(drain(home.update(Message::View(ViewMessage::RenameCubeConfirm))).is_empty());
+        assert!(home.rename_cube_modal.is_none());
+        assert!(home.error().is_some());
+        assert!(home.pending_remote_rename.is_none());
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == second.id)
+                .unwrap()
+                .name,
+            "Second"
+        );
+
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: first.id.clone(),
+            }))),
+        );
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![first.clone(), first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        assert!(drain(home.update(Message::View(ViewMessage::RenameCubeConfirm))).is_empty());
+        assert!(
+            home.rename_cube_modal.is_none(),
+            "ambiguous identity invalidates the draft"
+        );
+        assert!(home.pending_remote_rename.is_none());
+
+        drop(home.update(Message::FocusedCubes {
+            for_chain: ChainId::Bitcoin,
+            res: Ok(State::Cubes {
+                cubes: vec![first.clone()],
+                create_cube: false,
+                source: ChainId::Bitcoin,
+            }),
+        }));
+        drop(
+            home.update(Message::View(ViewMessage::RenameCatalog(CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: first.id.clone(),
+            }))),
+        );
+        home.network = ChainId::Testnet4;
+        assert!(drain(home.update(Message::View(ViewMessage::RenameCubeConfirm))).is_empty());
+        assert!(
+            home.rename_cube_modal.is_none(),
+            "another chain cannot inherit a rename draft"
+        );
+        assert!(home.pending_remote_rename.is_none());
+        let saved: settings::Settings =
+            serde_json::from_slice(&std::fs::read(&settings_path).unwrap()).unwrap();
+        assert_eq!(
+            saved
+                .cubes
+                .iter()
+                .find(|cube| cube.id == first.id)
+                .unwrap()
+                .name,
+            "Renamed first"
+        );
+        std::fs::remove_dir_all(datadir.path()).unwrap();
     }
 
     #[test]
@@ -9601,7 +9777,13 @@ mod tests {
             create_cube: false,
             source: crate::chain::ChainId::Bitcoin,
         };
-        home.rename_cube_modal = Some((0, "Renamed Cube".to_string()));
+        home.rename_cube_modal = Some((
+            CubeCatalogKey {
+                chain: ChainId::Bitcoin,
+                cube_id: "local-a".into(),
+            },
+            "Renamed Cube".to_string(),
+        ));
         home.view();
         home.rename_cube_modal = None;
         home.delete_remote_cube_modal = Some(DeleteRemoteCubeModal {

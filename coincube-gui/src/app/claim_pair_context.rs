@@ -103,6 +103,25 @@ impl ClaimPairContext {
         self.generation.subscribe()
     }
 
+    /// Recheck the account bound at admission before a visible fork action.
+    /// A remotely authenticated scoped unlock may rotate its bearer, but its
+    /// verified account and provider cannot change. A local fork retains the
+    /// source session it was admitted under.
+    pub(crate) fn matches_session(&self, session: &claim::ConnectSession) -> bool {
+        match (self.client.as_ref(), self.verified_account) {
+            (Some(client), Some(account)) => {
+                account.to_string() == session.account
+                    && client.base_url == session.client.base_url
+                    && client.token().is_some_and(|token| !token.is_empty())
+            }
+            (Some(client), None) => {
+                client.base_url == session.client.base_url
+                    && client.token() == session.client.token()
+            }
+            (None, _) => false,
+        }
+    }
+
     pub(crate) fn bind(
         &self,
         request: &ClaimPairRequest,

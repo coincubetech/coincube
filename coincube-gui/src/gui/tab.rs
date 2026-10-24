@@ -561,6 +561,178 @@ impl ClaimResources {
     }
 }
 
+/// A closed loader can still have queued worker results with transferred
+/// resource ownership. Reject the result without ever admitting a new App.
+pub(crate) fn discard_closed_loader_result(message: Message) {
+    fn stop_embedded(daemon: &Arc<dyn crate::daemon::Daemon + Sync + Send>) {
+        if daemon.backend().is_embedded() {
+            if let Err(error) = tokio::runtime::Handle::current().block_on(daemon.stop()) {
+                tracing::error!("Closed loader daemon stop failed: {error}");
+            }
+        }
+    }
+
+    match message {
+        Message::AppAsync(_, nested) | Message::ForkAsync(_, nested) => {
+            discard_closed_loader_result(*nested);
+        }
+        Message::ClaimResourcesLoaded(mut resources) => resources.stop_owned(),
+        Message::Load(loader::Message::Started(Ok((daemon, pending, _)))) => {
+            stop_embedded(&daemon);
+            // PendingForkNode owns its node until admitted by a live Loader.
+            drop(pending);
+        }
+        Message::Load(loader::Message::Synced(Ok((_, _, daemon, node, _, _))))
+        | Message::Load(loader::Message::App(Ok((_, _, _, daemon, _, node)))) => {
+            stop_embedded(&daemon);
+            if let Some(node) = node {
+                node.stop();
+            }
+        }
+        Message::Load(loader::Message::BreezLoaded {
+            daemon, bitcoind, ..
+        }) => {
+            stop_embedded(&daemon);
+            if let Some(node) = bitcoind {
+                node.stop();
+            }
+        }
+        Message::Load(loader::Message::Loaded(Ok((daemon, _)))) => {
+            stop_embedded(&daemon);
+        }
+        Message::BreezClientLoadedAfterPin {
+            internal_bitcoind: Some(node),
+            ..
+        } => node.stop(),
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod admitted_app_startup_tests {
+    use super::*;
+    use iced_runtime::futures::futures::StreamExt;
+
+    fn recovery_route(message: &Message) -> bool {
+        matches!(message,
+            Message::AppAsync(_, nested)
+                if matches!(nested.as_ref(), Message::Run(app::Message::View(
+                    app::view::Message::Menu(app::menu::Menu::Cube(
+                        app::menu::CubeSubMenu::Settings(app::menu::CubeSettingsOption::Recovery)
+                    ))
+                )))
+        )
+    }
+
+    async fn held_recovery_route(task: Task<Message>) -> Message {
+        let mut stream = iced_runtime::task::into_stream(task).expect("admitted App startup work");
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while let Some(action) = stream.next().await {
+                if let iced_runtime::Action::Output(message) = action {
+                    if recovery_route(&message) {
+                        return message;
+                    }
+                }
+            }
+            panic!("admitted App startup lost its Recovery route");
+        })
+        .await
+        .expect("Recovery route completed within the fixture bound")
+    }
+
+    #[test]
+    fn newly_admitted_app_startup_and_recovery_route_reject_stale_generation() {
+        std::thread::Builder::new()
+            .name("admitted-app-startup".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                let _guard = crate::app::session::test_guard();
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap();
+                let _enter = runtime.enter();
+                let path = std::env::temp_dir()
+                    .join(format!("admitted-app-startup-{}", uuid::Uuid::new_v4()));
+                let root = CoincubeDirectory::new(path.clone());
+                let (fixture, wallet) = crate::app::claim_step1_tests::bitcoin_app(&path);
+                let settings = fixture.cube_settings().clone();
+                let cache = fixture.cache().clone();
+                let daemon = crate::app::claim_step1_tests::fixture_daemon(&fixture);
+                drop(fixture);
+                let breez = Arc::new(app::breez_liquid::BreezClient::disconnected(
+                    settings.network.bitcoin_network(),
+                ));
+                let make_loader = || {
+                    let (loader, startup) = Loader::new(
+                        root.clone(),
+                        app::Config::new(false),
+                        settings.network.bitcoin_network(),
+                        None,
+                        None,
+                        None,
+                        settings.clone(),
+                        Some(breez.clone()),
+                        None,
+                    );
+                    drop(startup);
+                    loader
+                };
+                let admit = |tab: &mut Tab| {
+                    tab.pending_recovery_route = Some((
+                        root.clone(),
+                        settings.network,
+                        settings.id.clone(),
+                    ));
+                    tab.update(Message::Load(loader::Message::BreezLoaded {
+                        breez: breez.clone(),
+                        spark_backend: None,
+                        cache: cache.clone(),
+                        wallet: wallet.clone(),
+                        config: app::Config::new(false),
+                        daemon: daemon.clone(),
+                        datadir: root.clone(),
+                        bitcoind: None,
+                        cube_settings: settings.clone(),
+                    }))
+                };
+
+                let mut tab = Tab::new(1, State::Loader(make_loader()));
+                let first = admit(&mut tab);
+                assert!(matches!(tab.state, State::App(_)));
+                let first_generation = tab.app_generation_token().unwrap();
+                let stale = runtime.block_on(held_recovery_route(first));
+                assert!(matches!(stale, Message::AppAsync(generation, _) if generation == first_generation));
+
+                drop(tab.update(Message::LockCubeToLauncher));
+                assert!(matches!(tab.state, State::Home(_)));
+                tab.state = State::Loader(make_loader());
+                let second = admit(&mut tab);
+                let second_generation = tab.app_generation_token().unwrap();
+                assert_ne!(first_generation, second_generation);
+                let current = runtime.block_on(held_recovery_route(second));
+                assert!(matches!(tab.state, State::App(_)));
+                assert_eq!(tab.update(stale).units(), 0);
+                let State::App(app) = &tab.state else { unreachable!() };
+                assert!(!matches!(app.current_menu_for_test(),
+                    app::menu::Menu::Cube(app::menu::CubeSubMenu::Settings(
+                        app::menu::CubeSettingsOption::Recovery
+                    ))));
+                drop(tab.update(current));
+                let State::App(app) = &tab.state else { unreachable!() };
+                assert!(matches!(app.current_menu_for_test(),
+                    app::menu::Menu::Cube(app::menu::CubeSubMenu::Settings(
+                        app::menu::CubeSettingsOption::Recovery
+                    ))));
+                drop(tab);
+                std::fs::remove_dir_all(path).ok();
+            })
+            .unwrap()
+            .join()
+            .unwrap();
+    }
+}
+
 /// Resolve the Vault from its authoritative chain, never its address encoding.
 fn vault_settings_for_cube(
     root: &CoincubeDirectory,
@@ -662,6 +834,38 @@ pub struct Tab {
 }
 
 impl Tab {
+    /// Exact on-disk Cube identity for an unlocked or still-loading owner.
+    /// An installer without a known Cube ID is deliberately not matched.
+    pub(crate) fn matches_cube_identity(
+        &self,
+        root: &CoincubeDirectory,
+        chain: crate::chain::ChainId,
+        cube_id: &str,
+    ) -> bool {
+        let same = |path: &CoincubeDirectory, settings: &app::settings::CubeSettings| {
+            crate::chain::same_path(root.path(), path.path())
+                && settings.network == chain
+                && settings.id == cube_id
+        };
+        match &self.state {
+            State::App(app) => same(app.datadir(), app.cube_settings()),
+            State::Loader(loader) => same(&loader.datadir_path, &loader.cube_settings),
+            State::Installer(installer) => {
+                installer
+                    .cube_settings
+                    .as_ref()
+                    .is_some_and(|settings| same(&installer.datadir, settings))
+                    || installer
+                        .source_cube
+                        .as_ref()
+                        .is_some_and(|source| same(&installer.datadir, &source.settings))
+                    || (crate::chain::same_path(root.path(), installer.datadir.path())
+                        && installer.context.bitcoin_config.chain == chain
+                        && installer.context.cube_id.as_deref() == Some(cube_id))
+            }
+            _ => false,
+        }
+    }
     pub fn new(id: usize, state: State) -> Self {
         Tab {
             id,
@@ -1027,12 +1231,14 @@ impl Tab {
         let message = match message {
             Message::AppAsync(generation, message) => {
                 if !self.accepts_app_generation(generation) {
+                    discard_closed_loader_result(*message);
                     return Task::none();
                 }
                 *message
             }
             Message::ForkAsync(generation, message) => {
                 if generation != self.fork_session_generation {
+                    discard_closed_loader_result(*message);
                     return Task::none();
                 }
                 *message
@@ -1099,7 +1305,10 @@ impl Tab {
                 self.fork_session_generation = self.fork_session_generation.wrapping_add(1);
                 self.fork_tasks.clear();
             }
-            if was_app && is_app {
+            // A Loader -> App transition also returns App::new startup work.
+            // Its callbacks must belong to the generation just admitted,
+            // including the deferred Recovery destination.
+            if is_app {
                 let generation = self.app_generation;
                 result.map(move |message| Message::AppAsync(generation, Box::new(message)))
             } else {

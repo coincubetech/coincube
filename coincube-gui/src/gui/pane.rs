@@ -286,13 +286,29 @@ impl Pane {
             }
             tab.stop();
             if let Some(owner) = owner {
-                for index in (0..self.tabs.len()).rev() {
-                    if self.tabs[index].claim_open_owner() == Some(owner) {
-                        self.close_tab(index);
-                    }
-                }
+                self.close_tabs_matching(|tab| tab.claim_open_owner() == Some(owner));
             }
         }
+    }
+
+    /// `close_tab` may recursively remove an App's paired Claim tabs. Resolve
+    /// each selected tab by stable ID after every close instead of retaining
+    /// indices into a vector whose lower entries may have disappeared.
+    pub(crate) fn close_tabs_matching(&mut self, predicate: impl Fn(&tab::Tab) -> bool) -> bool {
+        let selected: Vec<usize> = self
+            .tabs
+            .iter()
+            .filter(|tab| predicate(tab))
+            .map(|tab| tab.id)
+            .collect();
+        let mut closed = false;
+        for id in selected {
+            if let Some(index) = self.tabs.iter().position(|tab| tab.id == id) {
+                self.close_tab(index);
+                closed = true;
+            }
+        }
+        closed
     }
 
     pub fn remove_tab(&mut self, i: usize) -> Option<tab::Tab> {
@@ -503,11 +519,7 @@ impl Pane {
                             && matches!(&tab.state, tab::State::App(app) if app.cache().app_generation == owner)
                     });
                     if !retained {
-                        for index in (0..self.tabs.len()).rev() {
-                            if self.tabs[index].claim_open_owner() == Some(owner) {
-                                self.close_tab(index);
-                            }
-                        }
+                        self.close_tabs_matching(|tab| tab.claim_open_owner() == Some(owner));
                     }
                 }
                 return task

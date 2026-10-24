@@ -769,10 +769,6 @@ impl Loader {
         if let Some(bitcoind) = self.internal_bitcoind.take() {
             bitcoind.stop();
         }
-        // Stop the managed Tor daemon (if inbound-over-Tor was running).
-        if !self.cube_settings.network.is_blake2b() {
-            crate::node::tor::stop_managed_tor();
-        }
     }
 
     /// A restricted Claim load transfers its verified wallet/daemon payload

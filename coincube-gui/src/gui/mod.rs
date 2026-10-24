@@ -1,10 +1,7 @@
 use iced::{
     event::{self, Event},
     keyboard,
-    widget::{
-        operation::{focus_next, focus_previous},
-        pane_grid,
-    },
+    widget::pane_grid,
     Size, Subscription, Task,
 };
 use iced_runtime::window;
@@ -16,7 +13,7 @@ extern crate serde;
 extern crate serde_json;
 
 use coincube_core::miniscript::bitcoin;
-use coincube_ui::widget::Element;
+use coincube_ui::widget::{action, Element};
 
 mod cache;
 pub mod pane;
@@ -261,6 +258,7 @@ impl GUI {
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
                     .is_some_and(|tab| tab.accepts_app_generation(generation));
                 if !current {
+                    tab::discard_closed_loader_result(*message);
                     return Task::none();
                 }
                 route_guarded_tab_result(pane_id, tab_id, *message)
@@ -277,16 +275,18 @@ impl GUI {
                     .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
                     .is_some_and(|tab| tab.accepts_fork_generation(generation));
                 if !current {
+                    tab::discard_closed_loader_result(*message);
                     return Task::none();
                 }
                 route_guarded_tab_result(pane_id, tab_id, *message)
             }
-            Message::Pane(pane_id, pane::Message::Tab(tab_id, _))
+            Message::Pane(pane_id, pane::Message::Tab(tab_id, tab_message))
                 if !self
                     .panes
                     .get(pane_id)
                     .is_some_and(|pane| pane.tabs.iter().any(|tab| tab.id == tab_id)) =>
             {
+                tab::discard_closed_loader_result(*tab_message);
                 return Task::none();
             }
             message => message,
@@ -752,6 +752,9 @@ impl GUI {
                 for (_, pane) in self.panes.iter_mut() {
                     pane.stop();
                 }
+                // Managed Tor is process-global; a Cube lock cannot own its
+                // teardown while another managed-node consumer may remain.
+                crate::node::tor::stop_managed_tor();
                 if let Some(window_config) = &self.window_config {
                     let path = GlobalSettings::path(&self.config.coincube_directory);
                     if let Err(e) = GlobalSettings::update_window_config(&path, window_config) {
@@ -763,9 +766,9 @@ impl GUI {
             Message::KeyPressed(Key::Tab(shift)) => {
                 log::debug!("Tab pressed!");
                 if shift {
-                    focus_previous()
+                    action::focus_previous_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
                 } else {
-                    focus_next()
+                    action::focus_next_visible(crate::app::view::nav::shell::MIDDLE_SCROLL_ID)
                 }
             }
             Message::Fiat(FiatMessage::GetPriceResult(price)) => {
@@ -1039,19 +1042,11 @@ impl GUI {
                 };
                 let mut empty_panes = Vec::new();
                 for (&other_id, pane) in self.panes.iter_mut() {
-                    for index in (0..pane.tabs.len()).rev() {
-                        let sibling = &pane.tabs[index];
-                        if other_id == pane_id && sibling.id == tab_id {
-                            continue;
-                        }
-                        let same_cube = matches!(&sibling.state, tab::State::App(app)
-                            if crate::chain::same_path(root.path(), app.datadir().path())
-                                && app.cube_settings().network == chain
-                                && app.cube_settings().id == cube_id);
-                        if sibling.claim_open_owner() == Some(owner) || same_cube {
-                            pane.close_tab(index);
-                        }
-                    }
+                    pane.close_tabs_matching(|sibling| {
+                        !(other_id == pane_id && sibling.id == tab_id)
+                            && (sibling.claim_open_owner() == Some(owner)
+                                || sibling.matches_cube_identity(&root, chain, &cube_id))
+                    });
                     if pane.tabs.is_empty() {
                         empty_panes.push(other_id);
                     }
@@ -1098,11 +1093,7 @@ impl GUI {
                 // The wipe is complete: do not leave a Launcher or another
                 // Cube surface visible above the cryptic duress state.
                 for (&other_id, other_pane) in self.panes.iter_mut() {
-                    for index in (0..other_pane.tabs.len()).rev() {
-                        if other_id != pane_id || other_pane.tabs[index].id != tab_id {
-                            other_pane.close_tab(index);
-                        }
-                    }
+                    other_pane.close_tabs_matching(|tab| other_id != pane_id || tab.id != tab_id);
                 }
                 crate::app::session::close();
                 if let Some(pane) = self.panes.get_mut(pane_id) {
@@ -1132,68 +1123,10 @@ impl GUI {
                     }
                 }
                 if !self.panes.iter().any(|(_, p)| !p.tabs.is_empty()) {
+                    crate::node::tor::stop_managed_tor();
                     return iced::window::latest().and_then(iced::window::close);
                 }
                 Task::none()
-            }
-            // A Cube can still be open in another tab or split pane in this
-            // intermediate shell release. Lock is a Cube-wide action: stop
-            // every sibling App with the same on-disk identity before the
-            // originating tab wipes the session and returns to Home.
-            Message::Pane(pane_id, pane::Message::Tab(tab_id, inner))
-                if matches!(inner.as_ref(), tab::Message::LockCubeToLauncher) =>
-            {
-                let identity = self
-                    .panes
-                    .get(pane_id)
-                    .and_then(|pane| pane.tabs.iter().find(|tab| tab.id == tab_id))
-                    .and_then(|tab| match &tab.state {
-                        tab::State::App(app) => Some((
-                            app.datadir().clone(),
-                            app.cube_settings().network,
-                            app.cube_settings().id.clone(),
-                        )),
-                        _ => None,
-                    });
-                let Some((root, chain, cube_id)) = identity else {
-                    return Task::none();
-                };
-                let mut empty_panes = Vec::new();
-                for (&other_pane_id, pane) in self.panes.iter_mut() {
-                    let mut index = pane.tabs.len();
-                    while index > 0 {
-                        index -= 1;
-                        let sibling = &pane.tabs[index];
-                        if other_pane_id == pane_id && sibling.id == tab_id {
-                            continue;
-                        }
-                        let same_cube = matches!(&sibling.state, tab::State::App(app)
-                            if crate::chain::same_path(root.path(), app.datadir().path())
-                                && app.cube_settings().network == chain
-                                && app.cube_settings().id == cube_id);
-                        if same_cube {
-                            pane.close_tab(index);
-                        }
-                    }
-                    if pane.tabs.is_empty() {
-                        empty_panes.push(other_pane_id);
-                    }
-                }
-                for empty in empty_panes {
-                    self.panes.close(empty);
-                    if self.focus == Some(empty) {
-                        self.focus = Some(pane_id);
-                    }
-                }
-                if let Some(pane) = self.panes.get_mut(pane_id) {
-                    pane.update(
-                        pane::Message::tab(tab_id, tab::Message::LockCubeToLauncher),
-                        &self.config,
-                    )
-                    .map(move |message| Message::Pane(pane_id, message))
-                } else {
-                    Task::none()
-                }
             }
             // In case of cube deletion, remove any tab where the cube/wallet is currently running.
             Message::Pane(p, pane::Message::Tab(t, inner))
@@ -1326,20 +1259,17 @@ impl GUI {
                     if !claim_route {
                         let mut closed = false;
                         for (_, pane) in self.panes.iter_mut() {
-                            for index in (0..pane.tabs.len()).rev() {
-                                if matches!(
-                                    pane.tabs[index].state,
+                            closed |= pane.close_tabs_matching(|tab| {
+                                matches!(
+                                    tab.state,
                                     tab::State::App(_)
                                         | tab::State::Loader(_)
                                         | tab::State::Installer(_)
                                         | tab::State::Login(_)
                                         | tab::State::PinEntry(_)
                                         | tab::State::PasskeyUnlock(_)
-                                ) {
-                                    pane.close_tab(index);
-                                    closed = true;
-                                }
-                            }
+                                )
+                            });
                         }
                         if closed {
                             crate::app::session::close();
@@ -1353,17 +1283,9 @@ impl GUI {
                     // When a cube is deleted, close all App and Loader tabs since they won't be valid anymore
                     let mut panes_to_close = Vec::<pane_grid::Pane>::new();
                     for (id, pane) in self.panes.iter_mut() {
-                        // Stop and remove tabs - iterate in reverse to maintain valid indices
-                        let mut i = pane.tabs.len();
-                        while i > 0 {
-                            i -= 1;
-                            if matches!(
-                                pane.tabs[i].state,
-                                tab::State::App(_) | tab::State::Loader(_)
-                            ) {
-                                pane.close_tab(i);
-                            }
-                        }
+                        pane.close_tabs_matching(|tab| {
+                            matches!(tab.state, tab::State::App(_) | tab::State::Loader(_))
+                        });
                         if pane.tabs.is_empty() {
                             panes_to_close.push(*id);
                         }
@@ -3027,6 +2949,87 @@ mod lock_cube_dispatch_tests {
     use super::*;
 
     #[test]
+    fn ordinary_switch_survives_recursive_removal_of_an_earlier_claim_loader() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("cube-switch-cascade-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let source_settings = source.cube_settings().clone();
+        let owner = source.cache().app_generation;
+        let (loader, startup) = crate::loader::Loader::new(
+            root.clone(),
+            crate::app::Config::new(false),
+            source_settings.network.bitcoin_network(),
+            None,
+            None,
+            None,
+            source_settings.clone(),
+            None,
+            None,
+        );
+        drop(startup);
+        let handoff = crate::app::claim_intent::ForkHandoff::new(
+            &root,
+            source_settings.id.clone(),
+            "paired".into(),
+        )
+        .unwrap();
+        let (home, home_startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(home_startup);
+        let mut pane = pane::Pane::new_with_tab(tab::State::Loader(loader));
+        pane.tabs[0].set_claim_open(home::ClaimOpenIntent::new(
+            owner,
+            &root,
+            source_settings.id.clone(),
+            "paired".into(),
+            home::ClaimRoute::Begin(handoff),
+        ));
+        pane.tabs.push(tab::Tab::new(2, tab::State::Home(home)));
+        pane.tabs.push(tab::Tab::new(3, tab::State::App(source)));
+        pane.focused_tab = 1;
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        let mut gui = GUI {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root.clone(), None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        };
+        let destination = crate::app::settings::CubeSettings::new_with_raw_id(
+            "other".into(),
+            "Other".into(),
+            source_settings.network,
+        );
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                2,
+                tab::Message::Launch(home::Message::Run(
+                    root.clone(),
+                    crate::app::Config::new(false),
+                    source_settings.network,
+                    destination,
+                )),
+            ),
+        )));
+        let pane = gui.panes.get(pane_id).expect("Launcher survives switch");
+        assert_eq!(pane.tabs.len(), 1, "owned Loader and App were both closed");
+        assert_eq!(pane.tabs[0].id, 2, "unrelated Launcher retains identity");
+        assert!(!matches!(pane.tabs[0].state, tab::State::App(_)));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn lock_closes_same_cube_across_panes_but_preserves_an_unrelated_cube() {
         let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()
@@ -3039,6 +3042,7 @@ mod lock_cube_dispatch_tests {
         let root = CoincubeDirectory::new(root_path.clone());
         let (first, _) = crate::app::claim_step1_tests::bitcoin_app(&root_path);
         let same_cube_id = first.cube_settings().id.clone();
+        let same_settings = first.cube_settings().clone();
         let sibling = crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
         let same_pane_sibling =
             crate::app::claim_step1_tests::bitcoin_app_with_id(&root_path, &same_cube_id);
@@ -3051,6 +3055,39 @@ mod lock_cube_dispatch_tests {
         first_pane
             .tabs
             .push(tab::Tab::new(3, tab::State::App(same_pane_sibling)));
+        let (loading, loading_task) = crate::loader::Loader::new(
+            root.clone(),
+            crate::app::Config::new(false),
+            same_settings.network.bitcoin_network(),
+            None,
+            None,
+            None,
+            same_settings.clone(),
+            None,
+            None,
+        );
+        drop(loading_task);
+        first_pane
+            .tabs
+            .push(tab::Tab::new(4, tab::State::Loader(loading)));
+        let (installing, install_task) = crate::installer::Installer::try_new_for_chain(
+            root.clone(),
+            same_settings.network,
+            None,
+            crate::installer::UserFlow::CreateWallet,
+            true,
+            Some(same_settings),
+            None,
+            None,
+            false,
+            None,
+        )
+        .unwrap();
+        drop(install_task);
+        first_pane.tabs.push(tab::Tab::new(
+            5,
+            tab::State::Installer(Box::new(installing)),
+        ));
         let (mut panes, origin) = pane_grid::State::new(first_pane);
         let (other, _) = panes
             .split(
@@ -3079,15 +3116,223 @@ mod lock_cube_dispatch_tests {
         assert_eq!(
             pane.tabs.len(),
             2,
-            "same-pane sibling was stopped and removed"
+            "matching App, Loader and Installer siblings were stopped and removed"
         );
         assert!(matches!(&pane.tabs[1].state, tab::State::App(app)
             if app.cube_settings().id == unrelated_id));
         assert!(gui.panes.get(other).is_none(), "empty sibling pane closed");
         assert_eq!(gui.focus, Some(origin));
+        drop(gui.update(Message::Pane(
+            origin,
+            pane::Message::tab(4, tab::Message::Load(crate::loader::Message::None)),
+        )));
+        assert_eq!(gui.panes.get(origin).unwrap().tabs.len(), 2);
 
         drop(gui);
         let _ = std::fs::remove_dir_all(root_path);
+    }
+
+    #[test]
+    fn a_removed_claim_loader_stops_detached_node_before_missing_tab_rejection() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("closed-claim-loader-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = crate::app::claim_step1_tests::bitcoin_app(&path);
+        let source_cube = source.cube_settings().id.clone();
+        let source_generation = source.cache().app_generation;
+        let (target, wallet) = crate::app::claim_step1_tests::bitcoin_app(&path.join("target"));
+        let target_daemon = crate::app::claim_step1_tests::fixture_daemon(&target);
+        let target_cache = target.cache().clone();
+        let target_settings = target.cube_settings().clone();
+        let node = crate::node::bitcoind::Bitcoind::for_test(
+            coincubed::config::BitcoindConfig {
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "fixture".into(),
+                    "fixture".into(),
+                ),
+                addr: "127.0.0.1:1".parse().unwrap(),
+            },
+            &root,
+            bitcoin::Network::Bitcoin,
+        );
+        let lock_dir = root.bitcoind_directory().path().join("locks/bitcoin");
+        assert!(lock_dir.exists());
+        let handoff =
+            crate::app::claim_intent::ForkHandoff::new(&root, source_cube.clone(), "paired".into())
+                .unwrap();
+        let intent = home::ClaimOpenIntent::new(
+            source_generation,
+            &root,
+            source_cube.clone(),
+            "paired".into(),
+            home::ClaimRoute::Begin(handoff),
+        );
+        let pane = pane::Pane::new_with_tab(tab::State::App(source));
+        let (panes, pane_id) = pane_grid::State::new(pane);
+        let mut gui = GUI {
+            panes,
+            focus: Some(pane_id),
+            config: Config::new(root.clone(), None),
+            window_id: None,
+            window_init: None,
+            window_config: None,
+            global_cache: GlobalCache::default(),
+            theme_mode: Default::default(),
+        };
+        let resources = tab::ClaimResources {
+            intent,
+            wallet,
+            cache: target_cache,
+            daemon: target_daemon,
+            bitcoind: Some(node),
+            settings: target_settings,
+            client: None,
+            verified_account: None,
+        };
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(999, tab::Message::ClaimResourcesLoaded(Box::new(resources))),
+        )));
+        assert!(!lock_dir.exists(), "the detached node lock was released");
+        let surviving = &gui.panes.get(pane_id).unwrap().tabs[0];
+        assert!(matches!(&surviving.state, tab::State::App(app)
+            if app.cube_settings().id == source_cube && !app.has_claim_pair_context()));
+
+        // A late Synced payload uses the same rejection path, but has not
+        // detached into a Claim context yet.
+        let node = crate::node::bitcoind::Bitcoind::for_test(
+            coincubed::config::BitcoindConfig {
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "fixture".into(),
+                    "fixture".into(),
+                ),
+                addr: "127.0.0.1:1".parse().unwrap(),
+            },
+            &root,
+            bitcoin::Network::Bitcoin,
+        );
+        assert!(lock_dir.exists());
+        let late_wallet = std::sync::Arc::new(surviving.wallet().unwrap().clone());
+        let late_cache = surviving.cache().unwrap().clone();
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                999,
+                tab::Message::Load(crate::loader::Message::Synced(Ok((
+                    late_wallet,
+                    late_cache,
+                    crate::app::claim_step1_tests::fixture_daemon(&target),
+                    Some(node),
+                    None,
+                    target.cube_settings().clone(),
+                )))),
+            ),
+        )));
+        assert!(!lock_dir.exists());
+
+        let (closed_home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let (closed_pane, _) = gui
+            .panes
+            .split(
+                pane_grid::Axis::Vertical,
+                pane_id,
+                pane::Pane::new_with_tab(tab::State::Home(closed_home)),
+            )
+            .unwrap();
+        gui.panes.close(closed_pane);
+        let node = crate::node::bitcoind::Bitcoind::for_test(
+            coincubed::config::BitcoindConfig {
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "fixture".into(),
+                    "fixture".into(),
+                ),
+                addr: "127.0.0.1:1".parse().unwrap(),
+            },
+            &root,
+            bitcoin::Network::Bitcoin,
+        );
+        assert!(lock_dir.exists());
+        let handoff =
+            crate::app::claim_intent::ForkHandoff::new(&root, source_cube.clone(), "paired".into())
+                .unwrap();
+        let stale = tab::ClaimResources {
+            intent: home::ClaimOpenIntent::new(
+                source_generation,
+                &root,
+                source_cube.clone(),
+                "paired".into(),
+                home::ClaimRoute::Begin(handoff),
+            ),
+            wallet: std::sync::Arc::new(target.wallet().unwrap().clone()),
+            cache: target.cache().clone(),
+            daemon: crate::app::claim_step1_tests::fixture_daemon(&target),
+            bitcoind: Some(node),
+            settings: target.cube_settings().clone(),
+            client: None,
+            verified_account: None,
+        };
+        drop(gui.update(Message::Pane(
+            closed_pane,
+            pane::Message::tab(1, tab::Message::ClaimResourcesLoaded(Box::new(stale))),
+        )));
+        assert!(
+            !lock_dir.exists(),
+            "missing-pane delivery released its node"
+        );
+        let node = crate::node::bitcoind::Bitcoind::for_test(
+            coincubed::config::BitcoindConfig {
+                rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                    "fixture".into(),
+                    "fixture".into(),
+                ),
+                addr: "127.0.0.1:1".parse().unwrap(),
+            },
+            &root,
+            bitcoin::Network::Bitcoin,
+        );
+        let handoff =
+            crate::app::claim_intent::ForkHandoff::new(&root, source_cube.clone(), "paired".into())
+                .unwrap();
+        let stale = tab::ClaimResources {
+            intent: home::ClaimOpenIntent::new(
+                source_generation,
+                &root,
+                source_cube.clone(),
+                "paired".into(),
+                home::ClaimRoute::Begin(handoff),
+            ),
+            wallet: std::sync::Arc::new(target.wallet().unwrap().clone()),
+            cache: target.cache().clone(),
+            daemon: crate::app::claim_step1_tests::fixture_daemon(&target),
+            bitcoind: Some(node),
+            settings: target.cube_settings().clone(),
+            client: None,
+            verified_account: None,
+        };
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(
+                1,
+                tab::Message::AppAsync(
+                    u64::MAX,
+                    Box::new(tab::Message::ClaimResourcesLoaded(Box::new(stale))),
+                ),
+            ),
+        )));
+        assert!(
+            !lock_dir.exists(),
+            "stale-generation delivery released its node"
+        );
+        drop(gui);
+        drop(target);
+        std::fs::remove_dir_all(path).ok();
     }
 }
 

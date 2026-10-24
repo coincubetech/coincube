@@ -909,6 +909,35 @@ fn scoped_claim_remote_identity(
         })
 }
 
+/// Messages produced by the visible paired Claim signing screen. Background
+/// source-Claim events and shell/global navigation keep their own routes.
+fn is_fork_claim_panel_message(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::ForkClaim(_)
+            | Message::View(
+                view::Message::Claim(_)
+                    | view::Message::Spend(_)
+                    | view::Message::ExportPsbt
+                    | view::Message::ImportPsbt
+                    | view::Message::ImportExport(_)
+                    | view::Message::SelectHardwareWallet(_)
+                    | view::Message::SelectPsbtHardwareWallet(_)
+                    | view::Message::OpenVaultRecipientIdentity(_, _)
+                    | view::Message::Label(_, _)
+                    | view::Message::ImportSpend(_)
+            )
+            | Message::Psbt(_)
+            | Message::Signed(_, _)
+            | Message::HardwareWallets(_)
+            | Message::LabelsUpdated(_)
+            | Message::Export(_)
+            | Message::Reconcile
+            | Message::Updated(_)
+            | Message::Saved(_)
+    )
+}
+
 fn load_fork_claim_panel(
     root: CoincubeDirectory,
     wallet: Arc<Wallet>,
@@ -3340,6 +3369,11 @@ pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checks
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn current_menu_for_test(&self) -> &Menu {
+        &self.panels.current
+    }
+
     /// Identifies a harmless shell dismissal for the GUI's sole Escape
     /// dispatcher. This does not handle the key or mutate the App.
     pub fn shell_escape_intent(&self) -> Option<view::Message> {
@@ -6615,9 +6649,6 @@ impl App {
             if let Some(bitcoind) = self.internal_bitcoind.take() {
                 bitcoind.stop();
             }
-            // Stop the managed Tor daemon (if inbound-over-Tor was running)
-            // alongside the node it serves.
-            crate::node::tor::stop_managed_tor();
         }
     }
 
@@ -7236,6 +7267,37 @@ impl App {
                 "Connect signer bootstrap is unavailable for Bitcoin Blake2b. Reopen this Cube through authenticated Connect startup; use its local Cube key for signing."
                     .into(),
             )));
+        }
+        // A paired Claim presents the fork signing panel inside the source
+        // App. Its visible actions and signer completions must use the paired
+        // resource owner, never the source Claim panel or its daemon/cache.
+        // Shell navigation is intentionally excluded and remains source-owned.
+        if self.panels.current == Menu::Vault(menu::VaultSubMenu::Claim)
+            && self
+                .claim_pair_context
+                .as_ref()
+                .is_some_and(|context| context.panel.is_some())
+            && is_fork_claim_panel_message(&message)
+        {
+            let admitted = self.claim_pair_context.as_ref().is_some_and(|context| {
+                context.owner == self.cache.app_generation
+                    && context.root == self.datadir
+                    && context.source_cube == self.cube_settings.id
+                    && context.settings.network == crate::chain::ChainId::BitcoinBlake2b
+                    && self.cache.btcb2_server_enabled
+                    && self
+                        .claim_connect_session()
+                        .is_some_and(|session| context.matches_session(&session))
+            });
+            if !admitted {
+                if let Some(context) = &mut self.claim_pair_context {
+                    context.revoke();
+                }
+                return Task::none();
+            }
+            let context = self.claim_pair_context.as_mut().expect("checked above");
+            let panel = context.panel.as_mut().expect("checked above");
+            return panel.update(Some(context.daemon.clone()), &context.cache, message);
         }
         match message {
             Message::ImportedBitcoin(event) => {
@@ -10810,7 +10872,7 @@ impl App {
                 .and_then(|context| context.panel.as_ref()),
         ) {
             let context = self.claim_pair_context.as_ref().expect("panel has owner");
-            panel.view(&self.panels.current, &context.cache)
+            panel.view_with_shell(&self.panels.current, &context.cache, &self.cache)
         } else if let Some(reason) = features::route_availability(
             &self.panels.current,
             self.cache.chain(),
@@ -12382,6 +12444,134 @@ mod tests {
         drop(context);
         drop(fork);
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visible_paired_claim_actions_stay_with_the_restricted_fork_owner() {
+        let _guard = crate::app::session::test_guard();
+        let (mut source, _handoff, path) =
+            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let target = split_app(&path, false, true);
+        let mut target_settings = target.cube_settings.clone();
+        let target_wallet = target.wallet.as_ref().unwrap().clone();
+        let mut target_cache = target.cache.clone();
+        target_cache.datadir_path = source.datadir.clone();
+        target_cache.cube_name = "Fork operation".into();
+        source.cache.cube_name = "Bitcoin source".into();
+        target_settings.vault_wallet_id = Some(target_wallet.id());
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("synthetic-source-token");
+        source
+            .panels
+            .connect
+            .install_admitted_client(client.clone());
+        source.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "synthetic@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        source.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        source.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        source.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        source.cache.btcb2_server_enabled = true;
+        let generation = *source.panels.claim_generation.borrow();
+        let source_id = source.cube_settings.id.clone();
+        let owner = source.cache.app_generation;
+        let mut context = claim_pair_context::ClaimPairContext::new(
+            cache::AppGeneration::next(),
+            owner,
+            source.datadir.clone(),
+            source_id.clone(),
+            target_settings,
+            target_wallet,
+            target.daemon.as_ref().unwrap().clone(),
+            target_cache,
+            Some(client),
+            Some(7),
+            None,
+        )
+        .unwrap();
+        context.panel = Some(state::vault::claim::fork_panel::tests::empty_for_test(
+            source.datadir.clone(),
+        ));
+        source.claim_pair_context = Some(Box::new(context));
+        source.panels.current = Menu::Vault(menu::VaultSubMenu::Claim);
+        drop(source.view()); // The visible screen must render with distinct source/target caches.
+        drop(source.update(Message::View(view::Message::ToggleCubeSwitcher)));
+        assert!(source.cache.cube_switcher_open);
+        drop(source.update(Message::View(view::Message::AskCubeLock)));
+        assert!(source.cache.cube_lock_confirmation);
+        drop(source.view());
+        drop(source.update(Message::View(view::Message::CancelCubeLock)));
+        assert!(!source.cache.cube_lock_confirmation);
+        assert_eq!(source.cache.cube_name, "Bitcoin source");
+        assert_eq!(
+            source.claim_pair_context.as_ref().unwrap().cache.cube_name,
+            "Fork operation"
+        );
+
+        for message in [
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+            Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
+            Message::View(view::Message::Spend(
+                view::SpendTxMessage::SelectMasterSigner,
+            )),
+            Message::View(view::Message::Claim(view::ClaimMessage::Cancel)),
+        ] {
+            drop(source.update(message));
+        }
+        let panel = source
+            .claim_pair_context
+            .as_ref()
+            .unwrap()
+            .panel
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            state::vault::claim::fork_panel::tests::observed_actions(panel),
+            ["confirm", "refresh", "sign", "cancel"]
+        );
+        assert!(panel.is_revoked());
+        assert_eq!(*source.panels.claim_generation.borrow(), generation);
+        assert_eq!(source.cube_settings.id, source_id);
+        drop(source.update(Message::View(view::Message::Spend(
+            view::SpendTxMessage::SelectMasterSigner,
+        ))));
+        assert!(source
+            .claim_pair_context
+            .as_ref()
+            .unwrap()
+            .panel
+            .as_ref()
+            .unwrap()
+            .is_revoked());
+
+        // A changed account can no longer dispatch even a queued button event.
+        source.panels.connect.account.user.as_mut().unwrap().id = 8;
+        drop(source.update(Message::View(view::Message::Claim(
+            view::ClaimMessage::Confirm,
+        ))));
+        assert_eq!(
+            state::vault::claim::fork_panel::tests::observed_actions(
+                source
+                    .claim_pair_context
+                    .as_ref()
+                    .unwrap()
+                    .panel
+                    .as_ref()
+                    .unwrap()
+            ),
+            ["confirm", "refresh", "sign", "cancel", "sign"]
+        );
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(path).ok();
     }
 
     fn local_app(root: &std::path::Path) -> App {
@@ -15591,6 +15781,10 @@ pub(crate) mod claim_step1_tests {
         app.cube_settings.id = id.to_owned();
         app.cache.cube_id = id.to_owned();
         app
+    }
+
+    pub(crate) fn fixture_daemon(app: &App) -> Arc<dyn Daemon + Sync + Send> {
+        app.daemon.as_ref().unwrap().clone()
     }
 
     #[test]

@@ -856,6 +856,63 @@ mod tests {
         CoincubeDirectory::new(base)
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn cube_and_loader_lock_leave_global_tor_for_final_window_shutdown() {
+        let _registry = registry_test_guard();
+        let _session = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let root = temp_datadir("lifecycle-owner");
+        std::fs::create_dir_all(root.path()).unwrap();
+        let child = std::process::Command::new("sleep")
+            .arg("60")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("disposable managed-process fixture");
+        let process = Arc::new(Mutex::new(child));
+        let ports = TorPorts {
+            control: 9051,
+            socks: 9050,
+        };
+        register_managed_tor(Tor {
+            ports,
+            process: process.clone(),
+        });
+        let alive = || process.lock().unwrap().try_wait().unwrap().is_none();
+        let (mut app, _) = crate::app::claim_step1_tests::bitcoin_app(root.path());
+        app.stop();
+        assert!(alive(), "locking an App cannot stop process-global Tor");
+        let (mut loader, startup) = crate::loader::Loader::new(
+            root.clone(),
+            crate::app::Config::new(false),
+            Network::Bitcoin,
+            None,
+            None,
+            None,
+            app.cube_settings().clone(),
+            None,
+            None,
+        );
+        drop(startup);
+        loader.stop();
+        assert!(alive(), "closing a Loader cannot stop process-global Tor");
+        let (mut gui, startup) =
+            crate::gui::GUI::new(crate::gui::Config::new(root.clone(), None), None);
+        drop(startup);
+        drop(gui.update(crate::gui::Message::CtrlC));
+        assert_eq!(managed_tor_ports(), None);
+        assert!(!alive(), "final window shutdown stops its global Tor owner");
+        stop_managed_tor();
+        assert!(!alive(), "global teardown is idempotent");
+        drop(gui);
+        std::fs::remove_dir_all(root.path()).ok();
+    }
+
     #[test]
     fn fork_tor_preparation_leaves_bitcoin_files_and_malformed_fork_files_untouched() {
         use crate::{chain::ChainId, node::bitcoind::NodeChainFamily};
