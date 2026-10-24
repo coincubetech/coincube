@@ -48,6 +48,9 @@ enum Scope {
     },
     Proposal,
     Creation,
+    Transaction {
+        wallet_id: String,
+    },
 }
 
 /// Memory-only bearer grant. Read and proposal scopes cannot upgrade each other.
@@ -130,6 +133,16 @@ impl Grant {
         grant.scope = Scope::Creation;
         Ok(grant)
     }
+    /// Restore separate unsigned-transaction preparation authority for one wallet.
+    pub fn paired_transactions(
+        wallet_id: String,
+        credential: String,
+        valid: impl Fn() -> bool + Send + Sync + 'static,
+    ) -> io::Result<Self> {
+        let mut grant = Self::paired(wallet_id.clone(), [false; 3], credential, valid)?;
+        grant.scope = Scope::Transaction { wallet_id };
+        Ok(grant)
+    }
     async fn wait_expiry(&self) {
         if let Some(expiry) = self.expires {
             tokio::time::sleep_until(tokio::time::Instant::from_std(expiry)).await;
@@ -196,6 +209,11 @@ impl Grant {
         match (&self.scope, request) {
             (Scope::Proposal, Request::PrepareProposal(_) | Request::Proposal(_)) => {}
             (Scope::Creation, Request::PrepareCreation(_) | Request::Proposal(_)) => {}
+            (Scope::Transaction { .. }, Request::List(_)) => {}
+            (Scope::Transaction { wallet_id }, Request::PrepareTransaction(input))
+                if input.wallet_id == *wallet_id => {}
+            (Scope::Transaction { wallet_id }, Request::Transaction(input))
+                if input.wallet_id == *wallet_id => {}
             (Scope::Read { .. }, Request::List(_)) => {}
             (
                 Scope::Read {

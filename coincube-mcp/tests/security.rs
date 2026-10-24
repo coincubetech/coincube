@@ -410,12 +410,13 @@ mod protocol {
         });
         let client = ().serve(client_io).await.unwrap();
         let listed = client.list_all_tools().await.unwrap();
-        assert_eq!(listed.len(), 8);
+        assert_eq!(listed.len(), 10);
         assert!(listed.iter().all(|t| t.output_schema.is_some()
             && t.annotations.as_ref().unwrap().read_only_hint
                 == Some(
                     t.name != "tenshu_prepare_wallet_proposal"
                         && t.name != "tenshu_prepare_wallet_creation"
+                        && t.name != "tenshu_prepare_transaction"
                 )));
         let result = client
             .call_tool(CallToolRequestParams::new("tenshu_list_wallets"))
@@ -456,7 +457,9 @@ mod protocol {
                 "tenshu_get_wallet_policy_summary",
                 "tenshu_prepare_wallet_proposal",
                 "tenshu_get_wallet_proposal",
-                "tenshu_prepare_wallet_creation"
+                "tenshu_prepare_wallet_creation",
+                "tenshu_prepare_transaction",
+                "tenshu_get_prepared_transaction"
             ]
         );
         for name in [
@@ -517,7 +520,8 @@ async fn capability_discovery_is_static_without_desktop_access() {
         "reads_require_existing_vault":true, "wallet_data_requires_consent":true,
         "persistent_client_pairing":true,
         "max_confirmed_transactions":50, "wallet_proposals": cfg!(feature = "native-proposals"),
-        "wallet_creation_via_mcp":false, "public_key_material":false, "secrets_or_signing":false
+        "wallet_creation_via_mcp":false, "public_key_material":false, "secrets_or_signing":false,
+        "transaction_preparation":cfg!(feature = "native-transactions")
     });
     if cfg!(feature = "native-proposals") {
         expected["proposal_support"] = serde_json::json!({"network":"regtest", "primary_threshold":3,
@@ -525,6 +529,9 @@ async fn capability_discovery_is_static_without_desktop_access() {
         "max_relative_delay_blocks":65535, "native_key_selection_required":false, "public_key_assembly":true, "manual_key_verification_required":true,
         "native_creation_authorization_required":true, "key_or_backup_verification":"manual_required",
         "owner_recovery_key_is_vault_signer":false});
+    }
+    if cfg!(feature = "native-transactions") {
+        expected["transaction_support"] = serde_json::json!({"network":"regtest", "amount_unit":"sats", "max_drafts_per_session":8, "max_recipients":8, "explicit_fee_limit_required":true, "psbt_export_via_mcp":false, "native_signing_required":true});
     }
     assert_eq!(json["structuredContent"], expected);
     let text = json.to_string();
