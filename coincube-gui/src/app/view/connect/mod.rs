@@ -754,13 +754,12 @@ pub fn recovery_services_ux<'a>(
             col = col.push(text::p2_regular("Loading Cube status…").style(theme::text::secondary));
         }
         RecoveryServicesState::Failed(error) => {
-            col = col
-                .push(text::p2_bold(&error.title).style(theme::text::primary))
-                .push(text::p2_regular(&error.guidance).style(theme::text::secondary))
-                .push(
-                    button::secondary(None, "Try again")
-                        .on_press(ConnectAccountMessage::RefreshRecoveryServices),
-                );
+            col = col.push(notification::error_card(
+                error.title.clone(),
+                error.guidance.clone(),
+                error.reference.clone(),
+                error.retry_action(ConnectAccountMessage::RefreshRecoveryServices),
+            ));
         }
         RecoveryServicesState::Ready(rows) if rows.is_empty() => {
             col = col.push(
@@ -3110,6 +3109,42 @@ mod renewal_banner_tests {
         },
     };
 
+    /// Collect text from laid-out production widgets, including button labels.
+    fn visible_labels(
+        mut element: Element<'_, ConnectAccountMessage>,
+        renderer: &iced::Renderer,
+    ) -> Vec<String> {
+        use iced::advanced::{
+            layout,
+            widget::{Id, Operation, Tree},
+            Layout,
+        };
+
+        #[derive(Default)]
+        struct Labels(Vec<String>);
+        impl Operation for Labels {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+                operate(self);
+            }
+
+            fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, value: &str) {
+                self.0.push(value.to_owned());
+            }
+        }
+
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            renderer,
+            &layout::Limits::new(iced::Size::ZERO, iced::Size::new(760.0, 1600.0)),
+        );
+        let mut labels = Labels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), renderer, &mut labels);
+        labels.0
+    }
+
     fn plan(tier: PlanTier, status: PlanStatus, renewal_at: Option<&str>) -> ConnectPlan {
         ConnectPlan {
             plan: tier,
@@ -3680,6 +3715,96 @@ mod renewal_banner_tests {
         let _ = recovery_services_ux(&account);
     }
 
+    #[tokio::test]
+    async fn recovery_error_card_shows_reference_and_only_actionable_retry() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut account = dashboard_panel();
+        for (retryable, reference, guidance) in [
+            (
+                true,
+                "CC-RECOVERY-TEMP",
+                "Check your connection and try again.",
+            ),
+            (
+                false,
+                "CC-RECOVERY-AUTH",
+                "Sign in again or contact support.",
+            ),
+        ] {
+            account.recovery_services = RecoveryServicesState::Failed(UserError::new(
+                "Could not load Cube status",
+                guidance,
+                reference,
+                retryable,
+            ));
+            let labels = visible_labels(recovery_services_ux(&account), &renderer);
+            assert!(labels
+                .iter()
+                .any(|text| text == "Could not load Cube status"));
+            assert!(labels.iter().any(|text| text == guidance));
+            assert!(labels
+                .iter()
+                .any(|text| text == &format!("Ref: {reference}")));
+            assert_eq!(
+                labels.iter().any(|text| text == "Try again"),
+                retryable,
+                "wrong recovery retry affordance: {:?}",
+                labels
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn current_signup_redemption_result_appears_in_default_plan_view() {
+        use iced::advanced::renderer::Headless;
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        for result in [
+            Ok("Estate unlocked".to_string()),
+            Err("Code expired".to_string()),
+        ] {
+            let mut account = dashboard_panel();
+            account.campaign_redeem.code = "FOUNDER".into();
+            assert!(!account.show_campaign_redeem);
+            let generation = account.session_generation();
+            let _ = account.update_message(ConnectAccountMessage::CampaignRedeemed(
+                Ok("old account result".into()),
+                generation + 1,
+            ));
+            let hidden = visible_labels(plan_billing_ux(&account), &renderer);
+            assert!(!hidden.iter().any(|text| text == "old account result"));
+            assert!(!account.show_campaign_redeem);
+
+            let expected = match &result {
+                Ok(message) | Err(message) => message.clone(),
+            };
+            let _ =
+                account.update_message(ConnectAccountMessage::CampaignRedeemed(result, generation));
+            let _ = account.update_message(ConnectAccountMessage::OpenPlanBilling);
+            let visible = visible_labels(plan_billing_ux(&account), &renderer);
+            assert!(
+                visible.iter().any(|text| text == &expected),
+                "visible labels: {:?}",
+                visible
+            );
+            assert!(!visible.iter().any(|text| text == "old account result"));
+        }
+    }
+
     #[test]
     fn plan_billing_checkout_and_history_views_build_for_branch_states() {
         let mut account = dashboard_panel();
@@ -3935,10 +4060,11 @@ mod renewal_banner_tests {
         let _ = avatar_ux(&cube);
     }
 
-    /// Layout uses the actual Connect widgets. Optional PNG output is for
-    /// review of the compact content area at the 1024×768 window minimum.
+    /// Layout uses the actual Connect widgets in a compact scroll viewport.
+    /// Root bounds describe that viewport, not the height of its scrollable
+    /// content. Optional PNG output supports review at the 1024×768 minimum.
     #[tokio::test(flavor = "multi_thread")]
-    async fn connect_views_fit_compact_content_and_can_be_captured() {
+    async fn connect_views_layout_in_compact_scroll_viewport_and_can_be_captured() {
         use iced::advanced::{layout, renderer::Headless, widget::Tree, Layout};
 
         for bytes in [
@@ -3964,8 +4090,12 @@ mod renewal_banner_tests {
                 "account",
                 "account-review",
                 "plan",
+                "plan-promo-success",
+                "plan-promo-failure",
                 "compare",
                 "recovery",
+                "recovery-error-retryable",
+                "recovery-error-terminal",
                 "checkout",
                 "security",
                 "device-review",
@@ -4004,7 +4134,8 @@ mod renewal_banner_tests {
                         ));
                         panel.features = Some(priced_features(None, Some(false)));
                         panel.active_sub = match section {
-                            "plan" | "compare" | "checkout" => ConnectSubMenu::PlanBilling,
+                            "plan" | "plan-promo-success" | "plan-promo-failure" | "compare"
+                            | "checkout" => ConnectSubMenu::PlanBilling,
                             "security" | "device-review" => ConnectSubMenu::Security,
                             "contacts" => ConnectSubMenu::Contacts,
                             _ => ConnectSubMenu::Overview,
@@ -4045,6 +4176,35 @@ mod renewal_banner_tests {
                             panel.recovery_services =
                                 RecoveryServicesState::Ready(vec![cube.into()]);
                         }
+                        if section == "recovery-error-retryable"
+                            || section == "recovery-error-terminal"
+                        {
+                            let retryable = section == "recovery-error-retryable";
+                            panel.recovery_services =
+                                RecoveryServicesState::Failed(crate::user_error::UserError::new(
+                                    "Could not load Cube status",
+                                    if retryable {
+                                        "Check your connection and try again."
+                                    } else {
+                                        "Sign in again or contact support."
+                                    },
+                                    if retryable {
+                                        "CC-RECOVERY-TEMP"
+                                    } else {
+                                        "CC-RECOVERY-AUTH"
+                                    },
+                                    retryable,
+                                ));
+                        }
+                        if section == "plan-promo-success" || section == "plan-promo-failure" {
+                            panel.show_campaign_redeem = true;
+                            panel.campaign_redeem.result =
+                                Some(if section == "plan-promo-success" {
+                                    Ok("Estate unlocked".into())
+                                } else {
+                                    Err("Code expired".into())
+                                });
+                        }
                         if section == "account-review" {
                             panel.review_sign_out = true;
                         }
@@ -4069,7 +4229,10 @@ mod renewal_banner_tests {
                 )
                 .await
                 .expect("software renderer for Connect");
-                let content = if scenario == "recovery" {
+                let content = if scenario == "recovery"
+                    || scenario == "recovery-error-retryable"
+                    || scenario == "recovery-error-terminal"
+                {
                     recovery_services_ux(&panel)
                 } else {
                     connect_account_panel(&panel)
@@ -4087,12 +4250,12 @@ mod renewal_banner_tests {
                 );
                 assert!(
                     node.size().width <= size.width,
-                    "{} overflows width",
+                    "{} scroll viewport overflows width",
                     scenario
                 );
                 assert!(
                     node.size().height <= size.height,
-                    "{} overflows height",
+                    "{} scroll viewport overflows height",
                     scenario
                 );
 

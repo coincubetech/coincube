@@ -2676,6 +2676,10 @@ impl ConnectAccountPanel {
                         self.campaign_redeem.result = Some(Err(e));
                     }
                 }
+                // Account-creation redemption starts with the disclosure
+                // closed. Reveal either outcome in the normal Plan & Billing
+                // view without changing the current section or sub-view.
+                self.show_campaign_redeem = true;
                 // Refresh the plan after every redeem — on success to pick up
                 // the granted tier/provenance, and on failure because the
                 // account-creation path (SessionLoaded) defers its post-signup
@@ -7289,6 +7293,7 @@ mod plan_lifecycle_tests {
     #[test]
     fn redeem_success_records_message_and_clears_code() {
         let mut panel = ConnectAccountPanel::new();
+        assert!(!panel.show_campaign_redeem);
         panel.campaign_redeem.code = "FOUNDER".into();
         panel.campaign_redeem.submitting = true;
         let gen = panel.session_generation();
@@ -7302,6 +7307,7 @@ mod plan_lifecycle_tests {
             Some(Ok("Estate unlocked".to_string()))
         );
         assert!(panel.campaign_redeem.code.is_empty());
+        assert!(panel.show_campaign_redeem);
     }
 
     #[test]
@@ -7309,6 +7315,7 @@ mod plan_lifecycle_tests {
         // The error message is the server's typed taxonomy string, rendered
         // verbatim; the code stays so the user can correct and retry.
         let mut panel = ConnectAccountPanel::new();
+        assert!(!panel.show_campaign_redeem);
         panel.campaign_redeem.code = "BADCODE".into();
         panel.campaign_redeem.submitting = true;
         let gen = panel.session_generation();
@@ -7322,6 +7329,7 @@ mod plan_lifecycle_tests {
             Some(Err("This code has already been redeemed.".to_string()))
         );
         assert_eq!(panel.campaign_redeem.code, "BADCODE");
+        assert!(panel.show_campaign_redeem);
     }
 
     #[test]
@@ -7337,6 +7345,50 @@ mod plan_lifecycle_tests {
         // ...but the in-flight flag is cleared so the field doesn't stick on
         // "Redeeming…" after a session change.
         assert!(!panel.campaign_redeem.submitting);
+        assert!(!panel.show_campaign_redeem);
+    }
+
+    #[test]
+    fn signup_redemption_reveals_current_result_when_returning_to_plan_management() {
+        for result in [
+            Ok("Estate unlocked".to_string()),
+            Err("Code expired".to_string()),
+        ] {
+            let mut panel = ConnectAccountPanel::new();
+            panel.pending_campaign_code = Some("FOUNDER".into());
+            assert!(!panel.show_campaign_redeem);
+            let _ = panel.update_message(ConnectAccountMessage::SessionLoaded {
+                user: User {
+                    id: 1,
+                    email: "founder@example.invalid".into(),
+                    email_verified: Some(true),
+                },
+                plan: None,
+                epoch: 0,
+            });
+            assert!(panel.campaign_redeem.submitting);
+            let current = panel.session_generation();
+
+            // A late completion from an earlier session cannot open the
+            // current account's disclosure or expose its result.
+            let _ = panel.update_message(ConnectAccountMessage::CampaignRedeemed(
+                Ok("old account result".into()),
+                current - 1,
+            ));
+            assert!(!panel.show_campaign_redeem);
+            assert!(panel.campaign_redeem.result.is_none());
+
+            let _ = panel.update_message(ConnectAccountMessage::CampaignRedeemed(
+                result.clone(),
+                current,
+            ));
+            assert_eq!(panel.campaign_redeem.result, Some(result));
+            assert!(panel.show_campaign_redeem);
+            let _ = panel.update_message(ConnectAccountMessage::OpenPlanBilling);
+            assert!(matches!(panel.active_sub, ConnectSubMenu::PlanBilling));
+            assert!(!panel.show_billing_history);
+            assert!(!panel.show_plan_comparison);
+        }
     }
 
     #[test]
