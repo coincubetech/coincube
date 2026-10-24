@@ -427,3 +427,8 @@ Transaction construction is gated on a completed poll newer than the native
 startup baseline. Failed engine constructions are cached under their immutable
 request IDs and count toward the eight-attempt session bound; retrying a fee-limit
 failure does not reserve change again.
+
+The MCP-prepared native review also shows an always-visible unsigned/signature
+state and change total/address section from the actual loaded PSBT and wallet
+classification. It does not require expansion, saving or signing to inspect
+change. Ordinary spend presentation and signing authorization are unchanged.

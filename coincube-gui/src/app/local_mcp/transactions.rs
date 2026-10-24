@@ -601,6 +601,96 @@ mod tests {
     }
 
     #[test]
+    fn mcp_transaction_native_review_renders_unsigned_change_without_expansion() {
+        use iced::advanced::{layout, widget, Layout};
+        struct Texts(Vec<(String, iced::Rectangle)>);
+        impl widget::Operation for Texts {
+            fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn widget::Operation)) {
+                operate(self);
+            }
+            fn text(&mut self, _: Option<&widget::Id>, bounds: iced::Rectangle, text: &str) {
+                self.0.push((text.to_string(), bounds));
+            }
+        }
+        let render = |tx: &crate::daemon::model::SpendTx| {
+            let mut element: iced::Element<
+                '_,
+                crate::app::view::Message,
+                coincube_ui::theme::Theme,
+                (),
+            > = crate::app::view::vault::spend::mcp_prepared_review(tx, Network::Regtest);
+            let mut tree = widget::Tree::new(element.as_widget());
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &(),
+                &layout::Limits::new(iced::Size::ZERO, iced::Size::new(800.0, 2000.0)),
+            );
+            assert!(node.bounds().width >= 800.0);
+            let mut operation = Texts(Vec::new());
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &(), &mut operation);
+            operation.0
+        };
+        tokio::runtime::Runtime::new().unwrap().block_on(async {
+            let (root, service) = fixture();
+            let summary = prepared(&service, input()).await;
+            let native = service.native(&summary.draft_id).unwrap();
+            let tx = crate::daemon::model::SpendTx::new(
+                None,
+                native.psbt,
+                native.coins,
+                &service.descriptor,
+                &secp256k1::Secp256k1::verification_only(),
+                Network::Regtest,
+            );
+            let change = tx
+                .psbt
+                .unsigned_tx
+                .output
+                .iter()
+                .enumerate()
+                .find(|(i, _)| tx.change_indexes.contains(i))
+                .unwrap()
+                .1;
+            let address = Address::from_script(&change.script_pubkey, Network::Regtest)
+                .unwrap()
+                .to_string();
+            let texts = render(&tx);
+            for expected in [
+                "Unsigned transaction. Your signature is required.".to_string(),
+                "Input total: 55000 sats".to_string(),
+                "Payment total: 10000 sats".to_string(),
+                format!("Miner fee: {} sats", summary.fee_sats),
+                format!(
+                    "Change returned to this Vault: {} sats",
+                    change.value.to_sat()
+                ),
+                format!("Change address: {address}"),
+            ] {
+                assert!(
+                    texts.iter().any(|(text, _)| text == &expected),
+                    "not present in ordinary widget traversal: {}",
+                    expected
+                );
+            }
+            assert!(texts.iter().any(|(text, bounds)| text
+                == &format!("Change address: {address}")
+                && bounds.width > 700.0));
+            let mut with_signature = tx.clone();
+            with_signature.psbt.inputs[0].final_script_sig = Some(ScriptBuf::new());
+            let signed_texts = render(&with_signature);
+            assert!(signed_texts
+                .iter()
+                .any(|(s, _)| s == "Signatures present. Review signing status in Tenshu."));
+            assert!(!signed_texts
+                .iter()
+                .any(|(s, _)| s == "Unsigned transaction. Your signature is required."));
+            cleanup(root, service).await;
+        });
+    }
+
+    #[test]
     fn mcp_transaction_startup_baseline_regression() {
         tokio::runtime::Runtime::new().unwrap().block_on(async {
             let (root, mut service) = fixture();

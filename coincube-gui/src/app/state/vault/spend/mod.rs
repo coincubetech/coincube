@@ -188,7 +188,8 @@ impl CreateSpendPanel {
     ) -> Self {
         let coins = native.coins.clone();
         let draft = step::TransactionDraft::from_mcp(native);
-        let mut review: Box<dyn step::Step> = Box::new(step::SaveSpend::new(wallet));
+        let mut review: Box<dyn step::Step> =
+            Box::new(step::SaveSpend::new(wallet).with_mcp_review());
         review.load(&coins, tip_height, &draft);
         Self {
             draft,
