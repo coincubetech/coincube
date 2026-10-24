@@ -86,6 +86,8 @@ pub struct ForkClaimPanel {
     review: Option<Review>,
     outcome: Option<Outcome>,
     tracking: Option<Tracking>,
+    #[cfg(test)]
+    observed_actions: Vec<&'static str>,
 }
 impl ForkClaimPanel {
     /// `Loaded` can only be obtained by reopening the paired, owned journal.
@@ -161,6 +163,8 @@ impl ForkClaimPanel {
             review: None,
             outcome,
             tracking: None,
+            #[cfg(test)]
+            observed_actions: Vec::new(),
         })
     }
     pub fn is_revoked(&self) -> bool {
@@ -508,6 +512,18 @@ impl State for ForkClaimPanel {
         cache: &Cache,
         message: Message,
     ) -> Task<Message> {
+        #[cfg(test)]
+        if let Some(action) = match &message {
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)) => Some("confirm"),
+            Message::View(view::Message::Claim(view::ClaimMessage::Refresh)) => Some("refresh"),
+            Message::View(view::Message::Claim(view::ClaimMessage::Cancel)) => Some("cancel"),
+            Message::View(view::Message::Spend(view::SpendTxMessage::SelectMasterSigner)) => {
+                Some("sign")
+            }
+            _ => None,
+        } {
+            self.observed_actions.push(action);
+        }
         if let Message::ForkClaim(event) = message {
             return self.apply(*event, daemon, cache);
         }
@@ -585,6 +601,19 @@ impl State for ForkClaimPanel {
         self.prepare_review()
     }
     fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
+        self.view_with_shell(menu, cache, cache)
+    }
+}
+
+impl ForkClaimPanel {
+    /// The operation uses its paired Vault cache, while navigation and Cube
+    /// controls always describe the source App that owns this public screen.
+    pub(crate) fn view_with_shell<'a>(
+        &'a self,
+        menu: &'a Menu,
+        operation_cache: &'a Cache,
+        shell_cache: &'a Cache,
+    ) -> Element<'a, view::Message> {
         use view::{ClaimMessage, Message as V};
         let mut body = Column::new()
             .spacing(20)
@@ -607,7 +636,7 @@ impl State for ForkClaimPanel {
                     &psbt.wallet.keys_aliases,
                     self.busy,
                     psbt.saved,
-                    psbt.replay_presentation(cache),
+                    psbt.replay_presentation(operation_cache),
                     false,
                 ));
             } else {
@@ -615,7 +644,7 @@ impl State for ForkClaimPanel {
                     "This wallet has no Vault Claim policy.".into(),
                 ));
             }
-            let content = view::dashboard(menu, cache, body);
+            let content = view::dashboard(menu, shell_cache, body);
             return if let Some(modal) = &psbt.modal {
                 modal.as_ref().view(content)
             } else {
@@ -664,7 +693,7 @@ impl State for ForkClaimPanel {
             button::secondary(None, "Check again")
                 .on_press_maybe(self.ready().then_some(V::Claim(ClaimMessage::Refresh))),
         );
-        view::dashboard(menu, cache, body)
+        view::dashboard(menu, shell_cache, body)
     }
 }
 
@@ -672,6 +701,32 @@ impl State for ForkClaimPanel {
 pub(crate) mod tests {
     use super::*;
     use iced::futures::StreamExt;
+    pub(crate) fn empty_for_test(root: CoincubeDirectory) -> ForkClaimPanel {
+        ForkClaimPanel {
+            root,
+            context: Context {
+                generation: 1,
+                account: "7".into(),
+                provider: "https://connect.example/".into(),
+            },
+            revoker: Revoker::for_test(),
+            epoch: NEXT_PANEL.fetch_add(1, Ordering::Relaxed),
+            revoked: false,
+            busy: false,
+            pending_epoch: None,
+            error: None,
+            psbt: None,
+            preparation: None,
+            coordinator: None,
+            review: None,
+            outcome: None,
+            tracking: None,
+            observed_actions: Vec::new(),
+        }
+    }
+    pub(crate) fn observed_actions(panel: &ForkClaimPanel) -> &[&'static str] {
+        &panel.observed_actions
+    }
     #[cfg(feature = "regtest-harness")]
     pub(crate) fn live_psbt(
         panel: &ForkClaimPanel,

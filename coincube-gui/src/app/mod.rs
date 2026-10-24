@@ -2,6 +2,7 @@ pub mod breez_liquid;
 pub mod breez_spark;
 pub mod cache;
 pub mod claim_intent;
+mod claim_pair_context;
 pub mod config;
 pub mod error;
 pub mod features;
@@ -845,6 +846,163 @@ pub(crate) struct ClaimPairRequest {
     session: state::vault::claim::ConnectSession,
 }
 
+/// The exact fork admission predicate is shared by a directly opened fork App
+/// and the restricted counterpart owner. Neither route may loosen one check.
+#[allow(clippy::too_many_arguments)]
+fn claim_fork_binding(
+    root: &CoincubeDirectory,
+    cube: &settings::CubeSettings,
+    wallet: &Arc<Wallet>,
+    daemon: &Arc<dyn Daemon + Sync + Send>,
+    backend: state::vault::claim::BackendState,
+    feature_granted: bool,
+    current: &crate::services::coincube::CoincubeClient,
+    account: &str,
+    bound_client: Option<&crate::services::coincube::CoincubeClient>,
+    generation: tokio::sync::watch::Receiver<u64>,
+    request: &ClaimPairRequest,
+) -> Option<state::vault::claim::ClaimForkBinding> {
+    if root != &request.root
+        || cube.network != crate::chain::ChainId::BitcoinBlake2b
+        || cube.id != request.fork_cube
+        || backend != state::vault::claim::BackendState::Ready
+        || !feature_granted
+        || wallet.chain != crate::chain::ChainId::BitcoinBlake2b
+        || wallet.inheritance_descriptor() != Some(&request.descriptor)
+        || cube.vault_wallet_id.as_ref() != Some(&wallet.id())
+        || account != request.session.account
+        || current.base_url != request.session.client.base_url
+        || current.token().is_none_or(|token| token.is_empty())
+        || request
+            .session
+            .client
+            .token()
+            .is_none_or(|token| token.is_empty())
+    {
+        return None;
+    }
+    let config = daemon.config()?;
+    if !crate::chain::is_managed_local_fork(config, root)
+        && !bound_client.is_some_and(|bound| {
+            bound.base_url == current.base_url && bound.token() == current.token()
+        })
+    {
+        return None;
+    }
+    (config.bitcoin_config.chain == crate::chain::ChainId::BitcoinBlake2b
+        && config.main_descriptor.as_vault() == Some(&request.descriptor))
+    .then(|| state::vault::claim::ClaimForkBinding::new(daemon, wallet, generation))
+}
+
+/// A scoped remote fork may refresh its bearer independently of the Bitcoin
+/// source. The fork PIN verified this user ID against `/user`; the daemon's
+/// admitted client is checked separately when obtaining the binding.
+fn scoped_claim_remote_identity(
+    session: &state::vault::claim::ConnectSession,
+    bound: Option<&crate::services::coincube::CoincubeClient>,
+    verified_account: Option<u32>,
+) -> bool {
+    verified_account.is_some_and(|id| id.to_string() == session.account)
+        && bound.is_some_and(|client| {
+            client.base_url == session.client.base_url
+                && client.token().is_some_and(|token| !token.is_empty())
+        })
+}
+
+/// Messages produced by the visible paired Claim signing screen. Background
+/// source-Claim events and shell/global navigation keep their own routes.
+fn is_fork_claim_panel_message(message: &Message) -> bool {
+    matches!(
+        message,
+        Message::ForkClaim(_)
+            | Message::View(
+                view::Message::Claim(_)
+                    | view::Message::Spend(_)
+                    | view::Message::ExportPsbt
+                    | view::Message::ImportPsbt
+                    | view::Message::ImportExport(_)
+                    | view::Message::SelectHardwareWallet(_)
+                    | view::Message::SelectPsbtHardwareWallet(_)
+                    | view::Message::OpenVaultRecipientIdentity(_, _)
+                    | view::Message::Label(_, _)
+                    | view::Message::ImportSpend(_)
+            )
+            | Message::Psbt(_)
+            | Message::Signed(_, _)
+            | Message::HardwareWallets(_)
+            | Message::LabelsUpdated(_)
+            | Message::Export(_)
+            | Message::Reconcile
+            | Message::Updated(_)
+            | Message::Saved(_)
+    )
+}
+
+fn load_fork_claim_panel(
+    root: CoincubeDirectory,
+    wallet: Arc<Wallet>,
+    daemon: Arc<dyn Daemon + Sync + Send>,
+    connect: state::vault::claim::ConnectSession,
+    handoff: claim_intent::ForkHandoff,
+    generation: u64,
+    receiver: tokio::sync::watch::Receiver<u64>,
+) -> Task<Message> {
+    Task::perform(
+        async move {
+            let result = async {
+                let source = crate::services::claim_observation::http::HttpObservationSource::new(
+                    connect.client.clone(),
+                    crate::chain::ChainId::Bitcoin,
+                    crate::chain::ChainId::BitcoinBlake2b,
+                    crate::services::claim_observation::CollectionContext {
+                        expected_generation: generation,
+                        generation: receiver.clone(),
+                    },
+                )
+                .map_err(|_| "Couldn't bind the Claim fee provider.".to_string())?;
+                let rate = source.claim_fee_rate().await.unwrap_or(0);
+                let loaded = state::vault::claim::fork_load::load(
+                    &root,
+                    wallet,
+                    daemon.clone(),
+                    connect,
+                    handoff.bitcoin_cube(),
+                    handoff.fork_cube(),
+                    generation,
+                    receiver,
+                    rate,
+                )
+                .await?;
+                let coins = match &loaded {
+                    state::vault::claim::fork_load::Loaded::Signing { psbt, .. } => {
+                        let inputs: Vec<_> = psbt
+                            .psbt()
+                            .unsigned_tx
+                            .input
+                            .iter()
+                            .map(|input| input.previous_output)
+                            .collect();
+                        daemon
+                            .list_coins(&[], &inputs)
+                            .await
+                            .map_err(|error| error.to_string())?
+                            .coins
+                    }
+                    state::vault::claim::fork_load::Loaded::Tracking { .. } => Vec::new(),
+                };
+                Ok((loaded, coins))
+            }
+            .await;
+            state::vault::claim::fork_load::Opened {
+                handoff,
+                generation,
+                result,
+            }
+        },
+        |opened| Message::ForkClaimOpened(Box::new(opened)),
+    )
+}
+
 pub struct App {
     cache: Cache,
     wallet: Option<Arc<Wallet>>,
@@ -873,6 +1031,7 @@ pub struct App {
     /// after the Cube is open — see the `ConnectAccount` mirror in `update`.
     pending_claim: bool,
     fork_claim_handoff: Option<claim_intent::ForkHandoff>,
+    claim_pair_context: Option<Box<claim_pair_context::ClaimPairContext>>,
     fork_claim_requested: bool,
     loading_fork_claim: Option<u64>,
     /// Exact foreign-wallet discovery evidence consumed from Home. This state
@@ -3210,6 +3369,32 @@ pub(crate) fn claim_target_exists(datadir: &CoincubeDirectory, descriptor_checks
 }
 
 impl App {
+    #[cfg(test)]
+    pub(crate) fn current_menu_for_test(&self) -> &Menu {
+        &self.panels.current
+    }
+
+    #[cfg(test)]
+    pub(crate) fn connect_user_id_for_test(&self) -> Option<u32> {
+        self.panels
+            .connect
+            .account
+            .user
+            .as_ref()
+            .map(|user| user.id)
+    }
+
+    /// Identifies a harmless shell dismissal for the GUI's sole Escape
+    /// dispatcher. This does not handle the key or mutate the App.
+    pub fn shell_escape_intent(&self) -> Option<view::Message> {
+        view::nav::shell::escape_intent(view::nav::shell::ShellState {
+            switcher_open: self.cache.cube_switcher_open,
+            lock_confirmation: self.cache.cube_lock_confirmation,
+            tools_open: self.cache.vault_tools_open,
+            backup_attention: false,
+        })
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         cache: Cache,
@@ -3737,6 +3922,7 @@ impl App {
             pending_claim: claim_intent,
             fork_claim_requested,
             fork_claim_handoff,
+            claim_pair_context: None,
             loading_fork_claim: None,
             split_handoff: split_intent.map(SplitHandoff::Waiting),
             split_handoff_generation: 0,
@@ -3978,6 +4164,7 @@ impl App {
                 // Home card is never offered for one.
                 pending_claim: false,
                 fork_claim_handoff: None,
+                claim_pair_context: None,
                 fork_claim_requested: false,
                 loading_fork_claim: None,
                 split_handoff: None,
@@ -4625,6 +4812,198 @@ impl App {
         })
     }
 
+    pub(crate) fn claim_pair_handoff(&self) -> Option<claim_intent::ForkHandoff> {
+        let request = self.claim_pair_request()?;
+        claim_intent::ForkHandoff::new(
+            &request.root,
+            self.cube_settings.id.clone(),
+            request.fork_cube,
+        )
+        .ok()
+    }
+
+    pub(crate) fn has_claim_pair_context(&self) -> bool {
+        self.claim_pair_context.is_some()
+    }
+
+    pub(crate) fn dismiss_shell_disclosures(&mut self) {
+        self.cache.cube_switcher_open = false;
+        self.cache.cube_lock_confirmation = false;
+    }
+
+    /// Admit only the wallet/daemon payload from a restricted fork load into
+    /// the Bitcoin source. The caller must have kept the source App alive and
+    /// must never construct a second App from this payload.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn admit_claim_pair_context(
+        &mut self,
+        intent: &crate::home::ClaimOpenIntent,
+        wallet: Arc<Wallet>,
+        daemon: Arc<dyn Daemon + Sync + Send>,
+        cache: Cache,
+        settings: settings::CubeSettings,
+        client: Option<crate::services::coincube::CoincubeClient>,
+        verified_account: Option<u32>,
+        bitcoind: Option<Bitcoind>,
+    ) -> Result<(), String> {
+        if !intent.validates(
+            self,
+            &self.datadir,
+            crate::chain::ChainId::BitcoinBlake2b,
+            &settings,
+        ) || self.claim_pair_context.is_some()
+        {
+            return Err("The Claim owner or operation changed while opening.".into());
+        }
+        // The loader's settings are a snapshot. Re-resolve the target at the
+        // admission boundary so a replaced attachment or Vault identity cannot
+        // inherit resources that were verified for the old record.
+        let current_target = settings::Settings::from_file(
+            &self
+                .datadir
+                .network_directory(crate::chain::ChainId::BitcoinBlake2b),
+        )
+        .ok()
+        .and_then(|saved| {
+            let mut matching = saved
+                .cubes
+                .into_iter()
+                .filter(|cube| cube.id == settings.id);
+            let cube = matching.next()?;
+            matching.next().is_none().then_some(cube)
+        });
+        let current_target = current_target.ok_or_else(|| {
+            "The paired Claim Cube changed while its wallet was loading.".to_string()
+        })?;
+        let target_unchanged = current_target.network == settings.network
+            && match &intent.route {
+                crate::home::ClaimRoute::Imported(_) => {
+                    current_target
+                        .bitcoin_import
+                        .as_deref()
+                        .and_then(settings::BitcoinImport::active_attachment)
+                        == settings
+                            .bitcoin_import
+                            .as_deref()
+                            .and_then(settings::BitcoinImport::active_attachment)
+                }
+                crate::home::ClaimRoute::Begin(handoff)
+                | crate::home::ClaimRoute::Continue(handoff)
+                | crate::home::ClaimRoute::Return(handoff) => {
+                    current_target.vault_wallet_id == settings.vault_wallet_id
+                        && current_target.vault_fingerprint == settings.vault_fingerprint
+                        && handoff.resolve_source(&self.datadir).is_ok_and(|source| {
+                            source.vault_wallet_id == self.cube_settings.vault_wallet_id
+                                && source.vault_fingerprint == self.cube_settings.vault_fingerprint
+                        })
+                }
+            };
+        if !target_unchanged {
+            return Err("The paired Claim Vault changed while opening.".into());
+        }
+        let allowed = match &intent.route {
+            crate::home::ClaimRoute::Imported(_) => features::imported_claim_blake2b(
+                self.cube_settings.network,
+                self.cache.has_imported_bitcoin,
+                self.cache.btcb2_server_enabled,
+            )
+            .is_available(),
+            crate::home::ClaimRoute::Begin(_)
+            | crate::home::ClaimRoute::Continue(_)
+            | crate::home::ClaimRoute::Return(_) => {
+                features::claim_blake2b(self.claim_source_cube()).is_available()
+            }
+        };
+        if !allowed {
+            return Err("Claim is no longer available for this Cube or account.".into());
+        }
+        let config = daemon
+            .config()
+            .ok_or_else(|| "The paired Claim backend is unavailable.".to_string())?;
+        let descriptor_matches = match &intent.route {
+            crate::home::ClaimRoute::Imported(_) => settings
+                .bitcoin_import
+                .as_deref()
+                .and_then(settings::BitcoinImport::active_attachment)
+                .is_some_and(|attachment| {
+                    attachment.wallet_id == wallet.id()
+                        && config.main_descriptor.as_imported() == Some(&attachment.descriptor)
+                        && wallet.main_descriptor.as_imported() == Some(&attachment.descriptor)
+                }),
+            crate::home::ClaimRoute::Begin(_)
+            | crate::home::ClaimRoute::Continue(_)
+            | crate::home::ClaimRoute::Return(_) => {
+                config.main_descriptor.as_vault() == wallet.inheritance_descriptor()
+                    && settings.vault_wallet_id.as_ref() == Some(&wallet.id())
+            }
+        };
+        if config.bitcoin_config.chain != crate::chain::ChainId::BitcoinBlake2b
+            || !descriptor_matches
+        {
+            return Err("The paired Claim Vault or node configuration changed.".into());
+        }
+        let session = self
+            .claim_connect_session()
+            .ok_or_else(|| "The Claim account session ended while opening.".to_string())?;
+        if !crate::chain::is_managed_local_fork(config, &self.datadir)
+            && !scoped_claim_remote_identity(&session, client.as_ref(), verified_account)
+        {
+            return Err("The paired Claim backend has a different account session.".into());
+        }
+        let context = claim_pair_context::ClaimPairContext::new(
+            intent.operation,
+            intent.owner,
+            self.datadir.clone(),
+            intent.source_cube.clone(),
+            settings,
+            wallet,
+            daemon,
+            cache,
+            Some(client.unwrap_or_else(|| session.client.clone())),
+            verified_account,
+            bitcoind,
+        )?;
+        self.claim_pair_context = Some(Box::new(context));
+        if let Some(request) = self.claim_pair_request() {
+            let binding = self.claim_fork_daemon(&request);
+            self.bind_claim_fork_daemon(binding);
+        }
+        Ok(())
+    }
+
+    pub(crate) fn begin_imported_split_context(
+        &mut self,
+        request: crate::imported_claim::ImportedClaimRequest,
+    ) -> Result<Task<Message>, String> {
+        let context = self
+            .claim_pair_context
+            .as_ref()
+            .ok_or_else(|| "The paired Split destination closed.".to_string())?;
+        if context.owner != self.cache.app_generation
+            || context.source_cube != request.source.cube_id
+            || context.root != self.datadir
+        {
+            return Err("The imported Split source changed.".into());
+        }
+        let (current, client) = self.prepare_imported_claim()?;
+        if current.source != request.source || request.validate(&self.datadir, &client).is_err() {
+            return Err("The imported Split attachment or account changed.".into());
+        }
+        let intent =
+            split_intent::take_for_open(&context.fork_cube, crate::chain::ChainId::BitcoinBlake2b)
+                .ok_or_else(|| "The Split scan expired. Scan both chains again.".to_string())?;
+        if intent
+            .imported_claim
+            .as_ref()
+            .is_none_or(|selected| selected.source != request.source)
+            || !intent.matches_client(&client)
+        {
+            return Err("The Split scan no longer matches this imported wallet.".into());
+        }
+        self.split_handoff = Some(SplitHandoff::Waiting(intent));
+        Ok(self.start_pending_split())
+    }
+
     /// Require the exact fork Cube and Vault, plus an authenticated session
     /// for the request's account and provider. Credentials remain tab-local:
     /// the fork daemon must still match its own admitted session.
@@ -4632,54 +5011,39 @@ impl App {
         &self,
         request: &ClaimPairRequest,
     ) -> Option<state::vault::claim::ClaimForkBinding> {
-        if self.datadir != request.root
-            || self.cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
-            || self.cube_settings.id != request.fork_cube
-            || self.split_backend != state::vault::claim::BackendState::Ready
-            || !self.panels.connect.account.bitcoin_blake2b_enabled()
-        {
-            return None;
+        if let Some(context) = &self.claim_pair_context {
+            if self.cache.app_generation != context.owner
+                || self.datadir != context.root
+                || self.cube_settings.network != crate::chain::ChainId::Bitcoin
+                || self.cube_settings.id != context.source_cube
+                || context.fork_cube != request.fork_cube
+            {
+                return None;
+            }
+            let session = self.claim_connect_session()?;
+            return context.bind(
+                request,
+                &session,
+                self.panels.connect.account.bitcoin_blake2b_enabled(),
+            );
         }
         let wallet = self.wallet.as_ref()?;
-        if wallet.chain != crate::chain::ChainId::BitcoinBlake2b
-            || wallet.inheritance_descriptor() != Some(&request.descriptor)
-            || self.cube_settings.vault_wallet_id.as_ref() != Some(&wallet.id())
-        {
-            return None;
-        }
         let current = self.panels.connect.account.authenticated_client()?;
         let account = self.panels.connect.account.user.as_ref()?.id.to_string();
-        if account != request.session.account
-            || current.base_url != request.session.client.base_url
-            || current.token().is_none_or(|token| token.is_empty())
-            || request
-                .session
-                .client
-                .token()
-                .is_none_or(|token| token.is_empty())
-        {
-            return None;
-        }
         let daemon = self.daemon.as_ref()?;
-        let config = daemon.config()?;
-        if !crate::chain::is_managed_local_fork(config, &self.datadir)
-            && !self.fork_connect_client.as_ref().is_some_and(|bound| {
-                // The fork daemon stays bound to its own admitted credential.
-                // A sibling tab can have another valid login for this account.
-                bound.base_url == current.base_url && bound.token() == current.token()
-            })
-        {
-            return None;
-        }
-        (config.bitcoin_config.chain == crate::chain::ChainId::BitcoinBlake2b
-            && config.main_descriptor.as_vault() == Some(&request.descriptor))
-        .then(|| {
-            state::vault::claim::ClaimForkBinding::new(
-                daemon,
-                wallet,
-                self.panels.claim_generation.subscribe(),
-            )
-        })
+        claim_fork_binding(
+            &self.datadir,
+            &self.cube_settings,
+            wallet,
+            daemon,
+            self.split_backend,
+            self.panels.connect.account.bitcoin_blake2b_enabled(),
+            &current,
+            &account,
+            self.fork_connect_client.as_ref(),
+            self.panels.claim_generation.subscribe(),
+            request,
+        )
     }
 
     pub(crate) fn bind_claim_fork_daemon(
@@ -4731,53 +5095,65 @@ impl App {
     }
 
     fn split_context_valid(&self, intent: &split_intent::SplitIntent) -> bool {
-        let Some(wallet) = self.wallet.as_ref() else {
+        let (settings, wallet) = if let Some(context) = &self.claim_pair_context {
+            if context.owner != self.cache.app_generation
+                || context.root != self.datadir
+                || context.source_cube != self.cube_settings.id
+            {
+                return false;
+            }
+            (&context.settings, &context.wallet)
+        } else {
+            let Some(wallet) = self.wallet.as_ref() else {
+                return false;
+            };
+            (&self.cube_settings, wallet)
+        };
+        let Some(source) = self.panels.connect.account.authenticated_client() else {
             return false;
         };
-        let Some(bound) = self.fork_connect_client.as_ref() else {
+        let Some(target_session) = self.split_target_session() else {
             return false;
         };
-        let current = self.panels.connect.account.authenticated_client();
         let wallet_fingerprint = wallet.id_fingerprint().to_string();
-        self.cube_settings.network == crate::chain::ChainId::BitcoinBlake2b
-            && wallet.chain == self.cube_settings.network
-            && intent.target_source() == self.cube_settings.network
-            && intent.target_cube_id() == self.cube_settings.id
+        settings.network == crate::chain::ChainId::BitcoinBlake2b
+            && wallet.chain == settings.network
+            && intent.target_source() == settings.network
+            && intent.target_cube_id() == settings.id
             && intent.is_internally_current()
             && if wallet.is_imported() {
-                self.paired_imported_split_context_valid(intent, wallet, bound)
+                self.paired_imported_split_context_valid(intent, settings, wallet, &source)
             } else {
                 intent.imported_claim.is_none()
-                    && self.cube_settings.vault_wallet_id.as_ref() == Some(&wallet.id())
-                    && self.cube_settings.vault_fingerprint.as_deref()
-                        == Some(wallet_fingerprint.as_str())
+                    && settings.vault_wallet_id.as_ref() == Some(&wallet.id())
+                    && settings.vault_fingerprint.as_deref() == Some(wallet_fingerprint.as_str())
             }
-            && intent.matches_client(bound)
-            && current
-                .as_ref()
-                .is_some_and(|client| intent.matches_client(client))
+            // The scan and imported request always bind the source session.
+            // A separately /user-verified remote target may rotate its bearer,
+            // while an unverified/local target must still be the exact client.
+            && intent.matches_client(&source)
+            && (self.claim_pair_context.is_some() || intent.matches_client(&target_session.client))
     }
 
     fn paired_imported_split_context_valid(
         &self,
         intent: &split_intent::SplitIntent,
+        settings: &settings::CubeSettings,
         wallet: &Wallet,
-        client: &crate::services::coincube::CoincubeClient,
+        source_client: &crate::services::coincube::CoincubeClient,
     ) -> bool {
         let Some(request) = &intent.imported_claim else {
             return false;
         };
-        let Ok(source) = crate::services::bitcoin_import::pairing::validate_pair(
-            &self.datadir,
-            &self.cube_settings,
-        ) else {
+        let Ok(source) =
+            crate::services::bitcoin_import::pairing::validate_pair(&self.datadir, settings)
+        else {
             return false;
         };
         let Some(imported) = wallet.main_descriptor.as_imported() else {
             return false;
         };
-        let Some(attachment) = self
-            .cube_settings
+        let Some(attachment) = settings
             .bitcoin_import
             .as_ref()
             .and_then(|import| import.active_attachment())
@@ -4785,7 +5161,7 @@ impl App {
             return false;
         };
         source.id == request.source.cube_id
-            && request.validate(&self.datadir, client).is_ok()
+            && request.validate(&self.datadir, source_client).is_ok()
             && attachment.wallet_id == wallet.id()
             && &attachment.descriptor == imported
             && imported.receive_descriptor().to_string() == request.source.external
@@ -4802,22 +5178,25 @@ impl App {
     /// once; the new session's ports are built in a task (#625 F3c) and
     /// installed by [`Message::SplitPortsBuilt`], unless a later refresh or
     /// a revocation came first.
+    fn split_target_session(&self) -> Option<state::vault::claim::ConnectSession> {
+        let source = self.claim_connect_session()?;
+        let target = self
+            .claim_pair_context
+            .as_ref()
+            .and_then(|context| context.client.clone())
+            .or_else(|| self.fork_connect_client.clone())?;
+        let matches = self.claim_pair_context.as_ref().map_or_else(
+            || target.base_url == source.client.base_url && target.token() == source.client.token(),
+            |context| context.matches_session(&source),
+        );
+        matches.then_some(state::vault::claim::ConnectSession {
+            client: target,
+            account: source.account,
+        })
+    }
+
     fn refresh_split_session(&mut self) -> Task<Message> {
-        let session = self
-            .fork_connect_client
-            .clone()
-            .filter(|_| self.panels.connect.account.bitcoin_blake2b_enabled())
-            .and_then(|bound| {
-                let current = self.panels.connect.account.authenticated_client()?;
-                if current.base_url != bound.base_url || current.token() != bound.token() {
-                    return None;
-                }
-                let account = self.panels.connect.account.user.as_ref()?.id.to_string();
-                Some(state::vault::claim::ConnectSession {
-                    client: bound,
-                    account,
-                })
-            });
+        let session = self.split_target_session();
         let Some(panel) = self.split_panel.as_mut() else {
             return Task::none();
         };
@@ -4846,14 +5225,19 @@ impl App {
         // first (`revoke_claim`), and a new daemon gives a new port.
         let (seq, generation, daemon) = (
             self.split_port_seq,
-            self.panels.claim_generation.subscribe(),
+            self.claim_pair_context.as_ref().map_or_else(
+                || self.panels.claim_generation.subscribe(),
+                |context| context.generation(),
+            ),
             self.split_daemon(),
         );
         // #568 B5b: a completion is recorded on this Cube, in its datadir.
-        let site = state::vault::split::step2::CompletionSite::of(
-            self.datadir.clone(),
-            &self.cube_settings,
-        );
+        let target_settings = self
+            .claim_pair_context
+            .as_ref()
+            .map_or(&self.cube_settings, |context| &context.settings);
+        let site =
+            state::vault::split::step2::CompletionSite::of(self.datadir.clone(), target_settings);
         let claim_root = Some(self.datadir.clone());
         Task::perform(
             async move {
@@ -4912,6 +5296,9 @@ impl App {
     /// refresh too, until a switch settles on a known-good backend.
     /// Reconciliation needs no daemon (#637 R1).
     fn split_daemon(&self) -> Option<Arc<dyn Daemon + Sync + Send>> {
+        if let Some(context) = &self.claim_pair_context {
+            return Some(context.daemon.clone());
+        }
         if self.split_backend == state::vault::claim::BackendState::Ready {
             self.daemon.clone()
         } else {
@@ -4923,6 +5310,22 @@ impl App {
         self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
         self.split_handoff = None;
         split_intent::clear();
+    }
+
+    /// A refusal of the current paired operation must stop its owned fork
+    /// resources, rather than only discarding its one-use scan. A stale result
+    /// for another target cannot take a newer context.
+    fn refuse_current_split_handoff(&mut self, target_cube: &str) {
+        let owns_context = self.claim_pair_context.as_ref().is_some_and(|context| {
+            context.owner == self.cache.app_generation
+                && context.root == self.datadir
+                && context.source_cube == self.cube_settings.id
+                && context.fork_cube == target_cube
+        });
+        self.revoke_split_handoff();
+        if owns_context {
+            self.stop_claim_pair_context();
+        }
     }
 
     /// Revalidate and begin the read-only destination review. The account's
@@ -4940,14 +5343,33 @@ impl App {
         if !self.panels.connect.account.bitcoin_blake2b_enabled()
             || !self.split_context_valid(intent)
         {
-            self.revoke_split_handoff();
+            let target = intent.target_cube_id().to_owned();
+            self.refuse_current_split_handoff(&target);
             return Task::done(Message::View(view::Message::ShowError(
                 "Split was cancelled because its Cube, Vault, account session, or feature grant changed. Scan again."
                     .to_string(),
             )));
         }
-        let Some(daemon) = self.daemon.clone() else {
-            self.revoke_split_handoff();
+        let target_cube = intent.target_cube_id().to_owned();
+        let (daemon, wallet, client) = if let Some(context) = &self.claim_pair_context {
+            (
+                Some(context.daemon.clone()),
+                Some(context.wallet.clone()),
+                context.client.clone(),
+            )
+        } else {
+            (
+                self.daemon.clone(),
+                self.wallet.clone(),
+                self.fork_connect_client.clone(),
+            )
+        };
+        let Some(daemon) = daemon else {
+            self.refuse_current_split_handoff(&target_cube);
+            return Task::none();
+        };
+        let Some(wallet) = wallet else {
+            self.refuse_current_split_handoff(&target_cube);
             return Task::none();
         };
         let Some(SplitHandoff::Waiting(intent)) = self.split_handoff.take() else {
@@ -4956,11 +5378,8 @@ impl App {
         self.split_handoff_generation = self.split_handoff_generation.wrapping_add(1);
         let generation = self.split_handoff_generation;
         self.split_handoff = Some(SplitHandoff::Reserving(intent));
-        let fees = split_fee_source(self.fork_connect_client.clone());
-        let receive_context = Some((
-            self.datadir.clone(),
-            self.wallet.as_ref().unwrap().main_descriptor.clone(),
-        ));
+        let fees = split_fee_source(client);
+        let receive_context = Some((self.datadir.clone(), wallet.main_descriptor.clone()));
         Task::perform(
             async move {
                 let (reservation, feerate) = tokio::join!(
@@ -4971,6 +5390,27 @@ impl App {
             },
             move |result| Message::SplitTargetPrepared { generation, result },
         )
+    }
+
+    /// A selected foreign Split target that is already unlocked resumes in
+    /// its existing App. The one-use scan is consumed by GUI only for this
+    /// exact Cube; the normal session/account checks still run here.
+    pub(crate) fn resume_foreign_split_intent(
+        &mut self,
+        intent: split_intent::SplitIntent,
+    ) -> Task<Message> {
+        if self.claim_pair_context.is_some()
+            || self.cube_settings.network != intent.target_source()
+            || self.cube_settings.id != intent.target_cube_id()
+            || !intent.is_internally_current()
+        {
+            return Task::done(Message::View(view::Message::ShowError(
+                "The selected Split destination changed. Scan again.".into(),
+            )));
+        }
+        self.revoke_split_handoff();
+        self.split_handoff = Some(SplitHandoff::Waiting(intent));
+        self.start_pending_split()
     }
 
     /// #568 B5c-2 (P5, the go-live): "Start split" on the sweep review, the
@@ -4990,6 +5430,12 @@ impl App {
         let Some(SplitHandoff::Review { intent, .. }) = self.split_handoff.as_ref() else {
             return Task::none();
         };
+        let target_cube = intent.target_cube_id().to_owned();
+        let (target_settings, target_wallet) = if let Some(context) = &self.claim_pair_context {
+            (context.settings.clone(), Some(context.wallet.clone()))
+        } else {
+            (self.cube_settings.clone(), self.wallet.clone())
+        };
         let refusal = if !self.panels.connect.account.bitcoin_blake2b_enabled()
             || !self.split_context_valid(intent)
         {
@@ -4997,13 +5443,13 @@ impl App {
         } else if self.split_panel.is_some() {
             Some(SPLIT_START_PANEL_OPEN.to_string())
         } else {
-            let root = self.wallet.as_ref().map(|wallet| {
+            let root = target_wallet.as_ref().map(|wallet| {
                 state::vault::split::step1::journal_root(&self.datadir, &wallet.id())
             });
             match (root, state::vault::split::step1::source_digest(intent)) {
                 (Some(root), Ok(digest)) => state::vault::split::step1::second_split_refusal(
                     &root,
-                    &self.cube_settings.split_from,
+                    &target_settings.split_from,
                     digest,
                 )
                 .map(str::to_string),
@@ -5012,16 +5458,16 @@ impl App {
             }
         };
         if let Some(reason) = refusal {
-            self.revoke_split_handoff();
+            self.refuse_current_split_handoff(&target_cube);
             return Task::done(Message::View(view::Message::ShowError(reason)));
         }
         let (Some(SplitHandoff::Review { intent, target, .. }), Some(wallet)) =
-            (self.split_handoff.take(), self.wallet.as_ref())
+            (self.split_handoff.take(), target_wallet.as_ref())
         else {
             return Task::none();
         };
-        if target.cube_id() != self.cube_settings.id || target.vault_id() != &wallet.id() {
-            self.revoke_split_handoff();
+        if target.cube_id() != target_settings.id || target.vault_id() != &wallet.id() {
+            self.refuse_current_split_handoff(intent.target_cube_id());
             return Task::done(Message::View(view::Message::ShowError(
                 SPLIT_START_CANCELLED.to_string(),
             )));
@@ -5037,7 +5483,7 @@ impl App {
         ) {
             Ok(binding) => binding,
             Err(_) => {
-                self.revoke_split_handoff();
+                self.refuse_current_split_handoff(intent.target_cube_id());
                 return Task::done(Message::View(view::Message::ShowError(
                     SPLIT_START_CANCELLED.to_string(),
                 )));
@@ -5048,7 +5494,7 @@ impl App {
         let target_descriptor = descriptor;
         self.revoke_split_handoff();
         let mut panel = Box::new(state::vault::split::SplitPanel::start(
-            self.cube_settings.id.clone(),
+            target_settings.id.clone(),
             root,
             intent,
         ));
@@ -5112,6 +5558,32 @@ impl App {
             .fork_claim_handoff
             .clone()
             .ok_or_else(|| "The paired Bitcoin Claim is unavailable.".to_string())?;
+        if let Some(context) = &self.claim_pair_context {
+            if self.cube_settings.network != crate::chain::ChainId::Bitcoin
+                || context.owner != self.cache.app_generation
+                || context.source_cube != self.cube_settings.id
+                || context.fork_cube != handoff.fork_cube()
+                || !context
+                    .panel
+                    .as_ref()
+                    .is_some_and(|panel| panel.can_return_to_bitcoin())
+            {
+                return Err(
+                    "Wait for the current Claim operation to finish before returning to Bitcoin."
+                        .into(),
+                );
+            }
+            handoff.resolve_source(&self.datadir)?;
+            self.revoke_claim_phase();
+            if let Some(context) = &mut self.claim_pair_context {
+                if let Some(panel) = &mut context.panel {
+                    panel.revoke();
+                }
+                context.panel = None;
+                context.loading_panel = None;
+            }
+            return Ok(handoff);
+        }
         if self.cube_settings.network != crate::chain::ChainId::BitcoinBlake2b
             || handoff.fork_cube() != self.cube_settings.id
             || !self
@@ -5143,7 +5615,7 @@ impl App {
             .as_mut()
             .ok_or_else(|| "Open the Bitcoin Claim first.".to_string())?
             .take_fork_handoff()?;
-        self.revoke_claim();
+        self.revoke_claim_phase();
         Ok(handoff)
     }
 
@@ -5237,10 +5709,92 @@ impl App {
         )
     }
 
+    pub(crate) fn begin_claim_pair_phase(
+        &mut self,
+        handoff: claim_intent::ForkHandoff,
+    ) -> Result<Task<Message>, String> {
+        let target = handoff.resolve_target(&self.datadir)?;
+        if self.cube_settings.network != crate::chain::ChainId::Bitcoin
+            || self.cube_settings.id != handoff.bitcoin_cube()
+            || !self.cache.btcb2_server_enabled
+            || !crate::app::features::claim_blake2b(self.claim_source_cube()).is_available()
+        {
+            return Err("The Bitcoin Claim source or feature grant changed.".into());
+        }
+        let connect = self
+            .claim_connect_session()
+            .ok_or_else(|| "The Claim account session ended.".to_string())?;
+        let context = self
+            .claim_pair_context
+            .as_mut()
+            .ok_or_else(|| "The paired Claim Cube is not open for this operation.".to_string())?;
+        if context.owner != self.cache.app_generation
+            || context.root != self.datadir
+            || context.source_cube != self.cube_settings.id
+            || context.fork_cube != target.id
+            || context.loading_panel.is_some()
+        {
+            return Err("The paired Claim operation changed.".into());
+        }
+        if let Some(panel) = &mut context.panel {
+            panel.revoke();
+        }
+        context.panel = None;
+        let receiver = context.generation();
+        let generation = *receiver.borrow();
+        context.loading_panel = Some(generation);
+        self.fork_claim_handoff = Some(handoff.clone());
+        Ok(load_fork_claim_panel(
+            self.datadir.clone(),
+            context.wallet.clone(),
+            context.daemon.clone(),
+            connect,
+            handoff,
+            generation,
+            receiver,
+        ))
+    }
+
     fn apply_fork_claim_opened(
         &mut self,
         opened: state::vault::claim::fork_load::Opened,
     ) -> Task<Message> {
+        if self
+            .claim_pair_context
+            .as_ref()
+            .is_some_and(|context| context.loading_panel == Some(opened.generation))
+        {
+            let valid = self.claim_pair_context.as_ref().is_some_and(|context| {
+                *context.generation().borrow() == opened.generation
+                    && context.owner == self.cache.app_generation
+                    && context.root == self.datadir
+                    && context.source_cube == self.cube_settings.id
+                    && context.fork_cube == opened.handoff.fork_cube()
+            }) && self.fork_claim_handoff.as_ref() == Some(&opened.handoff)
+                && self.cache.btcb2_server_enabled
+                && self.claim_connect_session().is_some();
+            let context = self.claim_pair_context.as_mut().expect("checked above");
+            context.loading_panel = None;
+            if !valid {
+                return Task::none();
+            }
+            let panel = opened.result.and_then(|(loaded, coins)| {
+                state::vault::claim::fork_panel::ForkClaimPanel::new(
+                    context.root.clone(),
+                    context.wallet.clone(),
+                    coins,
+                    loaded,
+                )
+            });
+            return match panel {
+                Ok(panel) => {
+                    context.panel = Some(panel);
+                    self.panels.current = Menu::Vault(menu::VaultSubMenu::Claim);
+                    Task::none()
+                }
+                Err(error) => Task::done(Message::View(view::Message::ShowError(error))),
+            };
+        }
         if self.loading_fork_claim != Some(opened.generation) {
             return Task::none();
         }
@@ -5461,6 +6015,18 @@ impl App {
     /// coordinator call also checks. The journaled claim itself survives:
     /// the panel re-binds it under the next context.
     pub fn revoke_claim(&mut self) {
+        self.revoke_claim_phase();
+        self.stop_claim_pair_context();
+    }
+
+    fn stop_claim_pair_context(&mut self) {
+        if let Some(context) = self.claim_pair_context.take() {
+            self.revoke_split_handoff();
+            context.stop();
+        }
+    }
+
+    fn revoke_claim_phase(&mut self) {
         self.drop_split_port_builds();
         if let Some(panel) = &mut self.split_panel {
             panel.revoke();
@@ -6033,12 +6599,20 @@ impl App {
         }
 
         // Current panel's subscription
-        subscriptions.push(
-            self.panels
+        let current_subscription = match (
+            &self.panels.current,
+            self.claim_pair_context
+                .as_ref()
+                .and_then(|context| context.panel.as_ref()),
+        ) {
+            (Menu::Vault(menu::VaultSubMenu::Claim), Some(panel)) => panel.subscription(),
+            _ => self
+                .panels
                 .current()
                 .unwrap_or(&self.panels.global_home)
                 .subscription(),
-        );
+        };
+        subscriptions.push(current_subscription);
 
         if let Some(imported) = self.panels.imported_bitcoin.as_ref() {
             if !imported.handles_route(&self.panels.current) {
@@ -6136,9 +6710,6 @@ impl App {
             if let Some(bitcoind) = self.internal_bitcoind.take() {
                 bitcoind.stop();
             }
-            // Stop the managed Tor daemon (if inbound-over-Tor was running)
-            // alongside the node it serves.
-            crate::node::tor::stop_managed_tor();
         }
     }
 
@@ -6758,6 +7329,37 @@ impl App {
                     .into(),
             )));
         }
+        // A paired Claim presents the fork signing panel inside the source
+        // App. Its visible actions and signer completions must use the paired
+        // resource owner, never the source Claim panel or its daemon/cache.
+        // Shell navigation is intentionally excluded and remains source-owned.
+        if self.panels.current == Menu::Vault(menu::VaultSubMenu::Claim)
+            && self
+                .claim_pair_context
+                .as_ref()
+                .is_some_and(|context| context.panel.is_some())
+            && is_fork_claim_panel_message(&message)
+        {
+            let admitted = self.claim_pair_context.as_ref().is_some_and(|context| {
+                context.owner == self.cache.app_generation
+                    && context.root == self.datadir
+                    && context.source_cube == self.cube_settings.id
+                    && context.settings.network == crate::chain::ChainId::BitcoinBlake2b
+                    && self.cache.btcb2_server_enabled
+                    && self
+                        .claim_connect_session()
+                        .is_some_and(|session| context.matches_session(&session))
+            });
+            if !admitted {
+                if let Some(context) = &mut self.claim_pair_context {
+                    context.revoke();
+                }
+                return Task::none();
+            }
+            let context = self.claim_pair_context.as_mut().expect("checked above");
+            let panel = context.panel.as_mut().expect("checked above");
+            return panel.update(Some(context.daemon.clone()), &context.cache, message);
+        }
         match message {
             Message::ImportedBitcoin(event) => {
                 if self.panels.imported_bitcoin.is_none() {
@@ -6881,27 +7483,32 @@ impl App {
                 if !self.panels.connect.account.bitcoin_blake2b_enabled()
                     || !self.split_context_valid(&intent)
                 {
-                    self.revoke_split_handoff();
+                    self.refuse_current_split_handoff(intent.target_cube_id());
                     return Task::done(Message::View(view::Message::ShowError(
                         "Split was cancelled because its target or authenticated session changed. Scan again."
                             .to_string(),
                     )));
                 }
+                let (target_settings, target_wallet) =
+                    if let Some(context) = &self.claim_pair_context {
+                        (context.settings.clone(), Some(context.wallet.clone()))
+                    } else {
+                        (self.cube_settings.clone(), self.wallet.clone())
+                    };
                 let prepared = result.and_then(|(reservation, feerate)| {
-                    let wallet = self
-                        .wallet
+                    let wallet = target_wallet
                         .as_ref()
                         .ok_or_else(|| "The destination Vault is no longer loaded.".to_string())?;
                     let target =
                         crate::services::foreign_psbt::TargetAddressEvidence::authenticate(
-                            &self.cube_settings,
+                            &target_settings,
                             wallet,
                             &reservation,
                             intent.scan_generation(),
                         )
                         .map_err(split_target_error)?;
                     let session = || crate::services::foreign_psbt::ForeignSession {
-                        chain: self.cube_settings.network,
+                        chain: target_settings.network,
                         generation: intent.scan_generation(),
                         target: &target,
                         external: &intent.external,
@@ -6941,13 +7548,14 @@ impl App {
                         return Task::none();
                     }
                     Err(error) => {
-                        self.revoke_split_handoff();
+                        self.refuse_current_split_handoff(intent.target_cube_id());
                         return Task::done(Message::View(view::Message::ShowError(error)));
                     }
                 }
             }
             Message::View(view::Message::DismissSplitReview) => {
                 self.revoke_split_handoff();
+                self.stop_claim_pair_context();
                 return Task::none();
             }
             Message::View(view::Message::StartSplit) => {
@@ -6991,10 +7599,15 @@ impl App {
                 {
                     return self.refresh_split_session();
                 }
-                return self.split_panel.as_mut().map_or_else(Task::none, |panel| {
+                let closing = matches!(message, state::vault::split::SplitMessage::Close);
+                let task = self.split_panel.as_mut().map_or_else(Task::none, |panel| {
                     let task = panel.update(message);
                     Task::batch([task, panel.arm_deadline()])
                 });
+                if closing {
+                    self.stop_claim_pair_context();
+                }
+                return task;
             }
             Message::View(view::Message::DismissToast(id)) => {
                 self.errors.retain(|(i, ..)| *i != id);
@@ -8045,15 +8658,7 @@ impl App {
                             self.cache.clear_btcb2_fiat();
                             self.cache.btcb2_price_request = None;
                         }
-                        // Keep the "backed up" banner state in sync with
-                        // whatever was persisted — the backup flow saves
-                        // cube.backed_up = true via this same path. If the
-                        // backed-up state transitions back to false, also
-                        // clear the session dismissal so the banner
-                        // resurfaces for the new state.
-                        if self.cache.current_cube_backed_up && !cube.backed_up {
-                            self.cache.backup_warning_dismissed = false;
-                        }
+                        // The backup attention row follows persisted state.
                         self.cache.current_cube_backed_up = cube.backed_up;
                         self.cube_settings.backed_up = cube.backed_up;
                         // Mirror the drift fingerprint cache (W12). Refreshing
@@ -8799,6 +9404,9 @@ impl App {
             // here; `enter_claim` decides between the target installer and
             // the step-1 panel from what is on disk.
             Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim))) => {
+                self.cache.cube_switcher_open = false;
+                self.cache.cube_lock_confirmation = false;
+                self.cache.vault_tools_open = true;
                 return self.enter_claim();
             }
             // Claim step 1's own results go to the claim panel whether or not
@@ -8813,6 +9421,11 @@ impl App {
             }
             Message::ForkClaimOpened(opened) => return self.apply_fork_claim_opened(*opened),
             Message::ForkClaim(_) => {
+                if let Some(context) = &mut self.claim_pair_context {
+                    if let Some(panel) = &mut context.panel {
+                        return panel.update(Some(context.daemon.clone()), &context.cache, message);
+                    }
+                }
                 if let Some(panel) = &mut self.panels.fork_claim {
                     return panel.update(self.daemon.clone(), &self.cache, message);
                 }
@@ -8823,6 +9436,27 @@ impl App {
                     return panel.update(self.daemon.clone(), &self.cache, message);
                 }
                 return Task::none();
+            }
+            Message::View(view::Message::ToggleCubeSwitcher) => {
+                self.cache.cube_switcher_open = !self.cache.cube_switcher_open;
+                self.cache.cube_lock_confirmation = false;
+                return iced::widget::operation::focus(view::nav::shell::CUBE_SWITCHER_ID);
+            }
+            Message::View(view::Message::AskCubeLock) => {
+                self.cache.cube_switcher_open = true;
+                self.cache.cube_lock_confirmation = true;
+                return iced::widget::operation::focus(view::nav::shell::CUBE_LOCK_CANCEL_ID);
+            }
+            Message::View(view::Message::CancelCubeLock) => {
+                self.cache.cube_lock_confirmation = false;
+                return iced::widget::operation::focus(view::nav::shell::CUBE_LOCK_ID);
+            }
+            Message::View(view::Message::ToggleVaultTools) => {
+                self.cache.vault_tools_open = !self.cache.vault_tools_open;
+                return iced::widget::operation::focus(view::nav::shell::VAULT_TOOLS_ID);
+            }
+            Message::View(view::Message::FocusAction(id)) => {
+                return iced::widget::operation::focus(id.clone());
             }
             Message::View(view::Message::Menu(menu)) => {
                 // Always honor the navigation even when the current
@@ -8842,6 +9476,19 @@ impl App {
                     .current_mut()
                     .map(|p| p.close())
                     .unwrap_or_else(Task::none);
+                self.cache.cube_switcher_open = false;
+                self.cache.cube_lock_confirmation = false;
+                if matches!(
+                    &menu,
+                    Menu::Vault(
+                        menu::VaultSubMenu::Coins(_)
+                            | menu::VaultSubMenu::PSBTs(_)
+                            | menu::VaultSubMenu::Recovery
+                            | menu::VaultSubMenu::Claim
+                    )
+                ) {
+                    self.cache.vault_tools_open = true;
+                }
                 return Task::batch([close_task, self.set_current_panel(menu)]);
             }
             msg @ Message::View(view::Message::ConnectAccount(_))
@@ -8946,7 +9593,8 @@ impl App {
                 // Compare the accepted session, not the arrival of a possibly
                 // obsolete refresh result. The fork loader owns this client.
                 let fork_replaced = (self.panels.fork_claim.is_some()
-                    || self.loading_fork_claim.is_some())
+                    || self.loading_fork_claim.is_some()
+                    || self.claim_pair_context.is_some())
                     && (!self.cache.btcb2_server_enabled
                         || match (&previous_claim_session, &claim_session) {
                             (Some(old), Some(new)) => !state::vault::claim::same_session(old, new),
@@ -9138,9 +9786,6 @@ impl App {
                         Message::View(view::Message::DismissReceivedCelebration),
                     );
                 }
-            }
-            Message::View(view::Message::DismissBackupWarning) => {
-                self.cache.backup_warning_dismissed = true;
             }
             Message::View(view::Message::DismissSparkNotice) => {
                 // Dismissing "USDB held but off" is an answer — keep it off
@@ -10281,6 +10926,14 @@ impl App {
                 view::Message::DismissReceivedCelebration,
             );
             view::dashboard(&self.panels.current, &self.cache, celebration)
+        } else if let (Menu::Vault(menu::VaultSubMenu::Claim), Some(panel)) = (
+            &self.panels.current,
+            self.claim_pair_context
+                .as_ref()
+                .and_then(|context| context.panel.as_ref()),
+        ) {
+            let context = self.claim_pair_context.as_ref().expect("panel has owner");
+            panel.view_with_shell(&self.panels.current, &context.cache, &self.cache)
         } else if let Some(reason) = features::route_availability(
             &self.panels.current,
             self.cache.chain(),
@@ -11769,6 +12422,403 @@ mod tests {
             "closing the tab must expire its pairing"
         );
         let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn scoped_claim_remote_identity_accepts_rotated_bearer_only_for_verified_account() {
+        let mut source =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        source.set_token("source-bearer");
+        let session = state::vault::claim::ConnectSession {
+            client: source,
+            account: "7".into(),
+        };
+        let mut fork =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        fork.set_token("rotated-fork-bearer");
+        assert!(scoped_claim_remote_identity(&session, Some(&fork), Some(7)));
+        assert!(!scoped_claim_remote_identity(
+            &session,
+            Some(&fork),
+            Some(8)
+        ));
+        assert!(!scoped_claim_remote_identity(&session, Some(&fork), None));
+        fork.base_url = "https://other.example/".into();
+        assert!(!scoped_claim_remote_identity(
+            &session,
+            Some(&fork),
+            Some(7)
+        ));
+        fork.base_url = session.client.base_url.clone();
+        fork.set_token("");
+        assert!(!scoped_claim_remote_identity(
+            &session,
+            Some(&fork),
+            Some(7)
+        ));
+    }
+
+    #[test]
+    fn admitted_claim_context_owns_its_node_and_can_be_readmitted_after_refusal() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let (mut source, handoff, path) =
+            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let target = split_app(&path, false, true);
+        let target_settings = settings::Settings::from_file(
+            &source
+                .datadir
+                .network_directory(crate::chain::ChainId::BitcoinBlake2b),
+        )
+        .unwrap()
+        .cubes
+        .remove(0);
+        let wallet = target.wallet.as_ref().unwrap().clone();
+        assert_eq!(target_settings.vault_wallet_id.as_ref(), Some(&wallet.id()));
+
+        let mut source_client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        source_client.set_token("source-bearer");
+        source
+            .panels
+            .connect
+            .install_admitted_client(source_client.clone());
+        source.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "source@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        source.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        source.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        source.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        let mut target_client = source_client.clone();
+        target_client.set_token("rotated-target-bearer");
+        let mut target_cache = target.cache.clone();
+        target_cache.datadir_path = source.datadir.clone();
+        let target_daemon = target.daemon.as_ref().unwrap().clone();
+        let source_owner = source.cache.app_generation;
+        let intent = crate::home::ClaimOpenIntent::new(
+            source_owner,
+            &source.datadir,
+            source.cube_settings.id.clone(),
+            target_settings.id.clone(),
+            crate::home::ClaimRoute::Begin(handoff),
+        );
+        assert_eq!(
+            source
+                .admit_claim_pair_context(
+                    &intent,
+                    wallet.clone(),
+                    target_daemon.clone(),
+                    target_cache.clone(),
+                    target_settings.clone(),
+                    Some(target_client.clone()),
+                    None,
+                    None,
+                )
+                .unwrap_err(),
+            "The paired Claim backend has a different account session."
+        );
+        let mut wrong_provider = target_client.clone();
+        wrong_provider.base_url = "https://other.example/".into();
+        assert_eq!(
+            source
+                .admit_claim_pair_context(
+                    &intent,
+                    wallet.clone(),
+                    target_daemon.clone(),
+                    target_cache.clone(),
+                    target_settings.clone(),
+                    Some(wrong_provider),
+                    Some(7),
+                    None,
+                )
+                .unwrap_err(),
+            "The paired Claim backend has a different account session."
+        );
+        assert!(source.claim_pair_context.is_none());
+        let node_config = coincubed::config::BitcoindConfig {
+            rpc_auth: coincubed::config::BitcoindRpcAuth::UserPass(
+                "fixture".into(),
+                "fixture".into(),
+            ),
+            addr: "127.0.0.1:1".parse().unwrap(),
+        };
+        let lock_dir = source
+            .datadir
+            .bitcoind_directory()
+            .path()
+            .join("locks/bitcoin");
+        let admit = |source: &mut App, intent: &crate::home::ClaimOpenIntent| {
+            let node = Bitcoind::for_test(
+                node_config.clone(),
+                &source.datadir,
+                bitcoin::Network::Bitcoin,
+            );
+            assert!(lock_dir.exists(), "the scoped operation owns a node lock");
+            source.admit_claim_pair_context(
+                intent,
+                wallet.clone(),
+                target_daemon.clone(),
+                target_cache.clone(),
+                target_settings.clone(),
+                Some(target_client.clone()),
+                Some(7),
+                Some(node),
+            )
+        };
+        admit(&mut source, &intent).expect("real context admission");
+        let context = source.claim_pair_context.as_ref().expect("admitted owner");
+        assert_eq!(context.owner, source_owner);
+        assert_eq!(context.fork_cube, target_settings.id);
+        let current = source
+            .claim_connect_session()
+            .expect("source still signed in");
+        assert!(context.matches_session(&current));
+        assert_eq!(
+            context.client.as_ref().unwrap().token(),
+            Some("rotated-target-bearer")
+        );
+        let request = ClaimPairRequest {
+            root: source.datadir.clone(),
+            fork_cube: target_settings.id.clone(),
+            descriptor: wallet.inheritance_descriptor().unwrap().clone(),
+            session: current.clone(),
+        };
+        let binding = source
+            .claim_fork_daemon(&request)
+            .expect("rotated target binding");
+        assert!(binding.current());
+        let mut wrong_source = current.clone();
+        wrong_source.account = "8".into();
+        assert!(!context.matches_session(&wrong_source));
+        let mut wrong_request = ClaimPairRequest {
+            root: request.root.clone(),
+            fork_cube: request.fork_cube.clone(),
+            descriptor: request.descriptor.clone(),
+            session: wrong_source,
+        };
+        assert!(source.claim_fork_daemon(&wrong_request).is_none());
+        wrong_request.session = current;
+        wrong_request.session.client.base_url = "https://other.example/".into();
+        assert!(source.claim_fork_daemon(&wrong_request).is_none());
+
+        source.refuse_current_split_handoff(&target_settings.id);
+        assert!(source.claim_pair_context.is_none());
+        assert!(!binding.current(), "refusal revoked the old operation");
+        assert!(!lock_dir.exists(), "refusal stopped its owned node");
+        source.refuse_current_split_handoff(&target_settings.id);
+        assert!(
+            !lock_dir.exists(),
+            "repeat refusal cannot stop another owner"
+        );
+        let next = crate::home::ClaimOpenIntent::new(
+            source_owner,
+            &source.datadir,
+            source.cube_settings.id.clone(),
+            target_settings.id.clone(),
+            crate::home::ClaimRoute::Begin(
+                crate::app::claim_intent::ForkHandoff::new(
+                    &source.datadir,
+                    source.cube_settings.id.clone(),
+                    target_settings.id.clone(),
+                )
+                .unwrap(),
+            ),
+        );
+        admit(&mut source, &next).expect("fresh operation can re-admit");
+        assert!(source.claim_pair_context.is_some());
+        source.revoke_claim();
+        assert!(!lock_dir.exists());
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn scoped_claim_binding_expires_on_context_revocation() {
+        let root = std::env::temp_dir().join(format!("claim-context-{}", uuid::Uuid::new_v4()));
+        let mut fork = split_app(&root, false, true);
+        let wallet = fork.wallet.as_ref().unwrap().clone();
+        fork.cube_settings.vault_wallet_id = Some(wallet.id());
+        let owner = cache::AppGeneration::next();
+        let mut resources_cache = fork.cache.clone();
+        resources_cache.datadir_path = fork.datadir.clone();
+        let mut context = claim_pair_context::ClaimPairContext::new(
+            cache::AppGeneration::next(),
+            owner,
+            fork.datadir.clone(),
+            "bitcoin-source".into(),
+            fork.cube_settings.clone(),
+            wallet.clone(),
+            fork.daemon.as_ref().unwrap().clone(),
+            resources_cache,
+            fork.fork_connect_client.clone(),
+            Some(7),
+            None,
+        )
+        .unwrap();
+        let mut source =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        source.set_token("independent-source-bearer");
+        let session = state::vault::claim::ConnectSession {
+            client: source,
+            account: "7".into(),
+        };
+        let request = ClaimPairRequest {
+            root: fork.datadir.clone(),
+            fork_cube: fork.cube_settings.id.clone(),
+            descriptor: wallet.inheritance_descriptor().unwrap().clone(),
+            session: session.clone(),
+        };
+        let binding = context.bind(&request, &session, true).unwrap();
+        assert!(binding.current());
+        let mut wrong_account = session.clone();
+        wrong_account.account = "8".into();
+        assert!(context.bind(&request, &wrong_account, true).is_none());
+        assert!(context.bind(&request, &session, false).is_none());
+        context.revoke();
+        assert!(!binding.current());
+        drop(context);
+        drop(fork);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn visible_paired_claim_actions_stay_with_the_restricted_fork_owner() {
+        let _guard = crate::app::session::test_guard();
+        let (mut source, _handoff, path) =
+            crate::app::claim_step1_tests::returning_claim_fixture(false);
+        let target = split_app(&path, false, true);
+        let mut target_settings = target.cube_settings.clone();
+        let target_wallet = target.wallet.as_ref().unwrap().clone();
+        let mut target_cache = target.cache.clone();
+        target_cache.datadir_path = source.datadir.clone();
+        target_cache.cube_name = "Fork operation".into();
+        source.cache.cube_name = "Bitcoin source".into();
+        target_settings.vault_wallet_id = Some(target_wallet.id());
+        let mut client =
+            crate::services::coincube::CoincubeClient::for_test("https://connect.example/");
+        client.set_token("synthetic-source-token");
+        source
+            .panels
+            .connect
+            .install_admitted_client(client.clone());
+        source.panels.connect.account.user = Some(crate::services::coincube::User {
+            id: 7,
+            email: "synthetic@example.invalid".into(),
+            email_verified: Some(true),
+        });
+        source.panels.connect.account.step = state::connect::account::ConnectFlowStep::Dashboard;
+        source.panels.connect.account.bitcoin_blake2b_opt_in = true;
+        source.panels.connect.account.features = Some(
+            serde_json::from_value(serde_json::json!({
+                "plans": [], "bitcoinBlake2bEnabled": true,
+            }))
+            .unwrap(),
+        );
+        source.cache.btcb2_server_enabled = true;
+        let generation = *source.panels.claim_generation.borrow();
+        let source_id = source.cube_settings.id.clone();
+        let owner = source.cache.app_generation;
+        let mut context = claim_pair_context::ClaimPairContext::new(
+            cache::AppGeneration::next(),
+            owner,
+            source.datadir.clone(),
+            source_id.clone(),
+            target_settings,
+            target_wallet,
+            target.daemon.as_ref().unwrap().clone(),
+            target_cache,
+            Some(client),
+            Some(7),
+            None,
+        )
+        .unwrap();
+        context.panel = Some(state::vault::claim::fork_panel::tests::empty_for_test(
+            source.datadir.clone(),
+        ));
+        source.claim_pair_context = Some(Box::new(context));
+        source.panels.current = Menu::Vault(menu::VaultSubMenu::Claim);
+        drop(source.view()); // The visible screen must render with distinct source/target caches.
+        drop(source.update(Message::View(view::Message::ToggleCubeSwitcher)));
+        assert!(source.cache.cube_switcher_open);
+        drop(source.update(Message::View(view::Message::AskCubeLock)));
+        assert!(source.cache.cube_lock_confirmation);
+        drop(source.view());
+        drop(source.update(Message::View(view::Message::CancelCubeLock)));
+        assert!(!source.cache.cube_lock_confirmation);
+        assert_eq!(source.cache.cube_name, "Bitcoin source");
+        assert_eq!(
+            source.claim_pair_context.as_ref().unwrap().cache.cube_name,
+            "Fork operation"
+        );
+
+        for message in [
+            Message::View(view::Message::Claim(view::ClaimMessage::Confirm)),
+            Message::View(view::Message::Claim(view::ClaimMessage::Refresh)),
+            Message::View(view::Message::Spend(
+                view::SpendTxMessage::SelectMasterSigner,
+            )),
+            Message::View(view::Message::Claim(view::ClaimMessage::Cancel)),
+        ] {
+            drop(source.update(message));
+        }
+        let panel = source
+            .claim_pair_context
+            .as_ref()
+            .unwrap()
+            .panel
+            .as_ref()
+            .unwrap();
+        assert_eq!(
+            state::vault::claim::fork_panel::tests::observed_actions(panel),
+            ["confirm", "refresh", "sign", "cancel"]
+        );
+        assert!(panel.is_revoked());
+        assert_eq!(*source.panels.claim_generation.borrow(), generation);
+        assert_eq!(source.cube_settings.id, source_id);
+        drop(source.update(Message::View(view::Message::Spend(
+            view::SpendTxMessage::SelectMasterSigner,
+        ))));
+        assert!(source
+            .claim_pair_context
+            .as_ref()
+            .unwrap()
+            .panel
+            .as_ref()
+            .unwrap()
+            .is_revoked());
+
+        // A changed account can no longer dispatch even a queued button event.
+        source.panels.connect.account.user.as_mut().unwrap().id = 8;
+        drop(source.update(Message::View(view::Message::Claim(
+            view::ClaimMessage::Confirm,
+        ))));
+        assert_eq!(
+            state::vault::claim::fork_panel::tests::observed_actions(
+                source
+                    .claim_pair_context
+                    .as_ref()
+                    .unwrap()
+                    .panel
+                    .as_ref()
+                    .unwrap()
+            ),
+            ["confirm", "refresh", "sign", "cancel", "sign"]
+        );
+        drop(source);
+        drop(target);
+        std::fs::remove_dir_all(path).ok();
     }
 
     fn local_app(root: &std::path::Path) -> App {
@@ -14931,7 +15981,7 @@ pub(crate) mod claim_step1_tests {
 
     /// A Bitcoin Cube with a Vault and an embedded (unstarted) daemon,
     /// with the account grant on so the claim entry is available.
-    pub(super) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
+    pub(crate) fn bitcoin_app(root: &std::path::Path) -> (App, Arc<Wallet>) {
         let descriptor = coincube_core::descriptors::CoincubeDescriptor::from_str(DESC).unwrap();
         let wallet = Arc::new(Wallet::new(descriptor.clone()));
         let cfg: coincubed::config::Config = toml::from_str(&format!(
@@ -14971,6 +16021,17 @@ pub(crate) mod claim_step1_tests {
             .unwrap(),
         );
         (app, wallet)
+    }
+
+    pub(crate) fn bitcoin_app_with_id(root: &std::path::Path, id: &str) -> App {
+        let (mut app, _) = bitcoin_app(root);
+        app.cube_settings.id = id.to_owned();
+        app.cache.cube_id = id.to_owned();
+        app
+    }
+
+    pub(crate) fn fixture_daemon(app: &App) -> Arc<dyn Daemon + Sync + Send> {
+        app.daemon.as_ref().unwrap().clone()
     }
 
     #[test]
@@ -15789,8 +16850,13 @@ pub(crate) mod claim_step1_tests {
         let entry = || Message::View(view::Message::Menu(Menu::Vault(menu::VaultSubMenu::Claim)));
 
         // Control: nothing on disk — the installer, and no panel switch.
+        app.cache.cube_switcher_open = true;
+        app.cache.cube_lock_confirmation = true;
         let before = app.panels.current.clone();
         let produced = outputs(app.update(entry())).await;
+        assert!(!app.cache.cube_switcher_open);
+        assert!(!app.cache.cube_lock_confirmation);
+        assert!(app.cache.vault_tools_open);
         assert!(
             starts_installer(&produced),
             "no target: the installer starts"
@@ -15801,7 +16867,11 @@ pub(crate) mod claim_step1_tests {
         // Another App instance creates the target; this one's cache is stale.
         write_claim_target(&root, &wallet);
         assert!(!app.cache.btcb2_already_claimed, "stale by construction");
+        app.cache.cube_switcher_open = true;
+        app.cache.cube_lock_confirmation = true;
         let produced = outputs(app.update(entry())).await;
+        assert!(!app.cache.cube_switcher_open);
+        assert!(!app.cache.cube_lock_confirmation);
         assert!(
             !starts_installer(&produced),
             "a second installer must not start"
