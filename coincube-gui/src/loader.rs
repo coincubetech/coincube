@@ -1002,6 +1002,9 @@ pub async fn load_application(
         background_node_install: Default::default(),
         connect_transport_key: None,
         cube_encryption_key: None,
+        cube_switcher_open: false,
+        cube_lock_confirmation: false,
+        vault_tools_open: false,
         datadir_path: config.datadir_path,
         network: config.info.network,
         fiat_chain: config.cube_settings.network,
@@ -1054,7 +1057,6 @@ pub async fn load_application(
         cube_connect_owner: config.cube_settings.connect_owner.clone(),
         cube_owned_by_other_account: false,
         current_cube_backed_up: config.cube_settings.backed_up,
-        backup_warning_dismissed: false,
         spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),

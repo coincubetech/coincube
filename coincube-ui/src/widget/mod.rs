@@ -1,3 +1,4 @@
+pub mod action;
 mod cursor;
 mod editor;
 pub mod equal_height;

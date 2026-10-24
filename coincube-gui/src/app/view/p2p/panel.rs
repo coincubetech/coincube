@@ -4182,7 +4182,6 @@ impl State for P2PPanel {
                             } else {
                                 None
                             };
-                            let has_vault = cache.has_vault;
                             let detail_content = iced::widget::scrollable(row![
                                 Space::new().width(Length::FillPortion(1)),
                                 column![
@@ -4203,42 +4202,19 @@ impl State for P2PPanel {
                                 Space::new().width(Length::FillPortion(1)),
                             ]);
 
-                            return row![]
-                                .push(view::nav::sidebar(
-                                    menu,
-                                    &view::nav::NavContext {
-                                        has_vault,
-                                        has_imported_bitcoin: cache.has_imported_bitcoin,
-                                        has_p2p: cache.has_p2p,
-                                        network: cache.chain(),
-                                        p2p_test_coordinator: cache.p2p_test_coordinator,
-                                        marketplace_flags: cache.marketplace_flags,
-                                        liquid_gate: cache.liquid_gate,
-                                        btcb2_server_enabled: cache.btcb2_server_enabled,
-                                        btcb2_already_claimed: cache.btcb2_already_claimed,
-                                        btcb2_claim_resume: cache.btcb2_claim_resume,
-                                        cube_name: &cache.cube_name,
-                                        lightning_address: None,
-                                        avatar: None,
-                                        theme_mode: cache.theme_mode,
-                                        connect_authenticated: cache.connect_authenticated,
-                                        connect_stream_status: &cache.connect_stream_status,
-                                    },
-                                ))
-                                .push(
-                                    iced::widget::Column::new()
-                                        .push(view::warn(None))
-                                        .push(
-                                            container(detail_content)
-                                                .center_x(Length::Fill)
-                                                .style(theme::container::background)
-                                                .height(Length::Fill),
-                                        )
-                                        .width(Length::Fill),
-                                )
-                                .width(Length::Fill)
-                                .height(Length::Fill)
-                                .into();
+                            return view::dashboard_shell(
+                                menu,
+                                cache,
+                                iced::widget::Column::new()
+                                    .push(view::warn(None))
+                                    .push(
+                                        container(detail_content)
+                                            .center_x(Length::Fill)
+                                            .style(theme::container::background)
+                                            .height(Length::Fill),
+                                    )
+                                    .width(Length::Fill),
+                            );
                         }
                     }
 
@@ -4334,7 +4310,6 @@ impl State for P2PPanel {
                             if self.active_chat == ActiveChat::Peer {
                                 // Separate chat view — built without dashboard()
                                 // to avoid nested scrollables.
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let trade_type_label = match trade.order_type {
                                     OrderType::Buy => "BUY",
@@ -4372,47 +4347,23 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             } else if self.active_chat == ActiveChat::Dispute {
                                 // Dispute chat view
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let header = container(
                                     row![
@@ -4437,44 +4388,21 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.dispute_chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.dispute_chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             }
                             return view::dashboard(
                                 menu,
@@ -4538,7 +4466,6 @@ impl State for P2PPanel {
                     if let Some(ref selected_id) = self.chat_selected_trade {
                         if let Some(trade) = self.trades.iter().find(|t| t.id == *selected_id) {
                             if self.active_chat == ActiveChat::Peer {
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let trade_type_label = match trade.order_type {
                                     OrderType::Buy => "BUY",
@@ -4574,46 +4501,22 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             } else if self.active_chat == ActiveChat::Dispute {
-                                let has_vault = cache.has_vault;
                                 let order_short = &trade.id[..8.min(trade.id.len())];
                                 let header = container(
                                     row![
@@ -4636,44 +4539,21 @@ impl State for P2PPanel {
                                 .width(Length::Fill)
                                 .style(theme::container::foreground);
 
-                                return row![]
-                                    .push(view::nav::sidebar(
-                                        menu,
-                                        &view::nav::NavContext {
-                                            has_vault,
-                                            has_imported_bitcoin: cache.has_imported_bitcoin,
-                                            has_p2p: cache.has_p2p,
-                                            network: cache.chain(),
-                                            p2p_test_coordinator: cache.p2p_test_coordinator,
-                                            marketplace_flags: cache.marketplace_flags,
-                                            liquid_gate: cache.liquid_gate,
-                                            btcb2_server_enabled: cache.btcb2_server_enabled,
-                                            btcb2_already_claimed: cache.btcb2_already_claimed,
-                                            btcb2_claim_resume: cache.btcb2_claim_resume,
-                                            cube_name: &cache.cube_name,
-                                            lightning_address: None,
-                                            avatar: None,
-                                            theme_mode: cache.theme_mode,
-                                            connect_authenticated: cache.connect_authenticated,
-                                            connect_stream_status: &cache.connect_stream_status,
-                                        },
-                                    ))
-                                    .push(
-                                        iced::widget::Column::new()
-                                            .push(view::warn(None))
-                                            .push(header)
-                                            .push(
-                                                container(self.dispute_chat_view(trade))
-                                                    .padding(20)
-                                                    .width(Length::Fill)
-                                                    .height(Length::Fill)
-                                                    .style(theme::container::background),
-                                            )
-                                            .width(Length::Fill),
-                                    )
-                                    .width(Length::Fill)
-                                    .height(Length::Fill)
-                                    .into();
+                                return view::dashboard_shell(
+                                    menu,
+                                    cache,
+                                    iced::widget::Column::new()
+                                        .push(view::warn(None))
+                                        .push(header)
+                                        .push(
+                                            container(self.dispute_chat_view(trade))
+                                                .padding(20)
+                                                .width(Length::Fill)
+                                                .height(Length::Fill)
+                                                .style(theme::container::background),
+                                        )
+                                        .width(Length::Fill),
+                                );
                             }
                         }
                     }

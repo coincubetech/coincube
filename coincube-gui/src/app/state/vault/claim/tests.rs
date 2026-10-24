@@ -5223,46 +5223,67 @@ mod flow {
     /// says why, and binds nothing; a real sign-in in this tab afterwards
     /// re-binds and submits once. (P2: another account, and the P1 lift.)
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
-        let first = reviewer_blank_app();
-        let second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        let mut other = reviewer_login();
-        other.user.id = 8;
-        drop(gui.reviewer_account(2, view::ConnectAccountMessage::SetSession(other, 0)));
-        let app = gui.reviewer_app_mut(0);
-        assert!(
-            app.claim_session_invalidated,
-            "held: another account signed in elsewhere"
-        );
-        assert_eq!(
-            app_claim_state(app),
-            (false, Some(SIGNED_IN_ELSEWHERE.into()), false, true)
-        );
-        for message in [
-            intent(view::ClaimMessage::Refresh),
-            intent(view::ClaimMessage::Confirm),
-        ] {
-            let task = app.update(message);
-            drive_claim_messages(app, task).await;
+    #[test]
+    fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
+        // This large two-App debug Claim fixture overflowed its Windows test
+        // thread; give only this fixture the existing 8 MiB test budget.
+        let result = std::thread::Builder::new()
+            .name("claim-sibling-other-account".into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(|| {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        let first = reviewer_blank_app();
+                        let second = reviewer_blank_app();
+                        let mut f = reach_review().await;
+                        let first = reviewer_app(&mut f, first);
+                        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                        let mut other = reviewer_login();
+                        other.user.id = 8;
+                        drop(gui.reviewer_account(
+                            2,
+                            view::ConnectAccountMessage::SetSession(other, 0),
+                        ));
+                        let app = gui.reviewer_app_mut(0);
+                        assert!(
+                            app.claim_session_invalidated,
+                            "held: another account signed in elsewhere"
+                        );
+                        assert_eq!(
+                            app_claim_state(app),
+                            (false, Some(SIGNED_IN_ELSEWHERE.into()), false, true)
+                        );
+                        for message in [
+                            intent(view::ClaimMessage::Refresh),
+                            intent(view::ClaimMessage::Confirm),
+                        ] {
+                            let task = app.update(message);
+                            drive_claim_messages(app, task).await;
+                        }
+                        assert_eq!(submissions(&f), 0);
+                        // This tab signs in (the account the claim was recorded under).
+                        sign_in_here_by_refresh(app, &f, 7).await;
+                        assert!(!app.claim_session_invalidated);
+                        assert_eq!(
+                            app_claim_state(app),
+                            (true, None, false, true),
+                            "a fresh review"
+                        );
+                        let submit = app.update(intent(view::ClaimMessage::Confirm));
+                        drive_claim_messages(app, submit).await;
+                        let count = submissions(&f);
+                        let _ = std::fs::remove_dir_all(&f.root);
+                        assert_eq!(count, 1);
+                    });
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
         }
-        assert_eq!(submissions(&f), 0);
-        // This tab signs in (the account the claim was recorded under).
-        sign_in_here_by_refresh(app, &f, 7).await;
-        assert!(!app.claim_session_invalidated);
-        assert_eq!(
-            app_claim_state(app),
-            (true, None, false, true),
-            "a fresh review"
-        );
-        let submit = app.update(intent(view::ClaimMessage::Confirm));
-        drive_claim_messages(app, submit).await;
-        let count = submissions(&f);
-        let _ = std::fs::remove_dir_all(&f.root);
-        assert_eq!(count, 1);
     }
 
     // ── Gandalf's round-4 reviewer probes (#518 issuecomment-5834501248),
