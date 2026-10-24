@@ -462,8 +462,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"section":{"editor":"enum","options":["status","enroll","disable","clear","contacts"],"default":"status","section":"Review"},"step":{"editor":"enum","options":["pin","passphrase","crk","delay","memorize"],"default":"pin","section":"Review"},"state":{"editor":"enum","options":["ready","kitIncomplete","kitChecking","enabledHere","enabledElsewhere","submitting","checking","stepUpPasskey","stepUpNone","locked","clearEntry","cleared","contactsEmpty","contactsMax","contactsForm","verifyChecking","verifyFailed","active","activeChecking","activeTryLater"],"default":"ready","section":"Review"},"gate":{"editor":"enum","options":["estate","pro","notEntitled","hidden"],"default":"estate","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={k:null};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     const P=this.props,self=this;
     const L={sec:P.section||'status',step:P.step||'pin',st:P.state||'ready',gate:P.gate||'estate'};
     const key=[L.sec,L.step,L.st,L.gate].join('|');
@@ -572,7 +574,7 @@ class Component extends DCLogic {
       :hidden?'Prototype · synthetic data · gate: server flag off and not enrolled, so the Duress entry is hidden (not greyed)'
       :'Prototype · synthetic account and contacts · gate: server flag or enrolment, plus Pro/Estate entitlement · copy quoted from the app';
     return {
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
       isActive:active,notActive:!active,act:act,vf:vf,foot:foot,I:I,
       navItems:navItems,floorCubes:floorCubes,v:v,go:go,st:st,kits:kits,en:en,ds:ds,cl:cl,ct:ct
     };

@@ -312,8 +312,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["overview","deposits","review","broadcast","confirm"],"default":"deposits","section":"Review"},"state":{"editor":"enum","options":["ready","loading","waiting","oneFunded","verifying","rateLimited","verified","splitDisabled","signing","rechecking","confirming","confirmed","reorg","signedOut","noAccess","passkeyCube","sessionChanged"],"default":"ready","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B = false; try { B2B = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P=this.props,self=this;
@@ -399,7 +401,7 @@ class Component extends DCLogic {
       b2bOff: !B2B, b2bGateCopy: 'Claiming Bitcoin Blake2b coins needs the Bitcoin Blake2b network turned on in App preferences › Developer.',
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
       lockIdle:!self.state.lockAsk,lockAsk:!!self.state.lockAsk,askLock:()=>self.setState({lockAsk:true}),cancelLock:()=>self.setState({lockAsk:false}),
       signedIn:st!=='signedOut',signedOut:st==='signedOut',acctTitle:st==='signedOut'?'Connect account · Signed out':'alex@example.test · Signed in',connTitle:'Cube service · '+(st==='signedOut'?'Not checked':'Connected'),
       hideP:hide?'true':'false',shown:!hide,hidden:hide,toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),

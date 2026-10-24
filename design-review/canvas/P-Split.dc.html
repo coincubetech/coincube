@@ -406,8 +406,10 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 </x-dc>
 <script type="text/x-dc" data-dc-script data-props='{"step":{"editor":"enum","options":["check","noCopy","coins","fees","sign","bitcoin","confirming","reorg","dropped","blake2b","done","abandon"],"default":"check","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":900}}'>
 class Component extends DCLogic {
-  constructor(p){super(p);this.state={k:null,hide:null,lockAsk:false};}
+  constructor(p){super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}this.state={k:null,hide:null,lockAsk:false};}
   renderVals(){
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B_ON = false; try { B2B_ON = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P=this.props,self=this;
@@ -510,7 +512,7 @@ class Component extends DCLogic {
       b2bOff: !B2B_ON, b2bGateCopy: 'Splitting coins between Bitcoin and Bitcoin Blake2b needs the Bitcoin Blake2b network turned on in App preferences › Developer.',
       menuOpen: !!this.state.menuOpen, toggleMenu: () => { this.setState({ menuOpen: !this.state.menuOpen }); },
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass:(P.theme||'dark')==='light'?'light':'',motionClass:P.reducedMotion?'reduced':'',
+      themeClass:(THEME==='light'||(THEME!=='dark'&&(P.theme||'dark')==='light'))?'light':'',motionClass:P.reducedMotion?'reduced':'',
       hideP:hide?'true':'false',shown:!hide,hidden:hide,
       toggleHide:()=>self.setState({hide:{for:hb,v:!hide}}),
       lock:{idle:!self.state.lockAsk,asking:!!self.state.lockAsk,ask:()=>self.setState({lockAsk:true}),cancel:()=>self.setState({lockAsk:false})},

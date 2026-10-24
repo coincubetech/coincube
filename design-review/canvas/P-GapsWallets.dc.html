@@ -621,10 +621,12 @@ a.brand{color:inherit;text-decoration:none;border-radius:6px}a.brand:hover{color
 <script type="text/x-dc" data-dc-script data-props='{"screen":{"editor":"enum","options":["sideshiftSend","sparkBridge","sparkDeposits","vaultOverview","rbf","nodeSettings","feerate","launcherRestore"],"default":"sideshiftSend","section":"Review"},"state":{"editor":"enum","options":["auto","ssAddress","ssNetwork","ssAmount","ssPreparing","ssReview","ssSubmitted","ssSettled","ssError","bridgeConnecting","bridgeError","bridgeNotConfigured","depMixed","depClaimFailed","voRescanDate","voSyncFailedEmpty","voSyncFailedStale","voNodeSyncing","voRecoveryTimer","voRecoveryExpiring","rbfBump","rbfBumpInvalid","rbfCancel","rbfDescendants","rbfCreated","nodeManaged","nodeTorRestart","nodeRescanFuture","nodeRescanRunning","nodeEsplora","nodeEsploraOk","nodeEsploraError","nodeHistory","nodeHistoryPaused","feeValid","feeZero","feeTooHigh","feeDecimal"],"default":"auto","section":"Review"},"theme":{"editor":"enum","options":["dark","light"],"default":"dark","section":"Review"},"reducedMotion":{"editor":"boolean","default":false,"section":"Review"},"hideBalances":{"editor":"boolean","default":false,"section":"Review"},"$preview":{"width":1440,"height":1100}}'>
 class Component extends DCLogic {
   constructor(p) {
-    super(p);
+    super(p); try { const bump = () => { try { this.setState({ protoTick: Date.now() }); } catch (e) {} }; window.addEventListener('tenshu-proto', bump); window.addEventListener('storage', bump); } catch (e) {}
     this.state = { k: null, hide: null, lockAsk: false };
   }
   renderVals() {
+    // prototype-only: Appearance (App preferences) is a device setting shared across artboards: system follows the review lever
+    let THEME = 'system'; try { THEME = localStorage.getItem('tenshu.proto.theme') || 'system'; } catch (e) {}
     // prototype-only: the Bitcoin Blake2b device toggle (App preferences › Developer) is shared across artboards in localStorage
     let B2B_ON = false; try { B2B_ON = localStorage.getItem('tenshu.proto.b2b') === '1'; } catch (e) {}
     const P = this.props, self = this;
@@ -850,7 +852,7 @@ class Component extends DCLogic {
     const inCube = scr !== 'launcherRestore';
     return {
       lockNow: () => { try { localStorage.removeItem('tenshu.proto.open'); } catch (e) {} },
-      themeClass: (P.theme ?? 'dark') === 'light' ? 'light' : '',
+      themeClass: (THEME === 'light' || (THEME !== 'dark' && (P.theme ?? 'dark') === 'light')) ? 'light' : '',
       motionClass: P.reducedMotion ? 'reduced' : '',
       inCube, isLauncher: !inCube,
       lockIdle: !self.state.lockAsk, lockAsk: !!self.state.lockAsk, askLock: () => self.setState({ lockAsk: true }), cancelLock: () => self.setState({ lockAsk: false }),
