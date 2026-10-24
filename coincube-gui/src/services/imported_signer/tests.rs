@@ -66,6 +66,22 @@ fn fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<String>, Psbt) {
     fixture_branch(kind, false)
 }
 
+fn two_input_fixture(kind: &str) -> (ImportedWalletDescriptor, Vec<String>, Psbt) {
+    let (wallet, phrases, first) = fixture(kind);
+    let mut construction = first.clone();
+    let mut second_prev = first.inputs[0].non_witness_utxo.clone().unwrap();
+    second_prev.output[0].value += Amount::from_sat(1);
+    let mut second_txin = first.unsigned_tx.input[0].clone();
+    second_txin.previous_output.txid = second_prev.compute_txid();
+    construction.unsigned_tx.input.push(second_txin);
+    let mut second_input = first.inputs[0].clone();
+    second_input.non_witness_utxo = Some(second_prev);
+    second_input.witness_utxo.as_mut().unwrap().value += Amount::from_sat(1);
+    construction.inputs.push(second_input);
+    construction.unsigned_tx.output[1].value += Amount::from_sat(150_001);
+    (wallet, phrases, construction)
+}
+
 fn fixture_branch(kind: &str, is_change: bool) -> (ImportedWalletDescriptor, Vec<String>, Psbt) {
     let multisig = kind.starts_with("wsh");
     let path = if multisig {
@@ -388,6 +404,91 @@ fn account_authority_rejects_wrong_passphrase_account_policy_and_chain() {
         Err(ImportedSignError::UnsupportedChain)
     ));
     assert!(original.inputs[0].partial_sigs.is_empty());
+}
+
+#[test]
+fn same_account_preserves_nondefault_nonce_and_foreign_cosigner_while_signing_second_input() {
+    let (wallet, phrases, original) = two_input_fixture("wsh(multi)");
+    let secp = Secp256k1::new();
+    let mut current = sign_imported_psbt(
+        &wallet,
+        &original,
+        &original,
+        &verified(&wallet, &phrases[1]),
+    )
+    .unwrap();
+    let foreign_a = current.inputs[0].partial_sigs.clone();
+    let foreign_b = current.inputs[1].partial_sigs.clone();
+    assert_eq!(foreign_a.len(), 1);
+    assert_eq!(foreign_b.len(), 1);
+
+    let root = Xpriv::new_master(
+        Network::Regtest,
+        &bip39::Mnemonic::parse(&phrases[0]).unwrap().to_seed(""),
+    )
+    .unwrap();
+    let fingerprint = root.fingerprint(&secp);
+    let (_, (_, child_path)) = current.inputs[0]
+        .bip32_derivation
+        .iter()
+        .find(|(_, (fp, _))| *fp == fingerprint)
+        .unwrap();
+    let private = root.derive_priv(&secp, child_path).unwrap();
+    let public = private.to_priv().public_key(&secp);
+    let mut cache = bitcoin::sighash::SighashCache::new(&current.unsigned_tx);
+    let (message, sighash_type) = current.sighash_ecdsa(0, &mut cache).unwrap();
+    let nondefault = bitcoin::ecdsa::Signature {
+        signature: secp.sign_ecdsa_with_noncedata(&message, &private.private_key, &[0x7a; 32]),
+        sighash_type,
+    };
+    let mut default_signed = current.clone();
+    default_signed.sign(&root, &secp).unwrap();
+    assert_ne!(
+        default_signed.inputs[0].partial_sigs.get(&public),
+        Some(&nondefault),
+    );
+    current.inputs[0].partial_sigs.insert(public, nondefault);
+    let before = current.clone();
+    let signed = sign_imported_psbt(
+        &wallet,
+        &original,
+        &current,
+        &verified(&wallet, &phrases[0]),
+    )
+    .unwrap();
+    assert_eq!(
+        signed.inputs[0].partial_sigs.get(&public),
+        Some(&nondefault)
+    );
+    for (pubkey, signature) in &foreign_a {
+        assert_eq!(signed.inputs[0].partial_sigs.get(pubkey), Some(signature));
+    }
+    for (pubkey, signature) in &foreign_b {
+        assert_eq!(signed.inputs[1].partial_sigs.get(pubkey), Some(signature));
+    }
+    assert_eq!(signed.inputs[0].partial_sigs.len(), 2);
+    assert_eq!(signed.inputs[1].partial_sigs.len(), 2);
+    assert_eq!(original.inputs[0].partial_sigs.len(), 0);
+    assert_eq!(original.inputs[1].partial_sigs.len(), 0);
+    assert_eq!(current, before);
+    coincube_core::imported_spend::verify_imported_signatures(&wallet, &original, &signed, &secp)
+        .unwrap();
+
+    let mut invalid = before.clone();
+    invalid.inputs[0]
+        .partial_sigs
+        .insert(public, *signed.inputs[1].partial_sigs.get(&public).unwrap());
+    let invalid_before = invalid.clone();
+    assert!(matches!(
+        sign_imported_psbt(
+            &wallet,
+            &original,
+            &invalid,
+            &verified(&wallet, &phrases[0])
+        ),
+        Err(ImportedSignError::InvalidConstruction),
+    ));
+    assert_eq!(invalid, invalid_before);
 }
 
 #[test]

@@ -146,6 +146,48 @@ pub struct SessionSigner {
     master_xpriv: bip32::Xpriv,
 }
 
+/// One already admitted account's ordinary receive/change children. The
+/// public verifier supplies the account identity; no other key requests are
+/// served. Kept private to this module so only the scoped signing entry point
+/// can pass it to Bitcoin's generic PSBT signer.
+struct ScopedImportedKey<'a> {
+    root: &'a bip32::Xpriv,
+    fingerprint: Fingerprint,
+    account_path: &'a DerivationPath,
+}
+
+impl GetKey for ScopedImportedKey<'_> {
+    type Error = secp256k1::Error;
+
+    fn get_key<C: secp256k1::Signing>(
+        &self,
+        request: KeyRequest,
+        secp: &secp256k1::Secp256k1<C>,
+    ) -> Result<Option<PrivateKey>, Self::Error> {
+        let KeyRequest::Bip32((fingerprint, path)) = request else {
+            return Ok(None);
+        };
+        if fingerprint != self.fingerprint
+            || !path.as_ref().starts_with(self.account_path.as_ref())
+            || path.len() != self.account_path.len() + 2
+            || !matches!(
+                path[self.account_path.len()],
+                ChildNumber::Normal { index: 0 | 1 }
+            )
+            || !path[self.account_path.len() + 1].is_normal()
+        {
+            return Ok(None);
+        }
+        let mut derived = self
+            .root
+            .derive_priv(secp, &path)
+            .map_err(|_| secp256k1::Error::InvalidSecretKey)?;
+        let key = derived.to_priv();
+        scrub_xpriv(&mut derived);
+        Ok(Some(key))
+    }
+}
+
 impl SessionSigner {
     pub fn from_mnemonic(
         network: bitcoin::Network,
@@ -211,47 +253,11 @@ impl SessionSigner {
         fingerprint: Fingerprint,
         account_path: &DerivationPath,
     ) -> Result<Psbt, ()> {
-        struct Scoped<'a> {
-            root: &'a bip32::Xpriv,
-            fingerprint: Fingerprint,
-            account_path: &'a DerivationPath,
-        }
-        impl GetKey for Scoped<'_> {
-            type Error = secp256k1::Error;
-
-            fn get_key<C: secp256k1::Signing>(
-                &self,
-                request: KeyRequest,
-                secp: &secp256k1::Secp256k1<C>,
-            ) -> Result<Option<PrivateKey>, Self::Error> {
-                let KeyRequest::Bip32((fingerprint, path)) = request else {
-                    return Ok(None);
-                };
-                if fingerprint != self.fingerprint
-                    || !path.as_ref().starts_with(self.account_path.as_ref())
-                    || path.len() != self.account_path.len() + 2
-                    || !matches!(
-                        path[self.account_path.len()],
-                        ChildNumber::Normal { index: 0 | 1 }
-                    )
-                    || !path[self.account_path.len() + 1].is_normal()
-                {
-                    return Ok(None);
-                }
-                let mut derived = self
-                    .root
-                    .derive_priv(secp, &path)
-                    .map_err(|_| secp256k1::Error::InvalidSecretKey)?;
-                let key = derived.to_priv();
-                scrub_xpriv(&mut derived);
-                Ok(Some(key))
-            }
-        }
         let secp = secp256k1::Secp256k1::new();
         let mut signed = psbt.clone();
         signed
             .sign(
-                &Scoped {
+                &ScopedImportedKey {
                     root: &self.master_xpriv,
                     fingerprint,
                     account_path,
@@ -259,6 +265,14 @@ impl SessionSigner {
                 &secp,
             )
             .map_err(|_| ())?;
+        // Bitcoin 0.32's generic signer unconditionally replaces an existing
+        // signature for a matching key. The caller has already verified every
+        // current signature against the immutable original draft. Restore
+        // those byte-exact entries and retain only newly added map keys. The
+        // public owner verifies the entire resulting PSBT again afterward.
+        for (after, before) in signed.inputs.iter_mut().zip(&psbt.inputs) {
+            after.partial_sigs.extend(before.partial_sigs.clone());
+        }
         Ok(signed)
     }
 
@@ -1119,6 +1133,68 @@ mod tests {
         descriptor::{DerivPaths, DescriptorMultiXKey, DescriptorPublicKey, Wildcard},
     };
     use std::collections::{BTreeMap, HashSet};
+
+    #[test]
+    fn scoped_imported_signer_discards_upstream_partial_mutation_on_later_error() {
+        use miniscript::bitcoin::{
+            bip32::DerivationPath, psbt::Psbt, secp256k1::Secp256k1, transaction::Version,
+            OutPoint, ScriptBuf, Transaction, TxIn, TxOut, Txid,
+        };
+
+        let mnemonic = bip39::Mnemonic::from_entropy(&[0x42; 16]).unwrap();
+        let signer = SessionSigner::from_mnemonic(bitcoin::Network::Regtest, mnemonic, "").unwrap();
+        let secp = Secp256k1::new();
+        let account = DerivationPath::from_str("m/84h/1h/0h").unwrap();
+        let child = DerivationPath::from_str("m/84h/1h/0h/0/0").unwrap();
+        let fingerprint = signer.fingerprint(&secp);
+        let public = signer.public_key_at(&child, &secp).unwrap();
+        let script =
+            ScriptBuf::new_p2wpkh(&bitcoin::PublicKey::new(public).wpubkey_hash().unwrap());
+        let make_input = |vout| TxIn {
+            previous_output: OutPoint {
+                txid: Txid::from_byte_array([0x11; 32]),
+                vout,
+            },
+            ..TxIn::default()
+        };
+        let tx = Transaction {
+            version: Version::TWO,
+            lock_time: absolute::LockTime::ZERO,
+            input: vec![make_input(0), make_input(1)],
+            output: vec![TxOut {
+                value: Amount::from_sat(10_000),
+                script_pubkey: ScriptBuf::new(),
+            }],
+        };
+        let mut psbt = Psbt::from_unsigned_tx(tx).unwrap();
+        for input in &mut psbt.inputs {
+            input.witness_utxo = Some(TxOut {
+                value: Amount::from_sat(20_000),
+                script_pubkey: script.clone(),
+            });
+            input
+                .bip32_derivation
+                .insert(public, (fingerprint, child.clone()));
+        }
+        psbt.inputs[1].sighash_type = Some(bitcoin::psbt::PsbtSighashType::from_u32(0xdead_beef));
+
+        // Same private scoped GetKey as production, not a raw-root stand-in.
+        let scoped = ScopedImportedKey {
+            root: &signer.master_xpriv,
+            fingerprint,
+            account_path: &account,
+        };
+        let mut upstream = psbt.clone();
+        assert!(upstream.sign(&scoped, &secp).is_err());
+        assert_eq!(upstream.inputs[0].partial_sigs.len(), 1);
+        assert!(upstream.inputs[1].partial_sigs.is_empty());
+
+        let unchanged = psbt.clone();
+        assert!(signer
+            .sign_imported_scoped(&psbt, fingerprint, &account)
+            .is_err());
+        assert_eq!(psbt, unchanged);
+    }
 
     fn uid() -> usize {
         static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
