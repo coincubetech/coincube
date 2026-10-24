@@ -13,11 +13,14 @@ use coincube_ui::{
     widget::*,
 };
 use iced::{
-    widget::{mouse_area, Button, Column, Space, Stack},
+    widget::{Button, Column, Space, Stack},
     Alignment, Length,
 };
 
 use crate::app::breez_liquid::assets::format_usdt_display;
+use crate::app::view::shared::landing::{
+    amount_cell, landing_button, landing_card_style, landing_control_id, AmountCell, AmountTier,
+};
 use crate::app::view::wallet_header::{wallet_header, HeaderVariant, SyncState, WalletHeaderProps};
 use crate::app::{
     menu::Menu,
@@ -74,23 +77,21 @@ pub struct PendingTransfer {
 fn pending_deposit_card<'a>(
     pending_transfer: PendingTransfer,
     bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
+    let display_amount = pending_deposit_amount(pending_transfer, bitcoin_unit, balance_masked);
     Container::new(
         Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
             .push(warning_icon().size(12).style(theme::text::secondary))
-            .push(text("Pending deposit").size(12).color(color::GREY_2))
-            .push(Space::new().width(Length::Fill))
             .push(
-                text(
-                    pending_transfer
-                        .amount
-                        .to_formatted_string_with_unit(bitcoin_unit),
-                )
-                .size(12)
-                .color(color::ORANGE),
-            ),
+                text("Pending deposit")
+                    .size(12)
+                    .style(theme::text::secondary),
+            )
+            .push(Space::new().width(Length::Fill))
+            .push(text(display_amount).size(12).color(color::ORANGE)),
     )
     .padding([10, 14])
     .style(|t| iced::widget::container::Style {
@@ -105,9 +106,28 @@ fn pending_deposit_card<'a>(
     .into()
 }
 
+fn pending_deposit_amount(
+    pending_transfer: PendingTransfer,
+    bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
+) -> String {
+    if balance_masked {
+        AmountCell::masked().primary
+    } else {
+        format!(
+            "{} {}",
+            pending_transfer
+                .amount
+                .to_formatted_string_with_unit(bitcoin_unit),
+            bitcoin_unit.label()
+        )
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn wallet_card<'a>(
     wallet_type: WalletType,
+    cube_id: &str,
     balance: &Amount,
     fiat_converter: Option<FiatAmountConverter>,
     balance_masked: bool,
@@ -126,28 +146,31 @@ fn wallet_card<'a>(
 ) -> Element<'a, Message> {
     let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
 
-    let (icon, title, title_color, send_action, receive_action) = match wallet_type {
+    let (icon, title, send_action, receive_action) = match wallet_type {
         WalletType::Liquid => (
             droplet_fill_icon().style(theme::text::secondary),
             "Liquid",
-            None::<iced::Color>,
             Message::Menu(Menu::Liquid(LiquidSubMenu::Send)),
             Message::Menu(Menu::Liquid(LiquidSubMenu::Receive)),
         ),
         WalletType::Usdt { .. } => (
             usd_icon().style(theme::text::secondary),
             "USDt",
-            None,
             Message::Menu(Menu::Liquid(LiquidSubMenu::Send)),
             Message::Menu(Menu::Liquid(LiquidSubMenu::Receive)),
         ),
         WalletType::Vault => (
             vault_icon().style(theme::text::secondary),
             "Vault",
-            None,
             Message::Menu(Menu::Vault(VaultSubMenu::Send)),
             Message::Menu(Menu::Vault(VaultSubMenu::Receive)),
         ),
+    };
+    let overview_action = match wallet_type {
+        WalletType::Vault => Message::Menu(Menu::Vault(VaultSubMenu::Overview)),
+        WalletType::Liquid | WalletType::Usdt { .. } => {
+            Message::Menu(Menu::Liquid(LiquidSubMenu::Overview))
+        }
     };
 
     // USDt card renders its own balance display (not Amount-based)
@@ -250,15 +273,7 @@ fn wallet_card<'a>(
             );
         return Container::new(content)
             .padding(20)
-            .style(|t| iced::widget::container::Style {
-                border: iced::Border {
-                    color: color::ORANGE,
-                    width: 0.2,
-                    radius: 25.0.into(),
-                },
-                background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                ..Default::default()
-            })
+            .style(landing_card_style)
             .into();
     }
 
@@ -267,35 +282,63 @@ fn wallet_card<'a>(
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(vault_icon())
-                .push(text("Vault").size(14))
+                .push(landing_button(
+                    landing_control_id(cube_id, "Vault", "open"),
+                    "Vault",
+                    Some(vault_icon()),
+                    Message::FocusAction,
+                    Some(overview_action.clone()),
+                    theme::button::transparent,
+                ))
                 .push(text("Wallet import pending").style(theme::text::secondary))
                 .push(Space::new().width(Length::Fill))
-                .push(
-                    button::primary(None, "Finish import")
-                        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
-                ),
+                .push(landing_button(
+                    landing_control_id(cube_id, "Vault", "finish-import"),
+                    "Finish import",
+                    None,
+                    Message::FocusAction,
+                    Some(Message::Menu(Menu::Vault(VaultSubMenu::Overview))),
+                    theme::button::primary,
+                )),
         ),
         WalletType::Vault if !has_vault => Column::new().spacing(12).push(
             Row::new()
                 .spacing(8)
                 .align_y(Alignment::Center)
-                .push(vault_icon())
-                .push(text("Vault").size(14))
+                .push(landing_button(
+                    landing_control_id(cube_id, "Vault", "open"),
+                    "Vault",
+                    Some(vault_icon()),
+                    Message::FocusAction,
+                    Some(overview_action.clone()),
+                    theme::button::transparent,
+                ))
                 .push(
                     Row::new()
                         .spacing(10)
                         .align_y(Alignment::Center)
                         .push(Space::new().width(Length::Fill))
                         .push(
-                            button::secondary(None, "Restore from Connect")
-                                .width(Length::Fixed(200.0))
-                                .on_press(Message::SetupVaultRestoreFromKit),
+                            landing_button(
+                                landing_control_id(cube_id, "Vault", "restore"),
+                                "Restore from Connect",
+                                None,
+                                Message::FocusAction,
+                                Some(Message::SetupVaultRestoreFromKit),
+                                theme::button::secondary,
+                            )
+                            .width(Length::Fixed(200.0)),
                         )
                         .push(
-                            button::primary(None, "Create Vault")
-                                .width(Length::Fixed(160.0))
-                                .on_press(Message::SetupVault),
+                            landing_button(
+                                landing_control_id(cube_id, "Vault", "create"),
+                                "Create Vault",
+                                None,
+                                Message::FocusAction,
+                                Some(Message::SetupVault),
+                                theme::button::primary,
+                            )
+                            .width(Length::Fixed(160.0)),
                         ),
                 ),
         ),
@@ -337,15 +380,27 @@ fn wallet_card<'a>(
                 )
                 .push(Space::new().width(Length::Fill))
                 .push(
-                    button::primary(None, "Send")
-                        .width(Length::Fixed(90.0))
-                        .on_press(send_action),
+                    landing_button(
+                        landing_control_id(cube_id, title, "send-btc"),
+                        "Send",
+                        None,
+                        Message::FocusAction,
+                        Some(send_action),
+                        theme::button::primary,
+                    )
+                    .width(Length::Fixed(90.0)),
                 )
                 .push(Space::new().width(Length::Fixed(8.0)))
                 .push(
-                    button::orange_outline(None, "Receive")
-                        .width(Length::Fixed(90.0))
-                        .on_press(receive_action),
+                    landing_button(
+                        landing_control_id(cube_id, title, "receive-btc"),
+                        "Receive",
+                        None,
+                        Message::FocusAction,
+                        Some(receive_action),
+                        theme::button::orange_outline,
+                    )
+                    .width(Length::Fixed(90.0)),
                 );
 
             // Headline — animated dots while the daemon hasn't
@@ -366,6 +421,10 @@ fn wallet_card<'a>(
                     pending_receive_sats,
                     display_mode,
                     on_swap: Some(Message::FlipDisplayMode),
+                    on_swap_focus: Some((
+                        landing_control_id(cube_id, title, "flip-balance"),
+                        Message::FocusAction,
+                    )),
                 })
                 .into()
             } else {
@@ -388,20 +447,14 @@ fn wallet_card<'a>(
 
             Column::new()
                 .spacing(12)
-                .push(
-                    Row::new()
-                        .spacing(8)
-                        .align_y(Alignment::Center)
-                        .push(icon.size(16))
-                        .push({
-                            let t = text(title).size(14);
-                            if let Some(c) = title_color {
-                                t.color(c)
-                            } else {
-                                t.style(theme::text::secondary)
-                            }
-                        }),
-                )
+                .push(landing_button(
+                    landing_control_id(cube_id, title, "open"),
+                    title,
+                    Some(icon.size(16)),
+                    Message::FocusAction,
+                    Some(overview_action),
+                    theme::button::transparent,
+                ))
                 .push(header)
                 .push(btc_row)
         }
@@ -410,7 +463,11 @@ fn wallet_card<'a>(
     let content = if matches!(wallet_type, WalletType::Vault) && loaded {
         if let Some(pending_transfer) = pending_vault_incoming {
             if pending_transfer.stage != TransferStage::Completed {
-                content.push(pending_deposit_card(pending_transfer, bitcoin_unit))
+                content.push(pending_deposit_card(
+                    pending_transfer,
+                    bitcoin_unit,
+                    balance_masked,
+                ))
             } else {
                 content
             }
@@ -423,27 +480,7 @@ fn wallet_card<'a>(
 
     Container::new(content)
         .padding(20)
-        .style(move |t| match wallet_type {
-            WalletType::Liquid => iced::widget::container::Style {
-                border: iced::Border {
-                    color: color::ORANGE,
-                    width: 0.2,
-                    radius: 25.0.into(),
-                },
-                background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                ..Default::default()
-            },
-            WalletType::Usdt { .. } => iced::widget::container::Style {
-                border: iced::Border {
-                    color: color::ORANGE,
-                    width: 0.2,
-                    radius: 25.0.into(),
-                },
-                background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                ..Default::default()
-            },
-            WalletType::Vault => theme::card::simple(t),
-        })
+        .style(landing_card_style)
         .into()
 }
 
@@ -1466,11 +1503,15 @@ impl TransferDirection {
 }
 
 pub struct GlobalViewConfig<'a> {
+    pub cube_id: &'a str,
     pub liquid_balance: Amount,
     /// Spark wallet BTC balance in sats. Defaults to `ZERO` while
     /// the first `get_info` round-trip is in flight or if the
     /// bridge subprocess is currently down.
     pub spark_balance: Amount,
+    pub spark_btc_balance: Amount,
+    pub spark_stable_balance: Option<&'a coincube_spark_protocol::StableBalanceSnapshot>,
+    pub spark_balance_error: bool,
     pub usdt_balance: u64,
     pub usdt_balance_error: bool,
     pub pending_liquid_send_sats: u64,
@@ -1584,8 +1625,12 @@ impl HomeView {
 
 pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message> {
     let GlobalViewConfig {
+        cube_id,
         liquid_balance,
         spark_balance,
+        spark_btc_balance,
+        spark_stable_balance,
+        spark_balance_error,
         usdt_balance,
         usdt_balance_error,
         pending_liquid_send_sats,
@@ -1708,22 +1753,17 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // USDt is pegged to USD, so always use BTC/USD price for conversion.
     // When the user's fiat currency is USD, btc_usd_price == converter.price_per_btc().
     // When it differs (e.g. EUR), we must use the dedicated USD price to avoid mispricing.
+    let usable_usd_quote = btc_usd_price.filter(|price| *price > 0.0 && price.is_finite());
     let usdt_fiat_value = usdt_balance as f64 / 1e8; // USDt base units → dollars
-    let usdt_as_sats = if let Some(btc_price_usd) = btc_usd_price {
-        if btc_price_usd > 0.0 {
-            (usdt_fiat_value / btc_price_usd * 1e8) as u64
-        } else {
-            0
-        }
-    } else {
-        0
-    };
+    let usdt_as_sats = usable_usd_quote
+        .map(|btc_price_usd| (usdt_fiat_value / btc_price_usd * 1e8) as u64)
+        .unwrap_or(0);
     // A gated-off Liquid wallet contributes nothing to the aggregate. Its
     // balances are zero in that state anyway (the state layer skips the
     // loaders), but stating it here keeps the Total Balance honest even if a
     // stale value ever survived the gate flipping.
     let total_sats = if has_liquid {
-        liquid_balance.to_sat() + usdt_as_sats
+        liquid_balance.to_sat().saturating_add(usdt_as_sats)
     } else {
         0
     };
@@ -1741,18 +1781,55 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     } else {
         vault_balance
     };
-    let global_total_sats = spark_balance.to_sat() + total_sats + display_vault_balance.to_sat();
+    // A bridge response received before Synced can contain persisted values
+    // from the prior session. Neither BTC nor USDB may enter the aggregate or
+    // read as a holding until the existing corroboration gate opens.
+    let trusted_spark_stable_balance = spark_stable_balance.filter(|_| spark_balance_loaded);
+    let spark_usdb_held = trusted_spark_stable_balance.is_some_and(|holding| holding.balance > 0);
+    let spark_usdb_as_sats = trusted_spark_stable_balance
+        .map(|holding| {
+            crate::app::breez_spark::assets::stable_token_as_sats(
+                holding.balance,
+                holding.decimals,
+                usable_usd_quote,
+            )
+        })
+        .unwrap_or(0);
+    let spark_display_balance = Amount::from_sat(if has_spark && spark_balance_loaded {
+        spark_btc_balance
+            .to_sat()
+            .saturating_add(spark_usdb_as_sats)
+    } else {
+        0
+    });
+    let spark_valuation_partial = spark_usdb_held && usable_usd_quote.is_none();
+    let global_total_sats = spark_display_balance
+        .to_sat()
+        .saturating_add(total_sats)
+        .saturating_add(display_vault_balance.to_sat());
     let global_total_amount = Amount::from_sat(global_total_sats);
     let global_total_fiat = fiat_converter
         .as_ref()
         .map(|c| c.convert(global_total_amount));
+    let total_partial = (has_spark && (spark_balance_error || spark_valuation_partial))
+        || (has_liquid
+            && (liquid_balance_error
+                || usdt_balance_error
+                || (usdt_balance > 0 && usable_usd_quote.is_none())));
 
-    let orange_outline_btn = |label: &'static str, msg: Message| -> Element<'a, Message> {
-        button::orange_outline(None, label)
+    let orange_outline_btn =
+        |wallet: &'static str, control: &'static str, msg: Message| -> Element<'a, Message> {
+            landing_button(
+                landing_control_id(cube_id, wallet, control),
+                "Receive",
+                None,
+                Message::FocusAction,
+                Some(msg),
+                theme::button::orange_outline,
+            )
             .width(Length::Fixed(90.0))
-            .on_press(msg)
             .into()
-    };
+        };
 
     // L-BTC asset row
     let lbtc_row = Column::new()
@@ -1794,14 +1871,21 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 )
                 .push(Space::new().width(Length::Fill))
                 .push(
-                    button::primary(None, "Send")
-                        .width(Length::Fixed(90.0))
-                        .on_press(Message::Home(HomeMessage::SendAsset(
+                    landing_button(
+                        landing_control_id(cube_id, "Liquid", "send-lbtc"),
+                        "Send",
+                        None,
+                        Message::FocusAction,
+                        Some(Message::Home(HomeMessage::SendAsset(
                             crate::app::state::liquid::send::SendAsset::Lbtc,
                         ))),
+                        theme::button::primary,
+                    )
+                    .width(Length::Fixed(90.0)),
                 )
                 .push(orange_outline_btn(
-                    "Receive",
+                    "Liquid",
+                    "receive-lbtc",
                     Message::Home(HomeMessage::ReceiveAsset(
                         crate::app::state::liquid::send::SendAsset::Lbtc,
                     )),
@@ -1882,14 +1966,21 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 })
                 .push(Space::new().width(Length::Fill))
                 .push(
-                    button::primary(None, "Send")
-                        .width(Length::Fixed(90.0))
-                        .on_press(Message::Home(HomeMessage::SendAsset(
+                    landing_button(
+                        landing_control_id(cube_id, "Liquid", "send-usdt"),
+                        "Send",
+                        None,
+                        Message::FocusAction,
+                        Some(Message::Home(HomeMessage::SendAsset(
                             crate::app::state::liquid::send::SendAsset::Usdt,
                         ))),
+                        theme::button::primary,
+                    )
+                    .width(Length::Fixed(90.0)),
                 )
                 .push(orange_outline_btn(
-                    "Receive",
+                    "Liquid",
+                    "receive-usdt",
                     Message::Home(HomeMessage::ReceiveAsset(
                         crate::app::state::liquid::send::SendAsset::Usdt,
                     )),
@@ -1939,16 +2030,33 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // Combined Liquid headline (L-BTC + USDt-as-sats). Both component
     // balances must be loaded — a partial sum would be misleading.
     let liquid_card_header_loaded = liquid_balance_loaded && usdt_balance_loaded;
-    let liquid_card_header: Element<'a, Message> = if liquid_card_header_loaded {
-        wallet_header::<Message>(WalletHeaderProps::new(
-            total_amount,
-            total_fiat,
-            balance_masked,
-            bitcoin_unit,
-            HeaderVariant::Card,
-            display_mode,
-            Some(Message::FlipDisplayMode),
-        ))
+    let liquid_card_header: Element<'a, Message> = if liquid_card_header_loaded
+        && (liquid_balance_error
+            || usdt_balance_error
+            || (usdt_balance > 0 && usable_usd_quote.is_none()))
+    {
+        amount_cell::<Message>(
+            AmountCell::unavailable(
+                "Combined Liquid valuation is partial; asset amounts are below",
+            ),
+            AmountTier::Card,
+        )
+    } else if liquid_card_header_loaded {
+        wallet_header::<Message>(
+            WalletHeaderProps::new(
+                total_amount,
+                total_fiat,
+                balance_masked,
+                bitcoin_unit,
+                HeaderVariant::Card,
+                display_mode,
+                Some(Message::FlipDisplayMode),
+            )
+            .with_swap_focus(
+                landing_control_id(cube_id, "Liquid", "flip-balance"),
+                Message::FocusAction,
+            ),
+        )
         .into()
     } else {
         Column::new()
@@ -1970,32 +2078,22 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
 
     let liquid_card_content = Column::new()
         .spacing(12)
-        .push(
-            Row::new()
-                .spacing(8)
-                .align_y(Alignment::Center)
-                .push(droplet_fill_icon().size(16).style(theme::text::secondary))
-                .push(text("Liquid").size(14).style(theme::text::secondary)),
-        )
+        .push(landing_button(
+            landing_control_id(cube_id, "Liquid", "open"),
+            "Liquid",
+            Some(droplet_fill_icon().size(16).style(theme::text::secondary)),
+            Message::FocusAction,
+            Some(Message::Menu(Menu::Liquid(LiquidSubMenu::Overview))),
+            theme::button::transparent,
+        ))
         .push(liquid_card_header)
         .push(lbtc_row)
         .push(usdt_row);
 
     let liquid_card: Element<'a, Message> = Container::new(liquid_card_content)
         .padding(20)
-        .style(|t| iced::widget::container::Style {
-            border: iced::Border {
-                color: color::ORANGE,
-                width: 0.2,
-                radius: 25.0.into(),
-            },
-            background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-            ..Default::default()
-        })
+        .style(landing_card_style)
         .into();
-
-    let liquid_card =
-        mouse_area(liquid_card).on_press(Message::Menu(Menu::Liquid(LiquidSubMenu::Overview)));
 
     // --- Spark card (BTC row only, mirrors the Liquid layout) ---
     // Rendered above the Liquid card because Spark is the default
@@ -2004,7 +2102,16 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
     // signer hide it entirely, so the entire widget tree is built
     // lazily inside `then(..)` to avoid wasted work on every render.
     let spark_card = has_spark.then(|| {
-        let spark_fiat = fiat_converter.as_ref().map(|c| c.convert(spark_balance));
+        let spark_fiat = (!spark_valuation_partial)
+            .then(|| {
+                fiat_converter
+                    .as_ref()
+                    .map(|c| c.convert(spark_display_balance))
+            })
+            .flatten();
+        let spark_btc_fiat = fiat_converter
+            .as_ref()
+            .map(|c| c.convert(spark_btc_balance));
         let spark_btc_row = Row::new()
             .spacing(8)
             .align_y(Alignment::Center)
@@ -2018,7 +2125,13 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     .width(Length::Fixed(60.0)),
             )
             .push(if balance_masked {
-                Row::new().push(text("********").size(P1_SIZE))
+                Row::new().push(text(AmountCell::masked().primary).size(P1_SIZE))
+            } else if spark_balance_error && !spark_balance_loaded {
+                Row::new().push(
+                    text("Balance unavailable")
+                        .size(P1_SIZE)
+                        .style(theme::text::warning),
+                )
             } else if !spark_balance_loaded {
                 // Pre-Synced placeholder — see the comment on the
                 // Spark wallet_header below for why we don't render
@@ -2031,12 +2144,12 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     |content| text(content).size(P1_SIZE).style(theme::text::secondary),
                 ))
             } else {
-                amount_with_size_and_unit(&spark_balance, P1_SIZE, bitcoin_unit)
+                amount_with_size_and_unit(&spark_btc_balance, P1_SIZE, bitcoin_unit)
             })
             .push_maybe(
                 (!balance_masked && spark_balance_loaded)
                     .then(|| {
-                        spark_fiat
+                        spark_btc_fiat
                             .as_ref()
                             .map(|f| f.to_text().size(P2_SIZE).style(theme::text::secondary))
                     })
@@ -2044,12 +2157,19 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             )
             .push(Space::new().width(Length::Fill))
             .push(
-                button::primary(None, "Send")
-                    .width(Length::Fixed(90.0))
-                    .on_press(Message::Home(HomeMessage::SendSparkBtc)),
+                landing_button(
+                    landing_control_id(cube_id, "Spark", "send-btc"),
+                    "Send",
+                    None,
+                    Message::FocusAction,
+                    Some(Message::Home(HomeMessage::SendSparkBtc)),
+                    theme::button::primary,
+                )
+                .width(Length::Fixed(90.0)),
             )
             .push(orange_outline_btn(
-                "Receive",
+                "Spark",
+                "receive-btc",
                 Message::Home(HomeMessage::ReceiveSparkBtc),
             ));
 
@@ -2058,16 +2178,36 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         // since the SDK can return a stale persisted value before
         // incremental sync completes. Animated dots match the Total
         // Balance loading treatment for visual consistency.
-        let spark_header: Element<'a, Message> = if spark_balance_loaded {
-            wallet_header::<Message>(WalletHeaderProps::new(
-                spark_balance,
-                spark_fiat,
-                balance_masked,
-                bitcoin_unit,
-                HeaderVariant::Card,
-                display_mode,
-                Some(Message::FlipDisplayMode),
-            ))
+        let spark_header: Element<'a, Message> = if spark_balance_error && !spark_balance_loaded {
+            amount_cell::<Message>(
+                AmountCell::unavailable("Spark bridge has not returned a balance"),
+                AmountTier::Card,
+            )
+        } else if spark_balance_loaded && spark_valuation_partial {
+            amount_cell::<Message>(
+                if balance_masked {
+                    AmountCell::masked()
+                } else {
+                    AmountCell::unavailable("Combined BTC and USDB valuation needs a BTC/USD quote")
+                },
+                AmountTier::Card,
+            )
+        } else if spark_balance_loaded {
+            wallet_header::<Message>(
+                WalletHeaderProps::new(
+                    spark_display_balance,
+                    spark_fiat,
+                    balance_masked,
+                    bitcoin_unit,
+                    HeaderVariant::Card,
+                    display_mode,
+                    Some(Message::FlipDisplayMode),
+                )
+                .with_swap_focus(
+                    landing_control_id(cube_id, "Spark", "flip-balance"),
+                    Message::FocusAction,
+                ),
+            )
             .into()
         } else {
             Column::new()
@@ -2089,41 +2229,70 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
 
         let spark_card_content = Column::new()
             .spacing(12)
-            .push(
+            .push(landing_button(
+                landing_control_id(cube_id, "Spark", "open"),
+                "Spark",
+                Some(lightning_icon().size(16).style(theme::text::secondary)),
+                Message::FocusAction,
+                Some(Message::Menu(Menu::Spark(
+                    crate::app::menu::SparkSubMenu::Overview,
+                ))),
+                theme::button::transparent,
+            ))
+            .push(spark_header)
+            .push(spark_btc_row)
+            .push_maybe(spark_stable_balance.map(|holding| {
+                let text_value = format!(
+                    "{} USDB",
+                    crate::app::breez_spark::assets::format_token_display(
+                        holding.balance,
+                        holding.decimals,
+                    )
+                );
                 Row::new()
                     .spacing(8)
                     .align_y(Alignment::Center)
-                    .push(lightning_icon().size(16).style(theme::text::secondary))
-                    .push(text("Spark").size(14).style(theme::text::secondary)),
-            )
-            .push(spark_header)
-            .push(spark_btc_row)
+                    .push(
+                        text("USDB")
+                            .size(P1_SIZE)
+                            .style(theme::text::secondary)
+                            .width(Length::Fixed(60.0)),
+                    )
+                    .push(amount_cell::<Message>(
+                        if balance_masked {
+                            AmountCell::masked()
+                        } else if spark_balance_error && !spark_balance_loaded {
+                            AmountCell::unavailable("Spark bridge has not returned a balance")
+                        } else if !spark_balance_loaded {
+                            AmountCell::unknown("Waiting for Spark sync")
+                        } else {
+                            AmountCell::shown(text_value, None)
+                        },
+                        AmountTier::Row,
+                    ))
+            }))
+            .push_maybe((spark_balance_error && spark_balance_loaded).then(|| {
+                text("Last known Spark balance · refresh failed")
+                    .size(P2_SIZE)
+                    .style(theme::text::warning)
+            }))
             .push_maybe(pending_spark_incoming.and_then(|pt| {
                 (pt.stage != TransferStage::Completed)
-                    .then(|| pending_deposit_card(pt, bitcoin_unit))
+                    .then(|| pending_deposit_card(pt, bitcoin_unit, balance_masked))
             }));
 
         let spark_card: Element<'a, Message> = Container::new(spark_card_content)
             .padding(20)
-            .style(|t| iced::widget::container::Style {
-                border: iced::Border {
-                    color: color::ORANGE,
-                    width: 0.2,
-                    radius: 25.0.into(),
-                },
-                background: Some(iced::Background::Color(t.colors.cards.simple.background)),
-                ..Default::default()
-            })
+            .style(landing_card_style)
             .into();
 
-        mouse_area(spark_card).on_press(Message::Menu(Menu::Spark(
-            crate::app::menu::SparkSubMenu::Overview,
-        )))
+        spark_card
     });
 
     let vault_card_element: Element<'a, Message> = {
-        mouse_area(wallet_card(
+        wallet_card(
             WalletType::Vault,
+            cube_id,
             &display_vault_balance,
             fiat_converter,
             balance_masked,
@@ -2139,32 +2308,37 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             } else {
                 vault_loaded
             },
-        ))
-        .on_press(Message::Menu(Menu::Vault(VaultSubMenu::Overview)))
-        .into()
+        )
     };
 
     // Total Balance block — the fiat-first headline number above the
-    // Wallets section. While any wallet is still loading we render
-    // an animated-dots placeholder so the aggregate doesn't briefly
-    // read as a misleadingly low partial. Once loaded, a degraded
-    // indicator surfaces beside the label when USDt failed to fetch
-    // (its contribution to the SATS line is then excluded).
+    // Wallets section. Before the first authoritative result, a zero is not
+    // a wallet balance. A failed first read without any known component is
+    // unavailable; with known components, the sum is explicitly partial.
+    let any_known_balance = (has_spark && spark_balance_loaded)
+        || (has_liquid
+            && ((liquid_balance_loaded && !liquid_balance_error)
+                || (usdt_balance_loaded && !usdt_balance_error)))
+        || (has_vault && vault_loaded && (!has_imported_bitcoin || imported_balance.is_some()));
     let total_balance_label_row = Row::new()
         .spacing(0)
         .align_y(Alignment::Center)
         .push(h3("Total Balance").bold())
         .push(
-            Button::new(if balance_masked {
-                eye_slash_icon()
-            } else {
-                eye_outline_icon()
-            })
+            coincube_ui::widget::action::Action::new(
+                landing_control_id(cube_id, "Hub", "mask-total"),
+                if balance_masked {
+                    eye_slash_icon()
+                } else {
+                    eye_outline_icon()
+                },
+                Message::FocusAction,
+            )
             .style(theme::button::container)
             .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
         )
         .push_maybe(
-            ((usdt_balance_error || liquid_balance_error) && !total_balance_loading)
+            (total_partial && !total_balance_loading)
                 .then(|| warning_icon().size(12).style(theme::text::secondary)),
         );
 
@@ -2184,83 +2358,119 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 |content| text(content).size(P1_SIZE).style(theme::text::secondary),
             ))
             .into()
+    } else if !any_known_balance {
+        amount_cell::<Message>(
+            if balance_masked {
+                AmountCell::masked()
+            } else {
+                AmountCell::unavailable("No wallet balance has loaded successfully")
+            },
+            AmountTier::Total,
+        )
     } else {
-        wallet_header::<Message>(WalletHeaderProps::new(
-            global_total_amount,
-            global_total_fiat,
-            balance_masked,
-            bitcoin_unit,
-            HeaderVariant::Jumbo,
-            display_mode,
-            Some(Message::FlipDisplayMode),
-        ))
+        wallet_header::<Message>(
+            WalletHeaderProps::new(
+                global_total_amount,
+                global_total_fiat,
+                balance_masked,
+                bitcoin_unit,
+                HeaderVariant::Jumbo,
+                display_mode,
+                Some(Message::FlipDisplayMode),
+            )
+            .with_swap_focus(
+                landing_control_id(cube_id, "Hub", "total-flip-balance"),
+                Message::FocusAction,
+            ),
+        )
         .into()
     };
 
     let total_balance_block = Column::new()
         .spacing(6)
         .push(total_balance_label_row)
-        .push(total_balance_value);
-
-    Column::new()
-        .spacing(20)
-        .push(total_balance_block)
-        .push(
-            Row::new()
-                .spacing(0)
-                .width(Length::Fill)
-                .push(h3("Wallets").bold())
-                .push(
-                    Button::new(if balance_masked {
-                        eye_slash_icon()
-                    } else {
-                        eye_outline_icon()
-                    })
-                    .style(theme::button::container)
-                    .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
-                )
-                .align_y(Alignment::Center),
-        )
-        .push_maybe(spark_card)
-        .push_maybe(has_liquid.then_some(liquid_card))
-        .push(vault_card_element)
+        .push(total_balance_value)
         .push_maybe(
-            transfer_available(has_liquid, has_vault, has_spark).then(|| {
-                // Disable Transfer while any wallet's balance hasn't been
-                // corroborated yet. The amount-entry view and wallet picker
-                // both consume the raw balance values to render available-
-                // funds hints and to cap validation; opening Transfer
-                // pre-load would surface a misleading zero / stale cap for
-                // whichever wallet hasn't finished syncing.
-                Container::new(
-                    button::secondary(Some(arrow_down_up_icon()), "Transfer")
-                        .style(|t, _s| iced::widget::button::Style {
-                            text_color: color::ORANGE,
-                            border: iced::Border {
-                                color: color::ORANGE,
-                                width: 1.0,
-                                radius: 35.0.into(),
-                            },
-                            background: Some(iced::Background::Color(
-                                t.colors.cards.simple.background,
-                            )),
-                            ..Default::default()
-                        })
-                        .width(Length::Fixed(150.0))
-                        .on_press_maybe(
-                            (!total_balance_loading)
-                                .then_some(Message::Home(HomeMessage::NextStep)),
-                        ),
-                )
-                .width(Length::Fill)
-                .center_x(Length::Fill)
+            (total_partial && !total_balance_loading && !balance_masked).then(|| {
+                text("Partial total · one or more wallet amounts or USD valuations are unavailable")
+                    .size(P2_SIZE)
+                    .style(theme::text::warning)
             }),
-        )
-        .push_maybe(
-            transfer_available(has_liquid, has_vault, has_spark)
-                .then(|| Space::new().height(Length::Fixed(30.0))),
-        )
-        .into()
+        );
+
+    Container::new(
+        Column::new()
+            .spacing(20)
+            .push(total_balance_block)
+            .push(
+                Row::new()
+                    .spacing(0)
+                    .width(Length::Fill)
+                    .push(h3("Wallets").bold())
+                    .push(
+                        coincube_ui::widget::action::Action::new(
+                            landing_control_id(cube_id, "Hub", "mask-wallets"),
+                            if balance_masked {
+                                eye_slash_icon()
+                            } else {
+                                eye_outline_icon()
+                            },
+                            Message::FocusAction,
+                        )
+                        .style(theme::button::container)
+                        .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
+                    )
+                    .align_y(Alignment::Center),
+            )
+            .push_maybe(spark_card)
+            .push_maybe(has_liquid.then_some(liquid_card))
+            .push(vault_card_element)
+            .push_maybe(
+                transfer_available(has_liquid, has_vault, has_spark).then(|| {
+                    // Disable Transfer while any wallet's balance hasn't been
+                    // corroborated yet. The amount-entry view and wallet picker
+                    // both consume the raw balance values to render available-
+                    // funds hints and to cap validation; opening Transfer
+                    // pre-load would surface a misleading zero / stale cap for
+                    // whichever wallet hasn't finished syncing.
+                    Container::new(
+                        landing_button(
+                            landing_control_id(cube_id, "Hub", "transfer"),
+                            "Transfer",
+                            Some(arrow_down_up_icon()),
+                            Message::FocusAction,
+                            transfer_balance_ready(
+                                total_balance_loading,
+                                has_spark,
+                                spark_balance_loaded,
+                            )
+                            .then_some(Message::Home(HomeMessage::NextStep)),
+                            |_t, _s| iced::widget::button::Style {
+                                text_color: color::ORANGE,
+                                border: iced::Border {
+                                    color: color::ORANGE,
+                                    width: 1.0,
+                                    radius: 35.0.into(),
+                                },
+                                background: Some(iced::Background::Color(
+                                    _t.colors.cards.simple.background,
+                                )),
+                                ..Default::default()
+                            },
+                        )
+                        .width(Length::Fixed(150.0)),
+                    )
+                    .width(Length::Fill)
+                    .center_x(Length::Fill)
+                }),
+            )
+            .push_maybe(
+                transfer_available(has_liquid, has_vault, has_spark)
+                    .then(|| Space::new().height(Length::Fixed(30.0))),
+            ),
+    )
+    .padding([0, 16])
+    .into()
 }
 
 /// Gate for the page-level Transfer button: a transfer needs two wallets to
@@ -2270,6 +2480,16 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
 /// present on every cube and so only a *second* wallet was in question. The
 /// Liquid sunset gate breaks that assumption — a new cube can now have Spark
 /// alone, which has nothing to transfer with — so the count is now explicit.
+/// Aggregate failure may end loading for display while an installed Spark
+/// wallet still has no authoritative funds for the transfer picker or cap.
+pub(crate) fn transfer_balance_ready(
+    total_balance_loading: bool,
+    has_spark: bool,
+    spark_balance_loaded: bool,
+) -> bool {
+    !total_balance_loading && (!has_spark || spark_balance_loaded)
+}
+
 fn transfer_available(has_liquid: bool, has_vault: bool, has_spark: bool) -> bool {
     [has_liquid, has_vault, has_spark]
         .iter()
@@ -2353,8 +2573,12 @@ mod tests {
             wallet_picker: Option<PickerSide>,
         ) -> GlobalViewConfig<'_> {
             GlobalViewConfig {
+                cube_id: "test-cube",
                 liquid_balance: Amount::from_sat(125_000),
                 spark_balance: Amount::from_sat(250_000),
+                spark_btc_balance: Amount::from_sat(250_000),
+                spark_stable_balance: None,
+                spark_balance_error: false,
                 usdt_balance: 100_000_000,
                 usdt_balance_error: false,
                 pending_liquid_send_sats: 1_000,
@@ -2423,6 +2647,425 @@ mod tests {
             VaultToSpark,
             SparkToVault,
         ]
+    }
+
+    #[test]
+    fn hub_mask_redacts_pending_deposit_amount() {
+        let pending = PendingTransfer {
+            amount: Amount::from_sat(31_000),
+            stage: TransferStage::PendingDeposit,
+        };
+        let visible = pending_deposit_amount(pending, BitcoinDisplayUnit::Sats, false);
+        let hidden = pending_deposit_amount(pending, BitcoinDisplayUnit::Sats, true);
+        assert!(visible.contains("31"));
+        assert!(visible.contains("SATS"));
+        assert_eq!(hidden, AmountCell::masked().primary);
+        assert!(!hidden.contains("31"));
+    }
+
+    #[test]
+    fn r06a_hub_headless_content_matrix_and_presync_usdb_gate() {
+        use crate::app::view::shared::landing::capture;
+        let fixture = ViewFixture::new();
+        let usdb = coincube_spark_protocol::StableBalanceSnapshot {
+            balance: 93_420_000_000,
+            decimals: 6,
+            ticker: "USDB".into(),
+        };
+        let raw_usdb = format!(
+            "{} USDB",
+            crate::app::breez_spark::assets::format_token_display(usdb.balance, usdb.decimals)
+        );
+        for (appearance, theme) in [
+            ("dark", theme::Theme::dark()),
+            ("light", theme::Theme::light()),
+        ] {
+            for outer in [(1024, 768), (1440, 900)] {
+                let normal = capture::inspect(
+                    "hub-normal",
+                    global_home_view(fixture.config(0, None, None)),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(normal.contains("Total Balance"));
+                assert!(normal.contains("Wallets"));
+                for (wallet, control) in [
+                    ("Hub", "mask-total"),
+                    ("Hub", "mask-wallets"),
+                    ("Spark", "open"),
+                    ("Spark", "send-btc"),
+                    ("Spark", "receive-btc"),
+                    ("Liquid", "open"),
+                    ("Liquid", "send-lbtc"),
+                    ("Vault", "open"),
+                    ("Vault", "send-btc"),
+                ] {
+                    assert!(normal.has_focus(landing_control_id("test-cube", wallet, control)));
+                }
+
+                let mut presync = fixture.config(0, None, None);
+                presync.spark_stable_balance = Some(&usdb);
+                presync.spark_balance_loaded = false;
+                presync.total_balance_loading = true;
+                let before = capture::inspect(
+                    "hub-presync-usdb",
+                    global_home_view(presync),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!before.contains(&raw_usdb));
+                assert!(before.contains("Waiting for Spark sync"));
+
+                let mut first_error = fixture.config(0, None, None);
+                first_error.spark_stable_balance = Some(&usdb);
+                first_error.spark_balance_loaded = false;
+                first_error.spark_balance_error = true;
+                let failed = capture::inspect(
+                    "hub-presync-error",
+                    global_home_view(first_error),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!failed.contains(&raw_usdb));
+                assert!(failed.contains("Balance unavailable"));
+
+                let mut trusted = fixture.config(0, None, None);
+                trusted.spark_stable_balance = Some(&usdb);
+                trusted.spark_balance_loaded = true;
+                trusted.btc_usd_price = None;
+                let shown = capture::inspect(
+                    "hub-usdb-missing-quote",
+                    global_home_view(trusted),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(shown.contains(&raw_usdb));
+                assert!(shown.contains("Partial total"));
+
+                let mut masked = fixture.config(0, None, None);
+                masked.spark_stable_balance = Some(&usdb);
+                masked.balance_masked = true;
+                let hidden = capture::inspect(
+                    "hub-masked",
+                    global_home_view(masked),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!hidden.contains(&raw_usdb));
+                assert!(!hidden.contains("31,000"));
+
+                let mut absent_vault = fixture.config(0, None, None);
+                absent_vault.has_vault = false;
+                absent_vault.has_imported_bitcoin = true;
+                absent_vault.imported_installed = false;
+                let import = capture::inspect(
+                    "hub-import-pending",
+                    global_home_view(absent_vault),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(
+                    import.contains("Wallet import pending") || import.contains("Create Vault")
+                );
+
+                let mut known_zero = fixture.config(0, None, None);
+                known_zero.liquid_balance = Amount::ZERO;
+                known_zero.spark_btc_balance = Amount::ZERO;
+                known_zero.spark_balance = Amount::ZERO;
+                known_zero.usdt_balance = 0;
+                known_zero.vault_balance = Amount::ZERO;
+                let zero = capture::inspect(
+                    "hub-known-zero",
+                    global_home_view(known_zero),
+                    outer,
+                    appearance,
+                    theme,
+                );
+                assert!(!zero.contains("No wallet balance has loaded successfully"));
+            }
+        }
+    }
+
+    #[test]
+    fn r06a_hub_wallet_header_pointer_and_enter_route_once_to_selected_wallet() {
+        use crate::app::view::shared::landing::capture;
+        let fixture = ViewFixture::new();
+        for pointer in [false, true] {
+            for (wallet, menu) in [
+                (
+                    "Spark",
+                    Menu::Spark(crate::app::menu::SparkSubMenu::Overview),
+                ),
+                ("Liquid", Menu::Liquid(LiquidSubMenu::Overview)),
+            ] {
+                let messages = capture::activate(
+                    global_home_view(fixture.config(0, None, None)),
+                    landing_control_id("test-cube", wallet, "open"),
+                    (1024, 768),
+                    pointer,
+                );
+                let routes = messages
+                    .iter()
+                    .filter(|message| matches!(message, Message::Menu(_)))
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    routes.len(),
+                    1,
+                    "{wallet} pointer={pointer}: {messages:?}",
+                    wallet = wallet,
+                    pointer = pointer,
+                    messages = messages
+                );
+                assert!(
+                    matches!(routes[0], Message::Menu(actual) if actual == &menu),
+                    "{wallet} pointer={pointer}: {messages:?}",
+                    wallet = wallet,
+                    pointer = pointer,
+                    messages = messages
+                );
+            }
+        }
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    enum TransferTrigger {
+        Pointer,
+        Enter,
+        Space,
+    }
+
+    /// Send real pointer/key events to the production Hub tree. Disabled
+    /// Actions do not expose focus IDs, so pointer targeting uses the rendered
+    /// Transfer text bounds rather than assuming a focusable Action exists.
+    fn activate_transfer(
+        content: Element<'_, Message>,
+        text_bounds: iced::Rectangle,
+        trigger: TransferTrigger,
+    ) -> Vec<Message> {
+        use coincube_ui::font;
+        use iced::advanced::{
+            layout,
+            renderer::Headless,
+            widget::{operation, operation::focusable, Operation, Tree},
+            Layout,
+        };
+        use iced::{keyboard, mouse, Event, Rectangle, Size};
+
+        for bytes in font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        // The Hub's Transfer action can sit below the 900px viewport. Expose
+        // the same production tree in a tall headless viewport for activation;
+        // the separate capture still checks the real 1440×900 geometry.
+        let size = Size::new(953.0, 2400.0);
+        assert!(
+            text_bounds.y >= 0.0 && text_bounds.y + text_bounds.height <= size.height,
+            "Transfer label at {:?} is outside activation viewport",
+            text_bounds
+        );
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .unwrap();
+        let mut element: Element<'_, Message> = iced::widget::scrollable(content)
+            .width(Length::Fill)
+            .height(Length::Fill)
+            .into();
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        if !matches!(trigger, TransferTrigger::Pointer) {
+            let id = landing_control_id("test-cube", "Hub", "transfer");
+            let mut operation: Box<dyn Operation<()>> = Box::new(focusable::focus(id));
+            loop {
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut operation::black_box(operation.as_mut()),
+                );
+                match operation.finish() {
+                    operation::Outcome::None | operation::Outcome::Some(()) => break,
+                    operation::Outcome::Chain(next) => operation = next,
+                }
+            }
+        }
+        let cursor = if matches!(trigger, TransferTrigger::Pointer) {
+            mouse::Cursor::Available(text_bounds.center())
+        } else {
+            mouse::Cursor::Unavailable
+        };
+        let events = match trigger {
+            TransferTrigger::Pointer => vec![
+                Event::Mouse(mouse::Event::ButtonPressed(mouse::Button::Left)),
+                Event::Mouse(mouse::Event::ButtonReleased(mouse::Button::Left)),
+            ],
+            TransferTrigger::Enter | TransferTrigger::Space => {
+                let named = if matches!(trigger, TransferTrigger::Enter) {
+                    keyboard::key::Named::Enter
+                } else {
+                    keyboard::key::Named::Space
+                };
+                let key = keyboard::Key::Named(named);
+                let physical_key =
+                    keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+                vec![
+                    Event::Keyboard(keyboard::Event::KeyPressed {
+                        key: key.clone(),
+                        modified_key: key.clone(),
+                        physical_key,
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                        text: None,
+                        repeat: false,
+                    }),
+                    Event::Keyboard(keyboard::Event::KeyReleased {
+                        key: key.clone(),
+                        modified_key: key,
+                        physical_key,
+                        location: keyboard::Location::Standard,
+                        modifiers: keyboard::Modifiers::empty(),
+                    }),
+                ]
+            }
+        };
+        let mut messages = Vec::new();
+        for event in events {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                cursor,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &Rectangle::with_size(size),
+            );
+        }
+        messages
+    }
+
+    #[test]
+    fn r06a_transfer_action_requires_authoritative_spark_after_partial_total_settles() {
+        use crate::app::{state::GlobalHome, view::shared::landing::capture};
+
+        let fixture = ViewFixture::new();
+        let snapshots = GlobalHome::r06a_transfer_snapshots();
+        for snapshot in &snapshots {
+            let mut config = fixture.config(0, None, None);
+            // The adapter itself is inert (no bridge). Its real update results
+            // feed this installed-Spark pure presenter without fabricating a
+            // backend or claiming that State::view had a live Spark route.
+            config.has_spark = snapshot.has_spark;
+            config.has_liquid = !snapshot.has_spark;
+            config.has_vault = true;
+            config.spark_balance = snapshot.spark_balance;
+            config.spark_btc_balance = snapshot.spark_balance;
+            config.spark_balance_loaded = snapshot.spark_balance_loaded;
+            config.spark_balance_error = snapshot.spark_balance_error;
+            config.total_balance_loading = snapshot.total_balance_loading;
+            let inspection = capture::inspect(
+                &format!("hub-transfer-{}", snapshot.name),
+                global_home_view(config),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            let text_bounds = inspection
+                .text
+                .iter()
+                .find_map(|(value, bounds)| (value == "Transfer").then_some(*bounds))
+                .expect("rendered Hub Transfer label");
+            let expected = matches!(
+                snapshot.name,
+                "trusted-postsync" | "trusted-refresh-error" | "no-spark"
+            );
+            assert_eq!(
+                inspection.has_focus(landing_control_id("test-cube", "Hub", "transfer")),
+                expected,
+                "{} focus eligibility",
+                snapshot.name
+            );
+            for trigger in [
+                TransferTrigger::Pointer,
+                TransferTrigger::Enter,
+                TransferTrigger::Space,
+            ] {
+                let mut config = fixture.config(0, None, None);
+                config.has_spark = snapshot.has_spark;
+                config.has_liquid = !snapshot.has_spark;
+                config.has_vault = true;
+                config.spark_balance = snapshot.spark_balance;
+                config.spark_btc_balance = snapshot.spark_balance;
+                config.spark_balance_loaded = snapshot.spark_balance_loaded;
+                config.spark_balance_error = snapshot.spark_balance_error;
+                config.total_balance_loading = snapshot.total_balance_loading;
+                let messages = activate_transfer(global_home_view(config), text_bounds, trigger);
+                let next_steps = messages
+                    .iter()
+                    .filter(|message| matches!(message, Message::Home(HomeMessage::NextStep)))
+                    .count();
+                assert_eq!(
+                    next_steps,
+                    usize::from(expected),
+                    "{} {trigger:?}: {messages:?}",
+                    snapshot.name
+                );
+            }
+        }
+
+        let trusted = snapshots
+            .iter()
+            .find(|snapshot| snapshot.name == "trusted-postsync")
+            .unwrap();
+        assert_eq!(trusted.spark_balance, Amount::from_sat(12_000));
+        let mut amount = fixture.config(1, Some(TransferDirection::SparkToVault), None);
+        amount.spark_balance = trusted.spark_balance;
+        let entered = capture::inspect(
+            "hub-transfer-trusted-amount",
+            global_home_view(amount),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(entered.contains("12,000"));
+        // Modal::operate only visits its base, so inspect the actual popup
+        // presenter rather than mistaking the amount summary for picker text.
+        let selected = capture::inspect(
+            "hub-transfer-trusted-picker",
+            wallet_selector_popup(
+                Some(WalletKind::Spark),
+                Some(WalletKind::Vault),
+                PickerSide::From,
+                true,
+                true,
+                false,
+                Amount::from_sat(0),
+                trusted.spark_balance,
+                Amount::from_sat(375_000),
+                BitcoinDisplayUnit::Sats,
+            ),
+            (1440, 900),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(selected.contains("FROM"));
+        assert!(selected.contains("Spark"));
+        assert!(selected.contains("12,000"));
     }
 
     /// Every directed pair of distinct wallets must map to exactly one
