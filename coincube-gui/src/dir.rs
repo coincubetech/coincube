@@ -21,8 +21,8 @@ fn unsafe_bootstrap(reason: &str) -> io::Error {
     io::Error::new(io::ErrorKind::InvalidData, reason)
 }
 
-/// The neutral parent lock is never unlinked. Validate its endpoint before
-/// opening and after opening so a stale or redirected lock cannot grant proof.
+/// Bootstrap locks are never unlinked. Validate the endpoint before and after
+/// opening so a stale or redirected lock cannot grant proof.
 fn bootstrap_lock(path: &Path) -> io::Result<fs::File> {
     let mut options = fs::OpenOptions::new();
     options.read(true).write(true).create_new(true);
@@ -109,7 +109,7 @@ impl CoincubeDirectory {
         use crate::app::settings::global::GlobalSettings;
 
         // Existing roots may be passed as `.` or `..`, neither of which has a
-        // `file_name`. Resolve them before deriving the neutral parent lock.
+        // `file_name`. Resolve them before deriving the lock locations.
         // Keep absent roots lexical so only the exact final-root mkdir below
         // can grant the first-install creator proof.
         let root_path = match fs::symlink_metadata(self.path()) {
@@ -130,7 +130,28 @@ impl CoincubeDirectory {
         create_directory(parent).map_err(|error| io::Error::other(error.to_string()))?;
         let parent = fs::canonicalize(parent)?;
         let root = parent.join(name);
-        let lock = bootstrap_lock(&parent.join(".coincube-bootstrap.lock"))?;
+        let parent_lock = parent.join(".coincube-bootstrap.lock");
+        // A new root needs the parent lock before its final mkdir. Once that
+        // lock exists, every startup for this root joins it, so no existing-
+        // root startup can initialize hidden between mkdir and the creator's
+        // settings transaction. An older install may have no parent lock and
+        // its parent may be read-only; lock inside its writable root instead.
+        let lock = match fs::symlink_metadata(&parent_lock) {
+            Ok(_) => bootstrap_lock(&parent_lock)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                match fs::symlink_metadata(&root) {
+                    Ok(_) => {
+                        valid_root(&root)?;
+                        bootstrap_lock(&root.join(".coincube-bootstrap.lock"))?
+                    }
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                        bootstrap_lock(&parent_lock)?
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            Err(error) => return Err(error),
+        };
         FileExt::lock_exclusive(&lock)?;
         let result = match fs::symlink_metadata(&root) {
             Ok(_) => {
@@ -404,6 +425,23 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn existing_writable_root_initializes_under_read_only_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let parent = TestParent::new();
+        let root = parent.root("existing");
+        fs::create_dir(root.path()).unwrap();
+        fs::set_permissions(&parent.0, fs::Permissions::from_mode(0o500)).unwrap();
+        let result = root.bootstrap_privacy();
+        fs::set_permissions(&parent.0, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert_eq!(result.unwrap().unwrap().balances_hidden(), Some(true));
+        assert!(root.path().join(".coincube-bootstrap.lock").is_file());
+        assert!(!parent.0.join(".coincube-bootstrap.lock").exists());
+    }
+
     #[test]
     fn existing_root_dot_and_dotdot_aliases_start_hidden() {
         let parent = TestParent::new();
@@ -421,7 +459,7 @@ mod tests {
                 .unwrap();
             assert_eq!(receipt.balances_hidden(), Some(true));
         }
-        assert!(parent.0.join(".coincube-bootstrap.lock").is_file());
+        assert!(existing.path().join(".coincube-bootstrap.lock").is_file());
     }
 
     #[test]
@@ -482,7 +520,7 @@ mod tests {
         let parent = TestParent::new();
         let root = parent.root("existing");
         fs::create_dir(root.path()).unwrap();
-        let lock = bootstrap_lock(&parent.0.join(".coincube-bootstrap.lock")).unwrap();
+        let lock = bootstrap_lock(&root.path().join(".coincube-bootstrap.lock")).unwrap();
         FileExt::lock_exclusive(&lock).unwrap();
         let (sender, receiver) = mpsc::channel();
         let worker_root = root.clone();

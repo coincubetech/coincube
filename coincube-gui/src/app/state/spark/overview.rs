@@ -13,7 +13,10 @@ use std::sync::Arc;
 
 use coincube_core::miniscript::bitcoin::Amount;
 use coincube_spark_protocol::PaymentSummary;
-use coincube_ui::widget::Element;
+use coincube_ui::{
+    theme,
+    widget::{ColumnExt, Element},
+};
 use iced::Task;
 
 use crate::app::cache::Cache;
@@ -65,6 +68,20 @@ impl SparkOverview {
     }
 }
 
+/// Resolve a preview action against the current snapshot, not its prior row
+/// position. A missing, empty, or duplicate bridge ID cannot open a payment.
+fn find_unique_recent<'a>(
+    recent: &'a [SparkRecentTransaction],
+    id: &str,
+) -> Option<&'a SparkRecentTransaction> {
+    if id.trim().is_empty() {
+        return None;
+    }
+    let mut matches = recent.iter().filter(|payment| payment.id == id);
+    let selected = matches.next()?;
+    matches.next().is_none().then_some(selected)
+}
+
 impl State for SparkOverview {
     fn view<'a>(
         &'a self,
@@ -89,10 +106,12 @@ impl State for SparkOverview {
         let overview = SparkOverviewView {
             status,
             recent_transactions: &self.recent_transactions,
+            cube_id: &cache.cube_id,
+            last_error: self.error.as_deref(),
             fiat_converter,
             bitcoin_unit: cache.bitcoin_unit,
             show_direction_badges: cache.show_direction_badges,
-            stable_balance_active: self.stable_balance_active.unwrap_or(false),
+            stable_balance_active: self.stable_balance_active,
             btc_usd_price: cache.btc_usd_price,
             display_mode: cache.display_mode,
             mask_amounts: cache.balance_amounts_masked(),
@@ -100,7 +119,33 @@ impl State for SparkOverview {
         .render()
         .map(view::Message::SparkOverview);
 
-        crate::app::view::dashboard(menu, cache, overview)
+        let held_while_off = self.stable_balance_active == Some(false)
+            && self.snapshot.as_ref().is_some_and(|snapshot| {
+                snapshot
+                    .stable_balance
+                    .as_ref()
+                    .is_some_and(|balance| balance.balance > 0)
+            });
+        let content = iced::widget::Column::new()
+            .push(overview)
+            .push_maybe(held_while_off.then(|| {
+                view::shared::landing::landing_button(
+                    view::shared::landing::landing_control_id(
+                        &cache.cube_id,
+                        "Spark",
+                        "review-stable-balance",
+                    ),
+                    "Review Stable Balance",
+                    None,
+                    view::Message::FocusAction,
+                    Some(view::Message::Menu(Menu::Spark(SparkSubMenu::Settings(
+                        Some(crate::app::menu::SparkSettingsOption::General),
+                    )))),
+                    theme::button::secondary,
+                )
+            }));
+
+        crate::app::view::dashboard(menu, cache, content)
     }
 
     fn reload(
@@ -112,7 +157,8 @@ impl State for SparkOverview {
             return Task::none();
         };
         self.loading = true;
-        self.error = None;
+        // Keep the last refresh error alongside a retained snapshot until a
+        // new success supersedes it; retrying alone is not fresh data.
         let data_task = Task::perform(
             {
                 let backend = backend.clone();
@@ -197,8 +243,10 @@ impl State for SparkOverview {
                 view::SparkOverviewMessage::History => {
                     return redirect(Menu::Spark(SparkSubMenu::Transactions(None)));
                 }
-                view::SparkOverviewMessage::SelectTransaction(idx) => {
-                    if let Some(payment) = self.recent_transactions.get(idx).cloned() {
+                view::SparkOverviewMessage::SelectTransaction(id) => {
+                    if let Some(payment) =
+                        find_unique_recent(&self.recent_transactions, &id).cloned()
+                    {
                         return Task::batch(vec![
                             redirect(Menu::Spark(SparkSubMenu::Transactions(None))),
                             Task::done(Message::View(view::Message::SparkTransactions(
@@ -206,6 +254,9 @@ impl State for SparkOverview {
                             ))),
                         ]);
                     }
+                }
+                view::SparkOverviewMessage::FocusAction(id) => {
+                    return iced::widget::operation::focus(id);
                 }
                 view::SparkOverviewMessage::FlipDisplayMode => {
                     return Task::done(Message::View(view::Message::FlipDisplayMode));
@@ -383,6 +434,30 @@ mod tests {
     }
 
     #[test]
+    fn recent_identity_survives_reorder_and_fails_closed_on_removal_or_duplicate() {
+        let first =
+            payment_summary_to_recent_tx(&payment("Receive", "Complete", "spark", 11_000), None);
+        let mut second_summary = payment("Send", "Pending", "spark", 22_000);
+        second_summary.id = "payment-2".to_string();
+        let second = payment_summary_to_recent_tx(&second_summary, None);
+        let mut recent = vec![first.clone(), second];
+        assert_eq!(
+            find_unique_recent(&recent, "payment-1").map(|p| p.amount.to_sat()),
+            Some(11_000)
+        );
+        recent.swap(0, 1);
+        assert_eq!(
+            find_unique_recent(&recent, "payment-1").map(|p| p.amount.to_sat()),
+            Some(11_000)
+        );
+        recent.remove(1);
+        assert!(find_unique_recent(&recent, "payment-1").is_none());
+        recent.extend([first.clone(), first]);
+        assert!(find_unique_recent(&recent, "payment-1").is_none());
+        assert!(find_unique_recent(&recent, " ").is_none());
+    }
+
+    #[test]
     fn lightning_receive_maps_direction_status_amount_and_default_description() {
         let row = payment_summary_to_recent_tx(
             &payment("receive", "completed", "lightning", 42_000),
@@ -521,5 +596,35 @@ mod tests {
         );
 
         assert_eq!(panel.stable_balance_active, Some(true));
+    }
+
+    #[test]
+    fn refresh_error_retains_spark_snapshot_and_recent_activity() {
+        let mut panel = SparkOverview::new(None);
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::DataLoaded {
+                    balance: Amount::from_sat(42_000),
+                    stable_balance: None,
+                    recent_payments: vec![payment("Receive", "Complete", "spark", 1_000)],
+                },
+            )),
+        );
+        let _ = panel.update(
+            None,
+            &Cache::default(),
+            Message::View(view::Message::SparkOverview(
+                view::SparkOverviewMessage::Error("bridge offline".to_string()),
+            )),
+        );
+        assert_eq!(panel.error.as_deref(), Some("bridge offline"));
+        assert_eq!(
+            panel.snapshot.as_ref().map(|s| s.balance_sats),
+            Some(42_000)
+        );
+        assert_eq!(panel.recent_transactions.len(), 1);
+        assert_eq!(panel.recent_transactions[0].id, "payment-1");
     }
 }

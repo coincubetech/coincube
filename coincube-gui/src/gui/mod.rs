@@ -36,6 +36,21 @@ use crate::{
     },
 };
 
+/// A Show receipt may have gone stale while the GUI was being constructed (or
+/// between later refreshes). Recheck the established choice at render time;
+/// any read failure is fail-closed until the ordered refresh accepts a receipt.
+fn privacy_render_needs_cover(
+    preferences: &PreferencesOwner,
+    settings_path: &std::path::Path,
+) -> bool {
+    use crate::app::state::preferences::BalancePrivacy;
+    preferences.privacy() == BalancePrivacy::Shown
+        && !matches!(
+            GlobalSettings::try_current_balances_hidden(settings_path),
+            Ok(Some(false))
+        )
+}
+
 use iced::window::Id;
 
 /// Both automatic polling and explicit signing actions need the current
@@ -93,6 +108,68 @@ fn balance_privacy_eye_change(
 mod balance_privacy_eye_origin_tests {
     use super::*;
     use crate::app::{self, settings::preferences::PreferenceChange, view};
+
+    #[test]
+    fn first_render_rechecks_a_show_receipt_after_another_writer_hides() {
+        let root =
+            std::env::temp_dir().join(format!("privacy-first-render-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(crate::app::settings::global::DEFAULT_FILE_NAME);
+        let shown =
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false)).unwrap();
+        let owner = PreferencesOwner::new(path.clone(), &Ok(shown));
+        let shown_bytes = std::fs::read(&path).unwrap();
+        assert!(!privacy_render_needs_cover(&owner, &path));
+        assert_eq!(std::fs::read(&path).unwrap(), shown_bytes);
+
+        let other_path = path.clone();
+        std::thread::spawn(move || {
+            GlobalSettings::save_preference(&other_path, PreferenceChange::HideBalances(true))
+                .unwrap();
+        })
+        .join()
+        .unwrap();
+        assert_eq!(
+            owner.privacy(),
+            crate::app::state::preferences::BalancePrivacy::Shown
+        );
+        assert!(privacy_render_needs_cover(&owner, &path));
+
+        std::fs::write(&path, br#"{"hide_balances":false}"#).unwrap();
+        assert!(privacy_render_needs_cover(&owner, &path));
+
+        std::fs::write(&path, b"{malformed").unwrap();
+        assert!(privacy_render_needs_cover(&owner, &path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn render_covers_amounts_without_waiting_for_a_settings_writer() {
+        use fs4::fs_std::FileExt;
+        use std::sync::mpsc;
+
+        let root =
+            std::env::temp_dir().join(format!("privacy-render-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(crate::app::settings::global::DEFAULT_FILE_NAME);
+        let shown =
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false)).unwrap();
+        let owner = PreferencesOwner::new(path.clone(), &Ok(shown));
+        let lock = std::fs::File::open(path.with_extension("lock")).unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let render = std::thread::spawn(move || {
+            sender
+                .send(privacy_render_needs_cover(&owner, &path))
+                .unwrap();
+        });
+        let covered_while_locked = receiver.recv_timeout(Duration::from_secs(2));
+        FileExt::unlock(&lock).unwrap();
+        render.join().unwrap();
+        assert!(covered_while_locked.unwrap());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn queued_eye_event_cannot_change_device_privacy_after_app_closes() {
@@ -986,9 +1063,6 @@ impl GUI {
                 for (_, pane) in self.panes.iter_mut() {
                     pane.stop();
                 }
-                // Managed Tor is process-global; a Cube lock cannot own its
-                // teardown while another managed-node consumer may remain.
-                crate::node::tor::stop_managed_tor();
                 if let Some(window_config) = &self.window_config {
                     let path = GlobalSettings::path(&self.config.coincube_directory);
                     if let Err(e) = GlobalSettings::update_window_config(&path, window_config) {
@@ -1406,7 +1480,6 @@ impl GUI {
                     }
                 }
                 if !self.panes.iter().any(|(_, p)| !p.tabs.is_empty()) {
-                    crate::node::tor::stop_managed_tor();
                     return iced::window::latest().and_then(iced::window::close);
                 }
                 Task::none()
@@ -2236,6 +2309,15 @@ impl GUI {
     }
 
     pub fn view(&self) -> Element<Message> {
+        if privacy_render_needs_cover(
+            &self.preferences,
+            &GlobalSettings::path(&self.config.coincube_directory),
+        ) {
+            return iced::widget::container(iced::widget::text("Updating balance privacy…"))
+                .width(iced::Length::Fill)
+                .height(iced::Length::Fill)
+                .into();
+        }
         let (&id, pane) = self
             .panes
             .iter()
@@ -4196,6 +4278,9 @@ mod lock_cube_dispatch_tests {
             pane_id,
             pane::Message::tab(999, tab::Message::ClaimResourcesLoaded(Box::new(resources))),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists(), "the detached node lock was released");
         let surviving = &gui.panes.get(pane_id).unwrap().tabs[0];
         assert!(matches!(&surviving.state, tab::State::App(app)
@@ -4231,6 +4316,9 @@ mod lock_cube_dispatch_tests {
                 )))),
             ),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists());
 
         let (closed_home, startup) = home::Home::new_for_chain(root.clone(), None);
@@ -4279,6 +4367,9 @@ mod lock_cube_dispatch_tests {
             closed_pane,
             pane::Message::tab(1, tab::Message::ClaimResourcesLoaded(Box::new(stale))),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(
             !lock_dir.exists(),
             "missing-pane delivery released its node"
@@ -4323,6 +4414,9 @@ mod lock_cube_dispatch_tests {
                 ),
             ),
         )));
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(
             !lock_dir.exists(),
             "stale-generation delivery released its node"
