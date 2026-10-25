@@ -2024,7 +2024,7 @@ pub(crate) async fn ensure_tor_and_start_managed(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn ensure_tor_and_start_managed_for_owner(
+pub(crate) async fn ensure_tor_and_start_managed_for_owner(
     coincube_datadir: CoincubeDirectory,
     network: Network,
     flavor: NodeFlavor,
@@ -2032,6 +2032,30 @@ async fn ensure_tor_and_start_managed_for_owner(
     force_restart: bool,
     resources: Option<NodeResources>,
     initiating_owner: Option<PathBuf>,
+) -> Result<(BitcoindConfig, Bitcoind), String> {
+    ensure_tor_and_start_managed_with_lifecycle(
+        coincube_datadir,
+        network,
+        flavor,
+        install,
+        force_restart,
+        resources,
+        initiating_owner,
+        None,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn ensure_tor_and_start_managed_with_lifecycle(
+    coincube_datadir: CoincubeDirectory,
+    network: Network,
+    flavor: NodeFlavor,
+    install: Option<ManagedNodeInstall>,
+    force_restart: bool,
+    resources: Option<NodeResources>,
+    initiating_owner: Option<PathBuf>,
+    lifecycle: Option<crate::node::bitcoind::ManagedNodeLifecycle>,
 ) -> Result<(BitcoindConfig, Bitcoind), String> {
     // Tor is provisioned for the Bitcoin node; not for a provider that cannot
     // serve this chain.
@@ -2078,19 +2102,27 @@ async fn ensure_tor_and_start_managed_for_owner(
     };
     // Hold the lifecycle lock across Tor installation and the subsequent
     // config/restart. Otherwise another Cube could attach after the check.
-    let root = coincube_datadir.clone();
-    let preflight_owner = initiating_owner.clone();
-    let lifecycle = tokio::task::spawn_blocking(move || {
-        let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
-            &root,
-            crate::node::bitcoind::NodeChainFamily::Bitcoin,
-        )
-        .map_err(|e| e.to_string())?;
-        lifecycle.ensure_exclusive_settings_owner(preflight_owner.as_deref())?;
-        Ok::<_, String>(lifecycle)
-    })
-    .await
-    .map_err(|e| e.to_string())??;
+    let lifecycle = match lifecycle {
+        Some(lifecycle) => {
+            lifecycle.ensure_exclusive_settings_owner(initiating_owner.as_deref())?;
+            lifecycle
+        }
+        None => {
+            let root = coincube_datadir.clone();
+            let preflight_owner = initiating_owner.clone();
+            tokio::task::spawn_blocking(move || {
+                let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                    &root,
+                    crate::node::bitcoind::NodeChainFamily::Bitcoin,
+                )
+                .map_err(|e| e.to_string())?;
+                lifecycle.ensure_exclusive_settings_owner(preflight_owner.as_deref())?;
+                Ok::<_, String>(lifecycle)
+            })
+            .await
+            .map_err(|e| e.to_string())??
+        }
+    };
     crate::node::tor::ensure_tor_installed_if_wanted(&coincube_datadir).await;
     let started = tokio::task::spawn_blocking(move || {
         configure_and_start_internal_bitcoind_locked(
@@ -3696,6 +3728,9 @@ mod tests {
         assert!(other.owner_lock_path().unwrap().exists());
 
         drop(other);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         // The same Cube's sole owner passes the ownership gate. Verification
         // then rejects the deliberately incomplete archive before any write.
         let err = configure_and_start_internal_bitcoind_locked(

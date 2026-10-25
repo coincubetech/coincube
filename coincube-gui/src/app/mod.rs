@@ -8339,6 +8339,7 @@ impl App {
                     network: self.cache.network,
                     chain: self.cache.chain(),
                     config: config.clone(),
+                    managed_owner: managed.owner_lock_path().map(std::path::PathBuf::from),
                     daemon: daemon.clone(),
                     wallet: wallet.clone(),
                 };

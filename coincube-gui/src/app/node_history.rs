@@ -18,7 +18,7 @@ use coincubed::{
     commands::CoinStatus,
     config::{BitcoinBackend, BitcoindConfig},
 };
-use std::{collections::BTreeSet, convert::TryFrom, sync::Arc};
+use std::{collections::BTreeSet, convert::TryFrom, path::PathBuf, sync::Arc};
 
 #[derive(Debug, Clone)]
 pub enum Action {
@@ -52,6 +52,7 @@ pub struct Context {
     pub network: Network,
     pub chain: ChainId,
     pub config: BitcoindConfig,
+    pub managed_owner: Option<PathBuf>,
     pub daemon: Arc<dyn Daemon + Send + Sync>,
     pub wallet: Arc<Wallet>,
 }
@@ -77,6 +78,24 @@ pub enum Start {
 }
 
 impl Context {
+    async fn exclusive_lifecycle(
+        &self,
+    ) -> Result<crate::node::bitcoind::ManagedNodeLifecycle, String> {
+        let root = self.datadir.clone();
+        let owner = self.managed_owner.clone();
+        tokio::task::spawn_blocking(move || {
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::Bitcoin,
+            )
+            .map_err(|e| e.to_string())?;
+            lifecycle.ensure_exclusive_settings_owner(owner.as_deref())?;
+            Ok::<_, String>(lifecycle)
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+
     pub async fn run(self, action: Action) -> Result<Outcome, String> {
         let vault = self
             .wallet
@@ -167,6 +186,7 @@ impl Context {
                 .await
                 .map_err(|e| e.to_string())?
                 .coins;
+            let mut settings_lifecycle = None;
             if starting {
                 if status
                     .job
@@ -209,9 +229,13 @@ impl Context {
                 job.phase = Phase::Paused;
                 job.import_requested = matches!(action, Action::Import);
                 job.last_error = Some("Recovery setup was interrupted; resume to continue".into());
+                settings_lifecycle = Some(self.exclusive_lifecycle().await?);
                 let _lease = history::HistoryLease::acquire(&directory)?;
                 history::write_json(&path, &job)?;
                 status.job = Some(job);
+            }
+            if settings_lifecycle.is_none() {
+                settings_lifecycle = Some(self.exclusive_lifecycle().await?);
             }
             status.policy = Some(match action {
                 Action::Retain(days) => retention::configure(
@@ -240,13 +264,15 @@ impl Context {
                 ))
                 .map_err(|e| e.to_string())?;
                 let (cfg, started) =
-                    super::state::vault::settings::bitcoind::ensure_tor_and_start_managed(
+                    super::state::vault::settings::bitcoind::ensure_tor_and_start_managed_with_lifecycle(
                         self.datadir.clone(),
                         self.network,
                         conf.flavor,
                         None,
                         true,
                         None,
+                        self.managed_owner.clone(),
+                        settings_lifecycle.take(),
                     )
                     .await?;
                 if cfg != self.config {
@@ -255,6 +281,7 @@ impl Context {
                 node = Some(started);
                 rpc = NodeRpc::new(&self.config, &wallet_path, self.chain).await?;
             }
+            drop(settings_lifecycle);
             let local = rpc.check_chain(self.network).await?;
             if local["pruned"].as_bool() != Some(true)
                 || local["automatic_pruning"].as_bool() != Some(false)
@@ -455,19 +482,31 @@ impl Context {
                 .map_err(|e| e.to_string())?;
             }
         }
-        if retention::finish_temporary(&self.datadir, self.network)? {
+        // `finish_temporary` rewrites bitcoin.conf before the restart. Only
+        // call it when its current policy could finish, with the same owner
+        // guard held until the replacement node has claimed its lock.
+        let mut finish_lifecycle = if status.policy.as_ref().is_some_and(|p| p.temporary)
+            && retention::unfinished(&directory)?.is_empty()
+        {
+            Some(self.exclusive_lifecycle().await?)
+        } else {
+            None
+        };
+        if finish_lifecycle.is_some() && retention::finish_temporary(&self.datadir, self.network)? {
             let conf = InternalBitcoindConfig::from_file(&internal_bitcoind_config_path(
                 &internal_bitcoind_datadir(&self.datadir),
             ))
             .map_err(|e| e.to_string())?;
             let (cfg, started) =
-                super::state::vault::settings::bitcoind::ensure_tor_and_start_managed(
+                super::state::vault::settings::bitcoind::ensure_tor_and_start_managed_with_lifecycle(
                     self.datadir.clone(),
                     self.network,
                     conf.flavor,
                     None,
                     true,
                     None,
+                    self.managed_owner.clone(),
+                    finish_lifecycle.take(),
                 )
                 .await?;
             if cfg != self.config {
@@ -476,6 +515,7 @@ impl Context {
             node = Some(started);
             status.policy = None;
         } else if status.policy.is_some() {
+            drop(finish_lifecycle);
             if let Err(error) = retention::maintain(&self.datadir, self.network, &rpc, now()).await
             {
                 status.error = Some(error);
