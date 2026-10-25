@@ -55,6 +55,7 @@ use crate::{
 use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 
 mod launcher_catalog;
+mod launcher_coin;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
 pub(crate) use launcher_catalog::LauncherSceneContext;

@@ -18,7 +18,7 @@ use coincube_ui::{
 
 use super::{
     launcher_catalog::{self, CatalogMessage, LauncherMode, Projection},
-    launcher_scene, CubeCatalogKey, DeleteCubeMessage, Home, ViewMessage,
+    launcher_coin, launcher_scene, CubeCatalogKey, DeleteCubeMessage, Home, ViewMessage,
 };
 use crate::{
     chain::{ChainId, ChainIdExt},
@@ -115,13 +115,7 @@ pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light
     } else {
         "#f3821d"
     };
-    let mark = if chain.is_blake2b() {
-        r##"<text x="90" y="53" text-anchor="middle" font-size="18" font-weight="bold" font-family="sans-serif" fill="#201407">B2</text>"##
-    } else {
-        // The repo's BTC logo path, scaled onto the top face. Text glyphs are
-        // not reliable in the headless SVG renderer on every platform.
-        r##"<g transform="translate(75 31) scale(.92)"><path fill="#fff" fill-rule="nonzero" d="M23.2 14c.3-2-1.3-3.2-3.5-4l.7-2.8-1.7-.4-.7 2.7-1.4-.3.7-2.8-1.7-.4-.7 2.8-1.1-.2-2.4-.6-.5 1.8 1.3.3q1 .4.8 1l-.8 3.3h.2-.2L11 18.9q-.1.4-.8.4L9 19l-.8 2 2.2.6 1.2.3-.7 2.8 1.7.5.8-2.9 1.3.4-.7 2.8 1.8.4.7-2.8c3 .5 5.1.3 6-2.3.8-2.2 0-3.4-1.5-4.2q1.8-.3 2.2-2.6m-4 5.6c-.5 2.1-4.1 1-5.3.7l1-3.9c1.1.3 4.9 1 4.3 3.2m.6-5.6c-.5 2-3.5 1-4.5.7l.9-3.4c1 .2 4 .7 3.6 2.7"/></g>"##
-    };
+    let mark = launcher_coin::fragment(chain, 64.0, 20.0, 52.0, 1.5);
     let dash = if matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
         "none"
     } else {
@@ -159,7 +153,7 @@ pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light
     }
     .replace("{marks}", marks);
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 8 140 140"><ellipse cx="90" cy="139" rx="60" ry="10" fill="{shadow}" opacity=".35"/><path d="M90 12 153 43 90 76 27 43Z" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M27 43 90 76 90 133 27 99Z" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M153 43 90 76 90 133 153 99Z" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><circle cx="90" cy="46" r="17" fill="{edge}"/>{mark}{wallet_mark}{unlock_mark}{backup_mark}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 8 140 140"><ellipse cx="90" cy="139" rx="60" ry="10" fill="{shadow}" opacity=".35"/><path d="M90 12 153 43 90 76 27 43Z" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M27 43 90 76 90 133 27 99Z" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M153 43 90 76 90 133 153 99Z" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><defs><clipPath id="launcher-top"><path d="M90 12 153 43 90 76 27 43Z"/></clipPath></defs><g clip-path="url(#launcher-top)" color="{marks}">{mark}</g>{wallet_mark}{unlock_mark}{backup_mark}</svg>"##,
     )
 }
 
@@ -324,7 +318,33 @@ fn text_tone(tone: tenshu::Tone) -> impl Fn(&theme::Theme) -> iced::widget::text
     move |theme| theme::tenshu::text::tone(theme, tone)
 }
 
-fn local_facts<'a>(row: &launcher_catalog::LocalRow<'_>, table: bool) -> Element<'a, ViewMessage> {
+fn network_coin(
+    chain: ChainId,
+    size: f32,
+    light: bool,
+) -> iced::widget::Svg<'static, theme::Theme> {
+    let border = if size == 18.0 { 1.0 } else { 1.5 };
+    iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(
+        launcher_coin::widget_source(chain, size, border, light).into_bytes(),
+    ))
+    .width(Length::Fixed(size))
+    .height(Length::Fixed(size))
+}
+
+fn network_label<'a>(chain: ChainId, size: f32, light: bool) -> Element<'a, ViewMessage> {
+    Row::new()
+        .spacing(6)
+        .align_y(Alignment::Center)
+        .push(network_coin(chain, size, light))
+        .push(tenshu::caption(chain.label()))
+        .into()
+}
+
+fn local_facts<'a>(
+    row: &launcher_catalog::LocalRow<'_>,
+    table: bool,
+    light: bool,
+) -> Element<'a, ViewMessage> {
     let (backup_text, backup_tone) = backup(row.cube);
     let name =
         Column::new()
@@ -345,7 +365,10 @@ fn local_facts<'a>(row: &launcher_catalog::LocalRow<'_>, table: bool) -> Element
             .align_y(Alignment::Center)
             .push(Container::new(icon::cube_icon()).width(Length::Fixed(AVATAR_WIDTH)))
             .push(name)
-            .push(tenshu::body(row.key.chain.label()).width(Length::Fixed(NETWORK_WIDTH)))
+            .push(
+                Container::new(network_label(row.key.chain, 16.0, light))
+                    .width(Length::Fixed(NETWORK_WIDTH)),
+            )
             .push(
                 tenshu::caption(local_wallets(row.cube))
                     .width(Length::Fixed(WALLETS_WIDTH))
@@ -369,10 +392,10 @@ fn local_facts<'a>(row: &launcher_catalog::LocalRow<'_>, table: bool) -> Element
                     .push(icon::cube_icon())
                     .push(name),
             )
+            .push(network_label(row.key.chain, 16.0, light))
             .push(
                 tenshu::caption(format!(
-                    "Network: {} · Wallets: {} · Backup: {}",
-                    row.key.chain.label(),
+                    "Wallets: {} · Backup: {}",
                     local_wallets(row.cube),
                     backup_text
                 ))
@@ -386,10 +409,11 @@ fn local_row<'a>(
     row: &launcher_catalog::LocalRow<'_>,
     selected: bool,
     table: bool,
+    light: bool,
 ) -> Element<'a, ViewMessage> {
     let select = Action::new(
         launcher_catalog::select_id(&row.key),
-        local_facts(row, table),
+        local_facts(row, table, light),
         focus,
     )
     .width(Length::Fill)
@@ -435,7 +459,7 @@ fn detail_line<'a>(
         .into()
 }
 
-fn details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage> {
+fn details<'a>(row: &launcher_catalog::LocalRow<'_>, light: bool) -> Element<'a, ViewMessage> {
     let (backup_text, backup_tone) = backup(row.cube);
     let mut content = Column::new()
         .spacing(14)
@@ -462,7 +486,7 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage>
         )
         .push(detail_line(
             "Network",
-            tenshu::body(row.key.chain.label()).into(),
+            network_label(row.key.chain, 18.0, light),
         ))
         .push(detail_line("Lock", tenshu::body("State unknown").into()))
         .push(detail_line(
@@ -533,7 +557,10 @@ fn details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage>
 
 /// The floor face has a fixed 420px rectangle. Keep its content deliberately
 /// shorter than the List details card so actions stay on the visible face.
-fn floor_details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMessage> {
+fn floor_details<'a>(
+    row: &launcher_catalog::LocalRow<'_>,
+    light: bool,
+) -> Element<'a, ViewMessage> {
     let (backup_text, backup_tone) = backup(row.cube);
     Container::new(
         Column::new()
@@ -549,10 +576,13 @@ fn floor_details<'a>(row: &launcher_catalog::LocalRow<'_>) -> Element<'a, ViewMe
                             .wrapping(Wrapping::WordOrGlyph),
                     ),
             )
-            .push(tenshu::caption(format!(
-                "Network · {}",
-                row.key.chain.label()
-            )))
+            .push(
+                Row::new()
+                    .spacing(6)
+                    .align_y(Alignment::Center)
+                    .push(tenshu::caption("Network ·"))
+                    .push(network_label(row.key.chain, 18.0, light)),
+            )
             .push(rule::horizontal(1))
             .push(detail_line("Lock", tenshu::body("State unknown").into()))
             .push(detail_line(
@@ -685,6 +715,7 @@ fn list_layout<'a>(
     projection: &Projection<'_>,
     scene: &LauncherScene,
     width: f32,
+    light: bool,
 ) -> Element<'a, ViewMessage> {
     let list_width =
         if scene.selected.is_some() && width >= LIST_MIN_WIDTH + DETAILS_WIDTH + PANEL_GAP {
@@ -734,6 +765,7 @@ fn list_layout<'a>(
                 row,
                 scene.selected.as_ref() == Some(&row.key),
                 table,
+                light,
             ));
         }
     }
@@ -753,7 +785,7 @@ fn list_layout<'a>(
         .selected
         .as_ref()
         .and_then(|key| projection.locals.iter().find(|row| &row.key == key))
-        .map(details);
+        .map(|row| details(row, light));
     match details {
         None => list.into(),
         Some(panel) if width >= LIST_MIN_WIDTH + DETAILS_WIDTH + PANEL_GAP => Row::new()
@@ -776,6 +808,10 @@ fn list_layout<'a>(
 pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
     let projection = launcher_catalog::project(home);
     let scene = project_catalog(&projection);
+    let light = matches!(
+        home.theme_mode,
+        coincube_ui::theme::palette::ThemeMode::Light
+    );
     let fallback = (home.catalog.mode == LauncherMode::Cubes
         && projection.local_total > launcher_catalog::FLOOR_MAX_CUBES)
         .then(|| tenshu::caption("List view for more than 20 Cubes on this network."));
@@ -783,7 +819,7 @@ pub(super) fn list_body(home: &Home) -> Element<'_, ViewMessage> {
         .spacing(8)
         .push(fallback)
         .push(
-            responsive(move |size: Size| list_layout(&projection, &scene, size.width))
+            responsive(move |size: Size| list_layout(&projection, &scene, size.width, light))
                 .height(Length::Shrink),
         )
         .into()
@@ -1063,7 +1099,7 @@ fn floor_layout<'a>(
         // The selected Cube itself becomes the centered face. Controls arrive
         // only when it is square to the camera and remain real Iced widgets.
         if progress >= 1.0 {
-            let panel = Container::new(floor_details(row))
+            let panel = Container::new(floor_details(row, light))
                 .width(Length::Fixed(420.0))
                 .height(Length::Fixed(420.0))
                 .style(|theme: &theme::Theme| container::Style {
@@ -1196,7 +1232,7 @@ pub(super) fn floor_body(home: &Home) -> Element<'_, ViewMessage> {
     let scene = project_catalog(&projection);
     responsive(move |size: Size| {
         if size.width < 840.0 {
-            list_layout(&projection, &scene, size.width)
+            list_layout(&projection, &scene, size.width, light)
         } else {
             floor_layout(&projection, page, size.width, light, motion.as_ref())
         }
@@ -2241,7 +2277,11 @@ mod tests {
         let dark = cube_glyph_source(&cube, false);
         let light = cube_glyph_source(&cube, true);
         for svg in [&dark, &light] {
-            assert!(svg.contains("translate(75 31)"), "Bitcoin logo missing");
+            assert!(
+                svg.contains("data:image/png;base64,"),
+                "Bitcoin coin missing"
+            );
+            assert!(svg.contains("clip-path=\"url(#launcher-top)\""));
             assert!(svg.contains("M58 73 67 77V87"), "Vault mark missing");
             assert!(svg.contains("m133 64 3 3 5-6"), "backup mark missing");
         }
@@ -2472,7 +2512,7 @@ mod tests {
         };
         let mounted = capture::inspect(
             "v113-launcher-wide-table",
-            list_layout(&projection, &project_catalog(&projection), 1400.0),
+            list_layout(&projection, &project_catalog(&projection), 1400.0, true),
             (2000, 900),
             "light",
             theme::Theme::light(),

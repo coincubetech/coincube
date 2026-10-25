@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::CubeCatalogKey;
+use super::{launcher_coin, CubeCatalogKey};
 use crate::chain::{ChainId, ChainIdExt};
 
 pub(super) const TURN: Duration = Duration::from_millis(820);
@@ -258,7 +258,7 @@ fn paint_cube(
             "\" fill=\"{color}\" stroke=\"{edge}\" stroke-width=\"2\"{dash}/>"
         );
         if let Some(text) = text {
-            paint_face_marks(svg, index, projected, network, light, text);
+            paint_face_marks(svg, index, projected, size, network, light, text);
         }
         if index == 1 && progress > 0.5 {
             if let Some(text) = text {
@@ -277,6 +277,7 @@ fn paint_face_marks(
     svg: &mut String,
     index: usize,
     p: [(f32, f32); 4],
+    size: f32,
     network: ChainId,
     light: bool,
     text: FaceText<'_>,
@@ -303,22 +304,23 @@ fn paint_face_marks(
     let mut marks = String::new();
     match index {
         4 => {
-            let edge = if network.is_blake2b() {
-                "#d4a62a"
-            } else if matches!(network, ChainId::Bitcoin) {
-                "#f3821d"
-            } else {
-                "#b9bbb5"
-            };
+            // The coin occupies 34% of the actual face. Map it with the
+            // projected top-face basis and retain the polygon clip below, so
+            // it narrows and disappears with the rotating face.
+            let tl = p[3];
+            let tr = p[2];
+            let bl = p[0];
+            let a = (tr.0 - tl.0) / size;
+            let b = (tr.1 - tl.1) / size;
+            let c = (bl.0 - tl.0) / size;
+            let d = (bl.1 - tl.1) / size;
             let _ = write!(
                 marks,
-                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"13\" fill=\"{edge}\"/>",
-                center.0, center.1
+                "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" color=\"{ink}\">{}</g>",
+                tl.0,
+                tl.1,
+                launcher_coin::fragment(network, size * 0.33, size * 0.33, size * 0.34, 1.5)
             );
-            // This is an orientation mark during the turn; the resting glyph
-            // retains the branded vector path and network-specific edge.
-            let mark = if network.is_blake2b() { "B2" } else { "₿" };
-            let _ = write!(marks, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" fill=\"#201407\">{mark}</text>", center.0, center.1);
         }
         2 if text.vault || text.imported_bitcoin => {
             let _ = write!(marks, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"11\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"2\"/>", center.0, center.1);
@@ -388,7 +390,8 @@ fn paint_face_text(
     );
     let _ = write!(
         svg,
-        "<text x=\"28\" y=\"79\" font-size=\"14\" fill=\"{muted}\">{}</text>",
+        "<g color=\"{ink}\">{}</g><text x=\"52\" y=\"79\" font-size=\"14\" fill=\"{muted}\">{}</text>",
+        launcher_coin::fragment(network, 28.0, 64.0, 18.0, 1.0),
         xml_text(network.label())
     );
     let _ = write!(
@@ -662,6 +665,7 @@ mod tests {
             &mut sliver,
             2,
             [(100.0, 0.0), (100.01, 0.0), (100.01, 200.0), (100.0, 200.0)],
+            REST_SIZE,
             ChainId::Bitcoin,
             false,
             face,
@@ -686,5 +690,35 @@ mod tests {
         assert!(near_edge[group_at..mark_at].contains("url(#launcher-face-2-"));
         assert!(near_edge[mark_at..].contains("</g>"));
         assert!(near_edge.contains("clipPathUnits=\"userSpaceOnUse\""));
+    }
+
+    #[test]
+    fn projected_top_coin_uses_face_transform_and_clip_for_test_network() {
+        let face = FaceText {
+            name: "Test",
+            backup: "Unknown",
+            connect: "Offline",
+            wallets: "Unknown",
+            passkey: false,
+            vault: false,
+            imported_bitcoin: false,
+            backup_confirmed: false,
+        };
+        let svg = source(
+            1000.0,
+            740.0,
+            (250.0, 265.0),
+            340.0,
+            ChainId::Testnet4,
+            face,
+            false,
+            0.0,
+            None,
+        );
+        let coin_at = svg.find("data:image/png;base64,").expect("coin image");
+        let clip_at = svg[..coin_at].rfind("<g clip-path=").expect("face clip");
+        assert!(svg[clip_at..coin_at].contains("matrix("));
+        assert!(svg[clip_at..coin_at].contains("stroke-dasharray=\"2.5 2.5\""));
+        assert!(svg[coin_at..].contains("opacity=\"0.6\""));
     }
 }
