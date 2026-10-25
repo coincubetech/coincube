@@ -1688,6 +1688,7 @@ pub fn select_bitcoind_type<'a>(
 #[allow(clippy::too_many_arguments)]
 pub fn start_internal_bitcoind<'a>(
     progress: (usize, usize),
+    ui_instance: u64,
     flavor: crate::node::bitcoind::NodeFlavor,
     existing_flavor: Option<crate::node::bitcoind::NodeFlavor>,
     flavor_confirmed: bool,
@@ -1716,7 +1717,7 @@ pub fn start_internal_bitcoind<'a>(
         let mut col = Column::new()
             .spacing(25)
             .push(node_flavor_selector(
-                progress.0 as u64,
+                ui_instance,
                 flavor,
                 existing_flavor,
                 |flavor| {
@@ -3126,6 +3127,7 @@ mod tests {
 
         let _ = start_internal_bitcoind(
             (3, 4),
+            10,
             NodeFlavor::Knots,
             Some(NodeFlavor::Core),
             false,
@@ -3140,6 +3142,7 @@ mod tests {
         );
         let _ = start_internal_bitcoind(
             (3, 4),
+            11,
             NodeFlavor::Core,
             None,
             true,
@@ -3546,7 +3549,7 @@ mod node_management_chain_tests {
     use iced::advanced::{
         layout,
         renderer::Headless,
-        widget::{operation, operation::focusable, Id, Operation, Tree},
+        widget::{operation, operation::focusable, operation::Focusable, Id, Operation, Tree},
         Layout,
     };
     use iced::{keyboard, mouse, Event, Rectangle, Size};
@@ -3560,6 +3563,113 @@ mod node_management_chain_tests {
         fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
             self.0.push(text.to_owned());
         }
+    }
+
+    #[derive(Default)]
+    struct FocusedActions(Vec<(Id, bool)>);
+
+    impl Operation for FocusedActions {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn focusable(&mut self, id: Option<&Id>, _: Rectangle, state: &mut dyn Focusable) {
+            if let Some(id) = id {
+                self.0.push((id.clone(), state.is_focused()));
+            }
+        }
+    }
+
+    #[test]
+    fn internal_node_flavor_focus_is_scoped_to_one_installer_pane() {
+        let prune = form::Value {
+            value: "15000".to_owned(),
+            valid: true,
+            warning: None,
+        };
+        let mempool = form::Value::default();
+        let mut element: Element<'_, Message> = Row::new()
+            .push(start_internal_bitcoind(
+                (3, 4),
+                41,
+                NodeFlavor::Knots,
+                None,
+                false,
+                false,
+                &prune,
+                &mempool,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .push(start_internal_bitcoind(
+                (3, 4),
+                42,
+                NodeFlavor::Knots,
+                None,
+                false,
+                false,
+                &prune,
+                &mempool,
+                None,
+                None,
+                None,
+                None,
+                None,
+            ))
+            .into();
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .expect("software renderer");
+        let size = Size::new(2048.0, 1200.0);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let left = Id::from("tenshu.installer.node.41.flavor.core".to_owned());
+        let right = Id::from("tenshu.installer.node.42.flavor.core".to_owned());
+        let mut focus: Box<dyn Operation<()>> = Box::new(focusable::focus::<()>(right.clone()));
+        loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(focus.as_mut()),
+            );
+            match focus.finish() {
+                operation::Outcome::None | operation::Outcome::Some(()) => break,
+                operation::Outcome::Chain(next) => focus = next,
+            }
+        }
+        let mut focused = FocusedActions::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut focused);
+        assert_eq!(
+            focused
+                .0
+                .iter()
+                .find(|(id, _)| id == &left)
+                .map(|(_, on)| *on),
+            Some(false),
+            "the first pane's Core action must stay unfocused"
+        );
+        assert_eq!(
+            focused
+                .0
+                .iter()
+                .find(|(id, _)| id == &right)
+                .map(|(_, on)| *on),
+            Some(true),
+            "the second pane's Core action must receive focus"
+        );
     }
 
     fn activate_node_action(

@@ -589,6 +589,12 @@ pub fn port_is_valid(port: &u16) -> bool {
     !BITCOIND_DEFAULT_PORTS.contains(port)
 }
 
+static NEXT_NODE_UI_INSTANCE: AtomicU64 = AtomicU64::new(1);
+
+fn next_node_ui_instance() -> u64 {
+    NEXT_NODE_UI_INSTANCE.fetch_add(1, Ordering::Relaxed)
+}
+
 pub struct SelectBitcoindTypeStep {
     ui_instance: u64,
     use_external: bool,
@@ -624,9 +630,8 @@ impl From<SelectBitcoindTypeStep> for Box<dyn Step> {
 
 impl SelectBitcoindTypeStep {
     pub fn new() -> Self {
-        static NEXT_NODE_UI_INSTANCE: AtomicU64 = AtomicU64::new(1);
         Self {
-            ui_instance: NEXT_NODE_UI_INSTANCE.fetch_add(1, Ordering::Relaxed),
+            ui_instance: next_node_ui_instance(),
             use_external: true,
             use_connect: true,
             install_node: true,
@@ -989,6 +994,7 @@ impl Default for DefineBitcoind {
 }
 
 pub struct InternalBitcoindStep {
+    ui_instance: u64,
     local_feature_client: Option<crate::services::coincube::CoincubeClient>,
     local_feature_request: u64,
     local_feature_pending: bool,
@@ -1044,6 +1050,7 @@ impl From<InternalBitcoindStep> for Box<dyn Step> {
 impl InternalBitcoindStep {
     pub fn new(coincube_datadir: &CoincubeDirectory) -> Self {
         Self {
+            ui_instance: next_node_ui_instance(),
             coincube_datadir: coincube_datadir.clone(),
             bitcoind_datadir: internal_bitcoind_datadir(coincube_datadir),
             network: Network::Bitcoin,
@@ -1838,6 +1845,7 @@ impl Step for InternalBitcoindStep {
         }
         view::start_internal_bitcoind(
             progress,
+            self.ui_instance,
             self.flavor,
             self.existing_flavor,
             self.flavor_confirmed,
