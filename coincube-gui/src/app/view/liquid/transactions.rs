@@ -1091,10 +1091,13 @@ mod tests {
             },
         );
         assert_eq!(
-            payment_list_status(&row, &[address]).map(|(label, _)| label),
+            payment_list_status(&row, std::slice::from_ref(&address)).map(|(label, _)| label),
             Some("Refundable")
         );
-        assert_eq!(payment_detail_status(&row, &[address]).0, "Refundable");
+        assert_eq!(
+            payment_detail_status(&row, std::slice::from_ref(&address)).0,
+            "Refundable"
+        );
     }
 
     #[test]
