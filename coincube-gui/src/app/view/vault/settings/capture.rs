@@ -625,11 +625,11 @@ async fn mounted_pair_nav_accepts_vault_and_denies_imported_wallet() {
             assert!(
                 matches!(
                     messages.as_slice(),
-                    [Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
-                        SettingsOption::LocalSigning
-                    ))))]
+                    [Message::FocusAction(id), Message::Menu(Menu::Vault(
+                        VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))
+                    ))] if id == &Id::new("tenshu.shell.sub.Pair with Keychain.Some(Menu(Vault(Settings(Some(LocalSigning)))))")
                 ),
-                "visible eligible Pair must route once: {:?}",
+                "visible eligible Pair must focus its exact row and route once: {:?}",
                 messages
             );
         }
