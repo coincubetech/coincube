@@ -3552,6 +3552,7 @@ mod shell_escape_dispatch_tests {
 #[cfg(test)]
 mod lock_cube_dispatch_tests {
     use super::*;
+    use crate::app;
 
     #[test]
     fn locking_source_app_closes_owned_home_claim_but_keeps_unrelated_home() {
