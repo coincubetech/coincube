@@ -1049,7 +1049,6 @@ mod tests {
             let row = payment(
                 state,
                 DomainPaymentDetails::Lightning {
-                    swap_id: None,
                     description: String::new(),
                     payer_note: None,
                 },
