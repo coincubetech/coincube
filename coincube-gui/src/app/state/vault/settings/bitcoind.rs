@@ -2,7 +2,7 @@ use std::convert::{From, TryInto};
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::str::FromStr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use chrono::{NaiveDate, Utc};
 use iced::{clipboard, Task};
@@ -127,7 +127,7 @@ async fn probe_esplora_tip(base_url: String) -> Result<u32, String> {
 #[derive(Debug)]
 pub struct BitcoindSettingsState {
     warning: Option<Error>,
-    managed_owner: Option<PathBuf>,
+    managed_owner: Arc<Mutex<Option<PathBuf>>>,
     config_updated: bool,
     full_config: Option<Config>,
     node_switch_processing: bool,
@@ -216,7 +216,7 @@ impl BitcoindSettingsState {
         };
         BitcoindSettingsState {
             warning: None,
-            managed_owner: None,
+            managed_owner: Arc::new(Mutex::new(None)),
             config_updated: false,
             full_config: config.clone(),
             node_switch_processing: false,
@@ -286,9 +286,16 @@ impl BitcoindSettingsState {
         }
     }
 
-    pub(crate) fn with_managed_owner(mut self, owner: Option<PathBuf>) -> Self {
+    pub(crate) fn with_managed_owner(mut self, owner: Arc<Mutex<Option<PathBuf>>>) -> Self {
         self.managed_owner = owner;
         self
+    }
+
+    pub(crate) fn managed_owner_path(&self) -> Option<PathBuf> {
+        self.managed_owner
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 
     /// Make the pending local node the Vault's backend, keeping the current
@@ -457,7 +464,7 @@ impl BitcoindSettingsState {
                     None,
                     false,
                     None,
-                    self.managed_owner.clone(),
+                    self.managed_owner_path(),
                 ),
                 |r| {
                     Message::View(view::Message::Settings(
@@ -821,7 +828,7 @@ impl State for BitcoindSettingsState {
                                     setup.download_progress = 100.0;
                                     let coincube_datadir = cache.datadir_path.clone();
                                     let network = cache.network;
-                                    let managed_owner = self.managed_owner.clone();
+                                    let managed_owner = self.managed_owner_path();
                                     return Task::perform(
                                         async move {
                                             // Fetch the release SHA256SUMS(+.asc)
@@ -863,7 +870,7 @@ impl State for BitcoindSettingsState {
                         if let Some(ref mut setup) = self.pending_node_setup {
                             match result {
                                 Ok((bitcoind_cfg, bitcoind)) => {
-                                    self.managed_owner =
+                                    *self.managed_owner.lock().unwrap_or_else(|e| e.into_inner()) =
                                         bitcoind.owner_lock_path().map(PathBuf::from);
                                     if let Some(cfg) = daemon.config() {
                                         let mut new_cfg = cfg.clone();
@@ -1121,7 +1128,7 @@ impl State for BitcoindSettingsState {
                                 None,
                                 true,
                                 None,
-                                self.managed_owner.clone(),
+                                self.managed_owner_path(),
                             ),
                             |r| {
                                 Message::View(view::Message::Settings(
@@ -1282,7 +1289,7 @@ impl State for BitcoindSettingsState {
                                 None,
                                 true,
                                 Some(resources),
-                                self.managed_owner.clone(),
+                                self.managed_owner_path(),
                             ),
                             |r| {
                                 Message::View(view::Message::Settings(
@@ -1987,12 +1994,22 @@ fn configure_and_start_internal_bitcoind_locked(
             .to_string()
     })?;
 
-    let bitcoind = Bitcoind::maybe_start_locked(
-        network,
-        bitcoind_config.clone(),
-        &coincube_datadir,
-        lifecycle,
-    )
+    let bitcoind = if force_restart {
+        Bitcoind::maybe_restart_locked(
+            network,
+            bitcoind_config.clone(),
+            &coincube_datadir,
+            lifecycle,
+            initiating_owner,
+        )
+    } else {
+        Bitcoind::maybe_start_locked(
+            network,
+            bitcoind_config.clone(),
+            &coincube_datadir,
+            lifecycle,
+        )
+    }
     .map_err(|e| e.to_string())?;
 
     Ok((bitcoind_config, bitcoind))
