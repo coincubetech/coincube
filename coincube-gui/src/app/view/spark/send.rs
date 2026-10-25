@@ -1194,9 +1194,10 @@ mod tests {
     // Unified spendable balance includes the BTC component and synthetic USDB.
     const SYNTHETIC_BALANCE_SATS: u64 = 35_000;
     const SYNTHETIC_BITCOIN_SATS: u64 = 25_053;
-    /// Shaped like the real kinds, valid as none of them.
+    /// Shaped like the real kinds, valid as none of them. `15u` is 15 microbitcoin,
+    /// or 1,500 sats, matching the ordinary prepared quote below.
     const SYNTHETIC_INVOICE: &str =
-        "lnbc15n1synthetic0r07b0fixture0not0a0payable0invoice0long0enough0to0test0wrapping";
+        "lnbc15u1synthetic0r07b0fixture0not0a0payable0invoice0long0enough0to0test0wrapping";
     const SYNTHETIC_CROSS_CHAIN_ADDRESS: &str =
         "0xsynthetic-r07b-usdc-cross-chain-address-not-payable";
     const SYNTHETIC_HINT: &str = "Your bitcoin balance is 25,053 sats; the rest is converted \
@@ -2384,6 +2385,8 @@ mod tests {
         assert_eq!(ordinary_quote.method, "Bolt11Invoice");
         assert_eq!(ordinary.target, SparkSendTarget::Lightning);
         assert_eq!(ordinary.destination, SYNTHETIC_INVOICE);
+        assert!(ordinary.destination.starts_with("lnbc15u1"));
+        assert_eq!(ordinary_quote.amount_sat, 15 * 100); // 1 μBTC = 100 sats.
         assert!(ordinary.invoice_amount);
         assert!(ordinary.hint.is_none());
         assert!(ordinary_quote.amount_sat + ordinary_quote.fee_sat < SYNTHETIC_BITCOIN_SATS);
