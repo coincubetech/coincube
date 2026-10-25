@@ -9,8 +9,8 @@ use iced::{
 use zeroize::{Zeroize, Zeroizing};
 
 /// Focus target used when a Launcher Cube opens directly into PIN entry.
-pub(crate) fn first_digit_id() -> iced::widget::text_input::Id {
-    iced::widget::text_input::Id::new("tenshu.unlock.pin:first-digit")
+pub(crate) fn first_digit_id() -> iced::advanced::widget::Id {
+    iced::advanced::widget::Id::new("tenshu.unlock.pin:first-digit")
 }
 
 /// Reusable 4-digit PIN input component.

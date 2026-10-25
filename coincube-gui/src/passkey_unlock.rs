@@ -44,7 +44,7 @@ use coincube_ui::{
         text::{h3, p1_regular, text},
     },
     icon, theme,
-    widget::{Column, Container, Element, Row},
+    widget::{action::Action, Column, Container, Element, Row},
 };
 
 use coincube_core::miniscript::bitcoin::bip32::Fingerprint;
@@ -148,6 +148,8 @@ enum Phase {
 pub enum Message {
     /// Raise the system passkey prompt.
     Begin,
+    /// Focus the visible passkey action after pointer or Launcher handoff.
+    Focus(iced::advanced::widget::Id),
     /// Poll the ceremony channel. Driven by [`PasskeyUnlock::subscription`].
     Tick,
     /// Abandon the unlock and return to Home.
@@ -197,6 +199,7 @@ impl PasskeyUnlock {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::Begin => self.begin(),
+            Message::Focus(id) => iced::widget::operation::focus(id),
             Message::Tick => self.poll(),
             // Both are terminal for this screen and handled by the parent.
             // `Back` still needs the in-flight ceremony torn down here, because
@@ -487,10 +490,17 @@ impl PasskeyUnlock {
                     content = content.push(p1_regular(error.as_str()).style(theme::text::error));
                 }
                 content = content.push(
-                    button::primary(None, "Unlock with passkey")
-                        .id(begin_button_id())
-                        .width(Length::Fixed(280.0))
-                        .on_press(Message::Begin),
+                    Action::new(
+                        begin_button_id(),
+                        text("Unlock with passkey")
+                            .font(coincube_ui::font::MEDIUM)
+                            .align_x(Alignment::Center)
+                            .align_y(Alignment::Center),
+                        Message::Focus,
+                    )
+                    .style(theme::button::primary)
+                    .width(Length::Fixed(280.0))
+                    .on_press(Message::Begin),
                 );
             }
             Phase::Opening => unreachable!("handled above"),

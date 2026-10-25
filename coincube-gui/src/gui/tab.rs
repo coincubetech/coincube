@@ -4253,41 +4253,27 @@ impl Tab {
             State::Home(v) => v.view().map(Message::Launch),
             State::Loader(v) => v.view().map(Message::Load),
             State::Login(v) => v.view().map(Message::Login),
-            State::PinEntry(v)
-                if self.unlock_motion.is_some_and(|started| {
-                    home::launcher_presenter::unlock_turn_progress(started, Instant::now()) < 1.0
-                }) =>
-            {
-                home::launcher_presenter::unlock_turn_with_controls(
-                    v.cube(),
-                    self.theme_mode,
-                    home::launcher_presenter::unlock_turn_progress(
-                        self.unlock_motion.unwrap(),
-                        Instant::now(),
-                    ),
-                    v.view_with_theme(self.theme_mode).map(Message::PinEntry),
-                )
-            }
-            State::PasskeyUnlock(v)
-                if self.unlock_motion.is_some_and(|started| {
-                    home::launcher_presenter::unlock_turn_progress(started, Instant::now()) < 1.0
-                }) =>
-            {
-                home::launcher_presenter::unlock_turn_with_controls(
-                    v.cube(),
-                    self.theme_mode,
-                    home::launcher_presenter::unlock_turn_progress(
-                        self.unlock_motion.unwrap(),
-                        Instant::now(),
-                    ),
-                    v.view_with_theme(self.theme_mode)
-                        .map(Message::PasskeyUnlock),
-                )
-            }
-            State::PinEntry(v) => v.view_with_theme(self.theme_mode).map(Message::PinEntry),
-            State::PasskeyUnlock(v) => v
-                .view_with_theme(self.theme_mode)
-                .map(Message::PasskeyUnlock),
+            State::PinEntry(v) => home::launcher_presenter::unlock_turn_with_controls(
+                v.cube(),
+                self.theme_mode,
+                self.unlock_motion
+                    .map(|started| {
+                        home::launcher_presenter::unlock_turn_progress(started, Instant::now())
+                    })
+                    .filter(|progress| *progress < 1.0),
+                v.view_with_theme(self.theme_mode).map(Message::PinEntry),
+            ),
+            State::PasskeyUnlock(v) => home::launcher_presenter::unlock_turn_with_controls(
+                v.cube(),
+                self.theme_mode,
+                self.unlock_motion
+                    .map(|started| {
+                        home::launcher_presenter::unlock_turn_progress(started, Instant::now())
+                    })
+                    .filter(|progress| *progress < 1.0),
+                v.view_with_theme(self.theme_mode)
+                    .map(Message::PasskeyUnlock),
+            ),
             State::DuressActive(v) => v.view().map(Message::Duress),
         }
     }
