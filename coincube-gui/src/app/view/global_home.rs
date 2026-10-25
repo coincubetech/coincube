@@ -6,8 +6,8 @@ use coincube_ui::{
     color,
     component::{amount::*, button, form, spinner, text::*},
     icon::{
-        arrow_down_up_icon, arrow_right, check_circle_icon, droplet_fill_icon, eye_outline_icon,
-        eye_slash_icon, lightning_icon, usd_icon, vault_icon, warning_icon,
+        arrow_down_up_icon, arrow_right, check_circle_icon, droplet_fill_icon, lightning_icon,
+        usd_icon, vault_icon, warning_icon,
     },
     theme,
     widget::*,
@@ -2171,15 +2171,6 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         .spacing(0)
         .align_y(Alignment::Center)
         .push(h3("Total Balance").bold())
-        .push(
-            Button::new(if balance_masked {
-                eye_slash_icon()
-            } else {
-                eye_outline_icon()
-            })
-            .style(theme::button::container)
-            .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
-        )
         .push_maybe(
             ((usdt_balance_error || liquid_balance_error) && !total_balance_loading)
                 .then(|| warning_icon().size(12).style(theme::text::secondary)),
@@ -2227,15 +2218,6 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 .spacing(0)
                 .width(Length::Fill)
                 .push(h3("Wallets").bold())
-                .push(
-                    Button::new(if balance_masked {
-                        eye_slash_icon()
-                    } else {
-                        eye_outline_icon()
-                    })
-                    .style(theme::button::container)
-                    .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
-                )
                 .align_y(Alignment::Center),
         )
         .push_maybe(spark_card)

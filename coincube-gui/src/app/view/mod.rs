@@ -249,7 +249,10 @@ fn dashboard_shell_with_info<'a>(
         backup_attention: show_backup_warning,
     };
     Column::new()
-        .push(nav::shell::top_bar(&nav_ctx))
+        .push(nav::shell::top_bar_with_privacy(
+            &nav_ctx,
+            cache.balance_privacy,
+        ))
         .push(nav::split::ShellSplit::new(
             nav::shell::sidebar(menu, &nav_ctx, shell_state),
             content_column,

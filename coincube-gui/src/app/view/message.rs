@@ -2256,7 +2256,6 @@ pub enum HomeMessage {
         btc: Amount,
         stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
     },
-    ToggleBalanceMask,
     /// Open the wallet-picker popup on the amount screen, editing the named side.
     OpenWalletPicker(PickerSide),
     /// Close the wallet-picker popup without changing the selected pair.
