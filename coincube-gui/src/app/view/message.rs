@@ -466,6 +466,7 @@ pub enum SettingsMessage {
     WalletAliasEdited(String),
     Save,
     GeneralSection,
+    PaymentChecksSection,
     /// Install the Recovery settings section (backup + Recovery Kit + alerts).
     RecoverySection,
     DisplayUnitChanged(BitcoinDisplayUnit),

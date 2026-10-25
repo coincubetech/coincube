@@ -9,8 +9,8 @@ use crate::{
     app::{
         features,
         menu::{
-            CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SettingsOption,
-            SparkSettingsOption, SparkSubMenu, TopLevel, VaultSubMenu,
+            CubeSettingsOption, CubeSubMenu, LiquidSubMenu, Menu, SparkSubMenu, TopLevel,
+            VaultSubMenu,
         },
         state::preferences::{BalancePrivacy, BalancePrivacyChrome},
         view::Message,
@@ -514,65 +514,6 @@ fn wallet_children<'a>(
         .collect()
 }
 
-fn settings_children<'a>(menu: &Menu, ctx: &NavContext<'a>) -> Vec<Element<'a, Message>> {
-    let mut items = Vec::new();
-    items.push(route(
-        "Cube",
-        None,
-        menu,
-        Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::General)),
-        true,
-    ));
-    if ctx.has_vault || ctx.has_imported_bitcoin {
-        items.push(route(
-            "Vault",
-            None,
-            menu,
-            Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))),
-            true,
-        ));
-    }
-    if !ctx.network.is_blake2b() {
-        items.push(route(
-            "Spark",
-            None,
-            menu,
-            Menu::Spark(SparkSubMenu::Settings(Some(SparkSettingsOption::General))),
-            true,
-        ));
-    }
-    if !ctx.network.is_blake2b() && ctx.liquid_gate.show() {
-        items.push(route(
-            "Liquid",
-            None,
-            menu,
-            Menu::Liquid(LiquidSubMenu::Settings(None)),
-            true,
-        ));
-    }
-    if let Some(subpages) = super::tertiary::items_for(menu, ctx) {
-        for item in subpages {
-            let label = match (&item.route, item.label) {
-                (Menu::Cube(CubeSubMenu::Settings(CubeSettingsOption::Recovery)), _) => {
-                    "Backup & protection"
-                }
-                (Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::Wallet))), _) => {
-                    "Wallet & signers"
-                }
-                (Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::LocalSigning))), _) => {
-                    "Pair with Keychain"
-                }
-                (Menu::Vault(VaultSubMenu::Settings(Some(SettingsOption::ImportExport))), _) => {
-                    "Data & exports"
-                }
-                _ => item.label,
-            };
-            items.push(subitem(menu, item, Some(label)));
-        }
-    }
-    items
-}
-
 /// One anchored sidebar, with only its middle group scrolling.
 pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
     let overview = Menu::Cube(CubeSubMenu::Overview);
@@ -725,19 +666,6 @@ pub fn sidebar<'a>(menu: &Menu, ctx: &NavContext<'a>, state: ShellState) -> Elem
             }
         }
     }
-    if matches!(
-        menu,
-        Menu::Cube(CubeSubMenu::Settings(_))
-            | Menu::Vault(VaultSubMenu::Settings(_))
-            | Menu::Spark(SparkSubMenu::Settings(_))
-            | Menu::Liquid(LiquidSubMenu::Settings(_))
-    ) {
-        middle = middle.push(section("SETTINGS"));
-        for item in settings_children(menu, ctx) {
-            middle = middle.push(item);
-        }
-    }
-
     let settings_active = matches!(
         menu,
         Menu::Cube(CubeSubMenu::Settings(_))

@@ -9,7 +9,7 @@ use coincube_ui::theme;
 use coincube_ui::widget::{ColumnExt, Element};
 
 use crate::app::cache;
-use crate::app::menu::Menu;
+use crate::app::menu::{CubeSettingsOption, CubeSubMenu, Menu};
 use crate::app::settings::display::DisplayMode;
 use crate::app::settings::fiat::PriceSetting;
 use crate::app::settings::unit::{BitcoinDisplayUnit, UnitSetting};
@@ -48,6 +48,7 @@ pub fn settings_content_section<'a>(
             currencies_list,
             show_direction_badges,
         ),
+        SettingsSection::PaymentChecks => payment_checks_section(menu, cache),
         SettingsSection::Recovery => recovery_section(
             menu,
             cache,
@@ -79,7 +80,11 @@ fn general_section<'a>(
             cache.fiat_toggle_allowed(),
         ))
         .push(direction_badges_toggle(show_direction_badges))
-        .push(recipient_identity_checks_toggle())
+        .push(
+            button::secondary(None, "Manage Cube avatar").on_press(Message::Menu(Menu::Cube(
+                CubeSubMenu::Settings(CubeSettingsOption::Avatar),
+            ))),
+        )
         .push(fiat_price(
             new_price_setting,
             currencies_list,
@@ -87,6 +92,23 @@ fn general_section<'a>(
         ));
 
     dashboard(menu, cache, col)
+}
+
+fn payment_checks_section<'a>(menu: &'a Menu, cache: &'a cache::Cache) -> Element<'a, Message> {
+    dashboard(
+        menu,
+        cache,
+        Column::new()
+            .spacing(20)
+            .push(super::header(
+                "Payment checks",
+                SettingsMessage::PaymentChecksSection,
+            ))
+            .push(p2_regular(
+                "Payment checks currently apply to all Cubes on this device.",
+            ))
+            .push(recipient_identity_checks_toggle()),
+    )
 }
 
 /// Recovery tab: local paper backup + Connect Recovery Kit + Vault Recovery
