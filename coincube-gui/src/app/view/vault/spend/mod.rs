@@ -548,24 +548,27 @@ pub fn create_spend_tx<'a>(
             .push(compose_divider())
             .push(compose_section(
                 Column::new()
-                    .spacing(12)
+                    .spacing(8)
                     .push(section_label(if recovery_timelock.is_some() {
                         "Recipient"
                     } else {
                         "Recipients"
                     }))
-                    .push(if is_batch {
-                        Element::from(
-                            form::Form::new("Batch label", batch_label, |s| {
-                                Message::CreateSpend(CreateSpendMessage::BatchLabelEdited(s))
-                            })
-                            .warning("Invalid label length, cannot be superior to 100")
-                            .size(P1_SIZE)
-                            .padding(10),
-                        )
-                    } else {
-                        Space::new().height(Length::Fixed(0.0)).into()
-                    })
+                    // Keep this slot in the Column's tree when the label is absent.
+                    // A zero-height Space is discarded by Column::push and shifts
+                    // recipient input state when a second recipient is added.
+                    .push(
+                        Column::new()
+                            .width(Length::Fill)
+                            .push_maybe(is_batch.then(|| {
+                                form::Form::new("Batch label", batch_label, |s| {
+                                    Message::CreateSpend(CreateSpendMessage::BatchLabelEdited(s))
+                                })
+                                .warning("Invalid label length, cannot be superior to 100")
+                                .size(P1_SIZE)
+                                .padding(10)
+                            })),
+                    )
                     .push(recipient_groups)
                     .push(
                         Row::new()
@@ -877,29 +880,30 @@ pub fn recipient_view<'a>(
 
     Container::new(
         Column::new()
-            .spacing(14)
-            .push(
-                // Recipient for recovery cannot be deleted.
-                Row::new()
-                    .align_y(Alignment::Center)
-                    .push(
-                        text(format!("Recipient {}", index + 1))
-                            .size(P2_SIZE)
-                            .font(font::SEMIBOLD)
-                            .style(theme::text::secondary),
-                    )
-                    .push(Space::new().width(Length::Fill))
-                    .push_maybe((!is_recovery).then(|| {
-                        Button::new(text("Remove").size(P2_SIZE))
-                            .style(theme::button::transparent)
-                            .on_press(CreateSpendMessage::DeleteRecipient(index))
-                            .width(Length::Shrink)
-                    })),
-            )
+            .spacing(8)
             .push(
                 Column::new()
-                    .spacing(6)
-                    .push(p1_bold("Address"))
+                    .spacing(4)
+                    .push(
+                        Row::new()
+                            .spacing(12)
+                            .align_y(Alignment::Center)
+                            .push(p1_bold("Address"))
+                            .push(
+                                text(format!("Recipient {}", index + 1))
+                                    .size(P2_SIZE)
+                                    .font(font::SEMIBOLD)
+                                    .style(theme::text::secondary),
+                            )
+                            .push(Space::new().width(Length::Fill))
+                            // Recipient for recovery cannot be deleted.
+                            .push_maybe((!is_recovery).then(|| {
+                                Button::new(text("Remove").size(P2_SIZE))
+                                    .style(theme::button::transparent)
+                                    .on_press(CreateSpendMessage::DeleteRecipient(index))
+                                    .width(Length::Shrink)
+                            })),
+                    )
                     .push(
                         form::Form::new_trimmed("Address", address, move |msg| {
                             CreateSpendMessage::RecipientEdited(index, "address", msg)
@@ -911,7 +915,7 @@ pub fn recipient_view<'a>(
             )
             .push(
                 Column::new()
-                    .spacing(6)
+                    .spacing(4)
                     .push(p1_bold("Description"))
                     .push(
                         form::Form::new("Payment label", label, move |msg| {
@@ -923,7 +927,7 @@ pub fn recipient_view<'a>(
                     ),
             )
             .push(
-                Column::new().spacing(6)
+                Column::new().spacing(4)
                     .push(p1_bold(match bitcoin_unit {
                         BitcoinDisplayUnit::BTC => "Amount BTC",
                         BitcoinDisplayUnit::Sats => "Amount (sats)",
@@ -2696,24 +2700,39 @@ mod tests {
         assert_eq!(harness.tab().input.as_deref(), Some("40000"));
         assert_eq!(harness.shift_tab().input.as_deref(), Some("Payment label"));
         assert_eq!(harness.shift_tab().input.as_deref(), Some(ADDRESS_A));
-        for changed in [
-            Scenario {
-                insufficient: true,
-                ..base.clone()
-            },
-            Scenario {
-                max_selected: true,
-                ..base.clone()
-            },
-            Scenario {
-                fiat: true,
-                fiat_editing: true,
-                ..base.clone()
-            },
-            Scenario {
-                recipients: 2,
-                ..base.clone()
-            },
+        for (transition, changed) in [
+            (
+                "insufficient",
+                Scenario {
+                    insufficient: true,
+                    ..base.clone()
+                },
+            ),
+            ("insufficient-to-normal", base.clone()),
+            (
+                "max",
+                Scenario {
+                    max_selected: true,
+                    ..base.clone()
+                },
+            ),
+            ("max-to-normal", base.clone()),
+            (
+                "fiat",
+                Scenario {
+                    fiat: true,
+                    fiat_editing: true,
+                    ..base.clone()
+                },
+            ),
+            ("fiat-to-normal", base.clone()),
+            (
+                "single-to-batch",
+                Scenario {
+                    recipients: 2,
+                    ..base.clone()
+                },
+            ),
         ] {
             harness.rebuild(compose(&fixture, &changed));
             assert_eq!(
@@ -2722,9 +2741,28 @@ mod tests {
                     .focused()
                     .and_then(|entry| entry.input.as_deref()),
                 Some(ADDRESS_A),
-                "focus moved during compose rebuild"
+                "focus moved during {transition} compose rebuild"
             );
         }
+        // No focus command after adding recipient 1: a real edit must still
+        // belong to recipient 0, rather than a newly inserted batch label.
+        harness.key(keyboard::key::Named::End, false, true);
+        let edited = harness.type_character('x');
+        assert!(
+            matches!(edited.as_slice(), [Message::CreateSpend(CreateSpendMessage::RecipientEdited(0, "address", value))]
+                if value == &format!("{ADDRESS_A}x")),
+            "batch rebuild lost recipient 0 input ownership: {:?}",
+            edited
+        );
+        harness.rebuild(compose(&fixture, &base));
+        assert_eq!(
+            harness
+                .probe()
+                .focused()
+                .and_then(|entry| entry.input.as_deref()),
+            Some(ADDRESS_A),
+            "focus moved during batch-to-single compose rebuild"
+        );
     }
 
     #[test]
