@@ -291,18 +291,6 @@ pub(crate) mod capture {
         inspect_at_width(scenario, content, outer, appearance, theme, width)
     }
 
-    /// The Launcher fills the window rather than the dashboard's 8/10 pane.
-    /// Its content-only fixture uses the actual 1024px minimum width.
-    pub fn inspect_full_window<M: 'static>(
-        scenario: &str,
-        content: Element<'_, M>,
-        outer: (u32, u32),
-        appearance: &str,
-        theme: theme::Theme,
-    ) -> Inspection {
-        inspect_at_width(scenario, content, outer, appearance, theme, outer.0)
-    }
-
     fn inspect_at_width<M: 'static>(
         scenario: &str,
         content: Element<'_, M>,
