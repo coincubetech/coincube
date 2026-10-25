@@ -58,7 +58,10 @@ pub fn import_wallet_or_descriptor<'a>(
 ) -> Element<'a, Message> {
     let mut col_wallets = Column::new()
         .spacing(20)
-        .push(h4_bold("Load a previously used wallet"));
+        .push(h4_bold("Wallets on this Connect account"))
+        .push(p2_regular(
+            "Choose a wallet already available to this Cube.",
+        ));
     let no_wallets = wallets.is_empty();
     for (i, (name, alias)) in wallets.into_iter().enumerate() {
         col_wallets = col_wallets.push(
@@ -74,7 +77,7 @@ pub fn import_wallet_or_descriptor<'a>(
         );
     }
     let card_wallets: Element<'a, Message> = if no_wallets {
-        h4_bold("You have no current wallets").into()
+        p2_regular("No previously used wallets are available on this account.").into()
     } else {
         card::simple(col_wallets).into()
     };
@@ -86,7 +89,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a shared wallet").style(theme::text::primary))
                     .push(
-                        text("If you received an invitation to join a shared wallet")
+                        text("Use an invitation token from a shared wallet")
                             .style(theme::text::secondary),
                     ),
             )
@@ -100,7 +103,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a shared wallet").style(theme::text::primary))
                     .push(
-                        text("Type the invitation token you received by email")
+                        text("Paste the invitation token you received by email")
                             .style(theme::text::secondary),
                     ),
             )
@@ -185,7 +188,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a wallet from descriptor").style(theme::text::primary))
                     .push(
-                        text("Creates a new wallet from the descriptor")
+                        text("Import its public descriptor; signing keys are not imported here")
                             .style(theme::text::secondary),
                     ),
             )
@@ -199,7 +202,7 @@ pub fn import_wallet_or_descriptor<'a>(
                     .spacing(5)
                     .push(h4_bold("Load a wallet from descriptor").style(theme::text::primary))
                     .push(
-                        text("Creates a new wallet from the descriptor")
+                        text("Import its public descriptor; signing keys are not imported here")
                             .style(theme::text::secondary),
                     ),
             )
@@ -266,9 +269,13 @@ pub fn import_wallet_or_descriptor<'a>(
     layout(
         progress,
         email,
-        "Add wallet",
+        "Import or restore a wallet",
         Column::new()
-            .spacing(50)
+            .spacing(24)
+            .push(h4_bold("Choose a source"))
+            .push(p2_regular(
+                "Continue with a wallet on this account, a shared invitation, or a descriptor file.",
+            ))
             .push(error.map(|e| card::error("Something wrong happened", e.to_string())))
             .push(card_wallets)
             .push(card::simple(col_invitation_token).padding(0))
@@ -344,8 +351,11 @@ pub fn import_descriptor<'a>(
     layout(
         progress,
         email,
-        "Import the wallet",
+        "Import a wallet descriptor",
         Column::new()
+            .push(p2_regular(
+                "A public descriptor restores wallet visibility. It does not add signing keys to this Cube.",
+            ))
             .push(
                 Column::new()
                     .spacing(20)
@@ -2425,14 +2435,17 @@ pub fn login(progress: (usize, usize), connection_step: Element<Message>) -> Ele
     layout(
         progress,
         None,
-        "Login",
+        "Connect to a shared wallet",
         Container::new(
             Column::new()
-                .spacing(50)
+                .spacing(20)
                 .max_width(700)
-                .align_x(Alignment::Center)
-                .width(Length::FillPortion(1))
-                .push(h2("COINCUBE | Connect"))
+                .width(Length::Fill)
+                .push(p2_regular("ADD WALLET · CONNECT").style(theme::text::secondary))
+                .push(h2("Sign in to Connect"))
+                .push(p2_regular(
+                    "Use the account associated with this shared wallet. The emailed token is submitted when complete.",
+                ))
                 .push(connection_step),
         )
         .center_x(Length::Fill),
@@ -2733,12 +2746,8 @@ pub(super) fn layout<'a>(
     .into()
 }
 
-/// Placeholder view for the Cube Recovery Kit restore step (W13/W14/W15).
-/// Renders a minimal but complete UI so every Phase has a reachable
-/// interaction. A design pass is expected as a follow-up.
-///
-/// The scope arg changes the headline copy and hides "Skip" when
-/// the flow is `Full` (W13 — the restore IS the point of the flow).
+/// The Recovery Kit journey keeps each existing authentication, selection and
+/// decryption phase visible. The step's state machine remains authoritative.
 #[allow(clippy::too_many_arguments)]
 pub fn recovery_kit_restore<'a>(
     progress: (usize, usize),
@@ -2760,7 +2769,52 @@ pub fn recovery_kit_restore<'a>(
         }
     };
 
-    let mut content: Column<'a, Message> = Column::new().spacing(20).width(Length::Fill);
+    let (step, step_title, step_detail) = match phase {
+        RestorePhase::Email | RestorePhase::OtpEntry => (
+            1,
+            "Sign in to Connect",
+            "Verify the account that holds this Cube's Recovery Kit.",
+        ),
+        RestorePhase::LoadingCubes | RestorePhase::CubePicker { .. } => (
+            2,
+            "Choose a Cube",
+            "Only Cubes on the current network with the required backup are available.",
+        ),
+        RestorePhase::PasswordEntry { .. } | RestorePhase::Decrypting { .. } => (
+            3,
+            "Open the Recovery Kit",
+            "The recovery password decrypts the backup on this device.",
+        ),
+        RestorePhase::Ready { .. } => (
+            4,
+            "Continue restoring",
+            "Your Recovery Kit was decrypted. The installer will finish the remaining steps.",
+        ),
+        RestorePhase::Error { .. } => (
+            0,
+            "Recovery needs attention",
+            "Review the error below, then retry the existing restore flow.",
+        ),
+    };
+    let mut content: Column<'a, Message> = Column::new()
+        .spacing(20)
+        .width(Length::Fill)
+        .max_width(700)
+        .push(
+            p2_regular(if step == 0 {
+                "RESTORE"
+            } else {
+                match step {
+                    1 => "RESTORE · STEP 1 OF 4",
+                    2 => "RESTORE · STEP 2 OF 4",
+                    3 => "RESTORE · STEP 3 OF 4",
+                    _ => "RESTORE · STEP 4 OF 4",
+                }
+            })
+            .style(theme::text::secondary),
+        )
+        .push(h4_bold(step_title))
+        .push(p2_regular(step_detail).style(theme::text::secondary));
 
     match phase {
         RestorePhase::Email => {
@@ -2791,7 +2845,10 @@ pub fn recovery_kit_restore<'a>(
         }
         RestorePhase::OtpEntry => {
             content = content
-                .push(text::text("Enter the 6-digit code we sent to your email."))
+                .push(text::text(format!(
+                    "Enter the 6-digit code sent to {}.",
+                    email.value
+                )))
                 .push(
                     form::Form::new_trimmed("123456", otp, |v| {
                         // Wrap immediately — the `String` from iced's
@@ -2811,6 +2868,7 @@ pub fn recovery_kit_restore<'a>(
             content = content.push(text::text("Loading your Cubes from Connect…"));
         }
         RestorePhase::CubePicker { cubes, .. } => {
+            content = content.push(p2_regular("Recovery Kit availability"));
             let mut col = Column::new().spacing(10);
             if cubes.is_empty() {
                 col = col.push(text::text(
@@ -2834,16 +2892,16 @@ pub fn recovery_kit_restore<'a>(
                             }
                         };
                     let label = if available {
-                        format!("{} — kit available", c.name)
+                        format!("{} · {} · Recovery Kit available", c.name, c.network)
                     } else if !c.status.has_recovery_kit {
-                        format!("{} — no kit (disabled)", c.name)
+                        format!("{} · {} · No Recovery Kit", c.name, c.network)
                     } else {
                         match scope {
                             crate::installer::step::RestoreScope::Full => {
-                                format!("{} — no seed in kit (disabled)", c.name)
+                                format!("{} · {} · No Master Seed in kit", c.name, c.network)
                             }
                             crate::installer::step::RestoreScope::DescriptorOnly => {
-                                format!("{} — no descriptor in kit (disabled)", c.name)
+                                format!("{} · {} · No descriptor in kit", c.name, c.network)
                             }
                         }
                     };
@@ -2852,7 +2910,7 @@ pub fn recovery_kit_restore<'a>(
                     // built from dynamic `String`s — `button::secondary`
                     // requires `&'static str`.
                     let mut btn = Button::new(text::text(label))
-                        .width(Length::Fixed(360.0))
+                        .width(Length::Fill)
                         .padding([8, 16])
                         .style(theme::button::secondary);
                     if available {
@@ -2904,8 +2962,7 @@ pub fn recovery_kit_restore<'a>(
         }
         RestorePhase::Decrypting { .. } => {
             content = content.push(text::text(
-                "Decrypting your Recovery Kit. This takes a moment — \
-                 Argon2id key derivation is intentionally slow.",
+                "Decrypting your Recovery Kit on this device. This can take a moment.",
             ));
         }
         RestorePhase::Ready { selected, .. } => {
@@ -2916,7 +2973,7 @@ pub fn recovery_kit_restore<'a>(
             // without an explicit Next button they'd be stuck.
             content = content
                 .push(text::text(format!(
-                    "Ready to restore from \"{}\". Click Next to continue.",
+                    "Recovery Kit for \"{}\" decrypted. Continue to the remaining installer steps.",
                     selected.name
                 )))
                 .push(
@@ -2956,7 +3013,8 @@ pub fn recovery_kit_restore<'a>(
 
     layout(
         progress,
-        None,
+        Some(email.value.as_str())
+            .filter(|value| !value.is_empty() && !matches!(phase, RestorePhase::Email)),
         title,
         content,
         true,
