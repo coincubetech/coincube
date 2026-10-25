@@ -38,6 +38,19 @@ install_each() {
     done
 }
 
+# The app loads these X11 libraries itself at start-up instead of linking
+# them, so `ldd` never lists them. Without any one of them the app closes
+# straight away with no message. Report which ones this distro lacks out of
+# the box, then install them so the start-up test can get further.
+x11_runtime() {
+    found=$( (ldconfig -p 2>/dev/null || /sbin/ldconfig -p) )
+    for soname in libX11.so.6 libX11-xcb.so.1 libXcursor.so.1 libXi.so.6 libxkbcommon-x11.so.0; do
+        echo "$found" | grep -q "$soname" ||
+            summary "- ⚠️ \`$soname\` was not installed with the app's other libraries. Without it the app closes silently on start."
+    done
+    install_each "$@"
+}
+
 # Test helpers (virtual screen, screenshot tool, software graphics). Their
 # package names drift between releases; a miss here is not a user problem.
 install_quiet() {
@@ -54,13 +67,23 @@ install() {
         apt-get install -y -q tar gzip || exit 1
         INSTALL="apt-get install -y -q --no-install-recommends"
         install_each libwebkit2gtk-4.1-0 libdbus-1-3 libudev1 ca-certificates
+        x11_runtime libx11-6 libx11-xcb1 libxcursor1 libxi6 libxkbcommon-x11-0
         install_quiet xvfb xauth dbus dbus-x11 libvulkan1 mesa-vulkan-drivers \
             libgl1-mesa-dri x11-apps procps fonts-dejavu-core
         ;;
     dnf)
         dnf install -y tar gzip || exit 1
         INSTALL="dnf install -y --setopt=install_weak_deps=False"
+        # RHEL-family: some libraries only exist in the EPEL/CRB add-on repos.
+        # Turn them on so we learn whether the app can run at all there; a
+        # user would have to do the same.
+        if [ -f /etc/almalinux-release ] || [ -f /etc/rocky-release ]; then
+            dnf install -y epel-release > /dev/null 2>&1 && command -v crb > /dev/null &&
+                crb enable > /dev/null 2>&1 &&
+                summary "- note: EPEL and CRB repositories enabled; users need these too"
+        fi
         install_each webkit2gtk4.1 dbus-libs systemd-libs ca-certificates
+        x11_runtime libX11 libX11-xcb libXcursor libXi libxkbcommon-x11
         install_quiet xorg-x11-server-Xvfb xorg-x11-xauth dbus-daemon dbus-x11 \
             vulkan-loader mesa-vulkan-drivers mesa-dri-drivers xwd xorg-x11-apps procps-ng \
             dejavu-sans-fonts
@@ -69,6 +92,7 @@ install() {
         pacman -Syu --noconfirm tar gzip || exit 1
         INSTALL="pacman -S --noconfirm --needed"
         install_each webkit2gtk-4.1 dbus systemd-libs ca-certificates
+        x11_runtime libx11 libxcursor libxi libxkbcommon-x11
         install_quiet xorg-server-xvfb xorg-xauth vulkan-icd-loader vulkan-swrast mesa \
             xorg-xwd procps-ng ttf-dejavu
         ;;
@@ -77,6 +101,7 @@ install() {
         zypper --non-interactive install tar gzip || exit 1
         INSTALL="zypper --non-interactive install --no-recommends"
         install_each libwebkit2gtk-4_1-0 libdbus-1-3 libudev1 ca-certificates
+        x11_runtime libX11-6 libX11-xcb1 libXcursor1 libXi6 libxkbcommon-x11-0
         install_quiet xorg-x11-server-Xvfb xauth dbus-1 dbus-1-x11 libvulkan1 \
             libvulkan_lvp Mesa-dri xwd procps dejavu-fonts
         ;;
@@ -92,11 +117,16 @@ install() {
 glibc() {
     need="$1"
     have=$(getconf GNU_LIBC_VERSION 2>/dev/null | awk '{print $2}')
+    # Some images (openSUSE Tumbleweed) ship no getconf; ldd reports it too.
+    [ -n "$have" ] || have=$(ldd --version 2>/dev/null | head -1 | grep -o '[0-9][0-9.]*$')
     lowest=$(printf '%s\n%s\n' "$need" "$have" | sort -V | head -1)
-    if [ -n "$have" ] && [ "$lowest" = "$need" ]; then
+    if [ -z "$have" ]; then
+        summary "❌ $(distro): could not read the glibc version (test problem, not an app problem)"
+        exit 1
+    elif [ "$lowest" = "$need" ]; then
         summary "✅ $(distro): glibc $have (app needs $need)"
     else
-        summary "❌ $(distro): glibc ${have:-unknown} is too old, the app needs $need. Users see a \"GLIBC_$need not found\" error and the app does not open."
+        summary "❌ $(distro): glibc $have is too old, the app needs $need. Users see a \"GLIBC_$need not found\" error and the app does not open."
         exit 1
     fi
 }
@@ -145,6 +175,9 @@ launch() {
     else
         summary "❌ $(distro): the app closed by itself (exit code $status). Last lines of its output:"
         tail -n 25 "$OUT/app.log" | sed 's/^/    /' | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
+        # The app's crash handler writes to its own log file, not the terminal.
+        find "$datadir" -name '*.log' -exec tail -n 40 {} \; 2>/dev/null |
+            sed 's/^/    /' | tee -a "${GITHUB_STEP_SUMMARY:-/dev/null}"
         exit 1
     fi
 }
