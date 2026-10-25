@@ -1188,8 +1188,10 @@ fn gallery_renders_controls_in_both_themes_and_window_sizes() {
 
             // The top of the page with a focused segment, then the form with a
             // focused field, scrolled into view where the window is short.
-            mounted.focus("theme-dark");
-            let segment = bounds_of(&mut mounted, "theme-dark");
+            // Focus an unselected segment, so the capture shows the blue focus
+            // ring beside the selected segment's orange outline.
+            mounted.focus("theme-light");
+            let segment = bounds_of(&mut mounted, "theme-light");
             let offset = reveal(&mut mounted, segment, window);
             let pixels = mounted.pixels(&theme, mouse::Cursor::Unavailable);
             let ring = sample(&pixels, width, segment.center_x(), segment.y - offset - 3.0);

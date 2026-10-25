@@ -110,7 +110,7 @@ impl<'a, M: 'a> From<SettingRow<'a, M>> for Element<'a, M> {
         let mut heading = Row::new()
             .spacing(space::S)
             .align_y(Alignment::Center)
-            .push(line(label, type_size::BODY, font::SEMIBOLD, Tone::Neutral));
+            .push(line(label, type_size::BODY, font::MEDIUM, Tone::Neutral));
         let tag = tag.map(|tag| {
             Container::new(line(tag, type_size::CAPTION, font::REGULAR, Tone::Muted))
                 .padding([0.0, 6.0])

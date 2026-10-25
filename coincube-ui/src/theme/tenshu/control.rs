@@ -134,7 +134,8 @@ pub fn segmented_frame(theme: &Theme, frame_radius: f32) -> container::Style {
 
 /// One segment (`.seg button`): muted text on no fill; the selected segment
 /// (`[aria-pressed="true"]`, `input:checked + label`) takes the selected fill,
-/// ink and a 1px accent outline, as App preferences draws it.
+/// ink and a 1px accent outline, as App preferences draws it. Under the
+/// pointer an unselected segment takes the selected fill without the outline.
 pub fn segment(
     theme: &Theme,
     status: Status,
@@ -143,15 +144,21 @@ pub fn segment(
 ) -> button::Style {
     let shell = &theme.colors.shell;
     let disabled = status == Status::Disabled;
-    let base = selected.then_some(shell.selected);
-    let ink = if selected || matches!(status, Status::Hovered | Status::Pressed) {
+    let pointed = matches!(status, Status::Hovered | Status::Pressed);
+    let ink = if selected || pointed {
         shell.ink
     } else {
         shell.muted
     };
+    // App preferences fills an unselected segment with the selected colour
+    // under the pointer (`.seg label:hover`); pressing adds one hover layer.
+    let fill = match status {
+        Status::Pressed => Some(over(shell.selected, shell.hover)),
+        Status::Hovered => Some(shell.selected),
+        Status::Active | Status::Disabled => selected.then_some(shell.selected),
+    };
     button::Style {
-        background: pointer_fill(theme, status, base)
-            .map(|fill| Background::Color(fade_if(disabled, fill))),
+        background: fill.map(|fill| Background::Color(fade_if(disabled, fill))),
         text_color: fade_if(disabled, ink),
         border: Border {
             color: if selected {

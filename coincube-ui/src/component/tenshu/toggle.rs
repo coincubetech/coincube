@@ -132,7 +132,7 @@ impl<'a, M: Clone + 'static> From<Toggle<'a, M>> for Element<'a, M> {
                     .style(move |theme| style::toggle_pill_track(theme, is_on, enabled));
                 let word = iced::widget::text(if is_on { on_word } else { off_word })
                     .shaping(Shaping::Advanced)
-                    .font(font::MEDIUM)
+                    .font(font::REGULAR)
                     .size(type_size::CHIP);
                 let content = Row::new()
                     .spacing(8)
