@@ -46,7 +46,7 @@ fn privacy_render_needs_cover(
     use crate::app::state::preferences::BalancePrivacy;
     preferences.privacy() == BalancePrivacy::Shown
         && !matches!(
-            GlobalSettings::current_balances_hidden(settings_path),
+            GlobalSettings::try_current_balances_hidden(settings_path),
             Ok(Some(false))
         )
 }
@@ -140,6 +140,34 @@ mod balance_privacy_eye_origin_tests {
 
         std::fs::write(&path, b"{malformed").unwrap();
         assert!(privacy_render_needs_cover(&owner, &path));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn render_covers_amounts_without_waiting_for_a_settings_writer() {
+        use fs4::fs_std::FileExt;
+        use std::sync::mpsc;
+
+        let root =
+            std::env::temp_dir().join(format!("privacy-render-lock-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let path = root.join(crate::app::settings::global::DEFAULT_FILE_NAME);
+        let shown =
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false)).unwrap();
+        let owner = PreferencesOwner::new(path.clone(), &Ok(shown));
+        let lock = std::fs::File::open(path.with_extension("lock")).unwrap();
+        FileExt::lock_exclusive(&lock).unwrap();
+
+        let (sender, receiver) = mpsc::channel();
+        let render = std::thread::spawn(move || {
+            sender
+                .send(privacy_render_needs_cover(&owner, &path))
+                .unwrap();
+        });
+        let covered_while_locked = receiver.recv_timeout(Duration::from_secs(2));
+        FileExt::unlock(&lock).unwrap();
+        render.join().unwrap();
+        assert_eq!(covered_while_locked.unwrap(), true);
         std::fs::remove_dir_all(root).unwrap();
     }
 
