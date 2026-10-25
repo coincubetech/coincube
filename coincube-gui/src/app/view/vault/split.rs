@@ -556,6 +556,12 @@ fn step2_body<'a>(
 pub const CLOSED_COPY: &str = "This split was closed on this device. Its record, with any signed transaction, is kept, and a new split of this wallet is refused until that record is reset.";
 
 pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
+    split_panel_with_privacy(panel, true)
+}
+
+/// The full-screen Split review keeps exact input and return amounts visible
+/// before signing; the privacy argument is retained for its mounted caller.
+pub fn split_panel_with_privacy(panel: &SplitPanel, _balance_masked: bool) -> Element<'_, Message> {
     let single = matches!(panel.stage(), Stage::Unified(_) | Stage::ChooseRoute)
         || panel.unified().record().is_some();
     let mut body = Column::new().spacing(10).max_width(640);
@@ -778,16 +784,20 @@ pub fn split_panel(panel: &SplitPanel) -> Element<'_, Message> {
                             )));
                         }
                         for row in &review.bitcoin.shared {
-                            body =
-                                body.push(coin_input_row(row, "Before fork · both chains", None));
+                            body = body.push(coin_input_row(
+                                row,
+                                "Before fork · both chains",
+                                None,
+                                false,
+                            ));
                         }
                         body = body
                             .push(p1_bold("Bitcoin transaction"))
-                            .push(coin_input_row(&review.bitcoin.funding, "Bitcoin-only", Some(review.bitcoin_confirmations)))
+                            .push(coin_input_row(&review.bitcoin.funding, "Bitcoin-only", Some(review.bitcoin_confirmations), false))
                             .push(caption(format!("Return to this source wallet: {} · {} sats", address(&review.bitcoin.destination), review.bitcoin.destination.value.to_sat())))
                             .push(caption(format!("Fee: {} sats", review.bitcoin.fee.to_sat())))
                             .push(p1_bold("Bitcoin Blake2b transaction"))
-                            .push(coin_input_row(&review.fork.funding, "BTCB2-only", Some(review.fork_confirmations)))
+                            .push(coin_input_row(&review.fork.funding, "BTCB2-only", Some(review.fork_confirmations), false))
                             .push(caption(format!("Send to your paired BTCB2 Cube: {} · {} sats", address(&review.fork.destination), review.fork.destination.value.to_sat())))
                             .push(caption(format!("Fee: {} sats", review.fork.fee.to_sat())))
                             .push(p1_regular("Each transaction spends every shared coin together with its own verified chain-specific funding coin. This preview is not a signing or broadcast request; both proofs, wallet state and fees must be checked again before either transaction can be signed."));
