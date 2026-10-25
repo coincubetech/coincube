@@ -13,6 +13,7 @@ pub mod quote_display;
 pub mod session_status;
 pub mod spinner;
 pub mod tabs;
+pub mod tenshu;
 pub mod text;
 pub mod toast;
 pub mod tooltip;
