@@ -46,6 +46,14 @@ fn payment_status_text(
     payment: &DomainPayment,
     refundable_swap_addresses: &[String],
 ) -> Element<'static, Message> {
+    let (label, style) = payment_detail_status(payment, refundable_swap_addresses);
+    text(label).style(style).into()
+}
+
+fn payment_detail_status(
+    payment: &DomainPayment,
+    refundable_swap_addresses: &[String],
+) -> (&'static str, StatusTextStyle) {
     if matches!(payment.details, DomainPaymentDetails::OnChainBitcoin { .. }) {
         let status = classify_payment(payment, refundable_swap_addresses);
         let style = match status {
@@ -57,24 +65,25 @@ fn payment_status_text(
             }
             _ => theme::text::secondary,
         };
-        return text(status.label()).style(style).into();
+        let label = if status == BtcSwapReceiveStatus::Completed {
+            "Confirmed"
+        } else {
+            status.label()
+        };
+        return (label, style);
     }
 
     match payment.status {
-        DomainPaymentStatus::Complete => text("Complete").style(theme::text::success).into(),
-        DomainPaymentStatus::Pending => text("Pending").style(theme::text::secondary).into(),
-        DomainPaymentStatus::Created => text("Created").style(theme::text::secondary).into(),
-        DomainPaymentStatus::Failed => text("Failed").style(theme::text::destructive).into(),
-        DomainPaymentStatus::TimedOut => text("Timed Out").style(theme::text::destructive).into(),
-        DomainPaymentStatus::Refundable => {
-            text("Refundable").style(theme::text::destructive).into()
+        DomainPaymentStatus::Complete => ("Confirmed", theme::text::success),
+        DomainPaymentStatus::Pending => ("Pending", theme::text::secondary),
+        DomainPaymentStatus::Created => ("Created", theme::text::secondary),
+        DomainPaymentStatus::Failed => ("Failed", theme::text::destructive),
+        DomainPaymentStatus::TimedOut => ("Timed Out", theme::text::destructive),
+        DomainPaymentStatus::Refundable => ("Refundable", theme::text::destructive),
+        DomainPaymentStatus::RefundPending => ("Refund Pending", theme::text::secondary),
+        DomainPaymentStatus::WaitingFeeAcceptance => {
+            ("Waiting Fee Acceptance", theme::text::secondary)
         }
-        DomainPaymentStatus::RefundPending => {
-            text("Refund Pending").style(theme::text::secondary).into()
-        }
-        DomainPaymentStatus::WaitingFeeAcceptance => text("Waiting Fee Acceptance")
-            .style(theme::text::secondary)
-            .into(),
     }
 }
 
@@ -110,6 +119,16 @@ fn usdt_amount_str(payment: &DomainPayment, usdt_id: &str) -> Option<String> {
     None
 }
 
+// The SDK reports the L-BTC fee as a number of sats. Zero does not prove that
+// the fee was paid in USDt; it may also mean no fee or unavailable fee data.
+fn usdt_fee_caption(fees_sat: u64) -> &'static str {
+    if fees_sat == 0 {
+        "No L-BTC fee reported"
+    } else {
+        "Fees (L-BTC)"
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn liquid_transactions_view<'a>(
     payments: &'a [DomainPayment],
@@ -117,7 +136,7 @@ pub fn liquid_transactions_view<'a>(
     in_flight_refunds: &'a HashMap<String, InFlightRefund>,
     _balance: &'a Amount,
     fiat_converter: Option<FiatAmountConverter>,
-    _loading: bool,
+    loading: bool,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     usdt_id: &'a str,
     asset_filter: AssetFilter,
@@ -131,49 +150,69 @@ pub fn liquid_transactions_view<'a>(
 ) -> Element<'a, Message> {
     let mut content = Column::new().spacing(20).width(Length::Fill);
 
-    // Header row with Transactions heading and Export button (matching Vault style)
+    // Keep the asset filter beside the title, as in the Liquid artboard.
+    // The source state still owns selection, server filtering and paging.
+    let mut filter_row = Row::new().spacing(4);
+    for (label, filter) in [
+        ("All", AssetFilter::All),
+        ("L-BTC", AssetFilter::LbtcOnly),
+        ("USDt", AssetFilter::UsdtOnly),
+    ] {
+        filter_row = filter_row.push(
+            iced::widget::button(Container::new(text(label).size(P2_SIZE)).padding([6, 12]))
+                .on_press(Message::SetAssetFilter(filter))
+                .style(if asset_filter == filter {
+                    theme::button::primary
+                } else {
+                    theme::button::transparent_border
+                }),
+        );
+    }
     content = content.push(
         Row::new()
+            .spacing(12)
+            .align_y(Alignment::Center)
             .push(Container::new(h3("Transactions").bold()))
             .push(Space::new().width(Length::Fill))
+            .push(filter_row)
             .push(
                 button::secondary(Some(icon::backup_icon()), "Export")
                     .on_press(ImportExportMessage::Open.into()),
             ),
     );
 
-    // Asset filter tabs
-    {
-        let mut filter_row = Row::new().spacing(8);
-        for (label, filter) in [
-            ("All", AssetFilter::All),
-            ("L-BTC", AssetFilter::LbtcOnly),
-            ("USDt", AssetFilter::UsdtOnly),
-        ] {
-            let is_active = asset_filter == filter;
-            let btn = iced::widget::button(
-                Container::new(text(label).size(P2_SIZE).color(if is_active {
-                    coincube_ui::color::WHITE
-                } else {
-                    coincube_ui::color::GREY_3
-                }))
-                .padding([6, 14]),
-            )
-            .on_press(Message::SetAssetFilter(filter))
-            .style(if is_active {
-                theme::button::primary
-            } else {
-                theme::button::transparent_border
-            });
-            filter_row = filter_row.push(btn);
-        }
-        content = content.push(filter_row);
+    // A refundable BTC → L-BTC swap is still activity even when the regular
+    // payment page is empty. The USDt tab must never show these BTC refunds.
+    let show_refundables = refundables_visible(refundables.len(), asset_filter);
+
+    // Put recoverable funds first so they are not buried after a paged list.
+    if show_refundables {
+        content = content.push(
+            Column::new()
+                .spacing(10)
+                .push(Container::new(h4_bold("Refundable Transactions")))
+                .push(refundables.iter().enumerate().fold(
+                    Column::new().spacing(10),
+                    |col, (i, refundable)| {
+                        col.push(refundable_row(
+                            i,
+                            refundable,
+                            in_flight_refunds.get(&refundable.swap_address),
+                            fiat_converter,
+                            bitcoin_unit,
+                        ))
+                    },
+                )),
+        );
     }
 
     // On page 0 with no rows we render the empty state; on later pages an
     // empty response just means we've paged past the end — keep the list
     // shell and pagination controls visible so the user can Prev back.
-    if payments.is_empty() && current_page == 0 {
+    if loading && payments.is_empty() && current_page == 0 && !show_refundables {
+        content =
+            content.push(p1_regular("Loading Liquid transactions…").style(theme::text::secondary));
+    } else if payments.is_empty() && current_page == 0 && !show_refundables {
         // Empty state with Kage quote
         content = content.push(
             Column::new()
@@ -186,13 +225,17 @@ pub fn liquid_transactions_view<'a>(
                 ))
                 .push(Space::new().height(Length::Fixed(10.0)))
                 .push(
-                    text("Your Liquid wallet is ready. Once you send or receive\nfunds, they'll show up here.")
+                    text(match asset_filter {
+                        AssetFilter::All => "Your Liquid wallet is ready. Once you send or receive\nfunds, they'll show up here.",
+                        AssetFilter::LbtcOnly => "No L-BTC transactions on this page.",
+                        AssetFilter::UsdtOnly => "No USDt transactions on this page.",
+                    })
                         .size(16)
                         .style(theme::text::secondary)
                         .wrapping(iced::widget::text::Wrapping::Word)
                         .align_x(iced::alignment::Horizontal::Center),
                 )
-                .push(
+                .push_maybe(matches!(asset_filter, AssetFilter::All).then(||
                     Row::new()
                         .spacing(15)
                         .push(
@@ -207,14 +250,18 @@ pub fn liquid_transactions_view<'a>(
                                 .padding(15)
                                 .width(Length::Fixed(150.0)),
                         ),
-                ),
+                )),
         );
-    } else {
+    } else if !payments.is_empty() || current_page > 0 {
         // The dashboard already wraps the whole panel in a page-level
         // scrollable, so the list is pushed directly — nesting another
         // scrollable here would make its `Fill` height resolve against an
         // unbounded parent and break layout. Pagination keeps each page
         // bounded (PAGE_SIZE rows), so the page scroll is enough.
+        let refundable_swap_addresses: Vec<String> = refundables
+            .iter()
+            .map(|swap| swap.swap_address.clone())
+            .collect();
         let list =
             payments
                 .iter()
@@ -232,6 +279,7 @@ pub fn liquid_transactions_view<'a>(
                         usdt_id,
                         show_direction_badges,
                         is_swap,
+                        &refundable_swap_addresses,
                     ))
                 });
         content = content.push(list);
@@ -243,33 +291,6 @@ pub fn liquid_transactions_view<'a>(
             processing,
             current_page,
         ));
-    }
-
-    // Refundables are always BTC → L-BTC swap refunds, so they only belong
-    // under the "All" and "L-BTC" filters. Previously they leaked into the
-    // USDt tab — fixed here.
-    let show_refundables =
-        !refundables.is_empty() && matches!(asset_filter, AssetFilter::All | AssetFilter::LbtcOnly);
-    if show_refundables {
-        content = content.push(
-            Column::new()
-                .spacing(10)
-                .push(Space::new().height(Length::Fixed(20.0)))
-                .push(Container::new(h3("Refundable Transactions").bold()))
-                .push(refundables.iter().enumerate().fold(
-                    Column::new().spacing(10),
-                    |col, (i, refundable)| {
-                        col.push(refundable_row(
-                            i,
-                            refundable,
-                            in_flight_refunds.get(&refundable.swap_address),
-                            fiat_converter,
-                            bitcoin_unit,
-                            show_direction_badges,
-                        ))
-                    },
-                )),
-        );
     }
 
     content = content.push(Space::new().height(Length::Fixed(30.0)));
@@ -285,6 +306,7 @@ fn transaction_row<'a>(
     usdt_id: &str,
     show_direction_badges: bool,
     is_swap: bool,
+    refundable_swap_addresses: &[String],
 ) -> Element<'a, Message> {
     let is_receive = payment.is_incoming();
     let usdt_str = usdt_amount_str(payment, usdt_id);
@@ -321,7 +343,7 @@ fn transaction_row<'a>(
         }
     };
 
-    let is_pending = matches!(payment.status, DomainPaymentStatus::Pending);
+    let status = payment_list_status(payment, refundable_swap_addresses);
 
     if let Some(ref usdt_display) = usdt_str {
         let mut item = TransactionListItem::new(direction, &Amount::ZERO, bitcoin_unit)
@@ -330,8 +352,8 @@ fn transaction_row<'a>(
             .with_custom_icon(combo_icon)
             .with_show_direction_badge(show_direction_badges)
             .with_amount_override(usdt_display.clone());
-        if is_pending {
-            item = item.with_custom_status(pending_badge());
+        if let Some((label, style)) = status {
+            item = item.with_custom_status(status_badge(label, style));
         }
         return item.view(Message::Select(i)).into();
     }
@@ -349,48 +371,71 @@ fn transaction_row<'a>(
 
     if let Some(fiat_amount) = fiat_converter.map(|converter| {
         let fiat = converter.convert(btc_amount);
-        format!("{} {}", fiat.to_formatted_string(), fiat.currency())
+        format!(
+            "{} {} · current rate",
+            fiat.to_formatted_string(),
+            fiat.currency()
+        )
     }) {
         item = item.with_fiat_amount(fiat_amount);
     }
 
-    if is_pending {
-        item = item.with_custom_status(pending_badge());
+    if let Some((label, style)) = status {
+        item = item.with_custom_status(status_badge(label, style));
     }
 
     item.view(Message::Select(i)).into()
 }
 
-/// "Pending" status pill, matching the one Overview shows on unconfirmed
-/// payments (so the two screens agree).
-fn pending_badge() -> Element<'static, Message> {
-    let fg = coincube_ui::color::BLACK;
-    Container::new(
-        Row::new()
-            .spacing(4)
-            .align_y(Alignment::Center)
-            .push(
-                icon::warning_icon()
-                    .size(14)
-                    .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-            )
-            .push(
-                text("Pending")
-                    .bold()
-                    .size(14)
-                    .style(move |_| iced::widget::text::Style { color: Some(fg) }),
-            ),
-    )
-    .padding([2, 8])
-    .style(move |_: &theme::Theme| iced::widget::container::Style {
-        background: Some(iced::Background::Color(coincube_ui::color::GREY_3)),
-        border: iced::Border {
-            radius: 12.0.into(),
+type StatusTextStyle = fn(&theme::Theme) -> iced::widget::text::Style;
+
+fn refundables_visible(count: usize, filter: AssetFilter) -> bool {
+    count > 0 && matches!(filter, AssetFilter::All | AssetFilter::LbtcOnly)
+}
+
+/// List status uses the same swap classifier as detail, so a failed payment
+/// that remains in the SDK refundable set reads "Refundable" in both places.
+fn payment_list_status(
+    payment: &DomainPayment,
+    refundable_swap_addresses: &[String],
+) -> Option<(&'static str, StatusTextStyle)> {
+    if matches!(payment.details, DomainPaymentDetails::OnChainBitcoin { .. }) {
+        let status = classify_payment(payment, refundable_swap_addresses);
+        return match status {
+            BtcSwapReceiveStatus::Completed => Some(("Confirmed", theme::text::success)),
+            BtcSwapReceiveStatus::Refunded => Some(("Refunded", theme::text::success)),
+            BtcSwapReceiveStatus::Failed | BtcSwapReceiveStatus::Refundable => {
+                Some((status.label(), theme::text::error))
+            }
+            status => Some((status.label(), theme::text::warning)),
+        };
+    }
+    match payment.status {
+        DomainPaymentStatus::Complete => Some(("Confirmed", theme::text::success)),
+        DomainPaymentStatus::Pending => Some(("Pending", theme::text::warning)),
+        DomainPaymentStatus::Created => Some(("Created", theme::text::secondary)),
+        DomainPaymentStatus::Failed => Some(("Failed", theme::text::error)),
+        DomainPaymentStatus::TimedOut => Some(("Timed Out", theme::text::error)),
+        DomainPaymentStatus::Refundable => Some(("Refundable", theme::text::error)),
+        DomainPaymentStatus::RefundPending => Some(("Refund Pending", theme::text::warning)),
+        DomainPaymentStatus::WaitingFeeAcceptance => {
+            Some(("Waiting Fee Acceptance", theme::text::warning))
+        }
+    }
+}
+
+fn status_badge(label: impl Into<String>, style: StatusTextStyle) -> Element<'static, Message> {
+    Container::new(text(label.into()).size(CAPTION_SIZE).bold().style(style))
+        .padding([2, 8])
+        .style(|theme: &theme::Theme| iced::widget::container::Style {
+            border: iced::Border {
+                color: theme.colors.rule,
+                width: 1.0,
+                radius: 10.0.into(),
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    })
-    .into()
+        })
+        .into()
 }
 
 fn refundable_row<'a>(
@@ -399,42 +444,62 @@ fn refundable_row<'a>(
     in_flight: Option<&'a InFlightRefund>,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
-    show_direction_badges: bool,
 ) -> Element<'a, Message> {
     let btc_amount = Amount::from_sat(refundable.amount_sat);
     let time_ago = format_time_ago(refundable.timestamp.into());
 
-    let direction = TransactionDirection::Incoming;
-
-    // If we have an in-flight refund for this swap, reflect that in the row
-    // label so the user can tell at a glance that their submission is being
-    // broadcast. Previously the card either disappeared or looked identical
-    // to "not yet refunded".
-    let label = match in_flight {
+    // This is a recoverable amount, not money already received. Keep it
+    // unsigned and name the broadcast state.
+    let status = match in_flight {
         Some(InFlightRefund {
             refund_txid: Some(txid),
             ..
-        }) => {
-            format!("Refund broadcast · {}", truncate_middle(txid, 6, 6))
-        }
+        }) => format!("Refund broadcast · {}", truncate_middle(txid, 6, 6)),
         Some(_) => "Refund broadcasting…".to_string(),
-        None => "Refundable Swap".to_string(),
+        None => "Refundable".to_string(),
     };
 
-    let mut item = TransactionListItem::new(direction, &btc_amount, bitcoin_unit)
-        .with_label(label)
-        .with_time_ago(time_ago)
-        .with_custom_icon(asset_network_logo("lbtc", "liquid", 40.0))
-        .with_show_direction_badge(show_direction_badges);
-
-    if let Some(fiat_amount) = fiat_converter.map(|converter| {
+    let amount = btc_amount.to_formatted_string_with_unit(bitcoin_unit);
+    let mut amount_column = Column::new()
+        .spacing(4)
+        .align_x(Alignment::End)
+        .push(p1_bold(amount));
+    if let Some(converter) = fiat_converter {
         let fiat = converter.convert(btc_amount);
-        format!("{} {}", fiat.to_formatted_string(), fiat.currency())
-    }) {
-        item = item.with_fiat_amount(fiat_amount);
+        amount_column = amount_column.push(
+            p2_regular(format!(
+                "{} {} · current rate",
+                fiat.to_formatted_string(),
+                fiat.currency()
+            ))
+            .style(theme::text::secondary),
+        );
     }
-
-    item.view(Message::SelectRefundable(i)).into()
+    let row = Row::new()
+        .spacing(12)
+        .align_y(Alignment::Center)
+        .push(asset_network_logo::<Message>("lbtc", "liquid", 40.0))
+        .push(
+            Column::new()
+                .spacing(4)
+                .width(Length::Fill)
+                .push(p1_regular("Refundable Swap"))
+                .push(
+                    Row::new()
+                        .spacing(8)
+                        .align_y(Alignment::Center)
+                        .push(p2_regular(time_ago).style(theme::text::secondary))
+                        .push(status_badge(status, theme::text::warning)),
+                ),
+        )
+        .push(amount_column);
+    Container::new(
+        iced::widget::button(row.padding(10))
+            .on_press(Message::SelectRefundable(i))
+            .style(theme::button::transparent_border),
+    )
+    .style(theme::card::simple)
+    .into()
 }
 
 pub fn transaction_detail_view<'a>(
@@ -496,8 +561,9 @@ pub fn transaction_detail_view<'a>(
         };
         let amount_row = if is_receive {
             Row::new()
-                .spacing(10)
+                .spacing(5)
                 .align_y(Alignment::Center)
+                .push(text("+").size(H1_SIZE))
                 .push(text(usdt_num).size(H1_SIZE).bold())
                 .push(text("USDt").size(H1_SIZE).color(coincube_ui::color::GREY_3))
         } else {
@@ -574,25 +640,21 @@ pub fn transaction_detail_view<'a>(
                             )
                             .spacing(20),
                     )
-                    .push(if fees_sat.to_sat() == 0 && !is_receive {
+                    .push(if fees_sat.to_sat() == 0 {
                         Row::new()
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Fees").bold()),
+                                    .push(text(usdt_fee_caption(0)).bold()),
                             )
-                            .push(
-                                Column::new()
-                                    .width(Length::FillPortion(2))
-                                    .push(text("Paid in USDt")),
-                            )
+                            .push(Column::new().width(Length::FillPortion(2)).push(text("—")))
                             .spacing(20)
                     } else {
                         Row::new()
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Fees (L-BTC)").bold()),
+                                    .push(text(usdt_fee_caption(fees_sat.to_sat())).bold()),
                             )
                             .push(
                                 Column::new().width(Length::FillPortion(2)).push(text(
@@ -646,9 +708,13 @@ pub fn transaction_detail_view<'a>(
                             if is_receive { btc_amount } else { total_amount };
                         let fiat = converter.convert(amount_for_conversion);
                         Row::new().align_y(Alignment::Center).push(
-                            fiat.to_text()
-                                .size(H2_SIZE)
-                                .color(coincube_ui::color::GREY_2),
+                            text(format!(
+                                "≈ {} {} · current rate",
+                                fiat.to_formatted_string(),
+                                fiat.currency()
+                            ))
+                            .size(H2_SIZE)
+                            .style(theme::text::secondary),
                         )
                     })),
             ),
@@ -787,8 +853,13 @@ pub fn refundable_detail_view<'a>(
 
     Column::new()
         .spacing(20)
+        .push(detail_back_button())
         .push(Container::new(h3("Refundable Swap")).width(Length::Fill))
-        .push(Column::new().push(p1_regular(header_status)).spacing(10))
+        .push(
+            Column::new()
+                .push(p1_regular(header_status).style(theme::text::warning))
+                .spacing(10),
+        )
         .push(
             Column::new().spacing(20).push(
                 Column::new()
@@ -888,8 +959,7 @@ pub fn refundable_detail_view<'a>(
                 )
                 .spacing(15),
         ))
-        .push(Space::new().height(Length::Fixed(20.0)))
-        .push(
+        .push_maybe((in_flight.is_none() && !refunding).then(|| {
             Column::new()
                 .spacing(15)
                 .push(Container::new(h4_bold("Refund Details")).width(Length::Fill))
@@ -935,16 +1005,16 @@ pub fn refundable_detail_view<'a>(
                 )
                 .push(
                     Row::new().spacing(10).push(
-                        button::primary(None, if refunding { "Refund..." } else { "Refund" })
-                            .on_press_maybe(if can_refund && !refunding {
-                                Some(Message::SubmitRefund)
-                            } else {
-                                None
-                            })
+                        button::primary(None, "Refund")
+                            .on_press_maybe(can_refund.then_some(Message::SubmitRefund))
                             .width(Length::Fill),
                     ),
-                ),
-        )
+                )
+                .push_maybe((!can_refund).then(|| {
+                    p2_regular("Enter a valid Bitcoin address and fee rate to enable Refund.")
+                        .style(theme::text::secondary)
+                }))
+        }))
         .into()
 }
 
@@ -958,6 +1028,119 @@ fn detail_back_button() -> Element<'static, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::wallets::DomainPaymentDirection;
+
+    fn payment(status: DomainPaymentStatus, details: DomainPaymentDetails) -> DomainPayment {
+        DomainPayment {
+            tx_id: None,
+            destination: None,
+            timestamp: 0,
+            amount_sat: 9_000,
+            fees_sat: 100,
+            direction: DomainPaymentDirection::Receive,
+            status,
+            details,
+        }
+    }
+
+    #[test]
+    fn liquid_list_preserves_failure_and_fee_review_statuses() {
+        for (state, expected) in [
+            (DomainPaymentStatus::Pending, Some("Pending")),
+            (DomainPaymentStatus::TimedOut, Some("Timed Out")),
+            (DomainPaymentStatus::RefundPending, Some("Refund Pending")),
+            (
+                DomainPaymentStatus::WaitingFeeAcceptance,
+                Some("Waiting Fee Acceptance"),
+            ),
+            (DomainPaymentStatus::Complete, Some("Confirmed")),
+        ] {
+            let row = payment(
+                state,
+                DomainPaymentDetails::Lightning {
+                    description: String::new(),
+                    payer_note: None,
+                },
+            );
+            assert_eq!(
+                payment_list_status(&row, &[]).map(|(label, _)| label),
+                expected
+            );
+            if state == DomainPaymentStatus::Complete {
+                assert_eq!(payment_detail_status(&row, &[]).0, "Confirmed");
+            }
+        }
+    }
+
+    #[test]
+    fn failed_bitcoin_receive_still_refundable_is_labelled_refundable() {
+        let address = "bc1qsyntheticrefund".to_string();
+        let row = payment(
+            DomainPaymentStatus::Failed,
+            DomainPaymentDetails::OnChainBitcoin {
+                swap_id: Some("synthetic-swap".into()),
+                bitcoin_address: Some(address.clone()),
+                description: String::new(),
+                auto_accepted_fees: false,
+                liquid_expiration_blockheight: 0,
+                bitcoin_expiration_blockheight: 0,
+                lockup_tx_id: Some("synthetic-lockup".into()),
+                claim_tx_id: None,
+                refund_tx_id: None,
+                refund_tx_amount_sat: None,
+            },
+        );
+        assert_eq!(
+            payment_list_status(&row, std::slice::from_ref(&address)).map(|(label, _)| label),
+            Some("Refundable")
+        );
+        assert_eq!(
+            payment_detail_status(&row, std::slice::from_ref(&address)).0,
+            "Refundable"
+        );
+    }
+
+    #[test]
+    fn completed_bitcoin_swap_has_visible_confirmed_status() {
+        let row = payment(
+            DomainPaymentStatus::Complete,
+            DomainPaymentDetails::OnChainBitcoin {
+                swap_id: Some("synthetic-swap".into()),
+                bitcoin_address: Some("bc1qsyntheticcompleted".into()),
+                description: String::new(),
+                auto_accepted_fees: false,
+                liquid_expiration_blockheight: 0,
+                bitcoin_expiration_blockheight: 0,
+                lockup_tx_id: Some("synthetic-lockup".into()),
+                claim_tx_id: Some("synthetic-claim".into()),
+                refund_tx_id: None,
+                refund_tx_amount_sat: None,
+            },
+        );
+        assert_eq!(
+            payment_list_status(&row, &[]).map(|(label, _)| label),
+            Some("Confirmed")
+        );
+        assert_eq!(payment_detail_status(&row, &[]).0, "Confirmed");
+    }
+
+    #[test]
+    fn completed_direct_liquid_payment_has_visible_confirmed_status() {
+        let row = payment(
+            DomainPaymentStatus::Complete,
+            DomainPaymentDetails::LiquidAsset {
+                asset_id: "synthetic-asset".into(),
+                asset_info: None,
+                description: String::new(),
+                payer_note: None,
+            },
+        );
+        assert_eq!(
+            payment_list_status(&row, &[]).map(|(label, _)| label),
+            Some("Confirmed")
+        );
+        assert_eq!(payment_detail_status(&row, &[]).0, "Confirmed");
+    }
 
     #[test]
     fn refundables_gated_out_of_usdt_filter() {
@@ -969,12 +1152,19 @@ mod tests {
             (AssetFilter::LbtcOnly, true),
             (AssetFilter::UsdtOnly, false),
         ] {
-            let show = matches!(filter, AssetFilter::All | AssetFilter::LbtcOnly);
+            let show = refundables_visible(1, filter);
             assert_eq!(
                 show, expected,
                 "refundables visibility for filter {:?}",
                 filter
             );
         }
+        assert!(!refundables_visible(0, AssetFilter::All));
+    }
+
+    #[test]
+    fn zero_reported_lbtc_fee_does_not_claim_usdt_fee_payment() {
+        assert_eq!(usdt_fee_caption(0), "No L-BTC fee reported");
+        assert_eq!(usdt_fee_caption(42), "Fees (L-BTC)");
     }
 }
