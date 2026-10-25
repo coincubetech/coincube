@@ -945,6 +945,9 @@ mod tests {
         first.stop();
         assert!(process.lock().unwrap().try_wait().unwrap().is_none());
         second.stop();
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            Duration::from_secs(120)
+        ));
         assert!(process.lock().unwrap().try_wait().unwrap().is_some());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
