@@ -2530,6 +2530,10 @@ mod tests {
                         assert!(!probe.contains("MAX"));
                     }
                     if outer == COMPACT && (name == "coin-mix" || name == "batch-btc") {
+                        let expected_amount = match scenario.unit {
+                            BitcoinDisplayUnit::Sats => "50,000",
+                            BitcoinDisplayUnit::BTC => "50 000",
+                        };
                         let label = probe.text.iter().find(|(text, _)| text ==
                             "Long-term savings for the extended household and future school expenses")
                             .map(|(_, bounds)| *bounds).expect("long coin label");
@@ -2537,7 +2541,7 @@ mod tests {
                             .text
                             .iter()
                             .find(|(text, bounds)| {
-                                text == "50 000"
+                                text == expected_amount
                                     && bounds.y < label.y + label.height
                                     && bounds.y + bounds.height > label.y
                             })
