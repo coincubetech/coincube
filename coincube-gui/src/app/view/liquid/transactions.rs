@@ -393,7 +393,7 @@ fn payment_list_status(
     if matches!(payment.details, DomainPaymentDetails::OnChainBitcoin { .. }) {
         let status = classify_payment(payment, refundable_swap_addresses);
         return match status {
-            BtcSwapReceiveStatus::Completed => None,
+            BtcSwapReceiveStatus::Completed => Some(("Confirmed", theme::text::success)),
             BtcSwapReceiveStatus::Refunded => Some(("Refunded", theme::text::success)),
             BtcSwapReceiveStatus::Failed | BtcSwapReceiveStatus::Refundable => {
                 Some((status.label(), theme::text::error))
@@ -402,7 +402,7 @@ fn payment_list_status(
         };
     }
     match payment.status {
-        DomainPaymentStatus::Complete => None,
+        DomainPaymentStatus::Complete => Some(("Confirmed", theme::text::success)),
         DomainPaymentStatus::Pending => Some(("Pending", theme::text::warning)),
         DomainPaymentStatus::Created => Some(("Created", theme::text::secondary)),
         DomainPaymentStatus::Failed => Some(("Failed", theme::text::error)),
@@ -1044,7 +1044,7 @@ mod tests {
                 DomainPaymentStatus::WaitingFeeAcceptance,
                 Some("Waiting Fee Acceptance"),
             ),
-            (DomainPaymentStatus::Complete, None),
+            (DomainPaymentStatus::Complete, Some("Confirmed")),
         ] {
             let row = payment(
                 state,
@@ -1081,6 +1081,46 @@ mod tests {
         assert_eq!(
             payment_list_status(&row, &[address]).map(|(label, _)| label),
             Some("Refundable")
+        );
+    }
+
+    #[test]
+    fn completed_bitcoin_swap_has_visible_confirmed_status() {
+        let row = payment(
+            DomainPaymentStatus::Complete,
+            DomainPaymentDetails::OnChainBitcoin {
+                swap_id: Some("synthetic-swap".into()),
+                bitcoin_address: Some("bc1qsyntheticcompleted".into()),
+                description: String::new(),
+                auto_accepted_fees: false,
+                liquid_expiration_blockheight: 0,
+                bitcoin_expiration_blockheight: 0,
+                lockup_tx_id: Some("synthetic-lockup".into()),
+                claim_tx_id: Some("synthetic-claim".into()),
+                refund_tx_id: None,
+                refund_tx_amount_sat: None,
+            },
+        );
+        assert_eq!(
+            payment_list_status(&row, &[]).map(|(label, _)| label),
+            Some("Confirmed")
+        );
+    }
+
+    #[test]
+    fn completed_direct_liquid_payment_has_visible_confirmed_status() {
+        let row = payment(
+            DomainPaymentStatus::Complete,
+            DomainPaymentDetails::LiquidAsset {
+                asset_id: "synthetic-asset".into(),
+                asset_info: None,
+                description: String::new(),
+                payer_note: None,
+            },
+        );
+        assert_eq!(
+            payment_list_status(&row, &[]).map(|(label, _)| label),
+            Some("Confirmed")
         );
     }
 
