@@ -21,7 +21,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, Container, Element, Row, RowExt},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -81,6 +81,11 @@ type StartedResult = Result<
     Error,
 >;
 
+/// A single-use counterpart PIN. Deliberately neither Clone nor Debug: the
+/// source Cube's process session remains untouched while the paired Vault is
+/// loaded, and retries must go through unlock again.
+pub struct ScopedSeedPassword(zeroize::Zeroizing<String>);
+
 pub struct Loader {
     pub datadir_path: CoincubeDirectory,
     pub network: bitcoin::Network,
@@ -93,7 +98,11 @@ pub struct Loader {
     pub cube_settings: CubeSettings,
     pub breez_client: Option<std::sync::Arc<BreezClient>>,
     pub connect_client: Option<crate::services::coincube::CoincubeClient>,
+    /// Account checked by fork PIN classification for a scoped Claim load.
+    pub(crate) claim_verified_account: Option<u32>,
     pub cube_encryption_key: Option<Arc<crate::services::connect::crypto::CubeEncryptionKey>>,
+    scoped_seed_password: Option<ScopedSeedPassword>,
+    restricted_claim: bool,
     /// Optional Spark backend loaded alongside `breez_client` in the PIN
     /// flow. `None` when the cube has no Spark signer or when the bridge
     /// subprocess failed to spawn — panels that depend on Spark surface a
@@ -444,6 +453,9 @@ impl Loader {
                 spark_backend,
                 connect_client,
                 cube_encryption_key,
+                scoped_seed_password: None,
+                restricted_claim: false,
+                claim_verified_account: None,
                 quote_provider,
                 current_quote,
                 current_image_handle,
@@ -547,6 +559,7 @@ impl Loader {
                     network: self.network,
                     internal_bitcoind: self.internal_bitcoind.clone(),
                     backup: self.backup.clone(),
+                    scoped_seed_password: self.scoped_seed_password.take(),
                 }),
                 Message::Synced,
             );
@@ -631,8 +644,16 @@ impl Loader {
 
     fn on_start(&mut self, res: StartedResult) -> Task<Message> {
         if self.cube_settings.network.is_blake2b() && self.fork_session_revoked {
-            if let Ok((daemon, _, _)) = res {
+            if let Ok((daemon, mut bitcoind, _)) = res {
                 daemon.invalidate_connect_session();
+                if daemon.backend().is_embedded() {
+                    if let Err(error) = Handle::current().block_on(daemon.stop()) {
+                        warn!("Revoked fork daemon failed to stop: {error}");
+                    }
+                }
+                if let Some(node) = bitcoind.node.take() {
+                    node.stop();
+                }
             }
             return Task::none();
         }
@@ -677,6 +698,7 @@ impl Loader {
                                     network: self.network,
                                     internal_bitcoind: self.internal_bitcoind.clone(),
                                     backup: self.backup.clone(),
+                                    scoped_seed_password: self.scoped_seed_password.take(),
                                 }),
                                 Message::Synced,
                             );
@@ -701,6 +723,9 @@ impl Loader {
         if !self.cube_settings.network.is_blake2b() {
             return;
         }
+        if self.restricted_claim {
+            self.stop();
+        }
         if let Step::Syncing { daemon, .. } = &self.step {
             daemon.invalidate_connect_session();
         }
@@ -711,6 +736,8 @@ impl Loader {
             node.stop();
         }
         self.fork_session_revoked = true;
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
         self.connect_client = None;
         self.cube_encryption_key = None;
         self.step = Step::Error(Box::new(Error::Unexpected(
@@ -719,6 +746,9 @@ impl Loader {
     }
 
     pub fn stop(&mut self) {
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
+        self.restricted_claim = false;
         if let Some(handle) = self.fork_task.take() {
             handle.abort();
         }
@@ -739,22 +769,55 @@ impl Loader {
         if let Some(bitcoind) = self.internal_bitcoind.take() {
             bitcoind.stop();
         }
-        // Stop the managed Tor daemon (if inbound-over-Tor was running).
-        if !self.cube_settings.network.is_blake2b() {
-            crate::node::tor::stop_managed_tor();
-        }
+    }
+
+    /// A restricted Claim load transfers its verified wallet/daemon payload
+    /// to the source App. Detach the loader's duplicate shutdown handles so
+    /// closing the temporary unlock tab cannot stop the new operation owner.
+    pub(crate) fn detach_claim_resources(&mut self) {
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
+        self.restricted_claim = false;
+        self.fork_session_revoked = true;
+        self.fork_task.take();
+        self.internal_bitcoind.take();
+        self.step = Step::Error(Box::new(Error::Unexpected(
+            "Claim resources transferred to the source Cube".into(),
+        )));
+    }
+
+    pub(crate) fn set_scoped_seed_password(&mut self, password: zeroize::Zeroizing<String>) {
+        self.scoped_seed_password = Some(ScopedSeedPassword(password));
+        self.restricted_claim = true;
     }
 
     /// Surface a refusal raised by the tab on this Loader's behalf (for
     /// example an installer the Cube's chain does not admit) without
     /// starting anything.
     pub(crate) fn fail(&mut self, error: Error) {
+        if self.restricted_claim {
+            self.stop();
+            // stop() clears the scoped credentials and owner handles, but this
+            // loader must remain a restricted Claim even after the refusal.
+            // Otherwise Retry would rebuild it through the generic admission path.
+            self.restricted_claim = true;
+        }
+        self.scoped_seed_password = None;
+        self.claim_verified_account = None;
         self.step = Step::Error(Box::new(error));
     }
 
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {
+                // A Claim loader is admitted with a one-use scoped PIN and an
+                // account verified by the source Cube. The generic builder
+                // cannot restore either credential, so retry must return to
+                // the source Cube's unlock flow instead of starting a weaker
+                // loader from the remaining fields.
+                if self.restricted_claim {
+                    return Task::none();
+                }
                 if self.cube_settings.network.is_blake2b() {
                     // Reopening must establish a fresh session after revocation.
                     // Keep the specific refusal instead of rebuilding without auth.
@@ -841,7 +904,13 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        view(&self.step, &self.current_quote, &self.current_image_handle).map(Message::View)
+        view(
+            &self.step,
+            &self.current_quote,
+            &self.current_image_handle,
+            self.restricted_claim,
+        )
+        .map(Message::View)
     }
 }
 
@@ -913,6 +982,7 @@ pub struct LoadApplicationConfig {
     pub network: bitcoin::Network,
     pub internal_bitcoind: Option<Bitcoind>,
     pub backup: Option<Backup>,
+    pub scoped_seed_password: Option<ScopedSeedPassword>,
 }
 
 pub async fn load_application(
@@ -962,7 +1032,10 @@ pub async fn load_application(
     } else {
         // A Vault hot signer is encrypted under the same credential the Cube
         // unlocks with. Only a strict Vault descriptor may load those seeds.
-        let seed_password = crate::app::session::seed_file_password(&config.cube_settings);
+        let seed_password = match config.scoped_seed_password {
+            Some(password) => Some(password.0),
+            None => crate::app::session::seed_file_password(&config.cube_settings),
+        };
         let descriptor = config
             .info
             .descriptors
@@ -1002,6 +1075,9 @@ pub async fn load_application(
         background_node_install: Default::default(),
         connect_transport_key: None,
         cube_encryption_key: None,
+        cube_switcher_open: false,
+        cube_lock_confirmation: false,
+        vault_tools_open: false,
         datadir_path: config.datadir_path,
         network: config.info.network,
         fiat_chain: config.cube_settings.network,
@@ -1054,10 +1130,10 @@ pub async fn load_application(
         cube_connect_owner: config.cube_settings.connect_owner.clone(),
         cube_owned_by_other_account: false,
         current_cube_backed_up: config.cube_settings.backed_up,
-        backup_warning_dismissed: false,
         spark_notice: None,
         has_p2p: false, // Set later by App::new based on mnemonic availability
         theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+        balance_privacy: None,
         btc_usd_price: None,
         show_direction_badges: true,
         lightning_address: None,
@@ -1104,6 +1180,7 @@ pub fn view<'a>(
     step: &'a Step,
     quote: &'a Quote,
     image_handle: &'a image::Handle,
+    restricted_claim: bool,
 ) -> Element<'a, ViewMessage> {
     match &step {
         Step::StartingDaemon { .. } => cover(
@@ -1214,11 +1291,11 @@ pub fn view<'a>(
                                     .width(Length::Fixed(200.0))
                                     .on_press(ViewMessage::SwitchNetwork),
                             )
-                            .push(
+                            .push_maybe((!restricted_claim).then(|| {
                                 button::secondary(None, "Retry")
                                     .width(Length::Fixed(200.0))
-                                    .on_press(ViewMessage::Retry),
-                            ),
+                                    .on_press(ViewMessage::Retry)
+                            })),
                     ),
             )
         }
@@ -1381,12 +1458,21 @@ async fn start_fork_daemon(
         let root = root.clone();
         tokio::task::spawn_blocking(move || {
             Bitcoind::preflight_for_chain(chain, &root)?;
-            crate::node::tor::prepare_inbound_tor_for_chain(&root, chain).map_err(|e| {
-                crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(e.to_string())
-            })?;
-            Bitcoind::maybe_start_for_chain(chain, node, &root).map(|node| PendingForkNode {
-                node: Some(node),
-                cleanup: true,
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &root,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )?;
+            crate::node::tor::prepare_inbound_tor_for_chain_locked(&root, chain, &lifecycle)
+                .map_err(|e| {
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    )
+                })?;
+            Bitcoind::maybe_start_for_chain_locked(chain, node, &root, &lifecycle).map(|node| {
+                PendingForkNode {
+                    node: Some(node),
+                    cleanup: true,
+                }
             })
         })
         .await
@@ -1587,15 +1673,23 @@ async fn start_bitcoind_and_daemon_with_import_auth(
             // replaced it may still name a Tor that is not running, so the
             // start is refused — retryably — rather than made from stale
             // privacy configuration.
-            let inbound_up =
-                crate::node::tor::prepare_inbound_tor_for_chain(&coincube_datadir_path, chain)
-                    .map_err(|e| {
-                        Error::Bitcoind(
-                            crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
-                                e.to_string(),
-                            ),
-                        )
-                    })?;
+            let lifecycle = crate::node::bitcoind::ManagedNodeLifecycle::acquire(
+                &coincube_datadir_path,
+                crate::node::bitcoind::NodeChainFamily::from_chain(chain),
+            )
+            .map_err(Error::Bitcoind)?;
+            let inbound_up = crate::node::tor::prepare_inbound_tor_for_chain_locked(
+                &coincube_datadir_path,
+                chain,
+                &lifecycle,
+            )
+            .map_err(|e| {
+                Error::Bitcoind(
+                    crate::node::bitcoind::StartInternalBitcoindError::ConfigUnavailable(
+                        e.to_string(),
+                    ),
+                )
+            })?;
             // A fresh tor gets fresh control/SOCKS ports each run, which a
             // *reused* bitcoind (one that survived a previous session) wouldn't
             // pick up — `maybe_start` would just reattach to it. When inbound is
@@ -1608,10 +1702,11 @@ async fn start_bitcoind_and_daemon_with_import_auth(
                 crate::node::bitcoind::stop_and_wait_managed_bitcoind(bitcoind_config);
             }
             Some(
-                Bitcoind::maybe_start_for_chain(
+                Bitcoind::maybe_start_for_chain_locked(
                     chain,
                     bitcoind_config.clone(),
                     &coincube_datadir_path,
+                    &lifecycle,
                 )
                 .map_err(Error::Bitcoind)?,
             )
@@ -2111,6 +2206,77 @@ mod tests {
     }
 
     #[test]
+    fn restricted_claim_retry_keeps_scoped_admission_and_does_not_start() {
+        let mut loader = loader_without_wallet(false);
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        let refusal = "Reopen Claim from the source Cube to retry";
+        loader.step = Step::Error(Box::new(Error::Unexpected(refusal.into())));
+
+        for _ in 0..2 {
+            assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+            assert!(loader.restricted_claim);
+            assert_eq!(
+                loader.scoped_seed_password.as_ref().unwrap().0.as_str(),
+                "synthetic-pin"
+            );
+            assert_eq!(loader.claim_verified_account, Some(7));
+            assert!(matches!(&loader.step, Step::Error(error)
+                if error.to_string().contains(refusal)));
+        }
+    }
+
+    #[test]
+    fn restricted_claim_error_does_not_offer_an_inert_retry() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut quote_provider = QuoteProvider::new();
+        let quote = quote_provider.select("loading");
+        let image_handle = quote_display::image_handle_for_context("loading");
+        let error = Step::Error(Box::new(Error::Unexpected(
+            "Reopen Claim from the source Cube to retry".into(),
+        )));
+        let mounted = capture::inspect(
+            "restricted-claim-error",
+            view(&error, &quote, &image_handle, true),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Back"));
+        assert!(!mounted.contains("Retry"));
+    }
+
+    #[test]
+    fn failed_restricted_claim_cleans_up_without_admitting_generic_retry() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut loader = loader_without_wallet(false);
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        let refusal = "Reopen Claim from the source Cube to retry";
+        loader.fail(Error::Unexpected(refusal.into()));
+
+        assert!(loader.restricted_claim);
+        assert!(loader.scoped_seed_password.is_none());
+        assert!(loader.claim_verified_account.is_none());
+        assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+        assert!(!loader.daemon_started);
+        assert!(matches!(&loader.step, Step::Error(error)
+            if error.to_string().contains(refusal)));
+
+        let mounted = capture::inspect(
+            "failed-restricted-claim",
+            loader.view(),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Back"));
+        assert!(!mounted.contains("Retry"));
+    }
+
+    #[test]
     fn fork_retry_is_user_triggered_and_rate_bounded() {
         let mut loader = loader_without_wallet(false);
         loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
@@ -2138,9 +2304,14 @@ mod tests {
                 bitcoin::Network::Bitcoin,
             ),
         ));
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
         loader.invalidate_fork_session();
         assert!(loader.connect_client.is_none());
         assert!(loader.cube_encryption_key.is_none());
+        assert!(loader.scoped_seed_password.is_none());
+        assert!(loader.claim_verified_account.is_none());
+        assert!(!loader.restricted_claim);
         let _ = loader.on_start(Err(Error::Unexpected("late startup".into())));
         assert!(
             matches!(&loader.step, Step::Error(error) if error.to_string().contains("session changed"))
@@ -2183,22 +2354,30 @@ mod tests {
         let quote = quote_provider.select("loading");
         let image_handle = quote_display::image_handle_for_context("loading");
 
-        let _ = view(&Step::Connecting, &quote, &image_handle);
+        let _ = view(&Step::Connecting, &quote, &image_handle, false);
         let _ = view(
             &Step::StartingDaemon { progress: 0.5 },
             &quote,
             &image_handle,
+            false,
         );
-        let _ = view(&Step::FullScan { progress: 0.5 }, &quote, &image_handle);
+        let _ = view(
+            &Step::FullScan { progress: 0.5 },
+            &quote,
+            &image_handle,
+            false,
+        );
         let _ = view(
             &Step::Error(Box::new(Error::Config(ConfigError::FileNotFound))),
             &quote,
             &image_handle,
+            false,
         );
         let _ = view(
             &Step::Error(Box::new(Error::Daemon(DaemonError::NoAnswer))),
             &quote,
             &image_handle,
+            false,
         );
         let _ = cover::<ViewMessage, _>(
             Some(("warn", &Error::Unexpected("details".to_string()))),
@@ -2764,7 +2943,8 @@ mod chain_identity_tests {
         use crate::node::bitcoind::{
             internal_bitcoind_config_path, internal_bitcoind_cookie_path,
             internal_bitcoind_datadir, InternalBitcoindConfig, InternalBitcoindNetworkConfig,
-            NodeFlavor, StartInternalBitcoindError, PRUNE_DEFAULT,
+            ManagedNodeLifecycle, NodeChainFamily, NodeFlavor, StartInternalBitcoindError,
+            PRUNE_DEFAULT,
         };
         use crate::node::managed_conf::ManagedConfLock;
         use crate::node::revalidate::ManagedNodeState;
@@ -2823,7 +3003,10 @@ mod chain_identity_tests {
             ),
         )
         .unwrap();
-        // The lock file is created by the holder below, so snapshot after it.
+        // Prime the stable lifecycle lock before the byte-for-byte snapshot;
+        // acquiring it is allowed even when the later conf lock is busy.
+        drop(ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap());
+        // The conf lock file is created by the holder below, so snapshot after it.
         let held = ManagedConfLock::acquire(&root).unwrap();
         let before = tree(root.path());
         // The start is polled on this thread (current-thread runtime), so the
@@ -2942,8 +3125,9 @@ mod bootstrap_backend_selection_tests {
     }
 
     /// Every directory and file under `root`, including exact file bytes.
-    /// Refusal tests use this as a mutation oracle, so traversal and reads must
-    /// fail the test rather than silently weakening the snapshot.
+    /// The active managed-node owner lock is empty but cannot be read while
+    /// locked on Windows; its path and length are checked instead. All other
+    /// files retain byte-for-byte comparison, including config and ledger data.
     fn tree(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
         fn walk(p: &Path, out: &mut Vec<(PathBuf, Option<Vec<u8>>)>) {
             for entry in std::fs::read_dir(p).unwrap() {
@@ -2954,7 +3138,22 @@ mod bootstrap_backend_selection_tests {
                     out.push((path.clone(), None));
                     walk(&path, out);
                 } else if kind.is_file() {
-                    out.push((path.clone(), Some(std::fs::read(path).unwrap())));
+                    #[cfg(windows)]
+                    let bytes = if path.extension() == Some(std::ffi::OsStr::new("lock"))
+                        && path
+                            .parent()
+                            .and_then(Path::parent)
+                            .and_then(Path::file_name)
+                            == Some(std::ffi::OsStr::new("locks"))
+                    {
+                        assert_eq!(std::fs::metadata(&path).unwrap().len(), 0, "{:?}", path);
+                        Vec::new()
+                    } else {
+                        std::fs::read(&path).unwrap()
+                    };
+                    #[cfg(not(windows))]
+                    let bytes = std::fs::read(&path).unwrap();
+                    out.push((path.clone(), Some(bytes)));
                 } else {
                     panic!("unsupported filesystem entry in test snapshot: {:?}", path);
                 }
@@ -3090,6 +3289,26 @@ mod bootstrap_backend_selection_tests {
         assert!(loader.fork_session_revoked);
         assert!(matches!(&loader.step, Step::Error(error)
             if error.to_string() == format!("Unexpected error: {disabled}")));
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn transferred_claim_loader_cannot_retry_before_its_tab_closes() {
+        let root = temp_root("transferred-claim-retry");
+        let (mut loader, startup) = Loader::new_for_chain(
+            root.clone(),
+            GUIConfig::new(false),
+            wallet(),
+            cube(ChainId::BitcoinBlake2b),
+            authenticated_client(),
+            encryption_key(),
+        );
+        drop(startup);
+        loader.detach_claim_resources();
+        assert!(loader.fork_revoked());
+        loader.fork_retry_not_before = None;
+        assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+        assert!(matches!(loader.step, Step::Error(_)));
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 
@@ -3697,6 +3916,9 @@ mod local_start_cancel_tests {
             info,
         )));
         drop(completed);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();
@@ -3732,6 +3954,9 @@ mod local_start_cancel_tests {
         received.await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();

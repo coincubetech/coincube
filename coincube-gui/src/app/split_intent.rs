@@ -197,6 +197,11 @@ pub fn take_for_open(cube_id: &str, source: ChainId) -> Option<SplitIntent> {
 /// clear it).
 #[cfg(test)]
 pub(crate) fn arm_fresh_for_test(cube_id: &str) {
+    arm_fresh_for_test_generation(cube_id, 1);
+}
+
+#[cfg(test)]
+pub(crate) fn arm_fresh_for_test_generation(cube_id: &str, generation: u64) {
     let mut client = CoincubeClient::new();
     client.set_token("split-exit-fixture");
     arm(SplitIntent::new(
@@ -204,7 +209,7 @@ pub(crate) fn arm_fresh_for_test(cube_id: &str) {
         ChainId::BitcoinBlake2b,
         0,
         &client,
-        empty_scan_for_test(1),
+        empty_scan_for_test(generation),
         ScanDescriptor::parse(
             crate::services::foreign_scan::Branch::External,
             "wpkh(02c6047f9441ed7d6d3045406e95c07cd85aeb5c6b7a3c2e21b73cdb1e24ff3a64)",
@@ -237,6 +242,71 @@ pub(crate) fn empty_scan_for_test(generation: u64) -> TwoChainScan {
     let bitcoin = report(ChainId::Bitcoin, 4);
     let inventory =
         SplitInventory::join(&btcb2, &bitcoin, generation, false).expect("empty scans join");
+    TwoChainScan {
+        btcb2,
+        bitcoin,
+        inventory,
+    }
+}
+
+/// A public, two-chain pre-fork coin at the source descriptor's first address.
+/// This fixture carries no key material or live network observation.
+#[cfg(test)]
+pub(crate) fn funded_scan_for_test(generation: u64, external: &ScanDescriptor) -> TwoChainScan {
+    use crate::services::foreign_scan::{Branch, BranchCoverage, DiscoveredCoin};
+    use coincube_core::miniscript::bitcoin::{
+        absolute, hashes::Hash, transaction, Amount, BlockHash, OutPoint, Transaction, TxIn, TxOut,
+    };
+    let previous = Transaction {
+        version: transaction::Version::TWO,
+        lock_time: absolute::LockTime::ZERO,
+        input: vec![TxIn::default()],
+        output: vec![TxOut {
+            value: Amount::from_sat(100_000),
+            script_pubkey: external.script(0).expect("public source script"),
+        }],
+    };
+    let coin = DiscoveredCoin {
+        branch: Branch::External,
+        index: 0,
+        outpoint: OutPoint::new(previous.compute_txid(), 0),
+        output: previous.output[0].clone(),
+        previous,
+        confirmed: true,
+        block_height: Some(99),
+        block_hash: Some(BlockHash::from_byte_array([6; 32])),
+    };
+    let coverage = vec![
+        BranchCoverage {
+            branch: Branch::External,
+            start: 0,
+            end_exclusive: 2,
+            last_used: Some(0),
+        },
+        BranchCoverage {
+            branch: Branch::Internal,
+            start: 0,
+            end_exclusive: 2,
+            last_used: None,
+        },
+    ];
+    let btcb2 = ScanReport::for_test(
+        ChainId::BitcoinBlake2b,
+        generation,
+        BlockHash::from_byte_array([3; 32]),
+        vec![coin.clone()],
+    )
+    .with_coverage(coverage.clone())
+    .with_fork_height(Some(100));
+    let bitcoin = ScanReport::for_test(
+        ChainId::Bitcoin,
+        generation,
+        BlockHash::from_byte_array([4; 32]),
+        vec![coin],
+    )
+    .with_coverage(coverage);
+    let inventory = SplitInventory::join(&btcb2, &bitcoin, generation, external.is_ranged())
+        .expect("matching public pre-fork histories join");
     TwoChainScan {
         btcb2,
         bitcoin,

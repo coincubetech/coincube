@@ -147,6 +147,7 @@ pub fn liquid_transactions_view<'a>(
     is_last_page: bool,
     processing: bool,
     swap_tx_ids: &'a std::collections::HashSet<String>,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let mut content = Column::new().spacing(20).width(Length::Fill);
 
@@ -200,6 +201,7 @@ pub fn liquid_transactions_view<'a>(
                             in_flight_refunds.get(&refundable.swap_address),
                             fiat_converter,
                             bitcoin_unit,
+                            mask_amounts,
                         ))
                     },
                 )),
@@ -280,6 +282,7 @@ pub fn liquid_transactions_view<'a>(
                         show_direction_badges,
                         is_swap,
                         &refundable_swap_addresses,
+                        mask_amounts,
                     ))
                 });
         content = content.push(list);
@@ -307,13 +310,16 @@ fn transaction_row<'a>(
     show_direction_badges: bool,
     is_swap: bool,
     refundable_swap_addresses: &[String],
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let is_receive = payment.is_incoming();
-    let usdt_str = usdt_amount_str(payment, usdt_id);
+    let usdt_str = (!mask_amounts)
+        .then(|| usdt_amount_str(payment, usdt_id))
+        .flatten();
 
     // Extract description — prefer payer_note/description, fall back to "USDt
     // Transfer". A locally-recorded swap overrides the label with "Swap".
-    let is_usdt = usdt_str.is_some();
+    let is_usdt = matches!(&payment.details, DomainPaymentDetails::LiquidAsset { asset_id, .. } if !usdt_id.is_empty() && asset_id == usdt_id);
     let description: String = if is_swap {
         "Swap".to_owned()
     } else if is_usdt {
@@ -345,13 +351,13 @@ fn transaction_row<'a>(
 
     let status = payment_list_status(payment, refundable_swap_addresses);
 
-    if let Some(ref usdt_display) = usdt_str {
+    if is_usdt {
         let mut item = TransactionListItem::new(direction, &Amount::ZERO, bitcoin_unit)
             .with_label(description.clone())
             .with_time_ago(time_ago)
             .with_custom_icon(combo_icon)
             .with_show_direction_badge(show_direction_badges)
-            .with_amount_override(usdt_display.clone());
+            .with_amount_override(usdt_str.unwrap_or_else(|| "••••••".to_owned()));
         if let Some((label, style)) = status {
             item = item.with_custom_status(status_badge(label, style));
         }
@@ -368,8 +374,11 @@ fn transaction_row<'a>(
         .with_time_ago(time_ago)
         .with_custom_icon(combo_icon)
         .with_show_direction_badge(show_direction_badges);
+    if mask_amounts {
+        item = item.with_amount_override("••••••".to_owned());
+    }
 
-    if let Some(fiat_amount) = fiat_converter.map(|converter| {
+    if let Some(fiat_amount) = fiat_converter.filter(|_| !mask_amounts).map(|converter| {
         let fiat = converter.convert(btc_amount);
         format!(
             "{} {} · current rate",
@@ -444,6 +453,7 @@ fn refundable_row<'a>(
     in_flight: Option<&'a InFlightRefund>,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let btc_amount = Amount::from_sat(refundable.amount_sat);
     let time_ago = format_time_ago(refundable.timestamp.into());
@@ -459,12 +469,16 @@ fn refundable_row<'a>(
         None => "Refundable".to_string(),
     };
 
-    let amount = btc_amount.to_formatted_string_with_unit(bitcoin_unit);
+    let amount = if mask_amounts {
+        "••••••".to_owned()
+    } else {
+        btc_amount.to_formatted_string_with_unit(bitcoin_unit)
+    };
     let mut amount_column = Column::new()
         .spacing(4)
         .align_x(Alignment::End)
         .push(p1_bold(amount));
-    if let Some(converter) = fiat_converter {
+    if let Some(converter) = fiat_converter.filter(|_| !mask_amounts) {
         let fiat = converter.convert(btc_amount);
         amount_column = amount_column.push(
             p2_regular(format!(
@@ -508,6 +522,7 @@ pub fn transaction_detail_view<'a>(
     bitcoin_unit: coincube_ui::component::amount::BitcoinDisplayUnit,
     usdt_id: &str,
     refundable_swap_addresses: &[String],
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let is_receive = payment.is_incoming();
     let usdt_str = usdt_amount_str(payment, usdt_id);
@@ -559,7 +574,9 @@ pub fn transaction_detail_view<'a>(
                 .unwrap_or_else(|| format_usdt_display(payment.amount_sat)),
             _ => format_usdt_display(payment.amount_sat),
         };
-        let amount_row = if is_receive {
+        let amount_row = if mask_amounts {
+            Row::new().push(text("••••••").size(H1_SIZE).bold())
+        } else if is_receive {
             Row::new()
                 .spacing(5)
                 .align_y(Alignment::Center)
@@ -633,11 +650,13 @@ pub fn transaction_detail_view<'a>(
                                     .width(Length::FillPortion(1))
                                     .push(text("Asset Amount").bold()),
                             )
-                            .push(
-                                Column::new()
-                                    .width(Length::FillPortion(2))
-                                    .push(text(usdt_display.clone())),
-                            )
+                            .push(Column::new().width(Length::FillPortion(2)).push(text(
+                                if mask_amounts {
+                                    "••••••".to_owned()
+                                } else {
+                                    usdt_display.clone()
+                                },
+                            )))
                             .spacing(20),
                     )
                     .push(if fees_sat.to_sat() == 0 {
@@ -656,11 +675,13 @@ pub fn transaction_detail_view<'a>(
                                     .width(Length::FillPortion(1))
                                     .push(text(usdt_fee_caption(fees_sat.to_sat())).bold()),
                             )
-                            .push(
-                                Column::new().width(Length::FillPortion(2)).push(text(
-                                    fees_sat.to_formatted_string_with_unit(bitcoin_unit),
-                                )),
-                            )
+                            .push(Column::new().width(Length::FillPortion(2)).push(text(
+                                if mask_amounts {
+                                    "••••••".to_owned()
+                                } else {
+                                    fees_sat.to_formatted_string_with_unit(bitcoin_unit)
+                                },
+                            )))
                             .spacing(20)
                     })
                     .spacing(15),
@@ -687,7 +708,9 @@ pub fn transaction_detail_view<'a>(
         .push(
             Column::new().spacing(20).push(
                 Column::new()
-                    .push(if is_receive {
+                    .push(if mask_amounts {
+                        Container::new(text("••••••").size(H1_SIZE))
+                    } else if is_receive {
                         Container::new(coincube_ui::component::amount::amount_with_size_and_unit(
                             &btc_amount,
                             H1_SIZE,
@@ -702,7 +725,7 @@ pub fn transaction_detail_view<'a>(
                             ),
                         ))
                     })
-                    .push_maybe(fiat_converter.map(|converter| {
+                    .push_maybe(fiat_converter.filter(|_| !mask_amounts).map(|converter| {
                         // Use total_amount for outgoing payments to match headline (includes fees)
                         let amount_for_conversion =
                             if is_receive { btc_amount } else { total_amount };
@@ -756,11 +779,13 @@ pub fn transaction_detail_view<'a>(
                                 .width(Length::FillPortion(1))
                                 .push(text("Amount").bold()),
                         )
-                        .push(
-                            Column::new()
-                                .width(Length::FillPortion(2))
-                                .push(text(btc_amount.to_formatted_string_with_unit(bitcoin_unit))),
-                        )
+                        .push(Column::new().width(Length::FillPortion(2)).push(text(
+                            if mask_amounts {
+                                "••••••".to_owned()
+                            } else {
+                                btc_amount.to_formatted_string_with_unit(bitcoin_unit)
+                            },
+                        )))
                         .spacing(20),
                 )
                 .push(
@@ -770,11 +795,13 @@ pub fn transaction_detail_view<'a>(
                                 .width(Length::FillPortion(1))
                                 .push(text("Fees").bold()),
                         )
-                        .push(
-                            Column::new()
-                                .width(Length::FillPortion(2))
-                                .push(text(fees_sat.to_formatted_string_with_unit(bitcoin_unit))),
-                        )
+                        .push(Column::new().width(Length::FillPortion(2)).push(text(
+                            if mask_amounts {
+                                "••••••".to_owned()
+                            } else {
+                                fees_sat.to_formatted_string_with_unit(bitcoin_unit)
+                            },
+                        )))
                         .spacing(20),
                 )
                 .spacing(15),
@@ -827,8 +854,19 @@ pub fn refundable_detail_view<'a>(
     pending_fee_priority: Option<FeeratePriority>,
     in_flight: Option<&'a InFlightRefund>,
     has_vault: bool,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let btc_amount = Amount::from_sat(refundable.amount_sat);
+    let header_amount: Element<'_, Message> = if mask_amounts {
+        text("••••••").size(H1_SIZE).into()
+    } else {
+        coincube_ui::component::amount::amount_with_size_and_unit::<Message>(
+            &btc_amount,
+            H1_SIZE,
+            bitcoin_unit,
+        )
+        .into()
+    };
 
     let date_text =
         format_timestamp(refundable.timestamp as u64).unwrap_or_else(|| "Unknown".to_string());
@@ -863,14 +901,8 @@ pub fn refundable_detail_view<'a>(
         .push(
             Column::new().spacing(20).push(
                 Column::new()
-                    .push(Container::new(Row::new().spacing(5).push(
-                        coincube_ui::component::amount::amount_with_size_and_unit(
-                            &btc_amount,
-                            H1_SIZE,
-                            bitcoin_unit,
-                        ),
-                    )))
-                    .push_maybe(fiat_converter.map(|converter| {
+                    .push(Container::new(Row::new().spacing(5).push(header_amount)))
+                    .push_maybe(fiat_converter.filter(|_| !mask_amounts).map(|converter| {
                         let fiat = converter.convert(btc_amount);
                         Row::new().align_y(Alignment::Center).push(
                             fiat.to_text()
@@ -950,11 +982,13 @@ pub fn refundable_detail_view<'a>(
                                 .width(Length::FillPortion(1))
                                 .push(text("Amount").bold()),
                         )
-                        .push(
-                            Column::new()
-                                .width(Length::FillPortion(2))
-                                .push(text(btc_amount.to_formatted_string_with_unit(bitcoin_unit))),
-                        )
+                        .push(Column::new().width(Length::FillPortion(2)).push(text(
+                            if mask_amounts {
+                                "••••••".to_owned()
+                            } else {
+                                btc_amount.to_formatted_string_with_unit(bitcoin_unit)
+                            },
+                        )))
                         .spacing(20),
                 )
                 .spacing(15),
@@ -963,6 +997,10 @@ pub fn refundable_detail_view<'a>(
             Column::new()
                 .spacing(15)
                 .push(Container::new(h4_bold("Refund Details")).width(Length::Fill))
+                .push(p1_regular(format!(
+                    "Refund amount: {}",
+                    btc_amount.to_formatted_string_with_unit(bitcoin_unit)
+                )))
                 .push(
                     Column::new()
                         .spacing(10)

@@ -2,6 +2,7 @@ pub mod app;
 pub mod backup;
 pub mod browser;
 pub mod chain;
+pub(crate) mod cube_display;
 pub mod daemon;
 pub mod delete;
 pub mod dir;

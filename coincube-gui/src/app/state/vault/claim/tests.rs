@@ -4912,6 +4912,32 @@ mod flow {
         out
     }
 
+    /// Keep each two-App GUI flow on its own bounded stack. The future and all
+    /// fixtures are constructed inside the worker, and panics reach the test
+    /// runner rather than silently passing after a failed join.
+    #[cfg(any(unix, windows))]
+    fn reviewer_gui_flow_on_bounded_stack<F, Fut>(name: &'static str, flow: F)
+    where
+        F: FnOnce() -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = ()> + 'static,
+    {
+        let result = std::thread::Builder::new()
+            .name(name.into())
+            .stack_size(8 * 1024 * 1024)
+            .spawn(move || {
+                tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .unwrap()
+                    .block_on(flow());
+            })
+            .unwrap()
+            .join();
+        if let Err(panic) = result {
+            std::panic::resume_unwind(panic);
+        }
+    }
+
     fn reviewer_login() -> crate::services::coincube::LoginResponse {
         serde_json::from_value(serde_json::json!({
             "requires_2fa": false, "token": "token", "refresh_token": "fixture-refresh",
@@ -4935,60 +4961,68 @@ mod flow {
     }
 
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn reviewer_sibling_setsession_must_not_require_spurious_logout() {
-        let first = reviewer_blank_app();
-        let second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        // Real GUI broadcaster, same-account SetSession from the other Bitcoin tab.
-        // SetSession is also what a successful keyring refresh emits at Cube open.
-        // Drop only async bootstrap work from the originating tab, not dispatch.
-        // (The epoch is the originating tab's own, as its refresh would carry.)
-        drop(gui.reviewer_account(
-            2,
-            view::ConnectAccountMessage::SetSession(reviewer_login(), 0),
-        ));
-        let app = gui.reviewer_app_mut(0);
-        assert!(app.panels.connect.account.is_authenticated());
-        let init = app.update(Message::View(view::Message::ConnectAccount(
-            view::ConnectAccountMessage::Init,
-        )));
-        drive_claim_messages(app, init).await;
-        let refresh = app.update(intent(view::ClaimMessage::Refresh));
-        drive_claim_messages(app, refresh).await;
-        let state = app_claim_state(app);
-        eprintln!(
-            "sibling same-account SetSession -> own Init + Refresh: {:?}, invalidated={}",
-            state, app.claim_session_invalidated
-        );
-        assert!(!state.1.as_deref().unwrap_or("").contains("Stale"));
-        let confirm = app.update(intent(view::ClaimMessage::Confirm));
-        drive_claim_messages(app, confirm).await;
-        let count = submissions(&f);
-        let _ = std::fs::remove_dir_all(&f.root);
-        assert_eq!(
+    #[test]
+    fn reviewer_sibling_setsession_must_not_require_spurious_logout() {
+        reviewer_gui_flow_on_bounded_stack(
+            "reviewer_sibling_setsession_must_not_require_spurious_logout",
+            || async {
+                let first = reviewer_blank_app();
+                let second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                // Real GUI broadcaster, same-account SetSession from the other Bitcoin tab.
+                // SetSession is also what a successful keyring refresh emits at Cube open.
+                // Drop only async bootstrap work from the originating tab, not dispatch.
+                // (The epoch is the originating tab's own, as its refresh would carry.)
+                drop(gui.reviewer_account(
+                    2,
+                    view::ConnectAccountMessage::SetSession(reviewer_login(), 0),
+                ));
+                let app = gui.reviewer_app_mut(0);
+                assert!(app.panels.connect.account.is_authenticated());
+                let init = app.update(Message::View(view::Message::ConnectAccount(
+                    view::ConnectAccountMessage::Init,
+                )));
+                drive_claim_messages(app, init).await;
+                let refresh = app.update(intent(view::ClaimMessage::Refresh));
+                drive_claim_messages(app, refresh).await;
+                let state = app_claim_state(app);
+                eprintln!(
+                    "sibling same-account SetSession -> own Init + Refresh: {:?}, invalidated={}",
+                    state, app.claim_session_invalidated
+                );
+                assert!(!state.1.as_deref().unwrap_or("").contains("Stale"));
+                let confirm = app.update(intent(view::ClaimMessage::Confirm));
+                drive_claim_messages(app, confirm).await;
+                let count = submissions(&f);
+                let _ = std::fs::remove_dir_all(&f.root);
+                assert_eq!(
             count, 1,
             "same-account sibling login/refresh must not force an unrelated authenticated tab to log out and back in"
+        );
+            },
         );
     }
 
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
-        let first = reviewer_blank_app();
-        let mut second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        sign_in_account(&mut second, &f, 7);
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        gui.reviewer_app_mut(0).invalidate_claim_session();
-        assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
-        // A real operation begun in the held tab after the hold: its refresh
-        // against the HTTP fixture, whose SetSession completion is then
-        // routed through the real GUI broadcaster.
-        f._server
+    #[test]
+    fn reviewer_originating_setsession_lifts_hold_after_gui_broadcast() {
+        reviewer_gui_flow_on_bounded_stack(
+            "reviewer_originating_setsession_lifts_hold_after_gui_broadcast",
+            || async {
+                let first = reviewer_blank_app();
+                let mut second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                sign_in_account(&mut second, &f, 7);
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                gui.reviewer_app_mut(0).invalidate_claim_session();
+                assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
+                // A real operation begun in the held tab after the hold: its refresh
+                // against the HTTP fixture, whose SetSession completion is then
+                // routed through the real GUI broadcaster.
+                f._server
             .mock_async(|when, then| {
                 when.method(POST).path("/api/v1/auth/token/refresh");
                 then.status(200).json_body(serde_json::json!({
@@ -4997,34 +5031,36 @@ mod flow {
                 }));
             })
             .await;
-        let refresh = gui.reviewer_account(
-            1,
-            view::ConnectAccountMessage::RefreshSession {
-                refresh_token: "fixture-refresh".into(),
-            },
-        );
-        let mut routed = 0;
-        for message in gui_outputs(refresh).await {
-            if crate::gui::GUI::reviewer_is_set_session(&message) {
-                routed += 1;
-                drop(gui.update(message));
-            }
-        }
-        assert_eq!(routed, 1, "the real refresh handed back one SetSession");
-        assert!(
-            !gui.reviewer_app_mut(0).claim_session_invalidated,
-            "same-tab hook must run AFTER broadcast so it lifts that tab's hold"
-        );
-        assert!(
+                let refresh = gui.reviewer_account(
+                    1,
+                    view::ConnectAccountMessage::RefreshSession {
+                        refresh_token: "fixture-refresh".into(),
+                    },
+                );
+                let mut routed = 0;
+                for message in gui_outputs(refresh).await {
+                    if crate::gui::GUI::reviewer_is_set_session(&message) {
+                        routed += 1;
+                        drop(gui.update(message));
+                    }
+                }
+                assert_eq!(routed, 1, "the real refresh handed back one SetSession");
+                assert!(
+                    !gui.reviewer_app_mut(0).claim_session_invalidated,
+                    "same-tab hook must run AFTER broadcast so it lifts that tab's hold"
+                );
+                assert!(
             !gui.reviewer_app_mut(1).claim_session_invalidated,
             "a same-account SetSession leaves the sibling's hold state unchanged (it was not held)"
         );
-        assert_eq!(
-            submissions(&f),
-            0,
-            "setting a session alone is not confirmation"
+                assert_eq!(
+                    submissions(&f),
+                    0,
+                    "setting a session alone is not confirmation"
+                );
+                let _ = std::fs::remove_dir_all(&f.root);
+            },
         );
-        let _ = std::fs::remove_dir_all(&f.root);
     }
 
     #[cfg(any(unix, windows))]
@@ -5185,84 +5221,94 @@ mod flow {
     /// in place: nothing this tab does re-binds, zero submissions, the
     /// sign-out copy stays. (P2: a sibling sign-in never lifts a hold.)
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn a_sibling_same_account_sign_in_after_a_log_out_leaves_the_hold() {
-        let first = reviewer_blank_app();
-        let second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        gui.reviewer_app_mut(0).invalidate_claim_session();
-        drop(gui.reviewer_account(
-            2,
-            view::ConnectAccountMessage::SetSession(reviewer_login(), 0),
-        ));
-        let app = gui.reviewer_app_mut(0);
-        assert!(app.claim_session_invalidated, "the hold stands");
-        for message in [
-            Message::View(view::Message::ConnectAccount(
-                view::ConnectAccountMessage::Init,
-            )),
-            intent(view::ClaimMessage::Refresh),
-            intent(view::ClaimMessage::Confirm),
-        ] {
-            let task = app.update(message);
-            drive_claim_messages(app, task).await;
-        }
-        assert!(app.claim_session_invalidated);
-        assert_eq!(
-            app_claim_state(app),
-            (false, Some(SIGNED_OUT_AT_REVIEW.into()), false, true)
+    #[test]
+    fn a_sibling_same_account_sign_in_after_a_log_out_leaves_the_hold() {
+        reviewer_gui_flow_on_bounded_stack(
+            "a_sibling_same_account_sign_in_after_a_log_out_leaves_the_hold",
+            || async {
+                let first = reviewer_blank_app();
+                let second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                gui.reviewer_app_mut(0).invalidate_claim_session();
+                drop(gui.reviewer_account(
+                    2,
+                    view::ConnectAccountMessage::SetSession(reviewer_login(), 0),
+                ));
+                let app = gui.reviewer_app_mut(0);
+                assert!(app.claim_session_invalidated, "the hold stands");
+                for message in [
+                    Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::Init,
+                    )),
+                    intent(view::ClaimMessage::Refresh),
+                    intent(view::ClaimMessage::Confirm),
+                ] {
+                    let task = app.update(message);
+                    drive_claim_messages(app, task).await;
+                }
+                assert!(app.claim_session_invalidated);
+                assert_eq!(
+                    app_claim_state(app),
+                    (false, Some(SIGNED_OUT_AT_REVIEW.into()), false, true)
+                );
+                let count = submissions(&f);
+                let _ = std::fs::remove_dir_all(&f.root);
+                assert_eq!(count, 0);
+            },
         );
-        let count = submissions(&f);
-        let _ = std::fs::remove_dir_all(&f.root);
-        assert_eq!(count, 0);
     }
 
     /// A sibling sign-in of another Connect account holds the claim here,
     /// says why, and binds nothing; a real sign-in in this tab afterwards
     /// re-binds and submits once. (P2: another account, and the P1 lift.)
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
-        let first = reviewer_blank_app();
-        let second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        let mut other = reviewer_login();
-        other.user.id = 8;
-        drop(gui.reviewer_account(2, view::ConnectAccountMessage::SetSession(other, 0)));
-        let app = gui.reviewer_app_mut(0);
-        assert!(
-            app.claim_session_invalidated,
-            "held: another account signed in elsewhere"
+    #[test]
+    fn a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in() {
+        reviewer_gui_flow_on_bounded_stack(
+            "a_sibling_sign_in_of_another_account_holds_until_this_tab_signs_in",
+            || async {
+                let first = reviewer_blank_app();
+                let second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                let mut other = reviewer_login();
+                other.user.id = 8;
+                drop(gui.reviewer_account(2, view::ConnectAccountMessage::SetSession(other, 0)));
+                let app = gui.reviewer_app_mut(0);
+                assert!(
+                    app.claim_session_invalidated,
+                    "held: another account signed in elsewhere"
+                );
+                assert_eq!(
+                    app_claim_state(app),
+                    (false, Some(SIGNED_IN_ELSEWHERE.into()), false, true)
+                );
+                for message in [
+                    intent(view::ClaimMessage::Refresh),
+                    intent(view::ClaimMessage::Confirm),
+                ] {
+                    let task = app.update(message);
+                    drive_claim_messages(app, task).await;
+                }
+                assert_eq!(submissions(&f), 0);
+                // This tab signs in (the account the claim was recorded under).
+                sign_in_here_by_refresh(app, &f, 7).await;
+                assert!(!app.claim_session_invalidated);
+                assert_eq!(
+                    app_claim_state(app),
+                    (true, None, false, true),
+                    "a fresh review"
+                );
+                let submit = app.update(intent(view::ClaimMessage::Confirm));
+                drive_claim_messages(app, submit).await;
+                let count = submissions(&f);
+                let _ = std::fs::remove_dir_all(&f.root);
+                assert_eq!(count, 1);
+            },
         );
-        assert_eq!(
-            app_claim_state(app),
-            (false, Some(SIGNED_IN_ELSEWHERE.into()), false, true)
-        );
-        for message in [
-            intent(view::ClaimMessage::Refresh),
-            intent(view::ClaimMessage::Confirm),
-        ] {
-            let task = app.update(message);
-            drive_claim_messages(app, task).await;
-        }
-        assert_eq!(submissions(&f), 0);
-        // This tab signs in (the account the claim was recorded under).
-        sign_in_here_by_refresh(app, &f, 7).await;
-        assert!(!app.claim_session_invalidated);
-        assert_eq!(
-            app_claim_state(app),
-            (true, None, false, true),
-            "a fresh review"
-        );
-        let submit = app.update(intent(view::ClaimMessage::Confirm));
-        drive_claim_messages(app, submit).await;
-        let count = submissions(&f);
-        let _ = std::fs::remove_dir_all(&f.root);
-        assert_eq!(count, 1);
     }
 
     // ── Gandalf's round-4 reviewer probes (#518 issuecomment-5834501248),
@@ -5487,258 +5533,264 @@ mod flow {
     }
 
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn round4_obsolete_refresh_failure_must_not_log_out_new_session() {
-        let first = reviewer_blank_app();
-        let mut second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        sign_in_account(&mut second, &f, 7);
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        let failure = f
-            ._server
-            .mock_async(|when, then| {
-                when.method(POST)
-                    .path("/api/v1/auth/token/refresh")
-                    .json_body(serde_json::json!({"refreshToken":"obsolete"}));
-                then.status(401)
-                    .json_body(serde_json::json!({"message":"expired"}));
-            })
-            .await;
-        let old = gui.reviewer_account(
-            1,
-            view::ConnectAccountMessage::RefreshSession {
-                refresh_token: "obsolete".into(),
+    #[test]
+    fn round4_obsolete_refresh_failure_must_not_log_out_new_session() {
+        reviewer_gui_flow_on_bounded_stack(
+            "round4_obsolete_refresh_failure_must_not_log_out_new_session",
+            || async {
+                let first = reviewer_blank_app();
+                let mut second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                sign_in_account(&mut second, &f, 7);
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                let failure = f
+                    ._server
+                    .mock_async(|when, then| {
+                        when.method(POST)
+                            .path("/api/v1/auth/token/refresh")
+                            .json_body(serde_json::json!({"refreshToken":"obsolete"}));
+                        then.status(401)
+                            .json_body(serde_json::json!({"message":"expired"}));
+                    })
+                    .await;
+                let old = gui.reviewer_account(
+                    1,
+                    view::ConnectAccountMessage::RefreshSession {
+                        refresh_token: "obsolete".into(),
+                    },
+                );
+                // A global hold, then a real new session in this tab. The old HTTP operation has not been polled.
+                gui.reviewer_app_mut(0).invalidate_claim_session();
+                sign_in_here_by_refresh(gui.reviewer_app_mut(0), &f, 7).await;
+                assert!(!gui.reviewer_app_mut(0).claim_session_invalidated);
+                assert!(gui
+                    .reviewer_app_mut(0)
+                    .panels
+                    .connect
+                    .account
+                    .is_authenticated());
+                assert!(!gui.reviewer_app_mut(1).claim_session_invalidated);
+                drive_account_messages(&mut gui, old).await;
+                failure.assert_hits_async(1).await;
+                let auth = gui
+                    .reviewer_app_mut(0)
+                    .panels
+                    .connect
+                    .account
+                    .is_authenticated();
+                let held = gui.reviewer_app_mut(0).claim_session_invalidated;
+                let sibling_held = gui.reviewer_app_mut(1).claim_session_invalidated;
+                eprintln!("obsolete refresh 401 after new sign-in: auth={auth}, held={held}, sibling_held={sibling_held}");
+                let _ = std::fs::remove_dir_all(&f.root);
+                assert!(
+                    auth && !held && !sibling_held,
+                    "an obsolete refresh failure signed out the new session and held the sibling"
+                );
             },
-        );
-        // A global hold, then a real new session in this tab. The old HTTP operation has not been polled.
-        gui.reviewer_app_mut(0).invalidate_claim_session();
-        sign_in_here_by_refresh(gui.reviewer_app_mut(0), &f, 7).await;
-        assert!(!gui.reviewer_app_mut(0).claim_session_invalidated);
-        assert!(gui
-            .reviewer_app_mut(0)
-            .panels
-            .connect
-            .account
-            .is_authenticated());
-        assert!(!gui.reviewer_app_mut(1).claim_session_invalidated);
-        drive_account_messages(&mut gui, old).await;
-        failure.assert_hits_async(1).await;
-        let auth = gui
-            .reviewer_app_mut(0)
-            .panels
-            .connect
-            .account
-            .is_authenticated();
-        let held = gui.reviewer_app_mut(0).claim_session_invalidated;
-        let sibling_held = gui.reviewer_app_mut(1).claim_session_invalidated;
-        eprintln!("obsolete refresh 401 after new sign-in: auth={auth}, held={held}, sibling_held={sibling_held}");
-        let _ = std::fs::remove_dir_all(&f.root);
-        assert!(
-            auth && !held && !sibling_held,
-            "an obsolete refresh failure signed out the new session and held the sibling"
         );
     }
 
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn round4_current_refresh_auth_failure_still_logs_out() {
-        let first = reviewer_blank_app();
-        let mut second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        sign_in_account(&mut second, &f, 7);
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        let failure = f
-            ._server
-            .mock_async(|when, then| {
-                when.method(POST).path("/api/v1/auth/token/refresh");
-                then.status(401)
-                    .json_body(serde_json::json!({"message":"expired"}));
-            })
-            .await;
-        let task = gui.reviewer_account(
-            1,
-            view::ConnectAccountMessage::RefreshSession {
-                refresh_token: "current".into(),
+    #[test]
+    fn round4_current_refresh_auth_failure_still_logs_out() {
+        reviewer_gui_flow_on_bounded_stack(
+            "round4_current_refresh_auth_failure_still_logs_out",
+            || async {
+                let first = reviewer_blank_app();
+                let mut second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                sign_in_account(&mut second, &f, 7);
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                let failure = f
+                    ._server
+                    .mock_async(|when, then| {
+                        when.method(POST).path("/api/v1/auth/token/refresh");
+                        then.status(401)
+                            .json_body(serde_json::json!({"message":"expired"}));
+                    })
+                    .await;
+                let task = gui.reviewer_account(
+                    1,
+                    view::ConnectAccountMessage::RefreshSession {
+                        refresh_token: "current".into(),
+                    },
+                );
+                drive_account_messages(&mut gui, task).await;
+                failure.assert_hits_async(1).await;
+                assert!(!gui
+                    .reviewer_app_mut(0)
+                    .panels
+                    .connect
+                    .account
+                    .is_authenticated());
+                assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
+                assert!(gui.reviewer_app_mut(1).claim_session_invalidated);
+                assert_eq!(submissions(&f), 0);
+                let _ = std::fs::remove_dir_all(&f.root);
             },
         );
-        drive_account_messages(&mut gui, task).await;
-        failure.assert_hits_async(1).await;
-        assert!(!gui
-            .reviewer_app_mut(0)
-            .panels
-            .connect
-            .account
-            .is_authenticated());
-        assert!(gui.reviewer_app_mut(0).claim_session_invalidated);
-        assert!(gui.reviewer_app_mut(1).claim_session_invalidated);
-        assert_eq!(submissions(&f), 0);
-        let _ = std::fs::remove_dir_all(&f.root);
     }
 
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds() {
-        use crate::app::state::connect::account::ConnectFlowStep;
-        for otp in [false, true] {
-            let first = reviewer_blank_app();
-            let second = reviewer_blank_app();
-            let mut f = reach_review().await;
-            let first = reviewer_app(&mut f, first);
-            let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-            f._server
-                .mock_async(|when, then| {
-                    when.method(POST).path(if otp {
-                        "/api/v1/auth/login/verify-otp"
-                    } else {
-                        "/api/v1/auth/token/refresh"
-                    });
-                    then.status(200).json_body(serde_json::json!({
+    #[test]
+    fn round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds() {
+        reviewer_gui_flow_on_bounded_stack(
+            "round4_real_refresh_and_otp_capture_spawn_epoch_across_two_holds",
+            || async {
+                use crate::app::state::connect::account::ConnectFlowStep;
+                for otp in [false, true] {
+                    let first = reviewer_blank_app();
+                    let second = reviewer_blank_app();
+                    let mut f = reach_review().await;
+                    let first = reviewer_app(&mut f, first);
+                    let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                    f._server
+                        .mock_async(|when, then| {
+                            when.method(POST).path(if otp {
+                                "/api/v1/auth/login/verify-otp"
+                            } else {
+                                "/api/v1/auth/token/refresh"
+                            });
+                            then.status(200).json_body(serde_json::json!({
                         "requires_2fa":false,"token":"flow-token","refresh_token":"fixture-refresh",
                         "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
                     }));
-                })
-                .await;
-            // Each operation actually starts in the panel. Do not poll it until a later hold.
-            for _ in 0..2 {
-                if otp {
-                    gui.reviewer_app_mut(0).panels.connect.account.step =
-                        ConnectFlowStep::OtpVerification {
-                            email: "fixture@example.invalid".into(),
-                            otp: "123456".into(),
-                            sending: false,
-                            is_signup: false,
-                            cooldown: 0,
-                        };
-                }
-                let task = gui.reviewer_account(
-                    1,
-                    if otp {
-                        view::ConnectAccountMessage::VerifyOtp
-                    } else {
-                        view::ConnectAccountMessage::RefreshSession {
-                            refresh_token: "fixture-refresh".into(),
+                        })
+                        .await;
+                    // Each operation actually starts in the panel. Do not poll it until a later hold.
+                    for _ in 0..2 {
+                        if otp {
+                            gui.reviewer_app_mut(0).panels.connect.account.step =
+                                ConnectFlowStep::OtpVerification {
+                                    email: "fixture@example.invalid".into(),
+                                    otp: "123456".into(),
+                                    sending: false,
+                                    is_signup: false,
+                                    cooldown: 0,
+                                };
                         }
-                    },
-                );
-                drop(gui.reviewer_account(2, view::ConnectAccountMessage::LogOut));
-                let completions = gui_outputs(task).await;
-                let mut routed = 0;
-                for message in completions {
-                    if crate::gui::GUI::reviewer_is_set_session(&message) {
-                        routed += 1;
-                        let loaded = gui.update(message);
-                        for follow in gui_outputs(loaded).await {
-                            // Deliver the real queued SessionLoaded too; omit unrelated network bootstrap.
-                            if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
-                            if matches!(inner.as_ref(), crate::gui::tab::Message::Run(Message::View(
-                                view::Message::ConnectAccount(
-                                    view::ConnectAccountMessage::SessionLoaded { .. }
-                                )))))
-                            {
-                                drop(gui.update(follow));
+                        let task = gui.reviewer_account(
+                            1,
+                            if otp {
+                                view::ConnectAccountMessage::VerifyOtp
+                            } else {
+                                view::ConnectAccountMessage::RefreshSession {
+                                    refresh_token: "fixture-refresh".into(),
+                                }
+                            },
+                        );
+                        drop(gui.reviewer_account(2, view::ConnectAccountMessage::LogOut));
+                        let completions = gui_outputs(task).await;
+                        let mut routed = 0;
+                        for message in completions {
+                            if crate::gui::GUI::reviewer_is_set_session(&message) {
+                                routed += 1;
+                                let loaded = gui.update(message);
+                                for follow in gui_outputs(loaded).await {
+                                    // Deliver the real queued SessionLoaded too; omit unrelated network bootstrap.
+                                    if crate::gui::GUI::reviewer_is_session_loaded(&follow) {
+                                        drop(gui.update(follow));
+                                    }
+                                }
+                            }
+                        }
+                        assert_eq!(routed, 1);
+                        assert!(
+                            gui.reviewer_app_mut(0).claim_session_invalidated,
+                            "pre-hold operation lifted hold; otp={}",
+                            otp
+                        );
+                        assert_eq!(submissions(&f), 0);
+                    }
+                    // A real local logout followed by an operation begun here lifts the latest hold.
+                    drop(gui.reviewer_account(1, view::ConnectAccountMessage::LogOut));
+                    // The log-out replaced the panel's client with `CoincubeClient::new()`:
+                    // pointed at the compiled-in API URL and, since that URL is https,
+                    // built https-only, so it cannot reach the http fixture at all —
+                    // production's URL is the same server before and after, the
+                    // fixture's is not. Give the logged-out panel the fixture's
+                    // client, without a token, as `new()` gives it none (probe fix).
+                    gui.reviewer_app_mut(0).panels.connect.account.client =
+                        CoincubeClient::for_test(f._server.base_url());
+                    if otp {
+                        gui.reviewer_app_mut(0).panels.connect.account.step =
+                            ConnectFlowStep::OtpVerification {
+                                email: "fixture@example.invalid".into(),
+                                otp: "123456".into(),
+                                sending: false,
+                                is_signup: false,
+                                cooldown: 0,
+                            };
+                    }
+                    let task = gui.reviewer_account(
+                        1,
+                        if otp {
+                            view::ConnectAccountMessage::VerifyOtp
+                        } else {
+                            view::ConnectAccountMessage::RefreshSession {
+                                refresh_token: "fixture-refresh".into(),
+                            }
+                        },
+                    );
+                    let mut routed = 0;
+                    for message in gui_outputs(task).await {
+                        if crate::gui::GUI::reviewer_is_set_session(&message) {
+                            routed += 1;
+                            let mut queue = std::collections::VecDeque::from(
+                                gui_outputs(gui.update(message)).await,
+                            );
+                            while let Some(follow) = queue.pop_front() {
+                                if crate::gui::GUI::reviewer_is_claim_or_session_loaded(&follow) {
+                                    queue.extend(gui_outputs(gui.update(follow)).await);
+                                }
                             }
                         }
                     }
-                }
-                assert_eq!(routed, 1);
-                assert!(
-                    gui.reviewer_app_mut(0).claim_session_invalidated,
-                    "pre-hold operation lifted hold; otp={}",
-                    otp
-                );
-                assert_eq!(submissions(&f), 0);
-            }
-            // A real local logout followed by an operation begun here lifts the latest hold.
-            drop(gui.reviewer_account(1, view::ConnectAccountMessage::LogOut));
-            // The log-out replaced the panel's client with `CoincubeClient::new()`:
-            // pointed at the compiled-in API URL and, since that URL is https,
-            // built https-only, so it cannot reach the http fixture at all —
-            // production's URL is the same server before and after, the
-            // fixture's is not. Give the logged-out panel the fixture's
-            // client, without a token, as `new()` gives it none (probe fix).
-            gui.reviewer_app_mut(0).panels.connect.account.client =
-                CoincubeClient::for_test(f._server.base_url());
-            if otp {
-                gui.reviewer_app_mut(0).panels.connect.account.step =
-                    ConnectFlowStep::OtpVerification {
-                        email: "fixture@example.invalid".into(),
-                        otp: "123456".into(),
-                        sending: false,
-                        is_signup: false,
-                        cooldown: 0,
-                    };
-            }
-            let task = gui.reviewer_account(
-                1,
-                if otp {
-                    view::ConnectAccountMessage::VerifyOtp
-                } else {
-                    view::ConnectAccountMessage::RefreshSession {
-                        refresh_token: "fixture-refresh".into(),
-                    }
-                },
-            );
-            let mut routed = 0;
-            for message in gui_outputs(task).await {
-                if crate::gui::GUI::reviewer_is_set_session(&message) {
-                    routed += 1;
-                    let mut queue =
-                        std::collections::VecDeque::from(gui_outputs(gui.update(message)).await);
-                    while let Some(follow) = queue.pop_front() {
-                        if matches!(&follow, crate::gui::Message::Pane(_, crate::gui::pane::Message::Tab(_, inner))
-                        if matches!(inner.as_ref(), crate::gui::tab::Message::Run(
-                            Message::Claim(_) | Message::View(view::Message::ConnectAccount(
-                                view::ConnectAccountMessage::SessionLoaded { .. }
-                            )))))
-                        {
-                            queue.extend(gui_outputs(gui.update(follow)).await);
-                        }
-                    }
-                }
-            }
-            assert_eq!(routed, 1);
-            assert!(
-                !gui.reviewer_app_mut(0).claim_session_invalidated,
-                "post-hold operation did not lift; otp={}",
-                otp
-            );
-            assert!(
-                gui.reviewer_app_mut(1).claim_session_invalidated,
-                "originating sign-in lifted sibling hold"
-            );
-            let app = gui.reviewer_app_mut(0);
-            let generation = app.panels.connect.account.session_generation();
-            let gate = app.update(Message::View(view::Message::ConnectAccount(
-                view::ConnectAccountMessage::DuressStateChecked(
-                    crate::services::coincube::DuressCheckOutcome::Ok(
-                        crate::services::coincube::DuressState {
-                            active: false,
-                            unlock_at: None,
-                            enrolled: false,
-                            this_device_registered: false,
-                        },
-                    ),
-                    generation,
-                    0,
-                ),
-            )));
-            drive_claim_messages(app, gate).await;
-            grant_current_beta_features(app).await;
-            let refresh = app.update(intent(view::ClaimMessage::Refresh));
-            drive_claim_messages(app, refresh).await;
-            assert_eq!(app_claim_state(app), (true, None, false, true));
-            let confirm = app.update(intent(view::ClaimMessage::Confirm));
-            drive_claim_messages(app, confirm).await;
-            assert_eq!(
-                submissions(&f),
-                1,
-                "local logout then actual new auth must recover once; otp={otp}"
-            );
+                    assert_eq!(routed, 1);
+                    assert!(
+                        !gui.reviewer_app_mut(0).claim_session_invalidated,
+                        "post-hold operation did not lift; otp={}",
+                        otp
+                    );
+                    assert!(
+                        gui.reviewer_app_mut(1).claim_session_invalidated,
+                        "originating sign-in lifted sibling hold"
+                    );
+                    let app = gui.reviewer_app_mut(0);
+                    let generation = app.panels.connect.account.session_generation();
+                    let gate = app.update(Message::View(view::Message::ConnectAccount(
+                        view::ConnectAccountMessage::DuressStateChecked(
+                            crate::services::coincube::DuressCheckOutcome::Ok(
+                                crate::services::coincube::DuressState {
+                                    active: false,
+                                    unlock_at: None,
+                                    enrolled: false,
+                                    this_device_registered: false,
+                                },
+                            ),
+                            generation,
+                            0,
+                        ),
+                    )));
+                    drive_claim_messages(app, gate).await;
+                    grant_current_beta_features(app).await;
+                    let refresh = app.update(intent(view::ClaimMessage::Refresh));
+                    drive_claim_messages(app, refresh).await;
+                    assert_eq!(app_claim_state(app), (true, None, false, true));
+                    let confirm = app.update(intent(view::ClaimMessage::Confirm));
+                    drive_claim_messages(app, confirm).await;
+                    assert_eq!(
+                        submissions(&f),
+                        1,
+                        "local logout then actual new auth must recover once; otp={otp}"
+                    );
 
-            let _ = std::fs::remove_dir_all(&f.root);
-        }
+                    let _ = std::fs::remove_dir_all(&f.root);
+                }
+            },
+        );
     }
 
     // ── Gandalf's round-5 reviewer probe (#518 issuecomment-5839188682),
@@ -5748,91 +5800,96 @@ mod flow {
     // account, is dropped by its own panel — and, since round 6, never
     // broadcast as a sign-in to the sibling either.
     #[cfg(any(unix, windows))]
-    #[tokio::test]
-    async fn round5_stale_setsession_must_not_broadcast_a_discarded_account() {
-        let first = reviewer_blank_app();
-        let mut second = reviewer_blank_app();
-        let mut f = reach_review().await;
-        sign_in_account(&mut second, &f, 7);
-        let first = reviewer_app(&mut f, first);
-        let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
-        let old_login = f
-            ._server
-            .mock_async(|when, then| {
-                when.method(POST)
-                    .path("/api/v1/auth/token/refresh")
-                    .json_body(json!({"refreshToken":"old-broadcast"}));
-                then.status(200).json_body(json!({
+    #[test]
+    fn round5_stale_setsession_must_not_broadcast_a_discarded_account() {
+        reviewer_gui_flow_on_bounded_stack(
+            "round5_stale_setsession_must_not_broadcast_a_discarded_account",
+            || async {
+                let first = reviewer_blank_app();
+                let mut second = reviewer_blank_app();
+                let mut f = reach_review().await;
+                sign_in_account(&mut second, &f, 7);
+                let first = reviewer_app(&mut f, first);
+                let mut gui = crate::gui::GUI::reviewer_claim_gui(first, second);
+                let old_login = f
+                    ._server
+                    .mock_async(|when, then| {
+                        when.method(POST)
+                            .path("/api/v1/auth/token/refresh")
+                            .json_body(json!({"refreshToken":"old-broadcast"}));
+                        then.status(200).json_body(json!({
                     "requires_2fa": false, "token":"old-seven", "refresh_token":"old-broadcast",
                     "user":{"id":7,"email":"fixture@example.invalid","email_verified":true}
                 }));
-            })
-            .await;
-        let pending = gui.reviewer_account(
-            1,
-            view::ConnectAccountMessage::RefreshSession {
-                refresh_token: "old-broadcast".into(),
-            },
-        );
-        let stale = gui_outputs(pending)
-            .await
-            .into_iter()
-            .find(crate::gui::GUI::reviewer_is_set_session)
-            .expect("real old refresh must produce SetSession");
-        old_login.assert_hits_async(1).await;
-        drop(gui.reviewer_account(1, view::ConnectAccountMessage::LogOut));
-        gui.reviewer_app_mut(0).panels.connect.account.client =
-            CoincubeClient::for_test(f._server.base_url());
-        round4_sign_in_with_distinct_token(gui.reviewer_app_mut(0), &f, 8).await;
-        round4_sign_in_with_distinct_token(gui.reviewer_app_mut(1), &f, 8).await;
-        for index in [0, 1] {
-            assert_eq!(
-                gui.reviewer_app_mut(index)
+                    })
+                    .await;
+                let pending = gui.reviewer_account(
+                    1,
+                    view::ConnectAccountMessage::RefreshSession {
+                        refresh_token: "old-broadcast".into(),
+                    },
+                );
+                let stale = gui_outputs(pending)
+                    .await
+                    .into_iter()
+                    .find(crate::gui::GUI::reviewer_is_set_session)
+                    .expect("real old refresh must produce SetSession");
+                old_login.assert_hits_async(1).await;
+                drop(gui.reviewer_account(1, view::ConnectAccountMessage::LogOut));
+                gui.reviewer_app_mut(0).panels.connect.account.client =
+                    CoincubeClient::for_test(f._server.base_url());
+                round4_sign_in_with_distinct_token(gui.reviewer_app_mut(0), &f, 8).await;
+                round4_sign_in_with_distinct_token(gui.reviewer_app_mut(1), &f, 8).await;
+                for index in [0, 1] {
+                    assert_eq!(
+                        gui.reviewer_app_mut(index)
+                            .panels
+                            .connect
+                            .account
+                            .user
+                            .as_ref()
+                            .unwrap()
+                            .id,
+                        8
+                    );
+                    assert!(gui
+                        .reviewer_app_mut(index)
+                        .panels
+                        .connect
+                        .account
+                        .is_authenticated());
+                    assert!(!gui.reviewer_app_mut(index).claim_session_invalidated);
+                }
+                let ignored = gui.update(stale);
+                drive_account_messages(&mut gui, ignored).await;
+                let origin_user = gui
+                    .reviewer_app_mut(0)
                     .panels
                     .connect
                     .account
                     .user
                     .as_ref()
                     .unwrap()
-                    .id,
-                8
-            );
-            assert!(gui
-                .reviewer_app_mut(index)
-                .panels
-                .connect
-                .account
-                .is_authenticated());
-            assert!(!gui.reviewer_app_mut(index).claim_session_invalidated);
-        }
-        let ignored = gui.update(stale);
-        drive_account_messages(&mut gui, ignored).await;
-        let origin_user = gui
-            .reviewer_app_mut(0)
-            .panels
-            .connect
-            .account
-            .user
-            .as_ref()
-            .unwrap()
-            .id;
-        let sibling_user = gui
-            .reviewer_app_mut(1)
-            .panels
-            .connect
-            .account
-            .user
-            .as_ref()
-            .unwrap()
-            .id;
-        let sibling_held = gui.reviewer_app_mut(1).claim_session_invalidated;
-        assert_eq!(origin_user, 8, "panel guard must discard the old account");
-        assert_eq!(sibling_user, 8);
-        assert_eq!(submissions(&f), 0);
-        let _ = std::fs::remove_dir_all(&f.root);
-        assert!(
-            !sibling_held,
-            "GUI broadcast a stale SetSession before its panel dropped it"
+                    .id;
+                let sibling_user = gui
+                    .reviewer_app_mut(1)
+                    .panels
+                    .connect
+                    .account
+                    .user
+                    .as_ref()
+                    .unwrap()
+                    .id;
+                let sibling_held = gui.reviewer_app_mut(1).claim_session_invalidated;
+                assert_eq!(origin_user, 8, "panel guard must discard the old account");
+                assert_eq!(sibling_user, 8);
+                assert_eq!(submissions(&f), 0);
+                let _ = std::fs::remove_dir_all(&f.root);
+                assert!(
+                    !sibling_held,
+                    "GUI broadcast a stale SetSession before its panel dropped it"
+                );
+            },
         );
     }
     #[cfg(any(unix, windows))]

@@ -2012,6 +2012,46 @@ pub mod global {
             Self::read_settings(path).map(|settings| settings.preferences())
         }
 
+        /// Read the current privacy choice under the global settings lock.
+        /// A cached Show receipt is insufficient at render time: another
+        /// process may have committed Hide since that receipt was issued.
+        pub fn current_balances_hidden(path: &Path) -> Result<Option<bool>, super::SettingsError> {
+            let settings = Self::read_settings(path)?;
+            Ok(settings
+                .balance_privacy_initialized
+                .then_some(settings.hide_balances))
+        }
+
+        /// Render-time privacy check. If a writer holds the settings lock,
+        /// return an unresolved choice immediately so the GUI covers amounts.
+        /// Other callers can still use the strict, blocking read above.
+        pub fn try_current_balances_hidden(
+            path: &Path,
+        ) -> Result<Option<bool>, super::SettingsError> {
+            let lock = super::open_existing_lock(&Self::lock_path(path)?).map_err(|e| {
+                super::SettingsError::ReadingFile(format!("Opening global settings lock: {e}"))
+            })?;
+            let held = match lock {
+                Some(lock) => {
+                    if !FileExt::try_lock_shared(&lock).map_err(|e| {
+                        super::SettingsError::ReadingFile(format!("Locking global settings: {e}"))
+                    })? {
+                        return Ok(None);
+                    }
+                    Some(HeldLock(Some(lock)))
+                }
+                None => None,
+            };
+            let document = Self::read_document(path);
+            drop(held);
+            document.map(|document| {
+                document
+                    .settings
+                    .balance_privacy_initialized
+                    .then_some(document.settings.hide_balances)
+            })
+        }
+
         /// Edit one choice in the shared transaction and return the new
         /// snapshot once the replacement is visible. A committed save whose
         /// post-rename steps could not be confirmed is logged and still
@@ -2082,6 +2122,29 @@ pub mod global {
                 // Hide once on upgrade (A4). Only a proved new installation
                 // could start shown, and no such proof exists here.
                 settings.hide_balances = true;
+                settings.balance_privacy_initialized = true;
+                Ok(Plan::Write {
+                    value: settings.snapshot(),
+                    force_privacy: true,
+                })
+            })
+            .map(receipt)
+            .map_err(PrivacyInitError::Settings)
+        }
+
+        /// Startup's one-use creator proof is the only path that can initialize
+        /// a missing privacy choice to shown. The caller still holds the stable
+        /// parent bootstrap lock while this transaction takes the global lock.
+        /// A concurrent explicit choice wins the locked recheck.
+        pub(crate) fn initialize_created_preferences(
+            creator: crate::dir::CreatedRoot,
+        ) -> Result<PreferencesReceipt, PrivacyInitError> {
+            let path = Self::path(creator.root());
+            Self::transact(&path, |settings| {
+                if settings.balance_privacy_initialized {
+                    return Ok(Plan::Keep(settings.snapshot()));
+                }
+                settings.hide_balances = false;
                 settings.balance_privacy_initialized = true;
                 Ok(Plan::Write {
                     value: settings.snapshot(),

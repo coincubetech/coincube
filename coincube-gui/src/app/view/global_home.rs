@@ -6,8 +6,8 @@ use coincube_ui::{
     color,
     component::{amount::*, button, form, spinner, text::*},
     icon::{
-        arrow_down_up_icon, arrow_right, check_circle_icon, droplet_fill_icon, eye_outline_icon,
-        eye_slash_icon, lightning_icon, usd_icon, vault_icon, warning_icon,
+        arrow_down_up_icon, arrow_right, check_circle_icon, droplet_fill_icon, lightning_icon,
+        usd_icon, vault_icon, warning_icon,
     },
     theme,
     widget::*,
@@ -74,6 +74,7 @@ pub struct PendingTransfer {
 fn pending_deposit_card<'a>(
     pending_transfer: PendingTransfer,
     bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     Container::new(
         Row::new()
@@ -83,11 +84,13 @@ fn pending_deposit_card<'a>(
             .push(text("Pending deposit").size(12).color(color::GREY_2))
             .push(Space::new().width(Length::Fill))
             .push(
-                text(
+                text(if balance_masked {
+                    "••••••".to_owned()
+                } else {
                     pending_transfer
                         .amount
-                        .to_formatted_string_with_unit(bitcoin_unit),
-                )
+                        .to_formatted_string_with_unit(bitcoin_unit)
+                })
                 .size(12)
                 .color(color::ORANGE),
             ),
@@ -410,7 +413,11 @@ fn wallet_card<'a>(
     let content = if matches!(wallet_type, WalletType::Vault) && loaded {
         if let Some(pending_transfer) = pending_vault_incoming {
             if pending_transfer.stage != TransferStage::Completed {
-                content.push(pending_deposit_card(pending_transfer, bitcoin_unit))
+                content.push(pending_deposit_card(
+                    pending_transfer,
+                    bitcoin_unit,
+                    balance_masked,
+                ))
             } else {
                 content
             }
@@ -471,9 +478,12 @@ fn balance_summary_card<'a>(
     balance: &Amount,
     fiat_converter: Option<FiatAmountConverter>,
     bitcoin_unit: crate::app::settings::unit::BitcoinDisplayUnit,
+    balance_masked: bool,
     on_press: Message,
 ) -> Element<'a, Message> {
-    let fiat_balance = fiat_converter.as_ref().map(|c| c.convert(*balance));
+    let fiat_balance = (!balance_masked)
+        .then(|| fiat_converter.as_ref().map(|c| c.convert(*balance)))
+        .flatten();
     let name = kind.label();
 
     let content = Column::new()
@@ -489,7 +499,11 @@ fn balance_summary_card<'a>(
             Row::new().align_y(Alignment::Center).push(
                 Column::new()
                     .spacing(4)
-                    .push(amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit))
+                    .push(if balance_masked {
+                        Row::new().push(text("••••••").size(H2_SIZE))
+                    } else {
+                        amount_with_size_and_unit(balance, H2_SIZE, bitcoin_unit)
+                    })
                     .push_maybe(
                         fiat_balance
                             .map(|fiat| fiat.to_text().size(P1_SIZE).style(theme::text::secondary)),
@@ -542,6 +556,7 @@ fn wallet_selector_popup<'a>(
     spark_balance: Amount,
     vault_balance: Amount,
     bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     let title_label = match editing {
         PickerSide::From => "FROM",
@@ -566,7 +581,11 @@ fn wallet_selector_popup<'a>(
 
     let row_for = |kind: WalletKind, balance: Amount| -> Element<'a, Message> {
         let is_selected = current == Some(kind);
-        let balance_str = balance.to_formatted_string_with_unit(bitcoin_unit);
+        let balance_str = if balance_masked {
+            "••••••".into()
+        } else {
+            balance.to_formatted_string_with_unit(bitcoin_unit)
+        };
         let icon_elem = wallet_kind_icon::<Message>(kind, 36.0);
         crate::app::view::shared::picker::picker_row(
             icon_elem,
@@ -703,6 +722,7 @@ fn enter_amount_view<'a>(
     bitcoin_unit: crate::app::settings::unit::BitcoinDisplayUnit,
     onchain_send_limit: Option<(u64, u64)>,
     onchain_receive_limit: Option<(u64, u64)>,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     let balance_for = |kind: WalletKind| -> &Amount {
         match kind {
@@ -722,6 +742,7 @@ fn enter_amount_view<'a>(
             balance_for(from_kind),
             fiat_converter,
             bitcoin_unit,
+            balance_masked,
             Message::Home(HomeMessage::OpenWalletPicker(PickerSide::From)),
         ))
         .push(balance_summary_card(
@@ -729,6 +750,7 @@ fn enter_amount_view<'a>(
             balance_for(to_kind),
             fiat_converter,
             bitcoin_unit,
+            balance_masked,
             Message::Home(HomeMessage::OpenWalletPicker(PickerSide::To)),
         ));
 
@@ -1654,6 +1676,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                     bitcoin_unit,
                     onchain_send_limit,
                     onchain_receive_limit,
+                    balance_masked,
                 );
                 if let Some(editing) = wallet_picker {
                     let popup = wallet_selector_popup(
@@ -1667,6 +1690,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                         spark_balance,
                         vault_balance,
                         bitcoin_unit,
+                        balance_masked,
                     );
                     return coincube_ui::widget::modal::Modal::new(amount_view, popup)
                         .on_blur(Some(Message::Home(HomeMessage::CloseWalletPicker)))
@@ -2100,7 +2124,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             .push(spark_btc_row)
             .push_maybe(pending_spark_incoming.and_then(|pt| {
                 (pt.stage != TransferStage::Completed)
-                    .then(|| pending_deposit_card(pt, bitcoin_unit))
+                    .then(|| pending_deposit_card(pt, bitcoin_unit, balance_masked))
             }));
 
         let spark_card: Element<'a, Message> = Container::new(spark_card_content)
@@ -2154,15 +2178,6 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
         .spacing(0)
         .align_y(Alignment::Center)
         .push(h3("Total Balance").bold())
-        .push(
-            Button::new(if balance_masked {
-                eye_slash_icon()
-            } else {
-                eye_outline_icon()
-            })
-            .style(theme::button::container)
-            .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
-        )
         .push_maybe(
             ((usdt_balance_error || liquid_balance_error) && !total_balance_loading)
                 .then(|| warning_icon().size(12).style(theme::text::secondary)),
@@ -2210,15 +2225,6 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
                 .spacing(0)
                 .width(Length::Fill)
                 .push(h3("Wallets").bold())
-                .push(
-                    Button::new(if balance_masked {
-                        eye_slash_icon()
-                    } else {
-                        eye_outline_icon()
-                    })
-                    .style(theme::button::container)
-                    .on_press(Message::Home(HomeMessage::ToggleBalanceMask)),
-                )
                 .align_y(Alignment::Center),
         )
         .push_maybe(spark_card)
@@ -2281,6 +2287,7 @@ fn transfer_available(has_liquid: bool, has_vault: bool, has_spark: bool) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use crate::{
         app::{
             cache::FiatPriceRequest,
@@ -2293,6 +2300,28 @@ mod tests {
     use std::{collections::HashMap, str::FromStr};
 
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    #[test]
+    fn pending_deposit_card_follows_passive_privacy_on_both_home_wallets() {
+        let transfer = PendingTransfer {
+            amount: Amount::from_sat(98_765_432),
+            stage: TransferStage::PendingDeposit,
+        };
+        let inspect = |masked| {
+            capture::inspect(
+                "home-pending-deposit",
+                pending_deposit_card(transfer, BitcoinDisplayUnit::Sats, masked),
+                (900, 200),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        let hidden = inspect(true);
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("98,765,432"));
+        let shown = inspect(false);
+        assert!(shown.contains("98,765,432"));
+    }
 
     struct ViewFixture {
         entered_amount: form::Value<String>,

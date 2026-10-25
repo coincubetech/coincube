@@ -92,6 +92,10 @@ impl AppGeneration {
         static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         Self(NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
+
+    pub(crate) fn value(self) -> u64 {
+        self.0
+    }
 }
 
 /// Where an entanglement lookup was issued from: the `App` instance, and the
@@ -198,14 +202,6 @@ pub struct Cache {
     /// Cube. Drives the soft "not backed up" warning banners on the Vault
     /// and Liquid home screens. Mirrors `CubeSettings::backed_up`.
     pub current_cube_backed_up: bool,
-    /// Session-scoped dismissal of the "not backed up" banner. Defaults
-    /// to `false` for every new `Cache`, so each Tab (one Cube per Tab)
-    /// starts with the banner visible, and it's also reset if
-    /// `current_cube_backed_up` ever transitions back to `false`. Set to
-    /// `true` only by the user clicking the dismiss button. Cleared on
-    /// app restart — the reminder keeps surfacing until the user
-    /// actually backs up.
-    pub backup_warning_dismissed: bool,
     /// A Spark Stable Balance condition the user should know about,
     /// rendered as a banner at the top of every page by the `dashboard`
     /// wrapper. `None` when there is nothing to say or the user dismissed
@@ -279,6 +275,14 @@ pub struct Cache {
     >,
     /// Current theme mode (dark/light) — used for theme-aware widget rendering
     pub theme_mode: coincube_ui::theme::palette::ThemeMode,
+    /// Presentation input for the shared top-bar balance eye. `None` until the
+    /// GUI preferences owner publishes a resolved or unresolved privacy state.
+    pub balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    /// Transient shell disclosures. These belong to this open Cube and are
+    /// deliberately not persisted with wallet or device settings.
+    pub cube_switcher_open: bool,
+    pub cube_lock_confirmation: bool,
+    pub vault_tools_open: bool,
     /// BTC price in USD, always fetched regardless of the user's selected fiat
     /// currency. Used for converting USDt (which is pegged to USD) into sats.
     pub btc_usd_price: Option<f64>,
@@ -422,7 +426,6 @@ impl std::default::Default for Cache {
             cube_connect_owner: None,
             cube_owned_by_other_account: false,
             current_cube_backed_up: false,
-            backup_warning_dismissed: false,
             spark_notice: None,
             has_p2p: false,
             p2p_test_coordinator: false,
@@ -434,6 +437,10 @@ impl std::default::Default for Cache {
             entangled: std::collections::HashMap::new(),
             split_deposit: None,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            balance_privacy: None,
+            cube_switcher_open: false,
+            cube_lock_confirmation: false,
+            vault_tools_open: false,
             btc_usd_price: None,
             show_direction_badges: true,
             lightning_address: None,
@@ -454,6 +461,14 @@ impl std::default::Default for Cache {
 }
 
 impl Cache {
+    /// Passive amounts are visible only after the GUI has published an
+    /// accepted installation-wide Show receipt. Missing or unresolved state
+    /// always masks, including the first frame of a newly opened Cube.
+    pub fn balance_amounts_masked(&self) -> bool {
+        self.balance_privacy
+            .is_none_or(|chrome| chrome.privacy.masks_amounts())
+    }
+
     /// Retain the Cube identity across storage and recovery boundaries.
     pub fn chain(&self) -> crate::chain::ChainId {
         self.fiat_chain
@@ -593,6 +608,32 @@ impl Cache {
 
     pub fn history_sync(&self) -> &coincubed::commands::HistorySync {
         &self.daemon_cache.history_sync
+    }
+}
+
+#[cfg(test)]
+mod balance_privacy_tests {
+    use super::Cache;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+
+    #[test]
+    fn passive_amounts_fail_closed_until_an_accepted_show_is_published() {
+        let mut cache = Cache::default();
+        assert!(cache.balance_amounts_masked());
+        for privacy in [BalancePrivacy::Unresolved, BalancePrivacy::Hidden] {
+            cache.balance_privacy = Some(BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            assert!(cache.balance_amounts_masked());
+        }
+        cache.balance_privacy = Some(BalancePrivacyChrome {
+            privacy: BalancePrivacy::Shown,
+            busy: false,
+            interactive: false,
+        });
+        assert!(!cache.balance_amounts_masked());
     }
 }
 

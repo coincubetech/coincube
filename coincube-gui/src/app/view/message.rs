@@ -143,6 +143,19 @@ pub enum Message {
     /// Copy text and show confirmation after the clipboard write is requested.
     CopyWithToast(String, String),
     Menu(Menu),
+    /// Show the Launcher while keeping this Cube's session in its App tab.
+    OpenLauncher,
+    /// Lock through the tab's secure lifecycle, then show the Launcher.
+    LockCubeToLauncher,
+    ToggleCubeSwitcher,
+    AskCubeLock,
+    CancelCubeLock,
+    ToggleVaultTools,
+    /// A shared Action's pointer-down request. The App applies whole-tree
+    /// focus so a captured sidebar click also blurs content controls.
+    FocusAction(iced::advanced::widget::Id),
+    /// Device-wide privacy intent handled only by the GUI preferences owner.
+    ChangeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
     /// Recovery Kit" mode. Branches off the same button the default
@@ -242,6 +255,9 @@ pub enum Message {
     ShowError(String),
     ShowSuccess(String),
     ShowToast(log::Level, String),
+    /// Keep the incoming amount structured until the toast is rendered, so an
+    /// already-visible notice follows the current device privacy choice.
+    ShowIncomingLiquidWaitingToast(u64),
     DismissToast(usize),
     SideshiftReceive(SideshiftReceiveMessage),
     SideshiftSend(SideshiftSendMessage),
@@ -282,7 +298,6 @@ pub enum Message {
     /// `false` = decline. Handled at the App level; the answer is persisted
     /// per-cube so the prompt never re-fires.
     RecoveryAlertsConsent(bool),
-    DismissBackupWarning,
     /// Close the Spark Stable Balance banner for this session
     /// (`Cache::spark_notice`). Handled at the App level.
     DismissSparkNotice,
@@ -1623,6 +1638,9 @@ pub enum ConnectAccountMessage {
     },
     /// Refresh public Cube metadata for Account → Recovery services.
     RefreshRecoveryServices,
+    /// Ask the Launcher to resolve this server Cube to an exact local Cube
+    /// before opening its ordinary authenticated unlock path.
+    OpenRecoveryService(crate::app::state::connect::account::RecoveryServiceTarget),
     /// A session refresh failed for a reason that is *not* an auth rejection
     /// (a timeout, an offline device, a 5xx). Carries presentation-ready copy
     /// rather than a raw error string — see [`crate::user_error`].
@@ -2238,7 +2256,6 @@ pub enum HomeMessage {
         btc: Amount,
         stable_balance: Option<coincube_spark_protocol::StableBalanceSnapshot>,
     },
-    ToggleBalanceMask,
     /// Open the wallet-picker popup on the amount screen, editing the named side.
     OpenWalletPicker(PickerSide),
     /// Close the wallet-picker popup without changing the selected pair.

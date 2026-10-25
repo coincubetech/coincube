@@ -113,7 +113,7 @@ impl BuySellPanel {
         }
     }
 
-    pub fn view<'a>(&'a self) -> iced::Element<'a, ViewMessage, theme::Theme> {
+    pub fn view<'a>(&'a self, mask_amounts: bool) -> iced::Element<'a, ViewMessage, theme::Theme> {
         let column = {
             let column = Column::new()
                 // COINCUBE branding
@@ -135,7 +135,9 @@ impl BuySellPanel {
                     BuySellFlowState::ModeSelect { .. } => self.mode_select_ux(),
 
                     // mavapay
-                    BuySellFlowState::Mavapay(state) => super::mavapay::ui::form(state),
+                    BuySellFlowState::Mavapay(state) => {
+                        super::mavapay::ui::form(state, mask_amounts)
+                    }
 
                     // meld
                     BuySellFlowState::Meld(state) => state.view(),

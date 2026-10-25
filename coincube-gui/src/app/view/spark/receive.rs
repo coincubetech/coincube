@@ -62,6 +62,7 @@ pub struct SparkReceiveView<'a> {
     pub balance_sats: u64,
     pub bitcoin_unit: BitcoinDisplayUnit,
     pub show_direction_badges: bool,
+    pub mask_amounts: bool,
     /// When the cross-network (SideShift) flow is active, its inline body —
     /// rendered below the two cards in place of the Bitcoin rail form.
     pub sideshift_body: Option<Element<'a, Message>>,
@@ -91,7 +92,11 @@ impl<'a> SparkReceiveView<'a> {
             };
             return coincube_ui::component::received_celebration_page(
                 self.received_celebration_context,
-                self.received_amount_display,
+                if self.mask_amounts {
+                    "••••••"
+                } else {
+                    self.received_amount_display
+                },
                 self.received_quote,
                 self.received_image_handle,
                 verb_phrase,
@@ -111,6 +116,7 @@ impl<'a> SparkReceiveView<'a> {
             self.cross_network_selected,
             self.balance_sats,
             self.bitcoin_unit,
+            self.mask_amounts,
         ));
 
         if let Some(body) = self.sideshift_body {
@@ -208,6 +214,7 @@ impl<'a> SparkReceiveView<'a> {
                 self.claim_error,
                 self.pending_deposit_confirmations,
                 self.network,
+                self.mask_amounts,
             ));
         }
 
@@ -216,6 +223,7 @@ impl<'a> SparkReceiveView<'a> {
             self.recent_transactions,
             self.bitcoin_unit,
             self.show_direction_badges,
+            self.mask_amounts,
             |idx| Message::SparkReceive(SparkReceiveMessage::SelectTransaction(idx)),
             Message::SparkReceive(SparkReceiveMessage::History),
         ));
@@ -230,6 +238,7 @@ fn pending_deposits_card<'a>(
     claim_error: Option<&'a str>,
     confirmations: &'a HashMap<(String, u32), u32>,
     network: Network,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let mut card = Column::new()
         .spacing(12)
@@ -249,7 +258,7 @@ fn pending_deposits_card<'a>(
         let confs = confirmations
             .get(&(deposit.txid.clone(), deposit.vout))
             .copied();
-        card = card.push(deposit_row(deposit, claiming, confs, network));
+        card = card.push(deposit_row(deposit, claiming, confs, network, mask_amounts));
     }
 
     Container::new(card)
@@ -263,12 +272,17 @@ fn deposit_row<'a>(
     claiming: Option<&'a (String, u32)>,
     confirmations: Option<u32>,
     network: Network,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let is_being_claimed = claiming
         .map(|(txid, vout)| txid == &deposit.txid && *vout == deposit.vout)
         .unwrap_or(false);
 
-    let amount_label = format!("{} sats", deposit.amount_sat);
+    let amount_label = if mask_amounts {
+        "•••••• sats".to_string()
+    } else {
+        format!("{} sats", deposit.amount_sat)
+    };
     let txid_short = if deposit.txid.len() > 16 {
         format!(
             "{}…{}",
@@ -418,6 +432,7 @@ fn spark_receive_cards<'a>(
     cross: Option<DepositOption>,
     balance_sats: u64,
     bitcoin_unit: BitcoinDisplayUnit,
+    mask_amounts: bool,
 ) -> Element<'a, Message> {
     let you_receive = Container::new(
         Column::new()
@@ -440,15 +455,19 @@ fn spark_receive_cards<'a>(
                     ),
             )
             .push(
-                text(format!(
-                    "{} {}",
-                    Amount::from_sat(balance_sats).to_formatted_string_with_unit(bitcoin_unit),
-                    if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
-                        "BTC"
-                    } else {
-                        "SATS"
-                    }
-                ))
+                text(if mask_amounts {
+                    "••••••".into()
+                } else {
+                    format!(
+                        "{} {}",
+                        Amount::from_sat(balance_sats).to_formatted_string_with_unit(bitcoin_unit),
+                        if matches!(bitcoin_unit, BitcoinDisplayUnit::BTC) {
+                            "BTC"
+                        } else {
+                            "SATS"
+                        }
+                    )
+                })
                 .size(P2_SIZE)
                 .style(theme::text::secondary),
             )
@@ -808,6 +827,120 @@ fn kv_row<'a>(label: &'a str, value: String) -> Element<'a, Message> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::cache::Cache;
+    use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
+    use crate::app::view::shared::landing::capture;
+
+    #[test]
+    fn pending_deposit_amount_follows_passive_privacy_authority() {
+        let mut cache = Cache::default();
+        let deposits = vec![DepositInfo {
+            txid: "privacy-deposit-123456".to_string(),
+            vout: 1,
+            amount_sat: 76_543_219,
+            is_mature: true,
+            claim_error: None,
+        }];
+        let confirmations = HashMap::new();
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "spark-pending-deposit-privacy",
+                pending_deposits_card(
+                    &deposits,
+                    None,
+                    None,
+                    &confirmations,
+                    Network::Bitcoin,
+                    cache.balance_amounts_masked(),
+                ),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            assert!(mounted.contains("privacy-…t-123456:1"));
+            assert!(mounted.contains("Claim"));
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains("76543219 sats"));
+            } else {
+                assert!(mounted.contains("•••••• sats"));
+                assert!(!mounted.contains("76543219"));
+            }
+        }
+    }
+
+    #[test]
+    fn mounted_received_celebration_masks_until_shown() {
+        let mut cache = Cache::default();
+        let phase = SparkReceivePhase::Received {
+            amount_sat: 87_654_321,
+            count: 1,
+        };
+        let deposits = Vec::new();
+        let confirmations = HashMap::new();
+        let transactions = Vec::new();
+        let quote = coincube_ui::component::quote_display::random_quote("spark-receive");
+        let image =
+            coincube_ui::component::quote_display::image_handle_for_context("spark-receive");
+        for privacy in [
+            None,
+            Some(BalancePrivacy::Unresolved),
+            Some(BalancePrivacy::Hidden),
+            Some(BalancePrivacy::Shown),
+        ] {
+            cache.balance_privacy = privacy.map(|privacy| BalancePrivacyChrome {
+                privacy,
+                busy: false,
+                interactive: false,
+            });
+            let mounted = capture::inspect(
+                "spark-received-celebration-privacy",
+                SparkReceiveView {
+                    backend_available: true,
+                    method: SparkReceiveMethod::Spark,
+                    amount_input: "",
+                    description_input: "",
+                    phase: &phase,
+                    qr_data: None,
+                    pending_deposits: &deposits,
+                    claiming: None,
+                    claim_error: None,
+                    pending_deposit_confirmations: &confirmations,
+                    network: Network::Bitcoin,
+                    received_amount_display: "+87,654,321 sats",
+                    received_celebration_context: "spark-receive",
+                    received_quote: &quote,
+                    received_image_handle: &image,
+                    recent_transactions: &transactions,
+                    balance_sats: 0,
+                    bitcoin_unit: BitcoinDisplayUnit::Sats,
+                    show_direction_badges: false,
+                    mask_amounts: cache.balance_amounts_masked(),
+                    sideshift_body: None,
+                    cross_network_selected: None,
+                }
+                .render(),
+                (1440, 900),
+                "dark",
+                theme::Theme::dark(),
+            );
+            if privacy == Some(BalancePrivacy::Shown) {
+                assert!(mounted.contains("+87,654,321 sats"));
+            } else {
+                assert!(mounted.contains("••••••"));
+                assert!(!mounted.contains("87,654,321"));
+            }
+        }
+    }
 
     #[test]
     fn short_error_leaves_short_and_boundary_length_errors_unchanged() {

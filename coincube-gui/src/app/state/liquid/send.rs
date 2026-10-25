@@ -621,6 +621,7 @@ impl State for LiquidSend {
                     cache.bitcoin_unit,
                     usdt_asset_id(self.breez_client.network()).unwrap_or(""),
                     &[],
+                    cache.balance_amounts_masked(),
                 ),
             )
         } else {
