@@ -212,7 +212,10 @@ impl From<PsbtsPanel> for Box<dyn State> {
 mod tests {
     use super::*;
     use crate::app::view::shared::landing::capture;
-    use crate::{daemon::client::Coincubed, utils::mock::Daemon as MockDaemon};
+    use crate::{
+        daemon::{client::Coincubed, model::TransactionKind},
+        utils::mock::Daemon as MockDaemon,
+    };
     use coincube_core::{
         descriptors::CoincubeDescriptor,
         miniscript::bitcoin::{secp256k1::Secp256k1, Amount, Network, Psbt},
@@ -237,6 +240,10 @@ mod tests {
     #[test]
     fn hidden_psbt_list_masks_spend_and_fee_without_removing_entry() {
         let mut tx = spend_tx();
+        // The shared PSBT is a self-transfer; make this rendering fixture an
+        // outbound row with nonzero values so both amount fields are visible.
+        tx.kind = TransactionKind::OutgoingPaymentBatch(vec![]);
+        tx.spend_amount = Amount::from_sat(123_456);
         tx.fee_amount = Some(Amount::from_sat(12_345));
         assert!(tx.spend_amount.to_sat() > 0);
         let raw_spend = tx
