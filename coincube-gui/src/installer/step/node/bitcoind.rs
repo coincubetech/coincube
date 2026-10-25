@@ -3,6 +3,7 @@ use std::io::{self, Cursor};
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use bitcoin_hashes::sha256;
 use coincube_core::miniscript::bitcoin::Network;
@@ -589,6 +590,7 @@ pub fn port_is_valid(port: &u16) -> bool {
 }
 
 pub struct SelectBitcoindTypeStep {
+    ui_instance: u64,
     use_external: bool,
     use_connect: bool,
     install_node: bool,
@@ -622,7 +624,9 @@ impl From<SelectBitcoindTypeStep> for Box<dyn Step> {
 
 impl SelectBitcoindTypeStep {
     pub fn new() -> Self {
+        static NEXT_NODE_UI_INSTANCE: AtomicU64 = AtomicU64::new(1);
         Self {
+            ui_instance: NEXT_NODE_UI_INSTANCE.fetch_add(1, Ordering::Relaxed),
             use_external: true,
             use_connect: true,
             install_node: true,
@@ -819,6 +823,7 @@ impl Step for SelectBitcoindTypeStep {
     ) -> Element<Message> {
         view::select_bitcoind_type(
             progress,
+            self.ui_instance,
             self.chain,
             self.install_node,
             self.show_advanced,

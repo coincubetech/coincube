@@ -25,7 +25,7 @@ use coincube_ui::{
         text::{h2, h3, h4_bold, p1_bold, p1_regular, text, Text},
     },
     icon, theme,
-    widget::*,
+    widget::{action::Action, *},
 };
 
 use crate::node::electrum::validate_domain_checkbox;
@@ -1360,6 +1360,7 @@ where
 /// and, with it, the relay policy that node applies — which is what the one-line
 /// blurb describes, since the two builds follow the same consensus rules.
 fn node_flavor_selector<'a>(
+    ui_instance: u64,
     selected: crate::node::bitcoind::NodeFlavor,
     existing: Option<crate::node::bitcoind::NodeFlavor>,
     on_select: fn(crate::node::bitcoind::NodeFlavor) -> Message,
@@ -1373,12 +1374,22 @@ fn node_flavor_selector<'a>(
     }
     let option = |flavor: NodeFlavor| {
         let label = flavor.display_name();
-        let btn = if selected == flavor {
-            button::primary(None, label)
+        let id = if flavor == NodeFlavor::Knots {
+            "knots"
         } else {
-            button::secondary(None, label)
+            "core"
         };
-        btn.width(Length::Fixed(260.0)).on_press(on_select(flavor))
+        let action = Action::new(
+            format!("tenshu.installer.node.{}.flavor.{}", ui_instance, id),
+            p1_regular(label),
+            Message::FocusAction,
+        );
+        let action = if selected == flavor {
+            action.style(theme::button::primary)
+        } else {
+            action.style(theme::button::secondary)
+        };
+        action.width(Length::Fill).on_press(on_select(flavor))
     };
     let blurb = match selected {
         NodeFlavor::Knots => {
@@ -1399,8 +1410,8 @@ fn node_flavor_selector<'a>(
         .spacing(10)
         .push(text("Node software").bold())
         .push(
-            Row::new()
-                .spacing(15)
+            Column::new()
+                .spacing(10)
                 .push(option(NodeFlavor::Knots))
                 .push(option(NodeFlavor::Core)),
         )
@@ -1426,6 +1437,8 @@ fn node_flavor_selector<'a>(
 }
 
 fn node_option_card<'a>(
+    ui_instance: u64,
+    id: &'static str,
     title: &'static str,
     description: impl Into<String>,
     action: message::SelectBitcoindTypeMsg,
@@ -1436,7 +1449,15 @@ fn node_option_card<'a>(
             .width(Length::Fill)
             .push(p1_bold(title))
             .push(p2_regular(description.into()).style(theme::text::secondary))
-            .push(button::secondary(None, "Select").on_press(Message::SelectBitcoindType(action))),
+            .push(
+                Action::new(
+                    format!("tenshu.installer.node.{}.{}", ui_instance, id),
+                    p1_regular("Select"),
+                    Message::FocusAction,
+                )
+                .style(theme::button::secondary)
+                .on_press(Message::SelectBitcoindType(action)),
+            ),
     )
     .padding(20)
     .width(Length::Fill)
@@ -1444,9 +1465,31 @@ fn node_option_card<'a>(
     .into()
 }
 
+fn node_install_toggle<'a>(
+    ui_instance: u64,
+    install_node: bool,
+    label: &'static str,
+) -> Element<'a, Message> {
+    Action::new(
+        format!("tenshu.installer.node.{}.install", ui_instance),
+        p1_regular(format!(
+            "{} {}",
+            if install_node { "☑" } else { "☐" },
+            label
+        )),
+        Message::FocusAction,
+    )
+    .style(theme::button::transparent)
+    .on_press(Message::SelectBitcoindType(
+        message::SelectBitcoindTypeMsg::ToggleInstallNode,
+    ))
+    .into()
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn select_bitcoind_type<'a>(
     progress: (usize, usize),
+    ui_instance: u64,
     chain: crate::chain::ChainId,
     install_node: bool,
     show_advanced: bool,
@@ -1464,14 +1507,18 @@ pub fn select_bitcoind_type<'a>(
             choices = choices
                 .push(text("Use COINCUBE | Connect").bold())
                 .push(text(format!("Use the hosted {chain_name} node while a local node syncs, or use Connect alone.")))
-                .push(checkbox(install_node).label("Also install a pruned node on my device").on_toggle(|_| Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)))
-                .push(button::primary(None, "Use Connect").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
+                .push(node_install_toggle(ui_instance, install_node, "Also install a pruned node on my device"))
+                .push(Action::new(format!("tenshu.installer.node.{}.blake2b-connect", ui_instance), p1_regular("Use Connect"), Message::FocusAction)
+                    .style(theme::button::primary)
+                    .on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ContinueWithConnect)));
         }
         if local_available {
             choices = choices
             .push(text("Install a local pruned node").bold())
             .push(text(format!("Run Bitcoin Knots for {chain_name} in an isolated data directory. No Connect account is required. Your node must finish syncing before the Vault can be created.")))
-            .push(button::secondary(None, "Use a local node").on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
+            .push(Action::new(format!("tenshu.installer.node.{}.blake2b-local", ui_instance), p1_regular("Use a local node"), Message::FocusAction)
+                .style(theme::button::secondary)
+                .on_press(Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))));
         }
         let content = Container::new(choices).padding(30);
         return layout(
@@ -1507,11 +1554,15 @@ pub fn select_bitcoind_type<'a>(
             .spacing(12)
             .max_width(620)
             .push(node_option_card(
+                ui_instance,
+                "existing",
                 "I already have a node",
                 "Connect Tenshu to a Bitcoin node already running locally or remotely.",
                 message::SelectBitcoindTypeMsg::UseExternal(true),
             ))
             .push(node_option_card(
+                ui_instance,
+                "local",
                 "Install a local pruned node",
                 local_description,
                 message::SelectBitcoindTypeMsg::UseExternal(false),
@@ -1540,18 +1591,15 @@ pub fn select_bitcoind_type<'a>(
                 "Your Vault will use our hosted Esplora server immediately \
                     (backed by Bitcoin Knots). No setup required.",
             ))
-            .push(
-                checkbox(install_node)
-                    .label("Also install a pruned Bitcoin node on my device")
-                    .on_toggle(|_| {
-                        Message::SelectBitcoindType(
-                            message::SelectBitcoindTypeMsg::ToggleInstallNode,
-                        )
-                    }),
-            );
+            .push(node_install_toggle(
+                ui_instance,
+                install_node,
+                "Also install a pruned Bitcoin node on my device",
+            ));
 
         let default_col = if install_node {
             default_col.push(node_flavor_selector(
+                ui_instance,
                 node_flavor,
                 existing_flavor,
                 |flavor| {
@@ -1564,11 +1612,19 @@ pub fn select_bitcoind_type<'a>(
             default_col
         };
 
-        let default_card = Container::new(default_col.push(text(node_description)).push(
-            button::primary(None, "Continue").on_press(Message::SelectBitcoindType(
-                message::SelectBitcoindTypeMsg::ContinueWithConnect,
-            )),
-        ))
+        let default_card = Container::new(
+            default_col.push(text(node_description)).push(
+                Action::new(
+                    format!("tenshu.installer.node.{}.continue", ui_instance),
+                    p1_regular("Continue"),
+                    Message::FocusAction,
+                )
+                .style(theme::button::primary)
+                .on_press(Message::SelectBitcoindType(
+                    message::SelectBitcoindTypeMsg::ContinueWithConnect,
+                )),
+            ),
+        )
         .padding(30);
 
         let toggle_label = if show_advanced {
@@ -1576,9 +1632,15 @@ pub fn select_bitcoind_type<'a>(
         } else {
             "▸  Advanced options"
         };
-        let advanced_toggle = button::transparent(None, toggle_label).on_press(
-            Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleAdvanced),
-        );
+        let advanced_toggle = Action::new(
+            format!("tenshu.installer.node.{}.advanced", ui_instance),
+            p1_regular(toggle_label),
+            Message::FocusAction,
+        )
+        .style(theme::button::transparent)
+        .on_press(Message::SelectBitcoindType(
+            message::SelectBitcoindTypeMsg::ToggleAdvanced,
+        ));
 
         let mut col = Column::new()
             .spacing(30)
@@ -1588,16 +1650,22 @@ pub fn select_bitcoind_type<'a>(
         if show_advanced {
             col = col
                     .push(node_option_card(
+                        ui_instance,
+                        "advanced-existing",
                         "I already have a node",
                         "Connect Tenshu to a Bitcoin node already running locally or remotely.",
                         message::SelectBitcoindTypeMsg::UseExternal(true),
                     ))
                     .push(node_option_card(
+                        ui_instance,
+                        "advanced-local",
                         "Install a node only",
                         "Tenshu installs a pruned node on your computer without COINCUBE | Connect as a fallback.",
                         message::SelectBitcoindTypeMsg::UseExternal(false),
                     ))
                     .push(node_option_card(
+                        ui_instance,
+                        "advanced-connect",
                         "COINCUBE | Connect only",
                         "Use COINCUBE | Connect to access our Esplora. No local node required.",
                         message::SelectBitcoindTypeMsg::UseConnect,
@@ -3016,6 +3084,7 @@ mod tests {
 
         let _ = select_bitcoind_type(
             (2, 4),
+            1,
             crate::chain::ChainId::Regtest,
             false,
             false,
@@ -3027,6 +3096,7 @@ mod tests {
         );
         let _ = select_bitcoind_type(
             (2, 4),
+            2,
             crate::chain::ChainId::Bitcoin,
             true,
             true,
@@ -3038,6 +3108,7 @@ mod tests {
         );
         let _ = select_bitcoind_type(
             (2, 4),
+            3,
             crate::chain::ChainId::Bitcoin,
             false,
             false,
@@ -3470,9 +3541,10 @@ mod node_management_chain_tests {
     use iced::advanced::{
         layout,
         renderer::Headless,
-        widget::{Id, Operation, Tree},
+        widget::{operation, operation::focusable, Id, Operation, Tree},
         Layout,
     };
+    use iced::{keyboard, mouse, Event, Rectangle, Size};
 
     #[derive(Default)]
     struct Labels(Vec<String>);
@@ -3482,6 +3554,187 @@ mod node_management_chain_tests {
         }
         fn text(&mut self, _: Option<&Id>, _: iced::Rectangle, text: &str) {
             self.0.push(text.to_owned());
+        }
+    }
+
+    fn activate_node_action(
+        mut element: Element<'static, Message>,
+        target: &str,
+        key: keyboard::Key,
+    ) -> Vec<Message> {
+        let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+            iced::Font::DEFAULT,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        ))
+        .expect("software renderer");
+        let size = Size::new(1024.0, 1200.0);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(Size::ZERO, size),
+        );
+        let mut focus: Box<dyn Operation<()>> = Box::new(focusable::focus::<()>(Id::new(target)));
+        loop {
+            element.as_widget_mut().operate(
+                &mut tree,
+                Layout::new(&node),
+                &renderer,
+                &mut operation::black_box(focus.as_mut()),
+            );
+            match focus.finish() {
+                operation::Outcome::None | operation::Outcome::Some(()) => break,
+                operation::Outcome::Chain(next) => focus = next,
+            }
+        }
+        let physical_key =
+            keyboard::key::Physical::Unidentified(keyboard::key::NativeCode::Unidentified);
+        let mut emitted = Vec::new();
+        for event in [
+            Event::Keyboard(keyboard::Event::KeyPressed {
+                key: key.clone(),
+                modified_key: key.clone(),
+                physical_key,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+                text: None,
+                repeat: false,
+            }),
+            Event::Keyboard(keyboard::Event::KeyReleased {
+                key: key.clone(),
+                modified_key: key,
+                physical_key,
+                location: keyboard::Location::Standard,
+                modifiers: keyboard::Modifiers::empty(),
+            }),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &event,
+                Layout::new(&node),
+                mouse::Cursor::Unavailable,
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut emitted),
+                &Rectangle::with_size(size),
+            );
+        }
+        emitted
+    }
+
+    #[test]
+    fn node_choices_activate_with_enter_and_space() {
+        use crate::chain::ChainIdExt;
+        use keyboard::key::Named;
+        let cases: &[(ChainId, bool, bool, bool, &str, fn(&Message) -> bool)] = &[
+            (ChainId::Regtest, false, false, false, "existing", |m| {
+                matches!(
+                    m,
+                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(true))
+                )
+            }),
+            (ChainId::Bitcoin, false, false, false, "local", |m| {
+                matches!(
+                    m,
+                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(false))
+                )
+            }),
+            (ChainId::Bitcoin, true, false, false, "continue", |m| {
+                matches!(
+                    m,
+                    Message::SelectBitcoindType(
+                        message::SelectBitcoindTypeMsg::ContinueWithConnect
+                    )
+                )
+            }),
+            (ChainId::Bitcoin, true, false, false, "advanced", |m| {
+                matches!(
+                    m,
+                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleAdvanced)
+                )
+            }),
+            (
+                ChainId::Bitcoin,
+                true,
+                true,
+                false,
+                "advanced-connect",
+                |m| {
+                    matches!(
+                        m,
+                        Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseConnect)
+                    )
+                },
+            ),
+            (ChainId::Bitcoin, true, false, true, "install", |m| {
+                matches!(
+                    m,
+                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::ToggleInstallNode)
+                )
+            }),
+            (ChainId::Bitcoin, true, false, true, "flavor.core", |m| {
+                matches!(
+                    m,
+                    Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::SelectFlavor(
+                        NodeFlavor::Core
+                    ))
+                )
+            }),
+            (
+                ChainId::BitcoinBlake2b,
+                true,
+                false,
+                true,
+                "blake2b-connect",
+                |m| {
+                    matches!(
+                        m,
+                        Message::SelectBitcoindType(
+                            message::SelectBitcoindTypeMsg::ContinueWithConnect
+                        )
+                    )
+                },
+            ),
+            (
+                ChainId::BitcoinBlake2b,
+                true,
+                false,
+                true,
+                "blake2b-local",
+                |m| {
+                    matches!(
+                        m,
+                        Message::SelectBitcoindType(message::SelectBitcoindTypeMsg::UseExternal(
+                            false
+                        ))
+                    )
+                },
+            ),
+        ];
+        for (chain, authenticated, advanced, install, suffix, expected) in cases {
+            for key in [Named::Enter, Named::Space] {
+                let element = select_bitcoind_type(
+                    (2, 5),
+                    42,
+                    *chain,
+                    *install,
+                    *advanced,
+                    15_000,
+                    *authenticated,
+                    if chain.is_blake2b() {
+                        NodeFlavor::KnotsBlake2b
+                    } else {
+                        NodeFlavor::Knots
+                    },
+                    None,
+                    true,
+                );
+                let target = format!("tenshu.installer.node.42.{}", suffix);
+                let messages = activate_node_action(element, &target, keyboard::Key::Named(key));
+                assert_eq!(messages.len(), 1, "{target} {key:?}: {messages:?}");
+                assert!(expected(&messages[0]), "{target} {key:?}: {messages:?}");
+            }
         }
     }
 
@@ -3502,6 +3755,7 @@ mod node_management_chain_tests {
         ] {
             let mut element = select_bitcoind_type(
                 (0, 2),
+                4,
                 chain,
                 true,
                 true,
