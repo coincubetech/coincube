@@ -13,7 +13,7 @@ use coincube_gui::{
     app::settings::global::{GlobalSettings, WindowConfig},
     dir::CoincubeDirectory,
     gui::{Config, GUI},
-    node::bitcoind::delete_all_bitcoind_locks_for_process,
+    node::bitcoind::{delete_all_bitcoind_locks_for_process, wait_for_managed_node_cleanup},
     VERSION,
 };
 
@@ -160,7 +160,7 @@ fn main() -> Result<(), Box<dyn Error>> {
 
     let window_settings = window_settings(initial_size);
 
-    if let Err(e) = iced::application(
+    let result = iced::application(
         move || GUI::new(config.clone(), log_level),
         GUI::update,
         GUI::view,
@@ -171,8 +171,11 @@ fn main() -> Result<(), Box<dyn Error>> {
     .subscription(GUI::subscription)
     .settings(settings)
     .window(window_settings)
-    .run()
-    {
+    .run();
+    // Final-owner release runs off the UI thread. Keep a normal process exit
+    // from abandoning that work after the last window closes.
+    wait_for_managed_node_cleanup();
+    if let Err(e) = result {
         log::error!("{}", e);
         Err(format!("Failed to launch UI: {}", e).into())
     } else {

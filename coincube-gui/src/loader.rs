@@ -797,6 +797,10 @@ impl Loader {
     pub(crate) fn fail(&mut self, error: Error) {
         if self.restricted_claim {
             self.stop();
+            // stop() clears the scoped credentials and owner handles, but this
+            // loader must remain a restricted Claim even after the refusal.
+            // Otherwise Retry would rebuild it through the generic admission path.
+            self.restricted_claim = true;
         }
         self.scoped_seed_password = None;
         self.claim_verified_account = None;
@@ -2235,6 +2239,35 @@ mod tests {
         let mounted = capture::inspect(
             "restricted-claim-error",
             view(&error, &quote, &image_handle, true),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Back"));
+        assert!(!mounted.contains("Retry"));
+    }
+
+    #[test]
+    fn failed_restricted_claim_cleans_up_without_admitting_generic_retry() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut loader = loader_without_wallet(false);
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        let refusal = "Reopen Claim from the source Cube to retry";
+        loader.fail(Error::Unexpected(refusal.into()));
+
+        assert!(loader.restricted_claim);
+        assert!(loader.scoped_seed_password.is_none());
+        assert!(loader.claim_verified_account.is_none());
+        assert_eq!(loader.update(Message::View(ViewMessage::Retry)).units(), 0);
+        assert!(!loader.daemon_started);
+        assert!(matches!(&loader.step, Step::Error(error)
+            if error.to_string().contains(refusal)));
+
+        let mounted = capture::inspect(
+            "failed-restricted-claim",
+            loader.view(),
             (1024, 768),
             "dark",
             theme::Theme::dark(),

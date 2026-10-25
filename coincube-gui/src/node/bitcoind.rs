@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Condvar, Mutex, OnceLock};
 use std::thread;
 use std::time;
 
@@ -1880,7 +1880,24 @@ pub struct Bitcoind {
 #[derive(Debug)]
 struct BitcoindOwner {
     config: BitcoindConfig,
-    lock: LockFile,
+    lock: Option<LockFile>,
+}
+
+static OWNER_CLEANUP: OnceLock<(Mutex<usize>, Condvar)> = OnceLock::new();
+
+fn owner_cleanup() -> &'static (Mutex<usize>, Condvar) {
+    OWNER_CLEANUP.get_or_init(|| (Mutex::new(0), Condvar::new()))
+}
+
+/// Finish outstanding final-owner releases after the UI has closed. The OS
+/// releases owner locks on an abrupt process exit; a normal exit also waits for
+/// the managed node and Tor shutdown to complete.
+pub fn wait_for_managed_node_cleanup() {
+    let (count, changed) = owner_cleanup();
+    let mut pending = count.lock().unwrap_or_else(|e| e.into_inner());
+    while *pending != 0 {
+        pending = changed.wait(pending).unwrap_or_else(|e| e.into_inner());
+    }
 }
 
 /// Serializes the whole managed-node handoff, including Tor preparation and
@@ -2227,7 +2244,10 @@ impl Bitcoind {
     fn owned(config: BitcoindConfig, lock: LockFile) -> Self {
         Self {
             config: config.clone(),
-            _owner: Arc::new(BitcoindOwner { config, lock }),
+            _owner: Arc::new(BitcoindOwner {
+                config,
+                lock: Some(lock),
+            }),
         }
     }
 
@@ -2695,20 +2715,20 @@ impl Bitcoind {
     pub fn stop(self) {
         // Clones are references to one Cube's ownership token. Closing one
         // reference must not release the token while another still needs it.
-        // BitcoindOwner::drop releases it after the final Arc goes away.
+        // BitcoindOwner::drop schedules release after the final Arc goes away.
     }
 }
 
 impl BitcoindOwner {
-    fn release(&self) {
-        let lifecycle = match ManagedNodeLifecycle::acquire_directory(self.lock.directory.clone()) {
+    fn release(config: BitcoindConfig, lock: LockFile) {
+        let lifecycle = match ManagedNodeLifecycle::acquire_directory(lock.directory.clone()) {
             Ok(lifecycle) => lifecycle,
             Err(e) => {
                 tracing::error!("Failed to acquire managed-node lifecycle lock: {e}");
                 return;
             }
         };
-        match self.lock.delete() {
+        match lock.delete() {
             Err(e) => {
                 tracing::error!("Failed to release bitcoind lock: {}", e);
             }
@@ -2716,11 +2736,11 @@ impl BitcoindOwner {
                 info!("Other processes are using internal bitcoind. Process lock has been deleted");
             }
             Ok(true) => {
-                match coincubed::BitcoinD::new(&self.config, "internal_bitcoind_stop".to_string()) {
+                match coincubed::BitcoinD::new(&config, "internal_bitcoind_stop".to_string()) {
                     Ok(bitcoind) => {
                         info!("Stopping internal bitcoind...");
                         bitcoind.stop();
-                        wait_for_internal_bitcoind_shutdown(&self.config);
+                        wait_for_internal_bitcoind_shutdown(&config);
                         info!("Stopped coincube managed bitcoind");
                     }
                     Err(e) => {
@@ -2737,8 +2757,25 @@ impl Drop for BitcoindOwner {
     fn drop(&mut self) {
         // A canceled spawn_blocking receiver drops its completed result. Keep
         // that from leaving a running node and Tor without an owner. Arc's
-        // inner Drop runs exactly once after all handle clones are gone.
-        self.release();
+        // inner Drop runs exactly once after all handle clones are gone. Move
+        // the owner lock into the worker so it stays live until cleanup, without
+        // waiting for the cross-process lifecycle lock on the UI thread.
+        let Some(lock) = self.lock.take() else { return };
+        let config = self.config.clone();
+        let (count, _) = owner_cleanup();
+        *count.lock().unwrap_or_else(|e| e.into_inner()) += 1;
+        thread::spawn(move || {
+            struct Completion;
+            impl Drop for Completion {
+                fn drop(&mut self) {
+                    let (count, changed) = owner_cleanup();
+                    *count.lock().unwrap_or_else(|e| e.into_inner()) -= 1;
+                    changed.notify_all();
+                }
+            }
+            let _completion = Completion;
+            Self::release(config, lock);
+        });
     }
 }
 
@@ -2978,6 +3015,7 @@ mod tests {
             .join("locks/bitcoin")
             .exists());
         drop(node);
+        wait_for_managed_node_cleanup();
         assert!(!root.bitcoind_directory().path().join("locks").exists());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
@@ -2999,6 +3037,7 @@ mod tests {
         clone.stop();
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         owner.stop();
+        wait_for_managed_node_cleanup();
         assert!(!locks.exists());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
@@ -3038,7 +3077,43 @@ mod tests {
         barrier.wait();
         t1.join().unwrap();
         t2.join().unwrap();
+        wait_for_managed_node_cleanup();
         assert!(!locks.exists(), "the last Arc drop must release the owner");
+        std::fs::remove_dir_all(root.path()).unwrap();
+    }
+
+    #[test]
+    fn final_owner_drop_does_not_wait_for_contended_lifecycle_lock() {
+        let root = CoincubeDirectory::new(
+            std::env::temp_dir().join(format!("contended-drop-{}", uuid::Uuid::new_v4())),
+        );
+        let config = BitcoindConfig {
+            addr: "127.0.0.1:1".parse().unwrap(),
+            rpc_auth: coincubed::config::BitcoindRpcAuth::CookieFile(
+                root.path().join("bitcoind/.cookie"),
+            ),
+        };
+        let node = Bitcoind::for_test(config, &root, Network::Bitcoin);
+        let owner_path = node._owner.lock.as_ref().unwrap().path.clone();
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, NodeChainFamily::Bitcoin).unwrap();
+        let (sent, received) = std::sync::mpsc::channel();
+        let dropping = std::thread::spawn(move || {
+            drop(node);
+            sent.send(()).unwrap();
+        });
+        let dropped_without_waiting = received.recv_timeout(time::Duration::from_secs(2));
+        assert!(
+            owner_path.exists(),
+            "owner must survive until cleanup acquires the lock"
+        );
+        drop(lifecycle);
+        dropping.join().unwrap();
+        assert!(
+            dropped_without_waiting.is_ok(),
+            "last owner drop blocked on lifecycle cleanup"
+        );
+        wait_for_managed_node_cleanup();
+        assert!(!owner_path.exists());
         std::fs::remove_dir_all(root.path()).unwrap();
     }
 
