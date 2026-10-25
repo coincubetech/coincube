@@ -568,6 +568,7 @@ fn unique_phone_index_for_vault(
     file: &PairingStoreFile,
     cert_pin: &[u8; 32],
     expected_vault: Fingerprint,
+    expected_descriptor: &[u8; 32],
 ) -> Option<usize> {
     let mut matches = file
         .phones
@@ -575,7 +576,12 @@ fn unique_phone_index_for_vault(
         .enumerate()
         .filter(|(_, phone)| &phone.cert_pin == cert_pin);
     let (index, phone) = matches.next()?;
-    if matches.next().is_some() || phone.vault_fingerprint != expected_vault {
+    if matches.next().is_some()
+        || phone.vault_fingerprint != expected_vault
+        || phone.signer_binding.as_ref().is_none_or(|binding| {
+            binding.descriptor_sha256.as_slice() != expected_descriptor.as_slice()
+        })
+    {
         return None;
     }
     Some(index)
@@ -588,20 +594,33 @@ pub fn unpair_if_vault(
     dir: &CoincubeDirectory,
     cert_pin: &[u8; 32],
     expected_vault: Fingerprint,
+    expected_descriptor: &[u8; 32],
 ) -> std::io::Result<bool> {
     let _guard = super::pairing_transaction::WRITER.lock().unwrap();
     // Refuse duplicate full pins, including one belonging to another Vault.
     // Check both the visible binding and raw disk rows before revoking any
     // provisional transaction for this pin.
-    if unique_phone_index_for_vault(&load_visible(dir)?, cert_pin, expected_vault).is_none()
-        || unique_phone_index_for_vault(&load_raw(dir)?, cert_pin, expected_vault).is_none()
+    if unique_phone_index_for_vault(
+        &load_visible(dir)?,
+        cert_pin,
+        expected_vault,
+        expected_descriptor,
+    )
+    .is_none()
+        || unique_phone_index_for_vault(
+            &load_raw(dir)?,
+            cert_pin,
+            expected_vault,
+            expected_descriptor,
+        )
+        .is_none()
     {
         return Ok(false);
     }
 
     super::pairing_transaction::revoke(dir, cert_pin)?;
     let mut file = load_raw(dir)?;
-    let index = unique_phone_index_for_vault(&file, cert_pin, expected_vault)
+    let index = unique_phone_index_for_vault(&file, cert_pin, expected_vault, expected_descriptor)
         .ok_or_else(|| std::io::Error::other("paired phone changed during removal"))?;
     let removed = file.phones.remove(index);
     file.pending_unpairs.retain(|p| &p.cert_pin != cert_pin);
@@ -791,6 +810,16 @@ mod tests {
         }
     }
 
+    fn bind_descriptor(phone: &mut PairedPhone, digest: [u8; 32]) {
+        phone.signer_binding = Some(SignerBinding {
+            key_id: "1".into(),
+            xpub: "test-xpub".into(),
+            fingerprint: Fingerprint::default(),
+            descriptor_sha256: digest.to_vec(),
+            imported_scope: None,
+        });
+    }
+
     #[test]
     fn pending_rollback_preserves_exact_prior_and_stale_cleanup_cannot_delete_new_run() {
         use super::super::pairing_transaction::PairingTransaction;
@@ -849,17 +878,27 @@ mod tests {
         use super::super::pairing_transaction::PairingTransaction;
 
         let dir = fresh_dir();
-        let original = sample_phone(44);
+        let mut original = sample_phone(44);
+        let original_digest = [0u8; 32];
+        bind_descriptor(&mut original, original_digest);
         upsert(&dir, original.clone()).unwrap();
         let mut candidate = original.clone();
         candidate.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        let candidate_digest = [1u8; 32];
+        bind_descriptor(&mut candidate, candidate_digest);
         let transaction =
             PairingTransaction::prepare(&dir, "new-binding".into(), candidate.clone()).unwrap();
         transaction.write_candidate().unwrap();
 
         // The provisional candidate is on disk, but the visible binding is
         // still the prior Vault. A refusal must leave its journal intact.
-        assert!(!unpair_if_vault(&dir, &original.cert_pin, candidate.vault_fingerprint).unwrap());
+        assert!(!unpair_if_vault(
+            &dir,
+            &original.cert_pin,
+            candidate.vault_fingerprint,
+            &candidate_digest,
+        )
+        .unwrap());
         transaction.decide().unwrap();
         transaction.finish().unwrap();
         let stored = load(&dir).unwrap();
@@ -874,9 +913,12 @@ mod tests {
     #[test]
     fn vault_unpair_refuses_duplicate_full_pins_in_either_order() {
         let dir = fresh_dir();
-        let vault_a = sample_phone(45);
+        let mut vault_a = sample_phone(45);
+        let digest_a = [0u8; 32];
+        bind_descriptor(&mut vault_a, digest_a);
         let mut vault_b = vault_a.clone();
         vault_b.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        bind_descriptor(&mut vault_b, [1u8; 32]);
         for phones in [
             vec![vault_b.clone(), vault_a.clone()],
             vec![vault_a.clone(), vault_b.clone()],
@@ -889,7 +931,13 @@ mod tests {
                 },
             )
             .unwrap();
-            assert!(!unpair_if_vault(&dir, &vault_a.cert_pin, vault_a.vault_fingerprint).unwrap());
+            assert!(!unpair_if_vault(
+                &dir,
+                &vault_a.cert_pin,
+                vault_a.vault_fingerprint,
+                &digest_a,
+            )
+            .unwrap());
             let stored = load(&dir).unwrap();
             assert_eq!(stored.phones.len(), 2);
             assert_eq!(

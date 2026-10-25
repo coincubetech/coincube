@@ -435,11 +435,21 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
             // "Exact vault key paired" for a phone whose binding fails on
             // key id, vault id, or key membership — a healthy row the user
             // then can't sign with.
+            let has_full_binding = p
+                .signer_binding
+                .as_ref()
+                .is_some_and(|binding| binding.descriptor_sha256.len() == 32);
+            let removable = p.signer_binding.as_ref().is_some_and(|binding| {
+                binding.descriptor_sha256.len() == 32
+                    && hex::encode(&binding.descriptor_sha256) == state.descriptor_sha256
+            });
             let identity_status = if p
                 .exact_signer_against(&state.descriptor_sha256, &state.vault_key_fingerprints)
                 .is_ok()
             {
                 "Exact vault key paired"
+            } else if has_full_binding && !removable {
+                "This pairing belongs to a different Vault descriptor."
             } else {
                 "Pair again and select the exact vault key held by this phone."
             };
@@ -496,12 +506,22 @@ fn paired_phones_card<'a>(state: &'a LocalSigningState) -> Element<'a, Message> 
                         )
                         .push(
                             button::secondary(None, "Review removal…")
-                                .on_press(Message::Settings(SettingsMessage::LocalSigning(
-                                    LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
-                                )))
+                                .on_press_maybe(removable.then(|| {
+                                    Message::Settings(SettingsMessage::LocalSigning(
+                                        LocalSigningMessage::ReviewRemovePhone(fp8.clone()),
+                                    ))
+                                }))
                                 .width(Length::Shrink),
                         ),
                 );
+            if !removable {
+                let removal_copy = if has_full_binding {
+                    "Open the Vault this phone was paired with to remove it. If that Vault is unavailable, a separate recovery flow is needed."
+                } else {
+                    "This older pairing has no verified Vault identity. Re-pair the phone before removing it. If the phone is lost, a separate recovery flow is needed."
+                };
+                row = row.push(text(removal_copy).style(theme::text::secondary));
+            }
             if state.pending_remove_phone.as_deref() == Some(fp8.as_str()) {
                 row = row.push(
                     Column::new()
