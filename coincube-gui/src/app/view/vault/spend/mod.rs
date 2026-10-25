@@ -2644,11 +2644,22 @@ mod tests {
                 for outer in [COMPACT, WIDE, TALL] {
                     let mut harness = Harness::new(compose(&fixture, &scenario), outer);
                     let probe = harness.probe();
-                    let viewport = *probe
+                    assert_eq!(probe.scrollable_bounds.len(), probe.scrollables.len());
+                    let (viewport, (reported_height, content_height)) = probe
                         .scrollable_bounds
                         .iter()
-                        .find(|bounds| bounds.height <= 300.5)
+                        .zip(&probe.scrollables)
+                        .find(|(bounds, _)| bounds.height <= 300.5)
                         .expect("native coin-list viewport");
+                    assert!((viewport.height - *reported_height).abs() < 0.01);
+                    // Iced embeds its 10px rail plus this scroll's 2px gap
+                    // only while the native content exceeds the viewport.
+                    let right_reserve = if *content_height > viewport.height {
+                        12.0
+                    } else {
+                        2.0
+                    };
+                    let viewport = *viewport;
                     let visible_coin_text: Vec<_> = probe
                         .text
                         .iter()
@@ -2745,7 +2756,7 @@ mod tests {
                     for (part, bounds, full_width) in parts {
                         assert!(
                             bounds.x >= viewport.x
-                                && bounds.x + full_width <= viewport.x + viewport.width - 12.0,
+                                && bounds.x + full_width <= viewport.x + viewport.width - right_reserve,
                             "{} {} {:?}: {} of {:?} starts at {:?}, needs {:.1}px of actual text, exceeds inner {:?}",
                             appearance, name, outer, part, formatted, bounds, full_width, viewport
                         );
@@ -2760,7 +2771,7 @@ mod tests {
                     );
                     for (text, bounds) in visible_coin_text {
                         assert!(
-                            bounds.x + bounds.width <= viewport.x + viewport.width - 12.0,
+                            bounds.x + bounds.width <= viewport.x + viewport.width - right_reserve,
                             "{} {} {:?}: coin text {:?} at {:?} exceeds inner {:?}",
                             appearance,
                             name,
