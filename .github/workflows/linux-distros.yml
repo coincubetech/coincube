@@ -34,9 +34,11 @@ env:
 jobs:
   build:
     name: Build Linux app
-    # Same runner as releases.yml, so these results describe what users
-    # download. To lower the glibc floor, try ubuntu-22.04 here.
-    runs-on: ubuntu-latest
+    # A binary only runs on a glibc at least as new as the one it was built
+    # against. releases.yml builds on ubuntu-latest (glibc 2.39), which shuts
+    # out Ubuntu 22.04 and Debian 12; building on 22.04 (glibc 2.35) is the
+    # candidate fix this workflow is testing.
+    runs-on: ubuntu-22.04
     timeout-minutes: 120
     outputs:
       glibc: ${{ steps.floor.outputs.glibc }}
@@ -51,11 +53,12 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      # Same key as nightly.yml, so this branch reuses master's cache.
+      # Not nightly.yml's key: its cache holds build scripts compiled on
+      # 24.04, which cannot run on 22.04's older glibc.
       - uses: actions/cache@v5
         with:
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'coincube-spark-bridge/Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-ubuntu-22.04-${{ hashFiles('Cargo.lock', 'coincube-spark-bridge/Cargo.lock') }}
+          restore-keys: cargo-ubuntu-22.04-
           path: |
             target
             coincube-spark-bridge/target
