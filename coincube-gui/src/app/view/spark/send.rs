@@ -2027,6 +2027,10 @@ mod tests {
         let menu = spark_send_menu();
         let empty = Fixture::new(SparkSendPhase::Idle);
         let cache = empty.cache();
+        // The replacement view must outlive the harness that borrows it.
+        let mut changed = Fixture::invoice(SparkSendPhase::Idle);
+        changed.target = SparkSendTarget::Spark;
+        let changed_cache = changed.cache();
         let mut harness = Harness::new(screen(&empty, &menu, &cache, false), COMPACT);
 
         // A pointer press on each field reaches the field itself: no parent
@@ -2076,9 +2080,6 @@ mod tests {
         // Notes, hints and a new target appear without moving the inputs'
         // slots, so a focused field stays focused and keeps its value.
         harness.focus(DESTINATION_INPUT_ID);
-        let mut changed = Fixture::invoice(SparkSendPhase::Idle);
-        changed.target = SparkSendTarget::Spark;
-        let changed_cache = changed.cache();
         harness.rerender(screen(&changed, &menu, &changed_cache, false));
         let probe = harness.probe();
         assert_eq!(probe.focused(), vec![Id::new(DESTINATION_INPUT_ID)]);
