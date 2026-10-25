@@ -2305,6 +2305,11 @@ impl Bitcoind {
         config: BitcoindConfig,
         coincube_datadir: &CoincubeDirectory,
     ) -> Result<Self, StartInternalBitcoindError> {
+        // Generic startup has no authenticated Claim capability. Refuse a
+        // dormant chain before the lifecycle lock creates its family root.
+        if let crate::chain::RuntimeSupport::Dormant { reason } = chain.runtime_support() {
+            return Err(StartInternalBitcoindError::ChainUnavailable(reason));
+        }
         Self::preflight_for_chain(chain, coincube_datadir)?;
         let lifecycle =
             ManagedNodeLifecycle::acquire(coincube_datadir, NodeChainFamily::from_chain(chain))?;
@@ -2339,9 +2344,9 @@ impl Bitcoind {
         )
     }
 
-    /// Everything [`Self::maybe_start_for_chain`] refuses, decided without a
-    /// side effect: the chain must have a runtime, be of the Bitcoin family,
-    /// and the provider the ledger names must serve it. Returns that provider.
+    /// Check that the configured provider serves this chain without a side
+    /// effect. Generic startup also checks runtime support at its entry point;
+    /// the separately admitted Claim path calls this under its lifecycle lock.
     ///
     /// For callers that have work of their own to do before the start —
     /// the loader provisions Tor, rewrites the managed conf for inbound and
@@ -4863,8 +4868,10 @@ mod tests {
             .copied()
         {
             match Bitcoind::maybe_start_for_chain(chain, config.clone(), &root) {
-                Err(StartInternalBitcoindError::ConfigUnavailable(_)) => {}
-                other => panic!("expected ConfigUnavailable, got {:?}", other.map(|_| ())),
+                Err(StartInternalBitcoindError::ChainUnavailable(reason)) => {
+                    assert_eq!(reason, crate::chain::BTCB2_DORMANT_REASON);
+                }
+                other => panic!("expected ChainUnavailable, got {:?}", other.map(|_| ())),
             }
             untouched(&root);
         }
@@ -5626,12 +5633,17 @@ mod local_fork_smoke {
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
         )
         .unwrap();
-        let node = Bitcoind::maybe_start_for_chain(
+        // This isolated smoke fixture exercises the authenticated local-fork
+        // node route, whose caller has already admitted the chain.
+        let lifecycle = ManagedNodeLifecycle::acquire(&root, family).unwrap();
+        let node = Bitcoind::maybe_start_for_chain_locked(
             crate::chain::ChainId::BitcoinBlake2bTestnet4,
             cfg.clone(),
             &root,
+            &lifecycle,
         )
         .unwrap();
+        drop(lifecycle);
         let rpc = coincubed::BitcoinD::new(&cfg, "smoke".into()).unwrap();
         assert!(rpc
             .check_local_fork_chain(crate::chain::ChainId::BitcoinBlake2bTestnet4, false)
