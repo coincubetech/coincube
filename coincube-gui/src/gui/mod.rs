@@ -167,7 +167,7 @@ mod balance_privacy_eye_origin_tests {
         let covered_while_locked = receiver.recv_timeout(Duration::from_secs(2));
         FileExt::unlock(&lock).unwrap();
         render.join().unwrap();
-        assert_eq!(covered_while_locked.unwrap(), true);
+        assert!(covered_while_locked.unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 
