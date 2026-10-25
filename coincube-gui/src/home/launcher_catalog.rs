@@ -228,6 +228,50 @@ pub enum CatalogMessage {
 }
 
 impl Home {
+    pub(crate) fn launcher_floor_open_armed(&self) -> bool {
+        self.catalog.open_from_floor
+    }
+
+    /// A floor Open is queued with a clone of the selected Cube. Reject that
+    /// clone if a catalog reload changed any persisted field before the GUI
+    /// receives Run, even when the same chain and ID still resolve. Comparing
+    /// JSON values avoids making CubeSettings' numerous nested fields part of
+    /// an ad hoc presentation-only equality definition.
+    pub(crate) fn floor_open_matches_current_cube(&self, queued: &CubeSettings) -> bool {
+        if !catalog_visible(self) {
+            return false;
+        }
+        let projection = project(self);
+        if !projection.floor_eligible(self.catalog.mode) {
+            return false;
+        }
+        let Some(index) = projection.selected else {
+            return false;
+        };
+        let Some(current) = projection.locals.get(index) else {
+            return false;
+        };
+        let Some(first) = self.catalog.page.checked_mul(FLOOR_PAGE_SIZE) else {
+            return false;
+        };
+        if !index
+            .checked_sub(first)
+            .is_some_and(|slot| slot < FLOOR_PAGE_SIZE)
+        {
+            return false;
+        }
+        if current.key.cube_id != queued.id || current.key.chain != queued.network {
+            return false;
+        }
+        matches!(
+            (
+                serde_json::to_value(current.cube),
+                serde_json::to_value(queued)
+            ),
+            (Ok(current), Ok(queued)) if current == queued
+        )
+    }
+
     /// Only a selected floor Cube has a details face for the tab to turn away
     /// from. Reduced motion resolves to List before this point.
     pub(crate) fn take_launcher_details_face(
@@ -251,7 +295,7 @@ impl Home {
         &self,
         cube: &crate::app::settings::CubeSettings,
     ) -> Option<LauncherSceneContext> {
-        if !catalog_visible(self) {
+        if !self.floor_open_matches_current_cube(cube) {
             return None;
         }
         let projection = project(self);
@@ -4099,6 +4143,24 @@ mod tests {
             .peers
             .iter()
             .all(|peer| !peer.glyph_dark.contains("Cube 5")));
+        assert!(home.floor_open_matches_current_cube(&cube));
+
+        // A queued Run still names the same ID after a reload, but its
+        // selected face and unlock metadata no longer describe that record.
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes[5].name = "Renamed while opening".into();
+        }
+        assert!(!home.floor_open_matches_current_cube(&cube));
+        assert!(home.launcher_scene_context(&cube).is_none());
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes[5].name = cube.name.clone();
+            cubes[5].backed_up = true;
+        }
+        assert!(!home.floor_open_matches_current_cube(&cube));
+        assert!(home.launcher_scene_context(&cube).is_none());
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes[5].backed_up = cube.backed_up;
+        }
 
         home.catalog.page = 0;
         assert!(home.launcher_scene_context(&cube).is_none());
@@ -4111,6 +4173,35 @@ mod tests {
         home.catalog.selected = Some(selected);
         home.catalog.mode = LauncherMode::List;
         assert!(home.launcher_scene_context(&cube).is_none());
+    }
+
+    #[test]
+    fn delayed_floor_run_refuses_same_id_with_changed_metadata() {
+        let mut home = rows(2);
+        home.catalog.mode = LauncherMode::Cubes;
+        catalog(&mut home, CatalogMessage::SelectFloor(key("cube-0")));
+        home.catalog.open_from_floor = true;
+        let queued = match &home.state {
+            State::Cubes { cubes, .. } => cubes[0].clone(),
+            _ => unreachable!(),
+        };
+        if let State::Cubes { cubes, .. } = &mut home.state {
+            cubes[0].name = "Changed after click".into();
+        }
+        let datadir = home.datadir_path.clone();
+        let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Home(home));
+        drop(tab.update(crate::gui::tab::Message::Launch(Message::Run(
+            datadir,
+            crate::app::config::Config::new(false),
+            ChainId::Bitcoin,
+            queued,
+        ))));
+        let crate::gui::tab::State::Home(home) = &tab.state else {
+            panic!("stale Cube must not enter unlock");
+        };
+        assert!(home
+            .error()
+            .is_some_and(|error| error.contains("changed while opening")));
     }
 
     #[test]

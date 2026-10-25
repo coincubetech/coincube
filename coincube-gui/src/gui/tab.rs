@@ -1679,7 +1679,16 @@ impl Tab {
                 }
                 home::Message::Run(datadir_path, cfg, chain, cube) => {
                     self.unlock_floor = None;
+                    let opened_on_floor = l.launcher_floor_open_armed();
                     let spin_from_details = l.take_launcher_details_face(&cube);
+                    if opened_on_floor && !l.floor_open_matches_current_cube(&cube) {
+                        l.set_error(
+                            "This Cube changed while opening. Select it again to use the current details.",
+                        );
+                        self.unlock_motion = None;
+                        app::split_intent::clear();
+                        return Task::none();
+                    }
                     // Every refusal below abandons this open: drop an armed Split
                     // handoff with it rather than let a later open inherit it.
                     // Chain gate — first, before anything below can touch a
