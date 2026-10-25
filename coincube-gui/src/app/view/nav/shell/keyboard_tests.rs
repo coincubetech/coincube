@@ -140,6 +140,63 @@ fn focus_snapshot(
     snapshot
 }
 
+#[test]
+fn top_bar_eye_precedes_app_preferences_in_visual_and_focus_order() {
+    load_fonts();
+    let renderer = iced::futures::executor::block_on(<iced::Renderer as Headless>::new(
+        coincube_ui::font::REGULAR,
+        14.into(),
+        Some("tiny-skia"),
+    ))
+    .unwrap();
+    let ctx = fixture_context();
+    let chrome = BalancePrivacyChrome {
+        privacy: BalancePrivacy::Shown,
+        busy: false,
+        interactive: true,
+    };
+    let mut element = top_bar_with_privacy(&ctx, Some(chrome));
+    let mut tree = Tree::new(element.as_widget());
+    let node = element.as_widget_mut().layout(
+        &mut tree,
+        &renderer,
+        &layout::Limits::new(Size::ZERO, Size::new(1024.0, TOP_BAR_HEIGHT)),
+    );
+    let eye = Id::new(BALANCE_PRIVACY_ID);
+    let preferences = Id::new(APP_PREFERENCES_ID);
+    let bounds = focus_snapshot(&mut element, &mut tree, &node, &renderer).bounds;
+    let eye_x = bounds.iter().find(|(id, _)| id == &eye).unwrap().1.x;
+    let preferences_x = bounds
+        .iter()
+        .find(|(id, _)| id == &preferences)
+        .unwrap()
+        .1
+        .x;
+    assert!(
+        eye_x < preferences_x,
+        "eye must appear before App preferences"
+    );
+
+    operate(
+        &mut element,
+        &mut tree,
+        &node,
+        &renderer,
+        focusable::focus::<()>(eye.clone()),
+    );
+    operate(
+        &mut element,
+        &mut tree,
+        &node,
+        &renderer,
+        focusable::focus_next::<()>(),
+    );
+    assert_eq!(
+        focus_snapshot(&mut element, &mut tree, &node, &renderer).focused,
+        vec![preferences]
+    );
+}
+
 #[derive(Default)]
 struct MiddleEdgeSnapshot {
     viewport: Option<Rectangle>,

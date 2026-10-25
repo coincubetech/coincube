@@ -233,8 +233,8 @@ pub fn top_bar_with_privacy<'a>(
     );
     container(
         row![brand, Space::new().width(Length::Fill), account, connection]
-            .push(preferences)
             .push(eye)
+            .push(preferences)
             .spacing(8)
             .align_y(Alignment::Center)
             .padding([0, 16]),
