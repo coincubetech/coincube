@@ -79,9 +79,13 @@ fn second_recovery_path_section(use_taproot: bool, recovery_path: &Path) -> Elem
 
 pub fn multisig_security_template_description(
     progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
 ) -> Element<'static, Message> {
     super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Expanding multisig wallet",
         "You need 3 keys: two Primary Keys and a Recovery Key.",
         "Both Primary Keys are needed to spend now. After the configured inactivity delay, any two of the three keys can recover your funds.",
@@ -105,9 +109,13 @@ pub fn multisig_security_template_description(
 
 pub fn multisig_inheritance_recovery_description(
     progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
 ) -> Element<'static, Message> {
     super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Multisig with inheritance & backup recovery",
         "You need 7 keys: three Primary, three Inheritance and one Recovery Key.",
         "Any two Primary Keys can spend now. After inactivity, any two Inheritance Keys can recover. The Recovery Key becomes available after a longer delay.",
@@ -326,9 +334,13 @@ pub fn multisig_security_template<'a>(
 
 pub fn expanding_multisig_inheritance_recovery_description(
     progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
 ) -> Element<'static, Message> {
     super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Expanding multisig with inheritance & backup recovery",
         "You need 7 keys. The Primary Keys are reused in the inheritance path.",
         "Any two Primary Keys can spend now. After inactivity, any two of the six Primary and Inheritance Keys can recover. The Recovery Key opens after a longer delay.",

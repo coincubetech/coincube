@@ -24,9 +24,15 @@ use crate::installer::{
     },
 };
 
-pub fn inheritance_template_description(progress: (usize, usize)) -> Element<'static, Message> {
+pub fn inheritance_template_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
     super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Simple inheritance wallet",
         "You need 2 keys: your Primary Key and an Inheritance Key for your heir.",
         "Your Primary Key can always spend. After the configured inactivity delay, the Inheritance Key can recover your funds.",
@@ -48,9 +54,15 @@ pub fn inheritance_template_description(progress: (usize, usize)) -> Element<'st
     )
 }
 
-pub fn two_of_three_inheritance_description(progress: (usize, usize)) -> Element<'static, Message> {
+pub fn two_of_three_inheritance_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
     super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "2-of-3 multisig with inheritance",
         "You need 4 keys: three Primary Keys and an Inheritance Key.",
         "Any two Primary Keys can spend now. After the configured inactivity delay, the Inheritance Key can recover your funds.",

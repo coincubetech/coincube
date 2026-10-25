@@ -28,9 +28,15 @@ use crate::installer::{
 
 const SAFETY_NET_DESCRIPTION: &str = "This adds a final recovery option containing keys from professional key agents.\n\nUse this option if you have been provided one or more Safety Net tokens.";
 
-pub fn custom_template_description(progress: (usize, usize)) -> Element<'static, Message> {
+pub fn custom_template_description(
+    progress: (usize, usize),
+    ui_instance: u64,
+    show_keychain_tip: bool,
+) -> Element<'static, Message> {
     super::template_introduction(
         progress,
+        ui_instance,
+        show_keychain_tip,
         "Build your own",
         "Define your primary and recovery spending policies.",
         "Your primary policy can always spend. Each recovery option becomes available after its configured inactivity delay.",
