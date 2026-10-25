@@ -21,7 +21,7 @@ use coincube_ui::{
         text::{p2_regular, text},
     },
     theme,
-    widget::{Column, Container, Element, Row},
+    widget::{Column, Container, Element, Row, RowExt},
 };
 use coincubed::{
     config::{BitcoinBackend, BitcoindConfig, BitcoindRpcAuth, Config, ConfigError},
@@ -900,7 +900,13 @@ impl Loader {
     }
 
     pub fn view(&self) -> Element<Message> {
-        view(&self.step, &self.current_quote, &self.current_image_handle).map(Message::View)
+        view(
+            &self.step,
+            &self.current_quote,
+            &self.current_image_handle,
+            self.restricted_claim,
+        )
+        .map(Message::View)
     }
 }
 
@@ -1170,6 +1176,7 @@ pub fn view<'a>(
     step: &'a Step,
     quote: &'a Quote,
     image_handle: &'a image::Handle,
+    restricted_claim: bool,
 ) -> Element<'a, ViewMessage> {
     match &step {
         Step::StartingDaemon { .. } => cover(
@@ -1280,11 +1287,11 @@ pub fn view<'a>(
                                     .width(Length::Fixed(200.0))
                                     .on_press(ViewMessage::SwitchNetwork),
                             )
-                            .push(
+                            .push_maybe((!restricted_claim).then(|| {
                                 button::secondary(None, "Retry")
                                     .width(Length::Fixed(200.0))
-                                    .on_press(ViewMessage::Retry),
-                            ),
+                                    .on_press(ViewMessage::Retry)
+                            })),
                     ),
             )
         }
@@ -2198,6 +2205,27 @@ mod tests {
     }
 
     #[test]
+    fn restricted_claim_error_does_not_offer_an_inert_retry() {
+        use crate::app::view::shared::landing::capture;
+
+        let mut quote_provider = QuoteProvider::new();
+        let quote = quote_provider.select("loading");
+        let image_handle = quote_display::image_handle_for_context("loading");
+        let error = Step::Error(Box::new(Error::Unexpected(
+            "Reopen Claim from the source Cube to retry".into(),
+        )));
+        let mounted = capture::inspect(
+            "restricted-claim-error",
+            view(&error, &quote, &image_handle, true),
+            (1024, 768),
+            "dark",
+            theme::Theme::dark(),
+        );
+        assert!(mounted.contains("Back"));
+        assert!(!mounted.contains("Retry"));
+    }
+
+    #[test]
     fn fork_retry_is_user_triggered_and_rate_bounded() {
         let mut loader = loader_without_wallet(false);
         loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
@@ -2275,22 +2303,30 @@ mod tests {
         let quote = quote_provider.select("loading");
         let image_handle = quote_display::image_handle_for_context("loading");
 
-        let _ = view(&Step::Connecting, &quote, &image_handle);
+        let _ = view(&Step::Connecting, &quote, &image_handle, false);
         let _ = view(
             &Step::StartingDaemon { progress: 0.5 },
             &quote,
             &image_handle,
+            false,
         );
-        let _ = view(&Step::FullScan { progress: 0.5 }, &quote, &image_handle);
+        let _ = view(
+            &Step::FullScan { progress: 0.5 },
+            &quote,
+            &image_handle,
+            false,
+        );
         let _ = view(
             &Step::Error(Box::new(Error::Config(ConfigError::FileNotFound))),
             &quote,
             &image_handle,
+            false,
         );
         let _ = view(
             &Step::Error(Box::new(Error::Daemon(DaemonError::NoAnswer))),
             &quote,
             &image_handle,
+            false,
         );
         let _ = cover::<ViewMessage, _>(
             Some(("warn", &Error::Unexpected("details".to_string()))),
