@@ -562,6 +562,42 @@ pub fn unpair(dir: &CoincubeDirectory, cert_pin: &[u8; 32]) -> std::io::Result<P
     load_visible(dir)
 }
 
+/// Remove a phone only while its durable binding still belongs to the Vault
+/// that requested removal. The check and removal share the writer lock with
+/// `upsert`, so a re-pair cannot move this cert pin between them.
+pub fn unpair_if_vault(
+    dir: &CoincubeDirectory,
+    cert_pin: &[u8; 32],
+    expected_vault: Fingerprint,
+) -> std::io::Result<bool> {
+    let _guard = super::pairing_transaction::WRITER.lock().unwrap();
+    if !load_visible(dir)?
+        .phones
+        .iter()
+        .any(|phone| &phone.cert_pin == cert_pin && phone.vault_fingerprint == expected_vault)
+    {
+        return Ok(false);
+    }
+
+    super::pairing_transaction::revoke(dir, cert_pin)?;
+    let mut file = load_raw(dir)?;
+    let index = file
+        .phones
+        .iter()
+        .position(|phone| &phone.cert_pin == cert_pin)
+        .ok_or_else(|| std::io::Error::other("paired phone disappeared during removal"))?;
+    let removed = file.phones.remove(index);
+    file.pending_unpairs.retain(|p| &p.cert_pin != cert_pin);
+    file.pending_unpairs.push(PendingUnpair {
+        cert_pin: removed.cert_pin,
+        name: removed.name,
+        fallback_addr: removed.fallback_addr,
+        removed_at_unix: now_unix(),
+    });
+    save(dir, &file)?;
+    Ok(true)
+}
+
 /// The phone said it removed this desktop. That carries the same authority as
 /// the user removing the phone here, so like [`unpair`] it supersedes any
 /// pairing journal for the phone, including one stuck after a lost final
@@ -789,6 +825,33 @@ mod tests {
         )
         .unwrap();
         assert!(load(&dir).unwrap().pending_unpairs.is_empty());
+    }
+
+    #[test]
+    fn refused_vault_unpair_keeps_an_unrelated_provisional_pairing() {
+        use super::super::pairing_transaction::PairingTransaction;
+
+        let dir = fresh_dir();
+        let original = sample_phone(44);
+        upsert(&dir, original.clone()).unwrap();
+        let mut candidate = original.clone();
+        candidate.vault_fingerprint = Fingerprint::from([1, 2, 3, 4]);
+        let transaction =
+            PairingTransaction::prepare(&dir, "new-binding".into(), candidate.clone()).unwrap();
+        transaction.write_candidate().unwrap();
+
+        // The provisional candidate is on disk, but the visible binding is
+        // still the prior Vault. A refusal must leave its journal intact.
+        assert!(!unpair_if_vault(&dir, &original.cert_pin, candidate.vault_fingerprint).unwrap());
+        transaction.decide().unwrap();
+        transaction.finish().unwrap();
+        let stored = load(&dir).unwrap();
+        assert_eq!(stored.phones.len(), 1);
+        assert_eq!(
+            stored.phones[0].vault_fingerprint,
+            candidate.vault_fingerprint
+        );
+        assert!(stored.pending_unpairs.is_empty());
     }
 
     #[test]
