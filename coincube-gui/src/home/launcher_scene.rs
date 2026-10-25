@@ -14,6 +14,11 @@ pub(super) const TURN: Duration = Duration::from_millis(820);
 const HANDOFF: Duration = Duration::from_millis(160);
 const PEERS: Duration = Duration::from_millis(500);
 const REST_SIZE: f32 = 152.0;
+// The static floor glyph uses these same projected faces at a smaller SVG
+// coordinate scale. Its 224px viewport restores the design's 152px Cube.
+pub(super) const REST_GLYPH_WIDTH: f32 = 224.0;
+pub(super) const REST_GLYPH_HEIGHT: f32 = 272.0;
+const GLYPH_SCALE: f32 = 126.0 / REST_GLYPH_WIDTH;
 const FACE_SIZE: f32 = 420.0;
 const CAMERA_DISTANCE: f32 = 1100.0;
 // Perspective projection of the front plane is exactly 420 logical pixels.
@@ -115,10 +120,47 @@ impl Vec3 {
     fn turn(self, pitch: f32, yaw: f32) -> Self {
         let (sx, cx) = pitch.sin_cos();
         let (sy, cy) = yaw.sin_cos();
-        let y = self.y * cx - self.z * sx;
-        let z = self.y * sx + self.z * cx;
-        Self::new(self.x * cy + z * sy, y, -self.x * sy + z * cy)
+        // CSS `rotateX(-35deg) rotateY(45deg)` applies Y first. Coordinates
+        // here have Y upward, hence the positive pitch below.
+        let x = self.x * cy + self.z * sy;
+        let z = -self.x * sy + self.z * cy;
+        Self::new(x, self.y * cx - z * sx, self.y * sx + z * cx)
     }
+}
+
+fn projected_face(
+    face: &Face,
+    size: f32,
+    pitch: f32,
+    yaw: f32,
+    cx: f32,
+    cy: f32,
+) -> [(f32, f32); 4] {
+    face.points.map(|point| {
+        let point = point.turn(pitch, yaw);
+        let depth = CAMERA_DISTANCE / (CAMERA_DISTANCE - point.z * size);
+        (cx + point.x * size * depth, cy - point.y * size * depth)
+    })
+}
+
+pub(super) fn rest_glyph_face(index: usize) -> [(f32, f32); 4] {
+    projected_face(
+        &FACES[index],
+        REST_SIZE,
+        35.0_f32.to_radians(),
+        45.0_f32.to_radians(),
+        0.0,
+        0.0,
+    )
+    .map(|(x, y)| (90.0 + x * GLYPH_SCALE, 76.4 + y * GLYPH_SCALE))
+}
+
+pub(super) fn polygon_points(points: [(f32, f32); 4]) -> String {
+    points
+        .iter()
+        .map(|(x, y)| format!("{x:.2},{y:.2}"))
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 struct Face {
@@ -223,9 +265,13 @@ fn paint_cube(
         if face.normal.turn(pitch, yaw).z <= 0.001 {
             continue;
         }
-        let vertices = face.points.map(|point| point.turn(pitch, yaw));
-        let depth = vertices.iter().map(|point| point.z).sum::<f32>() / 4.0;
-        faces.push((depth, index, face.shade, vertices));
+        let depth = face
+            .points
+            .iter()
+            .map(|point| point.turn(pitch, yaw).z)
+            .sum::<f32>()
+            / 4.0;
+        faces.push((depth, index, face.shade));
     }
     faces.sort_by(|a, b| a.0.total_cmp(&b.0));
     // The floor shadow belongs to this same moving Cube. Only its shadow
@@ -233,7 +279,7 @@ fn paint_cube(
     let shadow_opacity = (1.0 - progress).clamp(0.0, 1.0) * 0.35;
     let shadow = if light { "#4d463b" } else { "#080908" };
     let _ = write!(svg, "<ellipse cx=\"{cx:.2}\" cy=\"{:.2}\" rx=\"60\" ry=\"10\" fill=\"{shadow}\" opacity=\"{shadow_opacity:.3}\"/>", cy + 95.0);
-    for (_, index, shade, vertices) in faces {
+    for (_, index, shade) in faces {
         let color = match shade {
             "front" => colors[0],
             "panel" => colors[1],
@@ -241,10 +287,7 @@ fn paint_cube(
             _ => colors[3],
         };
         let _ = write!(svg, "<polygon points=\"");
-        let projected = vertices.map(|point| {
-            let depth = CAMERA_DISTANCE / (CAMERA_DISTANCE - point.z * size);
-            (cx + point.x * size * depth, cy - point.y * size * depth)
-        });
+        let projected = projected_face(&FACES[index], size, pitch, yaw, cx, cy);
         for (x, y) in projected {
             let _ = write!(svg, "{x:.2},{y:.2} ");
         }
@@ -304,30 +347,7 @@ fn paint_face_marks(
     let mut marks = String::new();
     match index {
         4 => {
-            // The coin occupies 34% of the actual face. Map it with the
-            // projected top-face basis and retain the polygon clip below, so
-            // it narrows and disappears with the rotating face.
-            let tl = p[3];
-            let tr = p[2];
-            let bl = p[0];
-            let a = (tr.0 - tl.0) / size;
-            let b = (tr.1 - tl.1) / size;
-            let c = (bl.0 - tl.0) / size;
-            let d = (bl.1 - tl.1) / size;
-            let _ = write!(
-                marks,
-                "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" color=\"{ink}\">{}</g>",
-                tl.0,
-                tl.1,
-                launcher_coin::fragment(
-                    network,
-                    size * 0.33,
-                    size * 0.33,
-                    size * 0.34,
-                    1.5,
-                    size * 0.018,
-                )
-            );
+            marks.push_str(&top_coin_markup(p, size, network, light));
         }
         2 if text.vault || text.imported_bitcoin => {
             let _ = write!(marks, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"11\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"2\"/>", center.0, center.1);
@@ -360,6 +380,38 @@ fn paint_face_marks(
         svg,
         "\"/></clipPath></defs><g clip-path=\"url(#{clip})\">{marks}</g>"
     );
+}
+
+fn top_coin_markup(p: [(f32, f32); 4], size: f32, network: ChainId, light: bool) -> String {
+    // The prototype rotates `.tc` locally by 45 degrees before the top face
+    // is projected. This keeps the coin upright on the resting diamond.
+    let tl = p[3];
+    let tr = p[2];
+    let bl = p[0];
+    let a = (tr.0 - tl.0) / size;
+    let b = (tr.1 - tl.1) / size;
+    let c = (bl.0 - tl.0) / size;
+    let d = (bl.1 - tl.1) / size;
+    let ink = if light { "#30302d" } else { "#ecebe6" };
+    format!(
+        "<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {:.2} {:.2})\" color=\"{ink}\"><g transform=\"rotate(45 {:.2} {:.2})\">{}</g></g>",
+        tl.0,
+        tl.1,
+        size / 2.0,
+        size / 2.0,
+        launcher_coin::fragment(
+            network,
+            size * 0.33,
+            size * 0.33,
+            size * 0.34,
+            1.5,
+            size * 0.018,
+        )
+    )
+}
+
+pub(super) fn rest_glyph_coin(network: ChainId, light: bool) -> String {
+    top_coin_markup(rest_glyph_face(4), REST_SIZE * GLYPH_SCALE, network, light)
 }
 
 fn xml_text(value: &str) -> String {
@@ -563,6 +615,47 @@ mod tests {
         assert!(motion.progress(motion.started) < 0.001);
         assert!(motion.done(motion.started + TURN));
         assert!((motion.progress(motion.started + TURN) - 1.0).abs() < 0.001);
+    }
+
+    #[test]
+    fn static_glyph_and_first_motion_frame_share_projected_faces_and_coin_basis() {
+        let pitch = 35.0_f32.to_radians();
+        let yaw = 45.0_f32.to_radians();
+        for index in [0, 2, 4] {
+            let moving = projected_face(&FACES[index], REST_SIZE, pitch, yaw, 500.0, 265.0);
+            let resting = rest_glyph_face(index);
+            for (a, b) in resting.iter().zip(moving) {
+                assert!((a.0 - (90.0 + (b.0 - 500.0) * GLYPH_SCALE)).abs() < 0.01);
+                assert!((a.1 - (76.4 + (b.1 - 265.0) * GLYPH_SCALE)).abs() < 0.01);
+            }
+        }
+        let top = rest_glyph_face(4);
+        let rendered_width = (top[1].0 - top[3].0) * REST_GLYPH_WIDTH / 126.0;
+        assert!((rendered_width - 224.0).abs() < 2.0);
+        assert!((top[1].0 + top[3].0 - 180.0).abs() < 0.01);
+
+        let moving_top = projected_face(&FACES[4], REST_SIZE, pitch, yaw, 500.0, 265.0);
+        let moving_coin = top_coin_markup(moving_top, REST_SIZE, ChainId::Bitcoin, false);
+        let resting_coin = rest_glyph_coin(ChainId::Bitcoin, false);
+        let basis = |markup: &str| {
+            markup
+                .split_once("matrix(")
+                .unwrap()
+                .1
+                .split_once(')')
+                .unwrap()
+                .0
+                .split_whitespace()
+                .take(4)
+                .map(str::parse::<f32>)
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        for (a, b) in basis(&resting_coin).into_iter().zip(basis(&moving_coin)) {
+            assert!((a - b).abs() < 0.00002, "coin basis snaps at motion start");
+        }
+        assert!(resting_coin.contains("rotate(45 "));
+        assert!(moving_coin.contains("rotate(45 "));
     }
 
     #[test]

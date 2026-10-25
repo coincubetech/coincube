@@ -88,7 +88,7 @@ fn cube_glyph_with_opacity(
 ) -> iced::widget::Svg<'static, theme::Theme> {
     let scale = 1.0 - 0.08 * ((1.0 - opacity) / 0.6).clamp(0.0, 1.0);
     let shift_x = 90.0 * (1.0 - scale);
-    let shift_y = 78.0 * (1.0 - scale);
+    let shift_y = 84.5 * (1.0 - scale);
     let source = cube_glyph_source(cube, light)
         .replace("<svg ", &format!("<svg opacity=\"{opacity:.3}\" "))
         .replacen(
@@ -105,26 +105,23 @@ fn cube_glyph_with_opacity(
 pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light: bool) -> String {
     let chain = cube.network;
     let edge = if chain.is_blake2b() {
-        if light {
-            "#c69f43"
-        } else {
-            "#d4a62a"
-        }
-    } else if light {
-        "#f9a45a"
+        "#d4a62a"
     } else {
         "#f3821d"
     };
-    let mark = launcher_coin::fragment(chain, 64.0, 20.0, 52.0, 1.5, 126.0 * 0.018);
+    let mark = launcher_scene::rest_glyph_coin(chain, light);
+    let top_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(4));
+    let left_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(2));
+    let right_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(0));
     let dash = if matches!(chain, ChainId::Bitcoin | ChainId::BitcoinBlake2b) {
         "none"
     } else {
         "5 3"
     };
     let (top, left, right, marks, shadow) = if light {
-        ("#e9e3d9", "#d8d0c4", "#ccc3b5", "#30302d", "#4d463b")
+        ("#e6e0d5", "#d6cfc2", "#c9c1b2", "#30302d", "#4d463b")
     } else {
-        ("#52534d", "#343633", "#292b29", "#ecebe6", "#080908")
+        ("#41423e", "#2e2f2c", "#262724", "#ecebe6", "#080908")
     };
     // A face mark is shown only for a fact persisted on this Cube. Spark and
     // Liquid inventories are unknown before unlock, so neither gets a mark.
@@ -153,7 +150,7 @@ pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light
     }
     .replace("{marks}", marks);
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="20 8 140 140"><ellipse cx="90" cy="139" rx="60" ry="10" fill="{shadow}" opacity=".35"/><path d="M90 12 153 43 90 76 27 43Z" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M27 43 90 76 90 133 27 99Z" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><path d="M153 43 90 76 90 133 153 99Z" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><defs><clipPath id="launcher-top"><path d="M90 12 153 43 90 76 27 43Z"/></clipPath></defs><g clip-path="url(#launcher-top)" color="{marks}">{mark}</g>{wallet_mark}{unlock_mark}{backup_mark}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="27 8 126 153"><ellipse cx="90" cy="155" rx="60" ry="10" fill="{shadow}" opacity=".35"/><polygon points="{top_points}" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{left_points}" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{right_points}" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><defs><clipPath id="launcher-top"><polygon points="{top_points}"/></clipPath></defs><g clip-path="url(#launcher-top)" color="{marks}">{mark}</g>{wallet_mark}{unlock_mark}{backup_mark}</svg>"##,
     )
 }
 
@@ -833,8 +830,8 @@ fn floor_cube<'a>(
     opacity: f32,
 ) -> Element<'a, ViewMessage> {
     let glyph = cube_glyph_with_opacity(row.cube, light, opacity)
-        .width(Length::Fixed(170.0))
-        .height(Length::Fixed(190.0));
+        .width(Length::Fixed(launcher_scene::REST_GLYPH_WIDTH))
+        .height(Length::Fixed(launcher_scene::REST_GLYPH_HEIGHT));
     let label = Container::new(
         Row::new()
             .spacing(8)
@@ -1011,7 +1008,7 @@ fn floor_layout<'a>(
         cubes = cubes.push(if moving {
             Space::new()
                 .width(Length::Fill)
-                .height(Length::Fixed(274.0))
+                .height(Length::Fixed(330.0))
                 .into()
         } else {
             floor_cube(
@@ -1030,7 +1027,7 @@ fn floor_layout<'a>(
     stage = stage.push(
         Container::new(
             Column::new()
-                .push(Space::new().height(Length::Fixed(if compact { 116.0 } else { 160.0 })))
+                .push(Space::new().height(Length::Fixed(if compact { 90.0 } else { 134.0 })))
                 .push(
                     Container::new(cubes)
                         .width(Length::Fill)
@@ -1389,7 +1386,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
             peers = peers.push(
                 Space::new()
                     .width(Length::Fill)
-                    .height(Length::Fixed(274.0)),
+                    .height(Length::Fixed(330.0)),
             );
             continue;
         }
@@ -1401,8 +1398,8 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
         let source = source.replace("<svg ", "<svg opacity=\"0.4\" ");
         let glyph =
             iced::widget::Svg::new(iced::widget::svg::Handle::from_memory(source.into_bytes()))
-                .width(Length::Fixed(170.0))
-                .height(Length::Fixed(190.0));
+                .width(Length::Fixed(launcher_scene::REST_GLYPH_WIDTH))
+                .height(Length::Fixed(launcher_scene::REST_GLYPH_HEIGHT));
         peers = peers.push(
             Container::new(
                 Column::new()
@@ -1413,7 +1410,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
                     .push(tenshu::caption(peer.status)),
             )
             .width(Length::Fixed(slot_width))
-            .height(Length::Fixed(274.0)),
+            .height(Length::Fixed(330.0)),
         );
     }
     let backdrop = Container::new(Space::new())
@@ -1440,7 +1437,7 @@ fn unlock_floor_stage<'a, M: 'a + 'static>(
         .push(
             Container::new(
                 Column::new()
-                    .push(Space::new().height(Length::Fixed(if compact { 116.0 } else { 160.0 })))
+                    .push(Space::new().height(Length::Fixed(if compact { 90.0 } else { 134.0 })))
                     .push(
                         Container::new(peers)
                             .width(Length::Fill)
@@ -2188,7 +2185,7 @@ mod tests {
         cube.backed_up = true;
         let recorded_backup = cube_glyph_source(&cube, true);
         assert!(recorded_backup.contains("cx=\"137\" cy=\"64\""));
-        assert!(recorded_backup.contains("#e9e3d9"));
+        assert!(recorded_backup.contains("#e6e0d5"));
 
         cube.passkey_metadata = Some(crate::app::settings::PasskeyMetadata {
             credential_id: "fixture".into(),
@@ -2337,7 +2334,7 @@ mod tests {
             assert!(svg.contains("m133 64 3 3 5-6"), "backup mark missing");
         }
         assert!(dark.contains("stroke=\"#f3821d\""));
-        assert!(light.contains("stroke=\"#f9a45a\""));
+        assert!(light.contains("stroke=\"#f3821d\""));
         assert_ne!(dark, light);
         for (appearance, mode, palette) in [
             (
