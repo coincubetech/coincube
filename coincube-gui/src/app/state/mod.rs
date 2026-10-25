@@ -3,6 +3,7 @@ pub mod connect;
 mod global_home;
 pub mod imported_bitcoin;
 pub mod liquid;
+pub mod preferences;
 pub mod settings;
 pub mod spark;
 pub mod vault;

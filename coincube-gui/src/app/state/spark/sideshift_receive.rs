@@ -261,7 +261,11 @@ impl SparkSideshiftReceiveFlow {
     // ── View ────────────────────────────────────────────────────────────
 
     pub fn view<'a>(&'a self, menu: &'a Menu, cache: &'a Cache) -> Element<'a, view::Message> {
-        let body = view::spark::spark_sideshift_receive_view(self, cache.bitcoin_unit);
+        let body = view::spark::spark_sideshift_receive_view(
+            self,
+            cache.bitcoin_unit,
+            cache.balance_amounts_masked(),
+        );
         view::dashboard(menu, cache, body.map(view::Message::SparkSideshiftReceive))
     }
 

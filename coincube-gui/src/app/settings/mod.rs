@@ -29,6 +29,143 @@ use crate::{
 
 pub const SETTINGS_FILE_NAME: &str = "settings.json";
 
+/// A settings endpoint refused by path policy rather than by the OS.
+fn unsafe_endpoint(reason: &str) -> std::io::Error {
+    std::io::Error::new(std::io::ErrorKind::InvalidData, reason.to_string())
+}
+
+/// Inspect a settings endpoint without following a final symbolic link.
+/// `Ok(None)` is a genuinely absent endpoint; links and non-regular entries are
+/// refused rather than followed.
+fn inspect_regular_file(path: &std::path::Path) -> std::io::Result<Option<std::fs::Metadata>> {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) if metadata.file_type().is_symlink() => {
+            Err(unsafe_endpoint("is a symbolic link"))
+        }
+        Ok(metadata) if !metadata.is_file() => Err(unsafe_endpoint("is not a regular file")),
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// Confirm an opened handle is the regular file currently at `path`. On Unix
+/// the device/inode pair also detects a swap between inspection and open;
+/// elsewhere only the entry types are rechecked. Neither is a guarantee against
+/// a hostile same-user process rewriting links.
+fn verify_opened_file(file: &std::fs::File, path: &std::path::Path) -> std::io::Result<()> {
+    let opened = file.metadata()?;
+    let current =
+        inspect_regular_file(path)?.ok_or_else(|| unsafe_endpoint("disappeared while opening"))?;
+    if !opened.is_file() {
+        return Err(unsafe_endpoint("is not a regular file"));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if (opened.dev(), opened.ino()) != (current.dev(), current.ino()) {
+            return Err(unsafe_endpoint("changed while opening"));
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = current;
+    Ok(())
+}
+
+/// Open an existing coordination lock file. `Ok(None)` when it has never been
+/// created; its presence alone never means anything is locked.
+fn open_existing_lock(path: &std::path::Path) -> std::io::Result<Option<std::fs::File>> {
+    if inspect_regular_file(path)?.is_none() {
+        return Ok(None);
+    }
+    let file = std::fs::File::open(path)?;
+    verify_opened_file(&file, path)?;
+    Ok(Some(file))
+}
+
+/// Open a coordination lock file, creating it owner-only if absent. A lock
+/// file is never unlinked: a waiter must not lock an obsolete inode.
+fn open_or_create_lock(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+    if let Some(file) = open_existing_lock(path)? {
+        return Ok(file);
+    }
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    match options.open(path) {
+        Ok(file) => {
+            verify_opened_file(&file, path)?;
+            Ok(file)
+        }
+        // Another cooperating process created it first; use that inode.
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            open_existing_lock(path)?.ok_or_else(|| unsafe_endpoint("disappeared while opening"))
+        }
+        Err(error) => Err(error),
+    }
+}
+
+/// Rejects a JSON document that repeats an object key at any depth. A
+/// `serde_json::Value` silently keeps only the last duplicate, so rewriting such
+/// a document could change which value an older or newer reader sees.
+struct UniqueKeys;
+
+impl<'de> Deserialize<'de> for UniqueKeys {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_any(UniqueKeys)
+    }
+}
+
+impl<'de> serde::de::Visitor<'de> for UniqueKeys {
+    type Value = UniqueKeys;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("JSON without duplicate object keys")
+    }
+    fn visit_bool<E: serde::de::Error>(self, _: bool) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_i64<E: serde::de::Error>(self, _: i64) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_u64<E: serde::de::Error>(self, _: u64) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_f64<E: serde::de::Error>(self, _: f64) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_str<E: serde::de::Error>(self, _: &str) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_unit<E: serde::de::Error>(self) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_none<E: serde::de::Error>(self) -> Result<Self, E> {
+        Ok(UniqueKeys)
+    }
+    fn visit_some<D: serde::Deserializer<'de>>(self, deserializer: D) -> Result<Self, D::Error> {
+        UniqueKeys::deserialize(deserializer)
+    }
+    fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut seq: A) -> Result<Self, A::Error> {
+        while seq.next_element::<UniqueKeys>()?.is_some() {}
+        Ok(UniqueKeys)
+    }
+    fn visit_map<A: serde::de::MapAccess<'de>>(self, mut map: A) -> Result<Self, A::Error> {
+        let mut seen = HashSet::new();
+        while let Some(key) = map.next_key::<String>()? {
+            if !seen.insert(key) {
+                return Err(serde::de::Error::custom("duplicate object key"));
+            }
+            map.next_value::<UniqueKeys>()?;
+        }
+        Ok(UniqueKeys)
+    }
+}
+
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Settings {
     #[serde(default)]
@@ -1695,8 +1832,8 @@ pub mod global {
     use fs4::fs_std::FileExt;
     use serde::{Deserialize, Deserializer, Serialize};
     use std::fs::{File, OpenOptions};
-    use std::io::{Read, Seek, SeekFrom, Write};
-    use std::path::PathBuf;
+    use std::io::{Read, Write};
+    use std::path::{Path, PathBuf};
 
     pub const DEFAULT_FILE_NAME: &str = "global_settings.json";
 
@@ -1760,8 +1897,19 @@ pub mod global {
         pub theme_preference: Option<ThemePreference>,
         #[serde(default)]
         pub launcher_style: LauncherStyle,
+        /// Not, by itself, authority to show amounts: see
+        /// `balance_privacy_initialized` and
+        /// [`GlobalSettings::load_or_initialize_preferences`].
         #[serde(default)]
         pub hide_balances: bool,
+        /// Durable provenance for `hide_balances`. Missing or false means the
+        /// installation's privacy choice is unresolved, even when an unrelated
+        /// write already serialized `hide_balances: false`. Only an explicit
+        /// Hide balances choice or privacy initialization sets it; generic
+        /// writers preserve it and cannot set it. Builds that predate it drop it
+        /// when they rewrite the file, which returns the choice to unresolved.
+        #[serde(default)]
+        balance_privacy_initialized: bool,
         #[serde(default)]
         pub motion_preference: MotionPreference,
         #[serde(default = "default_true")]
@@ -1806,6 +1954,8 @@ pub mod global {
                 theme_preference: Some(ThemePreference::System),
                 launcher_style: LauncherStyle::default(),
                 hide_balances: false,
+                // A missing file can coexist with legacy Cubes: never resolved by default.
+                balance_privacy_initialized: false,
                 motion_preference: MotionPreference::default(),
                 // Preserve the pre-existing Rust Default for this unrelated field.
                 show_direction_badges: false,
@@ -1836,7 +1986,12 @@ pub mod global {
                     self.theme_mode = choice.resolve(None);
                 }
                 PreferenceChange::LauncherStyle(style) => self.launcher_style = style,
-                PreferenceChange::HideBalances(hidden) => self.hide_balances = hidden,
+                PreferenceChange::HideBalances(hidden) => {
+                    self.hide_balances = hidden;
+                    // An explicit device choice is established provenance,
+                    // including a false that equals the default.
+                    self.balance_privacy_initialized = true;
+                }
                 PreferenceChange::Motion(motion) => self.motion_preference = motion,
                 PreferenceChange::DeveloperMode(enabled) => self.developer_mode = enabled,
                 PreferenceChange::BitcoinBlake2bBeta(enabled) => {
@@ -1845,37 +2000,166 @@ pub mod global {
             }
         }
 
-        /// Load the authoritative device choices without writing migration
-        /// data. Only a genuinely absent file is a fresh installation.
-        pub fn load_preferences(path: &PathBuf) -> Result<DevicePreferences, super::SettingsError> {
-            let mut snapshot = None;
-            Self::update(path, |s| snapshot = Some(s.preferences()), false)?;
-            Ok(snapshot.expect("global settings read callback runs once"))
+        /// Load the device choices without writing migration data or creating
+        /// any file. An absent file yields the defaults; absence proves neither
+        /// a new installation nor permission to show amounts.
+        ///
+        /// Read-only: its `hide_balances` is **not** permission to show
+        /// amounts. That takes a `PreferencesReceipt` whose `balances_hidden()`
+        /// is `Some(false)`, from [`Self::load_or_initialize_preferences`] or
+        /// from an explicit Show through [`Self::save_preference`].
+        pub fn load_preferences(path: &Path) -> Result<DevicePreferences, super::SettingsError> {
+            Self::read_settings(path).map(|settings| settings.preferences())
         }
 
-        /// Edit one choice under the existing file lock. Return the new
-        /// snapshot only after serialization, write, truncate and unlock pass.
+        /// Read the current privacy choice under the global settings lock.
+        /// A cached Show receipt is insufficient at render time: another
+        /// process may have committed Hide since that receipt was issued.
+        pub fn current_balances_hidden(path: &Path) -> Result<Option<bool>, super::SettingsError> {
+            let settings = Self::read_settings(path)?;
+            Ok(settings
+                .balance_privacy_initialized
+                .then_some(settings.hide_balances))
+        }
+
+        /// Render-time privacy check. If a writer holds the settings lock,
+        /// return an unresolved choice immediately so the GUI covers amounts.
+        /// Other callers can still use the strict, blocking read above.
+        pub fn try_current_balances_hidden(
+            path: &Path,
+        ) -> Result<Option<bool>, super::SettingsError> {
+            let lock = super::open_existing_lock(&Self::lock_path(path)?).map_err(|e| {
+                super::SettingsError::ReadingFile(format!("Opening global settings lock: {e}"))
+            })?;
+            let held = match lock {
+                Some(lock) => {
+                    if !FileExt::try_lock_shared(&lock).map_err(|e| {
+                        super::SettingsError::ReadingFile(format!("Locking global settings: {e}"))
+                    })? {
+                        return Ok(None);
+                    }
+                    Some(HeldLock(Some(lock)))
+                }
+                None => None,
+            };
+            let document = Self::read_document(path);
+            drop(held);
+            document.map(|document| {
+                document
+                    .settings
+                    .balance_privacy_initialized
+                    .then_some(document.settings.hide_balances)
+            })
+        }
+
+        /// Edit one choice in the shared transaction and return the new
+        /// snapshot once the replacement is visible. A committed save whose
+        /// post-rename steps could not be confirmed is logged and still
+        /// returned: the previous bytes are gone. See [`Self::save_preference`].
         pub fn update_preference(
-            path: &PathBuf,
+            path: &Path,
             change: PreferenceChange,
         ) -> Result<DevicePreferences, super::SettingsError> {
-            let mut snapshot = None;
-            Self::update(
-                path,
-                |s| {
-                    s.apply_preference(change);
-                    snapshot = Some(s.preferences());
-                },
-                true,
-            )?;
-            Ok(snapshot.expect("global settings write callback runs once"))
+            let receipt = Self::save_preference(path, change)?;
+            receipt.log_unconfirmed();
+            Ok(receipt.preferences())
+        }
+
+        /// Strict save boundary for the Preferences owner. `Err` always means
+        /// no replacement became visible and the previous file (or its absence)
+        /// remains. `Ok` carries the committed snapshot and whether every
+        /// post-rename step completed. An explicit Hide balances choice also
+        /// establishes the installation's privacy choice in the same write.
+        pub fn save_preference(
+            path: &Path,
+            change: PreferenceChange,
+        ) -> Result<PreferencesReceipt, super::SettingsError> {
+            let force_privacy = matches!(change, PreferenceChange::HideBalances(_));
+            Self::transact(path, |settings| {
+                settings.apply_preference(change);
+                Ok(Plan::Write {
+                    value: settings.snapshot(),
+                    force_privacy,
+                })
+            })
+            .map(receipt)
+        }
+
+        /// The authoritative read of the privacy choice: returns the persisted
+        /// choice once established, or establishes it exactly once. The other
+        /// authority is the receipt of an explicit Show or Hide through
+        /// [`Self::save_preference`], which establishes the choice itself.
+        ///
+        /// `root` is treated as an existing installation. While its global
+        /// settings hold no established choice, this commits
+        /// `hide_balances = true` together with the provenance marker (hide
+        /// once on upgrade, A4), whatever the stored value says. Nothing here
+        /// proves a new installation, and an empty root (for example after a
+        /// wipe) is never taken as one. Showing amounts afterwards takes an
+        /// explicit choice through [`Self::save_preference`]. A choice
+        /// established meanwhile wins at the recheck under the global lock.
+        ///
+        /// Only the global settings file is read or written: Cube metadata,
+        /// wallets and seeds play no part, and `root` is never created.
+        ///
+        /// Any `Err` means nothing was initialized: keep amounts masked and
+        /// offer a retry. Concurrency covers cooperating builds only; an older
+        /// build running at the same time ignores the lock and may erase the
+        /// marker, which returns the installation to unresolved and so to
+        /// hidden.
+        pub fn load_or_initialize_preferences(
+            root: &CoincubeDirectory,
+        ) -> Result<PreferencesReceipt, PrivacyInitError> {
+            let path = Self::path(root);
+            let current = Self::read_settings(&path).map_err(PrivacyInitError::Settings)?;
+            if current.balance_privacy_initialized {
+                return Ok(receipt(Outcome::Kept(current.snapshot())));
+            }
+            Self::transact(&path, |settings| {
+                if settings.balance_privacy_initialized {
+                    return Ok(Plan::Keep(settings.snapshot()));
+                }
+                // Hide once on upgrade (A4). Only a proved new installation
+                // could start shown, and no such proof exists here.
+                settings.hide_balances = true;
+                settings.balance_privacy_initialized = true;
+                Ok(Plan::Write {
+                    value: settings.snapshot(),
+                    force_privacy: true,
+                })
+            })
+            .map(receipt)
+            .map_err(PrivacyInitError::Settings)
+        }
+
+        /// Startup's one-use creator proof is the only path that can initialize
+        /// a missing privacy choice to shown. The caller still holds the stable
+        /// parent bootstrap lock while this transaction takes the global lock.
+        /// A concurrent explicit choice wins the locked recheck.
+        pub(crate) fn initialize_created_preferences(
+            creator: crate::dir::CreatedRoot,
+        ) -> Result<PreferencesReceipt, PrivacyInitError> {
+            let path = Self::path(creator.root());
+            Self::transact(&path, |settings| {
+                if settings.balance_privacy_initialized {
+                    return Ok(Plan::Keep(settings.snapshot()));
+                }
+                settings.hide_balances = false;
+                settings.balance_privacy_initialized = true;
+                Ok(Plan::Write {
+                    value: settings.snapshot(),
+                    force_privacy: true,
+                })
+            })
+            .map(receipt)
+            .map_err(PrivacyInitError::Settings)
         }
 
         pub fn path(global_datadir: &CoincubeDirectory) -> PathBuf {
             global_datadir.path().join(DEFAULT_FILE_NAME)
         }
 
-        pub fn load_window_config(path: &PathBuf) -> Option<WindowConfig> {
+        pub fn load_window_config(path: &Path) -> Option<WindowConfig> {
             let mut ret = None;
             if let Err(e) = Self::update(path, |s| ret = s.window_config.clone(), false) {
                 tracing::error!("Failed to load window config: {e}");
@@ -1884,7 +2168,7 @@ pub mod global {
         }
 
         pub fn update_window_config(
-            path: &PathBuf,
+            path: &Path,
             window_config: &WindowConfig,
         ) -> Result<(), super::SettingsError> {
             Self::update(
@@ -1895,14 +2179,14 @@ pub mod global {
         }
 
         pub fn load_bitbox_settings(
-            path: &PathBuf,
+            path: &Path,
         ) -> Result<Option<BitboxSettings>, super::SettingsError> {
             let mut ret = None;
             Self::update(path, |s| ret = s.bitbox.clone(), false)?;
             Ok(ret)
         }
 
-        pub fn load_developer_mode(path: &PathBuf) -> bool {
+        pub fn load_developer_mode(path: &Path) -> bool {
             let mut ret = false;
             if let Err(e) = Self::update(path, |s| ret = s.developer_mode, false) {
                 tracing::error!("Failed to load developer mode setting: {e}");
@@ -1910,7 +2194,7 @@ pub mod global {
             ret
         }
 
-        pub fn load_bitcoin_blake2b_beta(path: &PathBuf) -> bool {
+        pub fn load_bitcoin_blake2b_beta(path: &Path) -> bool {
             let mut enabled = false;
             if let Err(e) = Self::update(path, |s| enabled = s.bitcoin_blake2b_beta, false) {
                 tracing::error!("Failed to load Bitcoin Blake2b beta setting: {e}");
@@ -1919,13 +2203,13 @@ pub mod global {
         }
 
         pub fn update_bitcoin_blake2b_beta(
-            path: &PathBuf,
+            path: &Path,
             enabled: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update_preference(path, PreferenceChange::BitcoinBlake2bBeta(enabled)).map(|_| ())
         }
 
-        pub fn load_account_tier(path: &PathBuf) -> AccountTier {
+        pub fn load_account_tier(path: &Path) -> AccountTier {
             let mut ret = AccountTier::default();
             if let Err(e) = Self::update(path, |s| ret = s.account_tier, false) {
                 tracing::error!("Failed to load account tier setting: {e}");
@@ -1934,21 +2218,21 @@ pub mod global {
         }
 
         pub fn update_account_tier(
-            path: &PathBuf,
+            path: &Path,
             tier: AccountTier,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.account_tier = tier, true)
         }
 
         pub fn update_developer_mode(
-            path: &PathBuf,
+            path: &Path,
             developer_mode: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update_preference(path, PreferenceChange::DeveloperMode(developer_mode))
                 .map(|_| ())
         }
 
-        pub fn load_show_direction_badges(path: &PathBuf) -> bool {
+        pub fn load_show_direction_badges(path: &Path) -> bool {
             let mut ret = true;
             if let Err(e) = Self::update(path, |s| ret = s.show_direction_badges, false) {
                 tracing::error!("Failed to load show_direction_badges setting: {e}");
@@ -1957,7 +2241,7 @@ pub mod global {
         }
 
         pub fn update_show_direction_badges(
-            path: &PathBuf,
+            path: &Path,
             show: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.show_direction_badges = show, true)
@@ -1965,20 +2249,20 @@ pub mod global {
 
         /// Missing files and older settings default to enabled. Reading does not
         /// initialise Branta or emit any preference/check telemetry.
-        pub fn load_recipient_identity_checks(path: &PathBuf) -> bool {
+        pub fn load_recipient_identity_checks(path: &Path) -> bool {
             let mut enabled = true;
             let _ = Self::update(path, |s| enabled = s.recipient_identity_checks, false);
             enabled
         }
 
         pub fn update_recipient_identity_checks(
-            path: &PathBuf,
+            path: &Path,
             enabled: bool,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.recipient_identity_checks = enabled, true)
         }
 
-        pub fn load_theme_mode(path: &PathBuf) -> coincube_ui::theme::palette::ThemeMode {
+        pub fn load_theme_mode(path: &Path) -> coincube_ui::theme::palette::ThemeMode {
             let mut ret = coincube_ui::theme::palette::ThemeMode::default();
             if let Err(e) = Self::load_preferences(path).map(|s| ret = s.theme.resolve(None)) {
                 tracing::error!("Failed to load theme mode setting: {e}");
@@ -1987,7 +2271,7 @@ pub mod global {
         }
 
         pub fn update_theme_mode(
-            path: &PathBuf,
+            path: &Path,
             mode: coincube_ui::theme::palette::ThemeMode,
         ) -> Result<(), super::SettingsError> {
             Self::update_preference(path, PreferenceChange::Theme(mode.into())).map(|_| ())
@@ -1996,7 +2280,7 @@ pub mod global {
         /// Advisory-badge dismissals, as `"<fingerprint>:<advisory id>"`.
         /// Read once at startup into the in-process mirror — see
         /// [`crate::hw_advisory::dismissals`].
-        pub fn load_dismissed_hw_advisories(path: &PathBuf) -> Vec<String> {
+        pub fn load_dismissed_hw_advisories(path: &Path) -> Vec<String> {
             let mut ret = Vec::new();
             if let Err(e) =
                 Self::update(path, |s| ret.clone_from(&s.dismissed_hw_advisories), false)
@@ -2008,10 +2292,7 @@ pub mod global {
 
         /// Record one dismissal. Idempotent, so a repeated dismiss of the same
         /// device/advisory pair doesn't grow the file.
-        pub fn dismiss_hw_advisory(
-            path: &PathBuf,
-            key: String,
-        ) -> Result<(), super::SettingsError> {
+        pub fn dismiss_hw_advisory(path: &Path, key: String) -> Result<(), super::SettingsError> {
             Self::update(
                 path,
                 |s| {
@@ -2025,7 +2306,7 @@ pub mod global {
 
         /// Whether the one-time incident notice for `advisory_id` has already
         /// been acknowledged on this install.
-        pub fn advisory_notice_seen(path: &PathBuf, advisory_id: &str) -> bool {
+        pub fn advisory_notice_seen(path: &Path, advisory_id: &str) -> bool {
             let mut ret = false;
             if let Err(e) = Self::update(
                 path,
@@ -2039,7 +2320,7 @@ pub mod global {
 
         /// Mark the one-time incident notice for `advisory_id` acknowledged.
         pub fn mark_advisory_notice_seen(
-            path: &PathBuf,
+            path: &Path,
             advisory_id: &str,
         ) -> Result<(), super::SettingsError> {
             let advisory_id = advisory_id.to_string();
@@ -2055,121 +2336,764 @@ pub mod global {
         }
 
         pub fn update_bitbox_settings(
-            path: &PathBuf,
+            path: &Path,
             bitbox: &BitboxSettings,
         ) -> Result<(), super::SettingsError> {
             Self::update(path, |s| s.bitbox = Some(bitbox.clone()), true)
         }
 
         pub fn update<F>(
-            path: &PathBuf,
+            path: &Path,
             mut update: F,
             write: bool,
         ) -> Result<(), super::SettingsError>
         where
             F: FnMut(&mut GlobalSettings),
         {
-            let exists = match std::fs::symlink_metadata(path) {
-                Ok(_) => match std::fs::metadata(path) {
-                    Ok(metadata) if metadata.is_file() => true,
-                    Ok(_) => {
-                        return Err(super::SettingsError::ReadingFile(
-                            "Global settings path is not a regular file".to_string(),
-                        ));
-                    }
-                    Err(error) => {
-                        return Err(super::SettingsError::ReadingFile(format!(
-                            "Inspecting global settings file: {error}"
-                        )));
-                    }
-                },
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
-                Err(error) => {
-                    return Err(super::SettingsError::ReadingFile(format!(
-                        "Inspecting global settings path: {error}"
-                    )));
-                }
-            };
+            if !write {
+                // The callback sees a private copy; nothing is written or created.
+                update(&mut Self::read_settings(path)?);
+                return Ok(());
+            }
+            let outcome = Self::transact(path, |settings| {
+                update(settings);
+                Ok(Plan::Write {
+                    value: (),
+                    force_privacy: false,
+                })
+            })?;
+            if let Outcome::Committed {
+                durability: Durability::Unconfirmed(warning),
+                ..
+            } = outcome
+            {
+                tracing::warn!("Global settings were saved, but {warning}");
+            }
+            Ok(())
+        }
 
-            let (mut global_settings, file) = if exists {
-                let mut file = OpenOptions::new()
-                    .read(true)
-                    .write(true)
-                    .create(true)
-                    .truncate(false)
-                    .open(path)
-                    .map_err(|e| super::SettingsError::ReadingFile(format!("Opening file: {e}")))?;
+        /// The sibling lock shared by every global-settings reader and writer
+        /// in this build (`global_settings.lock` for the default file).
+        fn lock_path(path: &Path) -> Result<PathBuf, super::SettingsError> {
+            let lock = path.with_extension("lock");
+            if path.file_name().is_none() || lock == path {
+                return Err(super::SettingsError::Unexpected(
+                    "Global settings path has no distinct lock file".to_string(),
+                ));
+            }
+            Ok(lock)
+        }
 
-                file.lock_exclusive()
-                    .map_err(|e| super::SettingsError::ReadingFile(format!("Locking file: {e}")))?;
+        fn directory(path: &Path) -> &Path {
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => parent,
+                _ => Path::new("."),
+            }
+        }
 
-                let mut content = String::new();
-                file.read_to_string(&mut content)
-                    .map_err(|e| super::SettingsError::ReadingFile(format!("Reading file: {e}")))?;
-
-                if !write {
-                    File::unlock(&file).map_err(|e| {
-                        super::SettingsError::ReadingFile(format!("Unlocking file: {e}"))
+        /// Read the current settings without creating anything. When the
+        /// stable lock already exists it is held shared, so a cooperating
+        /// writer never replaces the file in the middle of this read. A
+        /// replacement is atomic, so a reader needs no lock for consistency
+        /// when no cooperating writer has ever run here.
+        fn read_settings(path: &Path) -> Result<GlobalSettings, super::SettingsError> {
+            let lock = super::open_existing_lock(&Self::lock_path(path)?).map_err(|e| {
+                super::SettingsError::ReadingFile(format!("Opening global settings lock: {e}"))
+            })?;
+            let held = match lock {
+                Some(lock) => {
+                    FileExt::lock_shared(&lock).map_err(|e| {
+                        super::SettingsError::ReadingFile(format!("Locking global settings: {e}"))
                     })?;
+                    Some(HeldLock(Some(lock)))
                 }
-
-                (
-                    serde_json::from_str::<GlobalSettings>(&content)
-                        .map_err(|e| super::SettingsError::ReadingFile(e.to_string()))?,
-                    Some(file),
-                )
-            } else {
-                (GlobalSettings::default(), None)
+                None => None,
             };
+            let document = Self::read_document(path);
+            drop(held);
+            document.map(|document| document.settings)
+        }
 
+        fn read_document(path: &Path) -> Result<Document, super::SettingsError> {
+            use super::SettingsError::ReadingFile;
+            let metadata = super::inspect_regular_file(path)
+                .map_err(|e| ReadingFile(format!("Inspecting global settings file: {e}")))?;
+            let Some(metadata) = metadata else {
+                return Ok(Document {
+                    raw: None,
+                    source: Vec::new(),
+                    settings: GlobalSettings::default(),
+                    read_only: false,
+                });
+            };
+            let mut file =
+                File::open(path).map_err(|e| ReadingFile(format!("Opening file: {e}")))?;
+            super::verify_opened_file(&file, path)
+                .map_err(|e| ReadingFile(format!("Opening global settings file: {e}")))?;
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes)
+                .map_err(|e| ReadingFile(format!("Reading file: {e}")))?;
+            let (raw, settings) = parse_document(&bytes).map_err(ReadingFile)?;
+            Ok(Document {
+                raw: Some(raw),
+                source: bytes,
+                settings,
+                read_only: metadata.permissions().readonly(),
+            })
+        }
+
+        /// One read-modify-write under the stable sibling lock. The lock is
+        /// taken before deciding whether the file exists, so concurrent first
+        /// writers serialize and the later one rereads the earlier result. The
+        /// callback runs exactly once, on the latest committed settings, and
+        /// must not call back into these APIs (the lock is not reentrant).
+        fn transact<T>(
+            path: &Path,
+            decide: impl FnOnce(&mut GlobalSettings) -> Result<Plan<T>, super::SettingsError>,
+        ) -> Result<Outcome<T>, super::SettingsError> {
+            use super::SettingsError::WritingFile;
+            match std::fs::metadata(Self::directory(path)) {
+                Ok(metadata) if metadata.is_dir() => {}
+                Ok(_) => {
+                    return Err(WritingFile(
+                        "Global settings directory is not a directory".to_string(),
+                    ))
+                }
+                Err(e) => {
+                    return Err(WritingFile(format!(
+                        "Inspecting global settings directory: {e}"
+                    )))
+                }
+            }
+            let lock = super::open_or_create_lock(&Self::lock_path(path)?)
+                .map_err(|e| WritingFile(format!("Opening global settings lock: {e}")))?;
+            stage(path, Stage::BeforeLock)?;
+            FileExt::lock_exclusive(&lock)
+                .map_err(|e| WritingFile(format!("Locking global settings: {e}")))?;
+            // Every early return from here releases the lock through `held`.
+            let held = HeldLock(Some(lock));
+            stage(path, Stage::Locked)?;
+
+            let document = Self::read_document(path)?;
+            let mut settings = document.settings;
+            let before = to_object(&settings)?;
             // Preserve the previous explicit/missing-theme behavior in legacy
             // files, but never write migration data during a read.
-            if write && global_settings.theme_preference.is_none() {
-                global_settings.theme_preference = Some(global_settings.theme_mode.into());
+            if settings.theme_preference.is_none() {
+                settings.theme_preference = Some(settings.theme_mode.into());
             }
-            update(&mut global_settings);
+            let (value, force_privacy) = match decide(&mut settings)? {
+                Plan::Keep(value) => return Ok(Outcome::Kept(value)),
+                Plan::Write {
+                    value,
+                    force_privacy,
+                } => (value, force_privacy),
+            };
+            if document.read_only {
+                return Err(WritingFile("Global settings file is read-only".to_string()));
+            }
+            if document.raw.is_some() {
+                // Refused before any replacement exists: the bytes stay as they are.
+                require_exact_unknown_numbers(&document.source, &before).map_err(|e| {
+                    WritingFile(format!("Refusing to rewrite global settings: {e}"))
+                })?;
+            }
+            let after = to_object(&settings)?;
+            let mut output = match document.raw {
+                Some(mut raw) => {
+                    merge_changed(&mut raw, &before, &after);
+                    raw
+                }
+                // A first file keeps the historical full serialization, including
+                // Rust Default values that differ from serde's missing-field ones.
+                None => after.clone(),
+            };
+            if force_privacy {
+                // A changed-value diff would miss an explicit false that equals
+                // the stored value; the choice and its provenance travel together.
+                output.insert(
+                    "hide_balances".to_string(),
+                    serde_json::Value::Bool(settings.hide_balances),
+                );
+                output.insert(
+                    "balance_privacy_initialized".to_string(),
+                    serde_json::Value::Bool(settings.balance_privacy_initialized),
+                );
+            }
+            let bytes = serde_json::to_vec_pretty(&output)
+                .map_err(|e| WritingFile(format!("Failed to serialize GlobalSettings: {e}")))?;
+            let (_, check) = parse_document(&bytes)
+                .map_err(|e| WritingFile(format!("Validating merged global settings: {e}")))?;
+            if to_object(&check)? != after {
+                return Err(WritingFile(
+                    "Merged global settings do not decode to the intended update".to_string(),
+                ));
+            }
 
-            if write {
-                let mut file = if let Some(file) = file {
-                    file
+            let mut warnings = Self::replace(path, &bytes)?;
+            if let Err(e) = hook(path, Stage::Unlock).and_then(|()| held.release()) {
+                warnings.push(format!("releasing the settings lock failed: {e}"));
+            }
+            Ok(Outcome::Committed {
+                value,
+                durability: if warnings.is_empty() {
+                    Durability::StepsCompleted
                 } else {
-                    let file = OpenOptions::new()
-                        .read(true)
-                        .write(true)
-                        .create(true)
-                        .truncate(false)
-                        .open(path)
-                        .map_err(|e| {
-                            super::SettingsError::WritingFile(format!("Opening file: {e}"))
-                        })?;
+                    Durability::Unconfirmed(warnings.join("; "))
+                },
+            })
+        }
 
-                    file.lock_exclusive().map_err(|e| {
-                        super::SettingsError::WritingFile(format!("Locking file: {e}"))
-                    })?;
-                    file
-                };
-                let content = serde_json::to_vec_pretty(&global_settings).map_err(|e| {
-                    super::SettingsError::WritingFile(format!(
-                        "Failed to serialize GlobalSettings: {e}"
-                    ))
-                })?;
-
-                file.seek(SeekFrom::Start(0)).map_err(|e| {
-                    super::SettingsError::WritingFile(format!("Failed to seek file: {e}"))
-                })?;
-
-                file.write_all(&content).map_err(|e| {
-                    super::SettingsError::WritingFile(format!("Failed to write file: {e}"))
-                })?;
-                file.set_len(content.len() as u64).map_err(|e| {
-                    super::SettingsError::WritingFile(format!("Failed to truncate file: {e}"))
-                })?;
-                File::unlock(&file).map_err(|e| {
-                    super::SettingsError::WritingFile(format!("Unlocking file: {e}"))
-                })?;
+        /// Stage a complete replacement in the target's directory and rename it
+        /// over the target. Every error is returned before the rename and leaves
+        /// the previous file (or its absence) in place. After the rename the new
+        /// bytes are visible; the returned warnings describe post-rename steps
+        /// that could not be confirmed, never a reverted save.
+        fn replace(path: &Path, bytes: &[u8]) -> Result<Vec<String>, super::SettingsError> {
+            use super::SettingsError::WritingFile;
+            /// Removes only the temporary file this transaction created.
+            struct Staged(Option<PathBuf>);
+            impl Drop for Staged {
+                fn drop(&mut self) {
+                    if let Some(path) = self.0.take() {
+                        let _ = std::fs::remove_file(path);
+                    }
+                }
             }
 
-            Ok(())
+            let directory = Self::directory(path);
+            let name = path
+                .file_name()
+                .ok_or_else(|| WritingFile("Global settings path has no file name".to_string()))?;
+            let temporary = directory.join(format!(
+                ".{}.{}.tmp",
+                name.to_string_lossy(),
+                uuid::Uuid::new_v4()
+            ));
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            // The file holds the BitBox pairing key: owner-only like Cube
+            // settings, deliberately not inheriting a broader existing mode.
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            stage(path, Stage::Create)?;
+            let mut file = options
+                .open(&temporary)
+                .map_err(|e| WritingFile(format!("Creating replacement: {e}")))?;
+            let mut staged = Staged(Some(temporary.clone()));
+            stage(path, Stage::Write)?;
+            file.write_all(bytes)
+                .map_err(|e| WritingFile(format!("Failed to write file: {e}")))?;
+            stage(path, Stage::Flush)?;
+            file.flush()
+                .map_err(|e| WritingFile(format!("Failed to flush file: {e}")))?;
+            stage(path, Stage::FileSync)?;
+            file.sync_all()
+                .map_err(|e| WritingFile(format!("Failed to sync file: {e}")))?;
+            drop(file);
+            stage(path, Stage::Rename)?;
+            std::fs::rename(&temporary, path)
+                .map_err(|e| WritingFile(format!("Replacing global settings: {e}")))?;
+            // Commit point: the replacement is visible and no longer ours to remove.
+            staged.0 = None;
+
+            #[cfg(unix)]
+            let warnings = match hook(path, Stage::DirectorySync)
+                .and_then(|()| File::open(directory).and_then(|d| d.sync_all()))
+            {
+                Ok(()) => Vec::new(),
+                Err(e) => vec![format!("syncing the settings directory failed: {e}")],
+            };
+            #[cfg(not(unix))]
+            let warnings = Vec::new();
+            Ok(warnings)
+        }
+    }
+
+    /// Receipt for the strict preference boundary, kept apart from
+    /// [`DevicePreferences`] so that snapshot type stays unchanged. Only this
+    /// module constructs one, from a single read or locked transaction: the
+    /// snapshot and its privacy provenance always describe the same bytes.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub struct PreferencesReceipt {
+        preferences: DevicePreferences,
+        privacy_established: bool,
+        persistence: Persistence,
+    }
+
+    /// Whether the call that produced a receipt wrote anything.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Persistence {
+        /// Nothing was written; the snapshot is what the file already held.
+        Unchanged,
+        /// This call's replacement is visible.
+        Committed(Durability),
+    }
+
+    impl PreferencesReceipt {
+        /// The persisted device choices. `hide_balances` here is authority to
+        /// show amounts only when [`Self::privacy_established`] is true; prefer
+        /// [`Self::balances_hidden`].
+        pub fn preferences(&self) -> DevicePreferences {
+            self.preferences
+        }
+
+        /// Whether the installation's privacy choice was established in the
+        /// same read or transaction that produced this snapshot.
+        pub fn privacy_established(&self) -> bool {
+            self.privacy_established
+        }
+
+        /// The authoritative Hide balances choice, or `None` while unresolved
+        /// (keep amounts masked and initialize). Never an apparent default.
+        pub fn balances_hidden(&self) -> Option<bool> {
+            self.privacy_established
+                .then_some(self.preferences.hide_balances)
+        }
+
+        pub fn persistence(&self) -> &Persistence {
+            &self.persistence
+        }
+
+        fn log_unconfirmed(&self) {
+            if let Persistence::Committed(Durability::Unconfirmed(warning)) = &self.persistence {
+                tracing::warn!("Preferences were saved, but {warning}");
+            }
+        }
+    }
+
+    /// Captured with the snapshot inside the transaction that produced it.
+    struct Snapshot {
+        preferences: DevicePreferences,
+        privacy_established: bool,
+    }
+
+    impl GlobalSettings {
+        fn snapshot(&self) -> Snapshot {
+            Snapshot {
+                preferences: self.preferences(),
+                privacy_established: self.balance_privacy_initialized,
+            }
+        }
+    }
+
+    fn receipt(outcome: Outcome<Snapshot>) -> PreferencesReceipt {
+        let (snapshot, persistence) = match outcome {
+            Outcome::Kept(snapshot) => (snapshot, Persistence::Unchanged),
+            Outcome::Committed { value, durability } => (value, Persistence::Committed(durability)),
+        };
+        PreferencesReceipt {
+            preferences: snapshot.preferences,
+            privacy_established: snapshot.privacy_established,
+            persistence,
+        }
+    }
+
+    /// What is known after a committed replacement. Neither variant is a
+    /// power-loss guarantee: no directory sync is attempted off Unix, and an
+    /// injected fault or a successful rename proves nothing about the disk.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum Durability {
+        /// Every post-rename step this platform performs succeeded: the
+        /// directory sync on Unix and the lock release.
+        StepsCompleted,
+        /// The new bytes are visible but a post-rename step failed. The
+        /// previous bytes are gone; the save was not undone.
+        Unconfirmed(String),
+    }
+
+    /// Privacy initialization did not establish a choice. Nothing was
+    /// initialized; keep amounts masked and offer a retry.
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    pub enum PrivacyInitError {
+        /// Reading or committing the global settings failed.
+        Settings(super::SettingsError),
+    }
+
+    impl std::fmt::Display for PrivacyInitError {
+        // Deliberately generic: never a path or an OS error string.
+        fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            match self {
+                Self::Settings(_) => write!(f, "Your privacy setting could not be loaded."),
+            }
+        }
+    }
+
+    struct Document {
+        /// The original JSON object, so unknown fields survive a rewrite.
+        raw: Option<serde_json::Map<String, serde_json::Value>>,
+        /// The original bytes behind `raw`; empty when the file is absent.
+        source: Vec<u8>,
+        settings: GlobalSettings,
+        read_only: bool,
+    }
+
+    enum Plan<T> {
+        /// Return `T` without writing.
+        Keep(T),
+        /// Commit the edited settings and return `T`.
+        Write { value: T, force_privacy: bool },
+    }
+
+    enum Outcome<T> {
+        Kept(T),
+        Committed { value: T, durability: Durability },
+    }
+
+    /// Releases an advisory lock explicitly rather than waiting for the OS to
+    /// notice the closed handle (which Windows documents as unprompt).
+    struct HeldLock(Option<File>);
+
+    impl HeldLock {
+        fn release(mut self) -> std::io::Result<()> {
+            match self.0.take() {
+                Some(file) => FileExt::unlock(&file),
+                None => Ok(()),
+            }
+        }
+    }
+
+    impl Drop for HeldLock {
+        fn drop(&mut self) {
+            if let Some(file) = self.0.take() {
+                let _ = FileExt::unlock(&file);
+            }
+        }
+    }
+
+    /// Decode a document strictly: one JSON object, no repeated keys at any
+    /// depth, and every known field valid. Empty and truncated input fail.
+    fn parse_document(
+        bytes: &[u8],
+    ) -> Result<(serde_json::Map<String, serde_json::Value>, GlobalSettings), String> {
+        serde_json::from_slice::<super::UniqueKeys>(bytes).map_err(|e| e.to_string())?;
+        let serde_json::Value::Object(raw) =
+            serde_json::from_slice::<serde_json::Value>(bytes).map_err(|e| e.to_string())?
+        else {
+            return Err("Global settings must be a JSON object".to_string());
+        };
+        let settings = serde_json::from_slice(bytes).map_err(|e| e.to_string())?;
+        // An established marker is authority only together with the choice it
+        // records; a missing value would otherwise read as the default false.
+        if raw.get("balance_privacy_initialized") == Some(&serde_json::Value::Bool(true))
+            && !matches!(raw.get("hide_balances"), Some(serde_json::Value::Bool(_)))
+        {
+            return Err(
+                "Global settings mark the privacy choice established without recording it"
+                    .to_string(),
+            );
+        }
+        Ok((raw, settings))
+    }
+
+    fn to_object(
+        settings: &GlobalSettings,
+    ) -> Result<serde_json::Map<String, serde_json::Value>, super::SettingsError> {
+        match serde_json::to_value(settings) {
+            Ok(serde_json::Value::Object(map)) => Ok(map),
+            Ok(_) => Err(super::SettingsError::Unexpected(
+                "GlobalSettings did not serialize to an object".to_string(),
+            )),
+            Err(e) => Err(super::SettingsError::WritingFile(format!(
+                "Failed to serialize GlobalSettings: {e}"
+            ))),
+        }
+    }
+
+    /// Write back only the known paths whose typed value changed. Unknown
+    /// top-level and nested fields, and known fields left at their serde
+    /// default by omission, keep their original representation.
+    fn merge_changed(
+        raw: &mut serde_json::Map<String, serde_json::Value>,
+        before: &serde_json::Map<String, serde_json::Value>,
+        after: &serde_json::Map<String, serde_json::Value>,
+    ) {
+        use serde_json::Value::Object;
+        for (key, new) in after {
+            let old = before.get(key);
+            if old == Some(new) {
+                continue;
+            }
+            if let (Some(Object(raw_child)), Some(Object(old)), Object(new)) =
+                (raw.get_mut(key), old, new)
+            {
+                merge_changed(raw_child, old, new);
+                continue;
+            }
+            raw.insert(key.clone(), new.clone());
+        }
+        for key in before.keys() {
+            if !after.contains_key(key) {
+                raw.remove(key);
+            }
+        }
+    }
+
+    /// Refuses a rewrite that would silently change an unknown number.
+    /// Without serde_json's `arbitrary_precision`, `Value` rounds integers
+    /// beyond i64/u64 and decimals beyond f64 to an f64, and the raw-preserving
+    /// merge would write that rounded value back. So every number token in the
+    /// original bytes outside the typed settings (`known`, as [`to_object`]
+    /// serializes them) must come back from `Value` with exactly the same
+    /// decimal value; only its spelling may change. Known fields are written
+    /// from their typed value, as before.
+    fn require_exact_unknown_numbers(
+        bytes: &[u8],
+        known: &serde_json::Map<String, serde_json::Value>,
+    ) -> Result<(), String> {
+        NumberScan {
+            bytes,
+            at: 0,
+            path: Vec::new(),
+            known,
+        }
+        .value()
+    }
+
+    /// One step from the document root.
+    enum Step {
+        Key(String),
+        Index(usize),
+    }
+
+    /// A walk over bytes that [`parse_document`] already accepted (so nesting
+    /// is within serde_json's recursion limit). It only tracks structure and
+    /// refuses anything it does not expect rather than guessing.
+    struct NumberScan<'a> {
+        bytes: &'a [u8],
+        at: usize,
+        path: Vec<Step>,
+        known: &'a serde_json::Map<String, serde_json::Value>,
+    }
+
+    impl NumberScan<'_> {
+        fn unexpected() -> String {
+            "Global settings could not be checked for exact numbers".to_string()
+        }
+
+        fn peek(&mut self) -> Option<u8> {
+            while matches!(self.bytes.get(self.at), Some(b' ' | b'\t' | b'\n' | b'\r')) {
+                self.at += 1;
+            }
+            self.bytes.get(self.at).copied()
+        }
+
+        /// Consumes `close` if it ends the container, or a separator.
+        fn next_item(&mut self, close: u8) -> Result<bool, String> {
+            match self.peek() {
+                Some(b',') => {
+                    self.at += 1;
+                    Ok(true)
+                }
+                Some(byte) if byte == close => {
+                    self.at += 1;
+                    Ok(false)
+                }
+                _ => Err(Self::unexpected()),
+            }
+        }
+
+        fn value(&mut self) -> Result<(), String> {
+            match self.peek() {
+                Some(b'{') => {
+                    self.at += 1;
+                    if self.peek() == Some(b'}') {
+                        self.at += 1;
+                        return Ok(());
+                    }
+                    loop {
+                        let key = self.string()?;
+                        if self.peek() != Some(b':') {
+                            return Err(Self::unexpected());
+                        }
+                        self.at += 1;
+                        self.path.push(Step::Key(key));
+                        self.value()?;
+                        self.path.pop();
+                        if !self.next_item(b'}')? {
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(b'[') => {
+                    self.at += 1;
+                    if self.peek() == Some(b']') {
+                        self.at += 1;
+                        return Ok(());
+                    }
+                    let mut index = 0;
+                    loop {
+                        self.path.push(Step::Index(index));
+                        self.value()?;
+                        self.path.pop();
+                        index += 1;
+                        if !self.next_item(b']')? {
+                            return Ok(());
+                        }
+                    }
+                }
+                Some(b'"') => self.string().map(drop),
+                Some(b'-' | b'0'..=b'9') => self.number(),
+                Some(b't' | b'f' | b'n') => {
+                    while matches!(self.bytes.get(self.at), Some(b'a'..=b'z')) {
+                        self.at += 1;
+                    }
+                    Ok(())
+                }
+                _ => Err(Self::unexpected()),
+            }
+        }
+
+        fn string(&mut self) -> Result<String, String> {
+            if self.peek() != Some(b'"') {
+                return Err(Self::unexpected());
+            }
+            let start = self.at;
+            self.at += 1;
+            loop {
+                match self.bytes.get(self.at) {
+                    Some(b'"') => break,
+                    Some(b'\\') => self.at += 2,
+                    Some(_) => self.at += 1,
+                    None => return Err(Self::unexpected()),
+                }
+            }
+            self.at += 1;
+            serde_json::from_slice(&self.bytes[start..self.at]).map_err(|e| e.to_string())
+        }
+
+        fn number(&mut self) -> Result<(), String> {
+            let start = self.at;
+            while matches!(
+                self.bytes.get(self.at),
+                Some(b'0'..=b'9' | b'-' | b'+' | b'.' | b'e' | b'E')
+            ) {
+                self.at += 1;
+            }
+            let token =
+                std::str::from_utf8(&self.bytes[start..self.at]).map_err(|e| e.to_string())?;
+            if known_value(self.known, &self.path).is_some() || number_survives(token) {
+                Ok(())
+            } else {
+                Err("Global settings hold a number this build cannot keep exactly".to_string())
+            }
+        }
+    }
+
+    /// The typed value at `path`, when the settings schema knows that path.
+    fn known_value<'a>(
+        known: &'a serde_json::Map<String, serde_json::Value>,
+        path: &[Step],
+    ) -> Option<&'a serde_json::Value> {
+        let (Step::Key(first), rest) = path.split_first()? else {
+            return None;
+        };
+        let mut value = known.get(first)?;
+        for step in rest {
+            value = match (step, value) {
+                (Step::Key(key), serde_json::Value::Object(map)) => map.get(key)?,
+                (Step::Index(index), serde_json::Value::Array(items)) => items.get(*index)?,
+                _ => return None,
+            };
+        }
+        Some(value)
+    }
+
+    /// Whether the number `token` reads back from `serde_json::Value` with the
+    /// same exact decimal value. The comparison is on decimal digits, never on
+    /// two already-rounded parses.
+    fn number_survives(token: &str) -> bool {
+        let Ok(serde_json::Value::Number(parsed)) =
+            serde_json::from_str::<serde_json::Value>(token)
+        else {
+            return false;
+        };
+        match (exact_decimal(token), exact_decimal(&parsed.to_string())) {
+            (Some(original), Some(kept)) => original == kept,
+            _ => false,
+        }
+    }
+
+    /// A JSON number's exact value as (negative, significant digits without
+    /// leading or trailing zeros, power of ten). Zero has a single form,
+    /// whatever its sign or spelling. `None` for anything else.
+    fn exact_decimal(token: &str) -> Option<(bool, String, i128)> {
+        let (negative, unsigned) = match token.strip_prefix('-') {
+            Some(rest) => (true, rest),
+            None => (false, token),
+        };
+        let (mantissa, exponent) = match unsigned.find(['e', 'E']) {
+            Some(at) => (&unsigned[..at], unsigned[at + 1..].parse::<i64>().ok()?),
+            None => (unsigned, 0),
+        };
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        if whole.is_empty()
+            || !whole
+                .bytes()
+                .chain(fraction.bytes())
+                .all(|byte| byte.is_ascii_digit())
+        {
+            return None;
+        }
+        let digits = format!("{whole}{fraction}");
+        let digits = digits.trim_start_matches('0');
+        let significant = digits.trim_end_matches('0');
+        if significant.is_empty() {
+            return Some((false, String::new(), 0));
+        }
+        let trailing = (digits.len() - significant.len()) as i128;
+        Some((
+            negative,
+            significant.to_string(),
+            i128::from(exponent) - fraction.len() as i128 + trailing,
+        ))
+    }
+
+    /// Points in a transaction where tests pause or inject a failure.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Stage {
+        BeforeLock,
+        Locked,
+        Create,
+        Write,
+        Flush,
+        FileSync,
+        Rename,
+        DirectorySync,
+        Unlock,
+    }
+
+    fn stage(path: &Path, stage: Stage) -> Result<(), super::SettingsError> {
+        hook(path, stage).map_err(|e| super::SettingsError::WritingFile(format!("{stage:?}: {e}")))
+    }
+
+    #[cfg(not(test))]
+    #[inline(always)]
+    fn hook(_: &Path, _: Stage) -> std::io::Result<()> {
+        Ok(())
+    }
+
+    #[cfg(test)]
+    type Hook = std::sync::Arc<dyn Fn(Stage) -> std::io::Result<()> + Send + Sync>;
+
+    #[cfg(test)]
+    static HOOKS: std::sync::Mutex<Vec<(PathBuf, Hook)>> = std::sync::Mutex::new(Vec::new());
+
+    /// Test hooks are keyed by settings path so parallel tests never share one.
+    #[cfg(test)]
+    fn hook(path: &Path, stage: Stage) -> std::io::Result<()> {
+        let hook = HOOKS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|(hooked, _)| hooked == path)
+            .map(|(_, hook)| hook.clone());
+        match hook {
+            Some(hook) => hook(stage),
+            None => Ok(()),
         }
     }
 
@@ -2218,6 +3142,1573 @@ pub mod global {
                 true,
             )
             .map_err(|e| ConfigError(e.to_string()))
+        }
+    }
+
+    /// Storage-boundary tests through the production APIs. Ordering uses
+    /// path-keyed hooks, and every wait is bounded: a paused transaction gives
+    /// up once its test stops waiting, workers and child processes are
+    /// collected against a deadline, and a child that outlives it is killed
+    /// and reaped. A fixed sleep appears only after a contender has reported
+    /// reaching its lock attempt, to detect one that should be blocked but is
+    /// not, never to order the steps.
+    #[cfg(test)]
+    mod transaction_tests {
+        use super::super::{open_or_create_lock, SettingsError, SETTINGS_FILE_NAME};
+        use super::*;
+        use crate::chain::ChainId;
+        use serde_json::{json, Value};
+        use std::ffi::OsStr;
+        use std::process::{Child, Command, ExitStatus};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::{mpsc, Arc, Mutex};
+        use std::time::{Duration, Instant};
+
+        /// Long enough that a writer which ignored a lock would have finished.
+        const BLOCKED: Duration = Duration::from_millis(400);
+        /// Upper bound on every wait, turning a deadlock into a failure.
+        const DEADLOCK: Duration = Duration::from_secs(20);
+        /// Prefix of every harness failure, so the probes can recognize them.
+        const HARNESS: &str = "R04B-HARNESS";
+
+        struct TempRoot(PathBuf);
+
+        impl TempRoot {
+            fn new(tag: &str) -> Self {
+                let path = std::env::temp_dir()
+                    .join(format!("coincube-r04b-{tag}-{}", uuid::Uuid::new_v4()));
+                std::fs::create_dir_all(&path).unwrap();
+                Self(path)
+            }
+            fn root(&self) -> CoincubeDirectory {
+                CoincubeDirectory::new(self.0.clone())
+            }
+            fn global(&self) -> PathBuf {
+                self.0.join(DEFAULT_FILE_NAME)
+            }
+            fn chain(&self, chain: ChainId) -> PathBuf {
+                self.0.join(chain.dir_name())
+            }
+        }
+
+        impl Drop for TempRoot {
+            fn drop(&mut self) {
+                #[cfg(unix)]
+                restore_permissions(&self.0);
+                let _ = std::fs::remove_dir_all(&self.0);
+            }
+        }
+
+        #[cfg(unix)]
+        fn restore_permissions(path: &Path) {
+            use std::os::unix::fs::PermissionsExt;
+            if let Ok(metadata) = std::fs::symlink_metadata(path) {
+                if metadata.file_type().is_symlink() {
+                    return;
+                }
+                let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
+                if metadata.is_dir() {
+                    for entry in std::fs::read_dir(path).into_iter().flatten().flatten() {
+                        restore_permissions(&entry.path());
+                    }
+                }
+            }
+        }
+
+        /// Whether permission bits actually restrict this process (not root).
+        #[cfg(unix)]
+        fn permissions_enforced(root: &Path) -> bool {
+            use std::os::unix::fs::PermissionsExt;
+            let probe = root.join("permission-probe");
+            std::fs::write(&probe, b"x").unwrap();
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o000)).unwrap();
+            let enforced = std::fs::read(&probe).is_err();
+            std::fs::set_permissions(&probe, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::remove_file(&probe).unwrap();
+            enforced
+        }
+
+        struct HookGuard(PathBuf);
+
+        impl Drop for HookGuard {
+            fn drop(&mut self) {
+                HOOKS.lock().unwrap().retain(|(path, _)| path != &self.0);
+            }
+        }
+
+        fn install(
+            path: &Path,
+            hook: impl Fn(Stage) -> std::io::Result<()> + Send + Sync + 'static,
+        ) -> HookGuard {
+            HOOKS
+                .lock()
+                .unwrap()
+                .push((path.to_path_buf(), Arc::new(hook)));
+            HookGuard(path.to_path_buf())
+        }
+
+        /// The first transaction reaching a stage reports its arrival and
+        /// waits for [`Pause::release`]. It gives up, failing that transaction
+        /// and so releasing its locks, once `limit` passes or the `Pause` is
+        /// dropped (for example by a failed assertion).
+        struct Pause {
+            arrived: mpsc::Receiver<()>,
+            release: Option<mpsc::Sender<()>>,
+            limit: Duration,
+        }
+
+        fn pause_once(at: Stage) -> (Pause, impl Fn(Stage) -> std::io::Result<()> + Send + Sync) {
+            pause_within(at, DEADLOCK)
+        }
+
+        fn pause_within(
+            at: Stage,
+            limit: Duration,
+        ) -> (Pause, impl Fn(Stage) -> std::io::Result<()> + Send + Sync) {
+            let (arrive, arrived) = mpsc::channel();
+            let (release, released) = mpsc::channel::<()>();
+            let released = Mutex::new(released);
+            let fired = AtomicBool::new(false);
+            let hook = move |stage: Stage| {
+                if stage != at || fired.swap(true, Ordering::SeqCst) {
+                    return Ok(());
+                }
+                let _ = arrive.send(());
+                match released.lock().unwrap().recv_timeout(limit) {
+                    Ok(()) => Ok(()),
+                    Err(_) => Err(std::io::Error::other(format!(
+                        "{HARNESS}: the paused transaction was not released"
+                    ))),
+                }
+            };
+            let pause = Pause {
+                arrived,
+                release: Some(release),
+                limit,
+            };
+            (pause, hook)
+        }
+
+        impl Pause {
+            /// Waits for the paused transaction. Fails as soon as `worker`
+            /// finishes without arriving, and once the limit passes.
+            fn arrived<T: std::fmt::Debug>(&self, worker: &Worker<T>) {
+                let deadline = Instant::now() + self.limit;
+                loop {
+                    match self.arrived.recv_timeout(Duration::from_millis(10)) {
+                        Ok(()) => return,
+                        Err(mpsc::RecvTimeoutError::Disconnected) => {
+                            panic!("{}: the pause hook is gone", HARNESS)
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {}
+                    }
+                    if let Ok(result) = worker.result.try_recv() {
+                        panic!(
+                            "{}: worker finished before reaching the pause: {:?}",
+                            HARNESS, result
+                        );
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "{HARNESS}: worker did not reach the pause within {:?}",
+                        self.limit
+                    );
+                }
+            }
+
+            fn release(&mut self) {
+                if let Some(release) = self.release.take() {
+                    let _ = release.send(());
+                }
+            }
+        }
+
+        /// A thread running one transaction, collected against a deadline.
+        /// On timeout the thread is abandoned rather than joined: the test
+        /// fails, and the thread ends with the test process.
+        struct Worker<T> {
+            result: mpsc::Receiver<std::thread::Result<T>>,
+            limit: Duration,
+        }
+
+        fn worker<T: Send + 'static>(run: impl FnOnce() -> T + Send + 'static) -> Worker<T> {
+            worker_within(DEADLOCK, run)
+        }
+
+        fn worker_within<T: Send + 'static>(
+            limit: Duration,
+            run: impl FnOnce() -> T + Send + 'static,
+        ) -> Worker<T> {
+            let (done, result) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = done.send(std::panic::catch_unwind(std::panic::AssertUnwindSafe(run)));
+            });
+            Worker { result, limit }
+        }
+
+        impl<T> Worker<T> {
+            /// The worker's value; a panic inside it is raised again here.
+            fn join(self) -> T {
+                match self.result.recv_timeout(self.limit) {
+                    Ok(Ok(value)) => value,
+                    Ok(Err(panic)) => std::panic::resume_unwind(panic),
+                    Err(_) => panic!("{HARNESS}: worker did not finish within {:?}", self.limit),
+                }
+            }
+
+            /// Fails the test if the worker has already finished.
+            fn assert_blocked(&self, what: &str) {
+                assert!(
+                    self.result.try_recv().is_err(),
+                    "{} finished while it should have been blocked",
+                    what
+                );
+            }
+        }
+
+        /// Reports every transaction reaching `at`, such as its lock attempt.
+        fn arrivals(
+            at: Stage,
+        ) -> (
+            mpsc::Receiver<()>,
+            impl Fn(Stage) -> std::io::Result<()> + Send + Sync,
+        ) {
+            let (arrive, arrived) = mpsc::channel();
+            let hook = move |stage: Stage| {
+                if stage == at {
+                    let _ = arrive.send(());
+                }
+                Ok(())
+            };
+            (arrived, hook)
+        }
+
+        /// Waits, bounded, for the next arrival reported by [`arrivals`].
+        fn next_arrival(arrived: &mpsc::Receiver<()>, what: &str) {
+            assert!(
+                arrived.recv_timeout(DEADLOCK).is_ok(),
+                "{}: {} did not reach its lock attempt within {:?}",
+                HARNESS,
+                what,
+                DEADLOCK
+            );
+        }
+
+        /// A child process running one test of this binary, with its output
+        /// in `log`. Dropping it kills and reaps the child, so a failing
+        /// parent never leaves one running.
+        struct ChildGuard(Option<Child>);
+
+        impl ChildGuard {
+            fn spawn(test: &str, env: &[(&str, &OsStr)], log: &Path) -> Self {
+                let output = std::fs::File::create(log).unwrap();
+                let errors = output.try_clone().unwrap();
+                let child = Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", test, "--nocapture", "--test-threads=1"])
+                    .envs(env.iter().copied())
+                    .stdout(output)
+                    .stderr(errors)
+                    .spawn()
+                    .unwrap();
+                Self(Some(child))
+            }
+
+            /// `Ok(status)` if the child exits within `limit`; otherwise it
+            /// is killed and reaped, and the reaped status is the `Err`.
+            fn wait(mut self, limit: Duration) -> Result<ExitStatus, ExitStatus> {
+                let deadline = Instant::now() + limit;
+                while Instant::now() < deadline {
+                    let child = self.0.as_mut().expect("the child was already collected");
+                    if let Some(status) = child.try_wait().unwrap() {
+                        self.0 = None;
+                        return Ok(status);
+                    }
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                let mut child = self.0.take().expect("the child was already collected");
+                let _ = child.kill();
+                Err(child.wait().unwrap())
+            }
+        }
+
+        impl Drop for ChildGuard {
+            fn drop(&mut self) {
+                if let Some(mut child) = self.0.take() {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+
+        /// The libtest name of a test in this module.
+        fn this_test(name: &str) -> String {
+            format!("{}::{name}", module_path!().split_once("::").unwrap().1)
+        }
+
+        fn fail_at(at: Stage) -> impl Fn(Stage) -> std::io::Result<()> {
+            move |stage| {
+                if stage == at {
+                    Err(std::io::Error::other("injected fault"))
+                } else {
+                    Ok(())
+                }
+            }
+        }
+
+        fn raw(path: &Path) -> Value {
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap()
+        }
+
+        /// Owned temporary replacements left in a directory.
+        fn temporaries(directory: &Path) -> Vec<String> {
+            std::fs::read_dir(directory)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                .filter(|name| name.ends_with(".tmp"))
+                .collect()
+        }
+
+        /// Writes legacy Cube metadata exactly as given and returns its bytes.
+        fn legacy(root: &TempRoot, chain: ChainId, cubes: &[(&str, bool)]) -> Vec<u8> {
+            let directory = root.chain(chain);
+            std::fs::create_dir_all(&directory).unwrap();
+            let cubes: Vec<Value> = cubes
+                .iter()
+                .map(|(id, masked)| {
+                    json!({
+                        "id": id,
+                        "name": format!("Private label {id}"),
+                        "network": chain.dir_name(),
+                        "created_at": 1_720_000_000,
+                        "balance_masked": masked,
+                    })
+                })
+                .collect();
+            let bytes =
+                serde_json::to_vec_pretty(&json!({ "cubes": cubes, "wallets": [] })).unwrap();
+            std::fs::write(directory.join(SETTINGS_FILE_NAME), &bytes).unwrap();
+            bytes
+        }
+
+        fn initialize(root: &TempRoot) -> Result<PreferencesReceipt, PrivacyInitError> {
+            GlobalSettings::load_or_initialize_preferences(&root.root())
+        }
+
+        fn hidden(root: &TempRoot) -> Option<bool> {
+            initialize(root).unwrap().balances_hidden()
+        }
+
+        fn window() -> WindowConfig {
+            WindowConfig {
+                width: 1024.0,
+                height: 768.0,
+            }
+        }
+
+        // --- Global transaction -------------------------------------------
+
+        #[test]
+        fn concurrent_first_writers_serialize_and_keep_both_fields() {
+            let root = TempRoot::new("first-file");
+            let path = root.global();
+            let (mut pause, pause_hook) = pause_once(Stage::Rename);
+            let (attempts, attempt_hook) = arrivals(Stage::BeforeLock);
+            let locked = Arc::new(Mutex::new(0usize));
+            let counter = locked.clone();
+            let _hook = install(&path, move |stage| {
+                if stage == Stage::Locked {
+                    *counter.lock().unwrap() += 1;
+                }
+                attempt_hook(stage)?;
+                pause_hook(stage)
+            });
+            let first_path = path.clone();
+            let first =
+                worker(move || GlobalSettings::update_window_config(&first_path, &window()));
+            next_arrival(&attempts, "the first writer");
+            pause.arrived(&first); // first writer holds the lock with its replacement staged
+            assert!(!path.exists(), "nothing is visible before the rename");
+            let second_path = path.clone();
+            let second =
+                worker(move || GlobalSettings::update_account_tier(&second_path, AccountTier::Pro));
+            next_arrival(&attempts, "the second writer");
+            std::thread::sleep(BLOCKED);
+            assert_eq!(
+                *locked.lock().unwrap(),
+                1,
+                "the second first-writer entered the transaction while the first held the lock"
+            );
+            second.assert_blocked("the second first-writer");
+            pause.release();
+            first.join().unwrap();
+            second.join().unwrap();
+            let saved = raw(&path);
+            assert_eq!(saved["account_tier"], "pro");
+            assert_eq!(saved["window_config"]["width"], 1024.0);
+        }
+
+        #[test]
+        fn concurrent_existing_file_writers_keep_nested_and_list_changes() {
+            let root = TempRoot::new("existing-concurrent");
+            let path = root.global();
+            std::fs::write(&path, br#"{"dismissed_hw_advisories":["a:1"]}"#).unwrap();
+            let (mut pause, pause_hook) = pause_once(Stage::Rename);
+            let (attempts, attempt_hook) = arrivals(Stage::BeforeLock);
+            let _hook = install(&path, move |stage| {
+                attempt_hook(stage)?;
+                pause_hook(stage)
+            });
+            let first_path = path.clone();
+            let first =
+                worker(move || GlobalSettings::dismiss_hw_advisory(&first_path, "b:2".to_string()));
+            next_arrival(&attempts, "the first writer");
+            pause.arrived(&first);
+            let second_path = path.clone();
+            let second = worker(move || {
+                GlobalSettings::update(
+                    &second_path,
+                    |s| {
+                        s.bitbox = Some(
+                            serde_json::from_value(json!({
+                                "noise_config": {
+                                    "app_static_privkey": vec![7u8; 32],
+                                    "device_static_pubkeys": []
+                                }
+                            }))
+                            .unwrap(),
+                        )
+                    },
+                    true,
+                )
+            });
+            next_arrival(&attempts, "the second writer");
+            std::thread::sleep(BLOCKED);
+            second.assert_blocked("the second writer");
+            pause.release();
+            first.join().unwrap();
+            second.join().unwrap();
+            let saved = raw(&path);
+            assert_eq!(saved["dismissed_hw_advisories"], json!(["a:1", "b:2"]));
+            assert_eq!(saved["bitbox"]["noise_config"]["app_static_privkey"][0], 7);
+        }
+
+        #[test]
+        fn unknown_and_nested_fields_survive_unrelated_writes() {
+            let root = TempRoot::new("unknown-fields");
+            let path = root.global();
+            std::fs::write(
+                &path,
+                serde_json::to_vec(&json!({
+                    "future_top_level": {"kept": [1, 2, {"deep": true}]},
+                    "account_tier": "legacy",
+                    "bitbox": {
+                        "future_bitbox_field": "kept",
+                        "noise_config": {
+                            "app_static_privkey": vec![1u8; 32],
+                            "device_static_pubkeys": [],
+                            "future_noise_field": 9
+                        }
+                    }
+                }))
+                .unwrap(),
+            )
+            .unwrap();
+            GlobalSettings::update_window_config(&path, &window()).unwrap();
+            let saved = raw(&path);
+            assert_eq!(
+                saved["future_top_level"],
+                json!({"kept": [1, 2, {"deep": true}]})
+            );
+            // An unchanged known field keeps its original (alias) spelling.
+            assert_eq!(saved["account_tier"], "legacy");
+            assert_eq!(saved["bitbox"]["future_bitbox_field"], "kept");
+            assert_eq!(saved["bitbox"]["noise_config"]["future_noise_field"], 9);
+            assert_eq!(saved["window_config"]["height"], 768.0);
+            assert!(saved.get("balance_privacy_initialized").is_none());
+
+            // Changing the nested known object still keeps its unknown siblings.
+            let changed: NoiseConfigData = serde_json::from_value(json!({
+                "app_static_privkey": vec![2u8; 32],
+                "device_static_pubkeys": []
+            }))
+            .unwrap();
+            PersistedBitboxNoiseConfig::new(&root.root())
+                .store_config(&changed)
+                .unwrap();
+            let saved = raw(&path);
+            assert_eq!(saved["bitbox"]["noise_config"]["app_static_privkey"][0], 2);
+            assert_eq!(saved["bitbox"]["noise_config"]["future_noise_field"], 9);
+            assert_eq!(saved["bitbox"]["future_bitbox_field"], "kept");
+            assert_eq!(saved["future_top_level"]["kept"][2]["deep"], true);
+        }
+
+        #[test]
+        fn default_and_serde_default_distinctions_are_preserved() {
+            let root = TempRoot::new("defaults");
+            // A first file keeps the historical full Rust Default serialization.
+            let fresh = root.global();
+            GlobalSettings::update_window_config(&fresh, &window()).unwrap();
+            assert_eq!(raw(&fresh)["show_direction_badges"], false);
+            assert!(!GlobalSettings::load_show_direction_badges(&fresh));
+            assert_eq!(raw(&fresh)["balance_privacy_initialized"], false);
+            // An existing file leaves an omitted field to its serde default.
+            let existing = root.0.join("existing.json");
+            std::fs::write(&existing, b"{}").unwrap();
+            GlobalSettings::update_window_config(&existing, &window()).unwrap();
+            assert!(raw(&existing).get("show_direction_badges").is_none());
+            assert!(GlobalSettings::load_show_direction_badges(&existing));
+            // Legacy theme presence still migrates only on a write.
+            std::fs::write(&existing, br#"{"theme_mode":"light"}"#).unwrap();
+            GlobalSettings::update_account_tier(&existing, AccountTier::Pro).unwrap();
+            assert_eq!(raw(&existing)["theme_preference"], "light");
+        }
+
+        #[test]
+        fn malformed_or_ambiguous_documents_are_refused_and_never_rewritten() {
+            let root = TempRoot::new("strict");
+            let path = root.global();
+            for document in [
+                "",
+                "   ",
+                "{",
+                r#"{"window_config":"#,
+                "[]",
+                r#""text""#,
+                "{} {}",
+                r#"{"hide_balances":"yes"}"#,
+                r#"{"hide_balances":null}"#,
+                r#"{"balance_privacy_initialized":1}"#,
+                r#"{"balance_privacy_initialized":null}"#,
+                r#"{"developer_mode":true,"developer_mode":false}"#,
+                r#"{"future":{"a":1,"a":2}}"#,
+                r#"{"seen_advisory_notices":[{"x":1,"x":1}]}"#,
+                r#"{"theme_preference":"sepia"}"#,
+                r#"{"account_tier":"platinum"}"#,
+            ] {
+                std::fs::write(&path, document).unwrap();
+                assert!(
+                    GlobalSettings::load_preferences(&path).is_err(),
+                    "{:?}",
+                    document
+                );
+                assert!(
+                    GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(true))
+                        .is_err(),
+                    "{:?}",
+                    document
+                );
+                assert!(GlobalSettings::update_window_config(&path, &window()).is_err());
+                assert!(matches!(
+                    initialize(&root),
+                    Err(PrivacyInitError::Settings(_))
+                ));
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), document);
+                assert!(temporaries(&root.0).is_empty());
+            }
+        }
+
+        #[test]
+        fn an_established_marker_without_its_choice_is_refused_unchanged() {
+            for document in [
+                r#"{"balance_privacy_initialized":true}"#,
+                r#"{"balance_privacy_initialized":true,"window_config":{"width":800.0,"height":600.0},"future":{"nested":[1,{"deep":true}]}}"#,
+                // Only the top-level choice counts.
+                r#"{"future":{"hide_balances":false},"balance_privacy_initialized":true}"#,
+            ] {
+                let root = TempRoot::new("marker-only");
+                let path = root.global();
+                std::fs::write(&path, document).unwrap();
+                assert!(
+                    GlobalSettings::load_preferences(&path).is_err(),
+                    "{}",
+                    document
+                );
+                assert!(GlobalSettings::update_window_config(&path, &window()).is_err());
+                for change in [
+                    PreferenceChange::HideBalances(false),
+                    PreferenceChange::HideBalances(true),
+                    PreferenceChange::DeveloperMode(true),
+                ] {
+                    // No receipt, so nothing can expose an apparent Some(false).
+                    assert!(
+                        GlobalSettings::save_preference(&path, change).is_err(),
+                        "{} {:?}",
+                        document,
+                        change
+                    );
+                }
+                assert!(matches!(
+                    initialize(&root),
+                    Err(PrivacyInitError::Settings(_))
+                ));
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), document);
+                assert!(temporaries(&root.0).is_empty(), "{}", document);
+            }
+            // Complete pairs keep their value; an unset marker still follows A4.
+            for (document, expected) in [
+                (
+                    r#"{"balance_privacy_initialized":true,"hide_balances":false}"#,
+                    false,
+                ),
+                (
+                    r#"{"hide_balances":true,"balance_privacy_initialized":true}"#,
+                    true,
+                ),
+                (r#"{"balance_privacy_initialized":false}"#, true),
+                (r#"{"hide_balances":false}"#, true),
+            ] {
+                let root = TempRoot::new("marker-pairs");
+                std::fs::write(root.global(), document).unwrap();
+                assert_eq!(hidden(&root), Some(expected), "{document}");
+                GlobalSettings::update_window_config(&root.global(), &window()).unwrap();
+                assert_eq!(hidden(&root), Some(expected), "{document}");
+                let saved = raw(&root.global());
+                assert_eq!(saved["hide_balances"], expected, "{document}");
+                assert_eq!(saved["balance_privacy_initialized"], true, "{document}");
+            }
+        }
+
+        #[test]
+        fn unknown_numbers_that_cannot_be_kept_exactly_refuse_every_write() {
+            let lossy = [
+                "18446744073709551616", // u64::MAX + 1
+                "-9223372036854775809", // i64::MIN - 1
+                "123456789012345678901234567890",
+                "0.12345678901234567890123456789",
+                // More digits than the nearest f64 (0.1) keeps.
+                "-0.1000000000000000055511151231257827",
+                "9007199254740993.0", // 2^53 + 1 as a float
+                "1.00000000000000000001e10",
+                "1e-400", // underflows to zero
+                "4.9e-324",
+                "-4.9e-324",
+            ];
+            for token in lossy {
+                for (shape, document) in [
+                    ("top level", format!(r#"{{"future":{token}}}"#)),
+                    (
+                        "nested map",
+                        format!(r#"{{"future":{{"deeper":{{"value":{token}}}}}}}"#),
+                    ),
+                    (
+                        "nested array",
+                        format!(r#"{{"developer_mode":true,"future":[0,[{token}]]}}"#),
+                    ),
+                    (
+                        "beside a changed window field",
+                        format!(
+                            r#"{{"window_config":{{"width":800.0,"height":600.0,"scale":{token}}}}}"#
+                        ),
+                    ),
+                ] {
+                    let root = TempRoot::new("lossy-number");
+                    let path = root.global();
+                    std::fs::write(&path, &document).unwrap();
+                    let case = format!("{shape}: {token}");
+                    // Reading loses nothing, so it is not refused.
+                    assert!(GlobalSettings::load_preferences(&path).is_ok(), "{}", case);
+                    assert!(
+                        GlobalSettings::update_window_config(&path, &window()).is_err(),
+                        "{}",
+                        case
+                    );
+                    assert!(
+                        GlobalSettings::update_account_tier(&path, AccountTier::Pro).is_err(),
+                        "{}",
+                        case
+                    );
+                    for hide in [true, false] {
+                        assert!(
+                            GlobalSettings::save_preference(
+                                &path,
+                                PreferenceChange::HideBalances(hide)
+                            )
+                            .is_err(),
+                            "{}",
+                            case
+                        );
+                    }
+                    assert!(
+                        matches!(initialize(&root), Err(PrivacyInitError::Settings(_))),
+                        "{}",
+                        case
+                    );
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), document, "{case}");
+                    assert!(temporaries(&root.0).is_empty(), "{}", case);
+                }
+            }
+
+            // Values that come back exactly still save; only the spelling may change.
+            for (token, written) in [
+                ("0", "0"),
+                ("42", "42"),
+                ("-42", "-42"),
+                ("18446744073709551615", "18446744073709551615"),
+                ("-9223372036854775808", "-9223372036854775808"),
+                ("0.5", "0.5"),
+                ("-2.25", "-2.25"),
+                ("123.456", "123.456"),
+                ("1024.0", "1024.0"),
+                ("1e3", "1000.0"),
+                ("2.5E-3", "0.0025"),
+            ] {
+                let root = TempRoot::new("exact-number");
+                let path = root.global();
+                let document = format!(
+                    r#"{{"future":{{"value":{token},"list":[{token}]}},"window_config":{{"width":1366.5,"height":768.25}}}}"#
+                );
+                std::fs::write(&path, &document).unwrap();
+                GlobalSettings::update_window_config(&path, &window()).unwrap();
+                assert_eq!(hidden(&root), Some(true), "{token}");
+                GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false))
+                    .unwrap();
+                let text = std::fs::read_to_string(&path).unwrap();
+                assert!(
+                    text.contains(&format!("\"value\": {written}")),
+                    "{}: {}",
+                    token,
+                    text
+                );
+                assert_eq!(raw(&path)["window_config"]["width"], 1024.0, "{token}");
+            }
+
+            // Known typed fields are written from their typed value, as before,
+            // so an unusual spelling there never blocks a write.
+            let root = TempRoot::new("known-window");
+            let path = root.global();
+            std::fs::write(
+                &path,
+                br#"{"window_config":{"width":1365.3333740234375,"height":767.99999999999999999999}}"#,
+            )
+            .unwrap();
+            GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(true)).unwrap();
+            GlobalSettings::update_window_config(&path, &window()).unwrap();
+            assert_eq!(raw(&path)["window_config"]["height"], 768.0);
+        }
+
+        #[test]
+        fn faults_before_the_rename_leave_prior_bytes_or_absence() {
+            for existing in [false, true] {
+                for stage in [
+                    Stage::Locked,
+                    Stage::Create,
+                    Stage::Write,
+                    Stage::Flush,
+                    Stage::FileSync,
+                    Stage::Rename,
+                ] {
+                    let root = TempRoot::new("precommit");
+                    let path = root.global();
+                    if existing {
+                        std::fs::write(&path, br#"{"developer_mode":true}"#).unwrap();
+                    }
+                    let before = std::fs::read(&path).ok();
+                    let hook = install(&path, fail_at(stage));
+                    assert!(
+                        GlobalSettings::save_preference(
+                            &path,
+                            PreferenceChange::HideBalances(true)
+                        )
+                        .is_err(),
+                        "{:?}",
+                        stage
+                    );
+                    assert!(GlobalSettings::update_window_config(&path, &window()).is_err());
+                    assert!(initialize(&root).is_err());
+                    assert_eq!(std::fs::read(&path).ok(), before, "{stage:?}");
+                    assert!(temporaries(&root.0).is_empty(), "{:?}", stage);
+                    drop(hook);
+                    // No marker was published: initialization still has to commit.
+                    let receipt = initialize(&root).unwrap();
+                    assert!(matches!(receipt.persistence(), Persistence::Committed(_)));
+                    assert_eq!(receipt.balances_hidden(), Some(true));
+                }
+            }
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn a_failed_directory_sync_reports_a_committed_unconfirmed_save() {
+            let root = TempRoot::new("dirsync");
+            let path = root.global();
+            let _hook = install(&path, fail_at(Stage::DirectorySync));
+            let receipt =
+                GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(true))
+                    .unwrap();
+            assert!(matches!(
+                receipt.persistence(),
+                Persistence::Committed(Durability::Unconfirmed(_))
+            ));
+            assert_eq!(receipt.balances_hidden(), Some(true));
+            // The new bytes are visible: the save was not undone.
+            assert_eq!(raw(&path)["hide_balances"], true);
+            assert_eq!(raw(&path)["balance_privacy_initialized"], true);
+            // Legacy wrappers report the committed save as success.
+            GlobalSettings::update_window_config(&path, &window()).unwrap();
+            assert!(GlobalSettings::update_preference(
+                &path,
+                PreferenceChange::Motion(MotionPreference::Reduced)
+            )
+            .is_ok());
+        }
+
+        #[test]
+        fn a_failed_lock_release_reports_committed_and_does_not_wedge_the_lock() {
+            let root = TempRoot::new("unlock");
+            let path = root.global();
+            let hook = install(&path, fail_at(Stage::Unlock));
+            let receipt =
+                GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false))
+                    .unwrap();
+            assert!(matches!(
+                receipt.persistence(),
+                Persistence::Committed(Durability::Unconfirmed(_))
+            ));
+            assert_eq!(raw(&path)["balance_privacy_initialized"], true);
+            drop(hook);
+            GlobalSettings::update_account_tier(&path, AccountTier::Estate).unwrap();
+            assert_eq!(raw(&path)["account_tier"], "estate");
+            assert_eq!(raw(&path)["hide_balances"], false);
+        }
+
+        #[test]
+        fn reads_create_nothing_and_writes_create_only_the_stable_lock() {
+            let root = TempRoot::new("read-only");
+            let path = root.global();
+            GlobalSettings::load_preferences(&path).unwrap();
+            GlobalSettings::load_window_config(&path);
+            GlobalSettings::load_developer_mode(&path);
+            assert_eq!(std::fs::read_dir(&root.0).unwrap().count(), 0);
+            let missing_root = root.0.join("not-created").join(DEFAULT_FILE_NAME);
+            assert_eq!(
+                GlobalSettings::load_preferences(&missing_root).unwrap(),
+                DevicePreferences::default()
+            );
+            assert!(!root.0.join("not-created").exists());
+            GlobalSettings::update_window_config(&path, &window()).unwrap();
+            let mut names: Vec<_> = std::fs::read_dir(&root.0)
+                .unwrap()
+                .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect();
+            names.sort();
+            assert_eq!(names, ["global_settings.json", "global_settings.lock"]);
+        }
+
+        #[test]
+        fn non_hide_saves_do_not_establish_privacy_provenance() {
+            let root = TempRoot::new("provenance");
+            let path = root.global();
+            for change in [
+                PreferenceChange::Theme(ThemePreference::Light),
+                PreferenceChange::LauncherStyle(LauncherStyle::List),
+                PreferenceChange::Motion(MotionPreference::Reduced),
+                PreferenceChange::DeveloperMode(true),
+                PreferenceChange::BitcoinBlake2bBeta(true),
+            ] {
+                let receipt = GlobalSettings::save_preference(&path, change).unwrap();
+                assert!(!receipt.privacy_established(), "{:?}", change);
+                assert_eq!(receipt.balances_hidden(), None, "{change:?}");
+            }
+            let receipt =
+                GlobalSettings::save_preference(&path, PreferenceChange::HideBalances(false))
+                    .unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(false));
+            // Established provenance survives later unrelated saves.
+            let receipt =
+                GlobalSettings::save_preference(&path, PreferenceChange::DeveloperMode(false))
+                    .unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(false));
+            GlobalSettings::update_window_config(&path, &window()).unwrap();
+            assert_eq!(raw(&path)["balance_privacy_initialized"], true);
+        }
+
+        #[cfg(unix)]
+        #[test]
+        fn links_and_non_regular_endpoints_are_refused_without_side_effects() {
+            use std::os::unix::fs::symlink;
+            let root = TempRoot::new("refusals");
+            let target = root.0.join("elsewhere.json");
+            std::fs::write(&target, br#"{"developer_mode":true}"#).unwrap();
+            let snapshot = |root: &TempRoot| {
+                let mut entries: Vec<_> = std::fs::read_dir(&root.0)
+                    .unwrap()
+                    .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                entries.sort();
+                entries
+            };
+            let refused = |path: &Path| {
+                assert!(GlobalSettings::load_preferences(path).is_err());
+                assert!(GlobalSettings::update_window_config(path, &window()).is_err());
+                assert!(GlobalSettings::save_preference(
+                    path,
+                    PreferenceChange::HideBalances(true)
+                )
+                .is_err());
+            };
+
+            // Settings file as a link to a valid file, and as a dangling link.
+            let linked = root.0.join("linked.json");
+            symlink(&target, &linked).unwrap();
+            refused(&linked);
+            let dangling = root.0.join("dangling.json");
+            symlink(root.0.join("missing.json"), &dangling).unwrap();
+            refused(&dangling);
+            assert!(!root.0.join("missing.json").exists());
+            // Settings path as a directory.
+            let directory = root.0.join("directory.json");
+            std::fs::create_dir(&directory).unwrap();
+            refused(&directory);
+            // Lock endpoint as a link and as a directory.
+            let lock_linked = root.0.join("lock-linked.json");
+            std::fs::write(&lock_linked, b"{}").unwrap();
+            symlink(&target, root.0.join("lock-linked.lock")).unwrap();
+            refused(&lock_linked);
+            let lock_directory = root.0.join("lock-directory.json");
+            std::fs::write(&lock_directory, b"{}").unwrap();
+            std::fs::create_dir(root.0.join("lock-directory.lock")).unwrap();
+            assert!(GlobalSettings::update_window_config(&lock_directory, &window()).is_err());
+            assert!(GlobalSettings::load_preferences(&lock_directory).is_err());
+
+            let before = snapshot(&root);
+            refused(&linked);
+            refused(&dangling);
+            assert_eq!(
+                snapshot(&root),
+                before,
+                "refusals created or removed entries"
+            );
+            assert_eq!(
+                std::fs::read(&target).unwrap(),
+                br#"{"developer_mode":true}"#
+            );
+            assert_eq!(std::fs::read(&lock_linked).unwrap(), b"{}");
+            assert!(std::fs::symlink_metadata(&linked)
+                .unwrap()
+                .file_type()
+                .is_symlink());
+
+            // Unreadable file: an error, never defaults over it.
+            if permissions_enforced(&root.0) {
+                use std::os::unix::fs::PermissionsExt;
+                let unreadable = root.0.join("unreadable.json");
+                std::fs::write(&unreadable, br#"{"developer_mode":true}"#).unwrap();
+                std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o000))
+                    .unwrap();
+                refused(&unreadable);
+                std::fs::set_permissions(&unreadable, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+                assert_eq!(
+                    std::fs::read(&unreadable).unwrap(),
+                    br#"{"developer_mode":true}"#
+                );
+            }
+
+            // A user-selected data root may itself be a link.
+            let real = TempRoot::new("real-root");
+            let linked_root = root.0.join("linked-root");
+            symlink(&real.0, &linked_root).unwrap();
+            let via_link = linked_root.join(DEFAULT_FILE_NAME);
+            GlobalSettings::update_window_config(&via_link, &window()).unwrap();
+            assert!(real.global().is_file());
+        }
+
+        #[test]
+        fn a_read_only_settings_file_is_refused_not_replaced() {
+            let root = TempRoot::new("read-only-file");
+            let path = root.global();
+            std::fs::write(&path, br#"{"developer_mode":true}"#).unwrap();
+            let original = std::fs::metadata(&path).unwrap().permissions();
+            let mut read_only = original.clone();
+            read_only.set_readonly(true);
+            std::fs::set_permissions(&path, read_only).unwrap();
+            assert!(GlobalSettings::update_window_config(&path, &window()).is_err());
+            assert_eq!(std::fs::read(&path).unwrap(), br#"{"developer_mode":true}"#);
+            assert!(temporaries(&root.0).is_empty());
+            std::fs::set_permissions(&path, original).unwrap();
+        }
+
+        /// The child half runs in another process, so the OS lock (not an
+        /// in-process mutex) must keep the parent's read after its commit.
+        #[test]
+        fn the_global_lock_serializes_writers_across_processes() {
+            const CHILD: &str = "COINCUBE_R04B_GLOBAL_LOCK_CHILD";
+            if let Some(directory) = std::env::var_os(CHILD) {
+                let directory = PathBuf::from(directory);
+                let path = directory.join(DEFAULT_FILE_NAME);
+                let (locked, waiting) = (
+                    directory.join("child-locked"),
+                    directory.join("parent-waiting"),
+                );
+                let _hook = install(&path, move |stage| {
+                    if stage == Stage::Locked {
+                        std::fs::write(&locked, b"")?;
+                        let deadline = Instant::now() + DEADLOCK;
+                        while !waiting.exists() && Instant::now() < deadline {
+                            std::thread::sleep(Duration::from_millis(5));
+                        }
+                    }
+                    Ok(())
+                });
+                GlobalSettings::update_account_tier(&path, AccountTier::Pro).unwrap();
+                return;
+            }
+            let root = TempRoot::new("process-lock");
+            let path = root.global();
+            let log = root.0.join("child.log");
+            // Declared after `root`, so a failing parent kills and reaps it first.
+            let child = ChildGuard::spawn(
+                &this_test("the_global_lock_serializes_writers_across_processes"),
+                &[(CHILD, root.0.as_os_str())],
+                &log,
+            );
+            let locked = root.0.join("child-locked");
+            let deadline = Instant::now() + DEADLOCK;
+            while !locked.exists() {
+                assert!(
+                    Instant::now() < deadline,
+                    "{}: the child never took the lock",
+                    HARNESS
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+            let waiting = root.0.join("parent-waiting");
+            let observed = path.clone();
+            let _hook = install(&path, move |stage| match stage {
+                Stage::BeforeLock => std::fs::write(&waiting, b""),
+                Stage::Locked => {
+                    let committed = std::fs::read(&observed)
+                        .map(|bytes| String::from_utf8_lossy(&bytes).contains("\"pro\""))
+                        .unwrap_or(false);
+                    if committed {
+                        Ok(())
+                    } else {
+                        Err(std::io::Error::other(
+                            "entered the transaction before the other process committed",
+                        ))
+                    }
+                }
+                _ => Ok(()),
+            });
+            let parent_path = path.clone();
+            worker(move || GlobalSettings::update_window_config(&parent_path, &window()))
+                .join()
+                .unwrap();
+            let status = child
+                .wait(DEADLOCK)
+                .expect("the child did not exit in time; it was killed and reaped");
+            assert!(
+                status.success(),
+                "{}",
+                std::fs::read_to_string(&log).unwrap_or_default()
+            );
+            let saved = raw(&path);
+            assert_eq!(saved["account_tier"], "pro");
+            assert_eq!(saved["window_config"]["width"], 1024.0);
+        }
+
+        // --- Privacy initialization decision table ---------------------------
+
+        #[test]
+        fn initialization_decision_table() {
+            // Empty root: no new-installation proof, so hidden once.
+            let root = TempRoot::new("empty");
+            assert_eq!(hidden(&root), Some(true));
+            assert_eq!(raw(&root.global())["balance_privacy_initialized"], true);
+
+            // Absent global file + a legacy masked Cube.
+            let root = TempRoot::new("legacy-masked");
+            let legacy_bytes = legacy(&root, ChainId::Bitcoin, &[("a", false), ("b", true)]);
+            let receipt = initialize(&root).unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(true));
+            assert!(matches!(receipt.persistence(), Persistence::Committed(_)));
+            assert_eq!(
+                std::fs::read(root.chain(ChainId::Bitcoin).join(SETTINGS_FILE_NAME)).unwrap(),
+                legacy_bytes
+            );
+
+            // Intermediate R04a file: false written, no marker, legacy true.
+            let root = TempRoot::new("intermediate-false");
+            std::fs::write(
+                root.global(),
+                br#"{"hide_balances":false,"developer_mode":true,"future":1}"#,
+            )
+            .unwrap();
+            legacy(&root, ChainId::Testnet4, &[("t", true)]);
+            assert_eq!(hidden(&root), Some(true));
+            let saved = raw(&root.global());
+            assert_eq!(saved["developer_mode"], true);
+            assert_eq!(saved["future"], 1);
+
+            // Legacy JSON without the new fields, unmasked Cubes only: hidden
+            // once on upgrade (A4), not the old automatic false.
+            let root = TempRoot::new("legacy-clear");
+            std::fs::write(root.global(), br#"{"theme_mode":"light"}"#).unwrap();
+            let legacy_bytes = legacy(&root, ChainId::Bitcoin, &[("a", false)]);
+            assert_eq!(hidden(&root), Some(true));
+            assert_eq!(raw(&root.global())["theme_mode"], "light");
+            assert_eq!(
+                std::fs::read(root.chain(ChainId::Bitcoin).join(SETTINGS_FILE_NAME)).unwrap(),
+                legacy_bytes
+            );
+
+            // Unresolved global false + every legacy mask false: still hidden.
+            let root = TempRoot::new("global-false-clear");
+            std::fs::write(root.global(), br#"{"hide_balances":false}"#).unwrap();
+            for chain in ChainId::ALL {
+                legacy(&root, chain, &[("a", false)]);
+            }
+            assert_eq!(hidden(&root), Some(true));
+
+            // Unresolved global true stays true.
+            let root = TempRoot::new("global-true");
+            std::fs::write(root.global(), br#"{"hide_balances":true}"#).unwrap();
+            legacy(&root, ChainId::Bitcoin, &[("a", false)]);
+            assert_eq!(hidden(&root), Some(true));
+
+            // An established choice always wins over legacy masks, restart
+            // after restart, and is never rewritten by initialization.
+            for (established, mask) in [(false, true), (true, false)] {
+                let root = TempRoot::new("established");
+                legacy(&root, ChainId::Bitcoin, &[("a", mask)]);
+                GlobalSettings::save_preference(
+                    &root.global(),
+                    PreferenceChange::HideBalances(established),
+                )
+                .unwrap();
+                let before = std::fs::read(root.global()).unwrap();
+                for _ in 0..2 {
+                    let receipt = initialize(&root).unwrap();
+                    assert_eq!(receipt.balances_hidden(), Some(established));
+                    assert_eq!(receipt.persistence(), &Persistence::Unchanged);
+                }
+                assert_eq!(std::fs::read(root.global()).unwrap(), before);
+            }
+
+            // After the one-time hide, an explicit Show persists and legacy
+            // masks are never applied again.
+            let root = TempRoot::new("show-after-upgrade");
+            legacy(&root, ChainId::Signet, &[("s", true)]);
+            assert_eq!(hidden(&root), Some(true));
+            let shown = GlobalSettings::save_preference(
+                &root.global(),
+                PreferenceChange::HideBalances(false),
+            )
+            .unwrap();
+            assert_eq!(shown.balances_hidden(), Some(false));
+            assert!(matches!(shown.persistence(), Persistence::Committed(_)));
+            legacy(&root, ChainId::Testnet, &[("t", true)]);
+            for _ in 0..2 {
+                let receipt = initialize(&root).unwrap();
+                assert_eq!(receipt.balances_hidden(), Some(false));
+                assert_eq!(receipt.persistence(), &Persistence::Unchanged);
+            }
+            // And an explicit Hide persists the same way.
+            GlobalSettings::save_preference(&root.global(), PreferenceChange::HideBalances(true))
+                .unwrap();
+            assert_eq!(hidden(&root), Some(true));
+        }
+
+        #[test]
+        fn automatic_initialization_never_shows_amounts_without_new_install_proof() {
+            // Every unresolved root hides, including roots that look new or
+            // freshly wiped.
+            type RootCase = (&'static str, fn(&TempRoot));
+            let roots: [RootCase; 5] = [
+                ("no-chains", |_: &TempRoot| {}),
+                ("scaffolding-only", |root: &TempRoot| {
+                    for chain in ChainId::ALL {
+                        let directory = root.chain(chain);
+                        std::fs::create_dir_all(directory.join("data")).unwrap();
+                        std::fs::write(directory.join("settings.lock"), b"").unwrap();
+                    }
+                }),
+                ("empty-metadata", |root: &TempRoot| {
+                    let directory = root.chain(ChainId::Bitcoin);
+                    std::fs::create_dir_all(&directory).unwrap();
+                    std::fs::write(directory.join(SETTINGS_FILE_NAME), br#"{"cubes":[]}"#).unwrap();
+                }),
+                ("unmasked-everywhere", |root: &TempRoot| {
+                    for chain in ChainId::ALL {
+                        legacy(root, chain, &[("a", false), ("b", false)]);
+                    }
+                }),
+                ("unrelated-global-writes", |root: &TempRoot| {
+                    GlobalSettings::update_window_config(&root.global(), &window()).unwrap();
+                    GlobalSettings::save_preference(
+                        &root.global(),
+                        PreferenceChange::Motion(MotionPreference::Reduced),
+                    )
+                    .unwrap();
+                }),
+            ];
+            for (tag, setup) in roots {
+                let root = TempRoot::new(tag);
+                setup(&root);
+                let receipt = initialize(&root).unwrap();
+                assert_eq!(receipt.balances_hidden(), Some(true), "{tag}");
+                assert!(receipt.preferences().hide_balances, "{}", tag);
+                assert!(
+                    matches!(receipt.persistence(), Persistence::Committed(_)),
+                    "{}",
+                    tag
+                );
+                assert_eq!(raw(&root.global())["hide_balances"], true, "{tag}");
+            }
+
+            // A missing root is refused and never created.
+            let root = TempRoot::new("absent-parent");
+            let missing = CoincubeDirectory::new(root.0.join("absent-root"));
+            assert!(matches!(
+                GlobalSettings::load_or_initialize_preferences(&missing),
+                Err(PrivacyInitError::Settings(_))
+            ));
+            assert!(!root.0.join("absent-root").exists());
+        }
+
+        #[test]
+        fn unrelated_writes_before_initialization_keep_privacy_unresolved() {
+            let root = TempRoot::new("unrelated-first");
+            // No legacy mask anywhere: the serialized false is still not authority.
+            legacy(&root, ChainId::Signet, &[("s", false)]);
+            GlobalSettings::update_window_config(&root.global(), &window()).unwrap();
+            GlobalSettings::dismiss_hw_advisory(&root.global(), "x:1".into()).unwrap();
+            GlobalSettings::save_preference(
+                &root.global(),
+                PreferenceChange::Theme(ThemePreference::Dark),
+            )
+            .unwrap();
+            assert_eq!(raw(&root.global())["hide_balances"], false);
+            assert_eq!(raw(&root.global())["balance_privacy_initialized"], false);
+            assert_eq!(hidden(&root), Some(true));
+            // Idempotent and unchanged afterwards.
+            assert_eq!(
+                initialize(&root).unwrap().persistence(),
+                &Persistence::Unchanged
+            );
+            GlobalSettings::update_window_config(&root.global(), &window()).unwrap();
+            assert_eq!(hidden(&root), Some(true));
+        }
+
+        #[test]
+        fn an_explicit_choice_before_initialization_takes_the_lock_wins() {
+            for explicit in [false, true] {
+                for global_exists in [false, true] {
+                    let root = TempRoot::new("explicit-wins");
+                    let path = root.global();
+                    if global_exists {
+                        std::fs::write(&path, br#"{"account_tier":"pro"}"#).unwrap();
+                    }
+                    let (mut pause, hook) = pause_once(Stage::BeforeLock);
+                    let _hook = install(&path, hook);
+                    let init_root = root.root();
+                    let initializer =
+                        worker(move || GlobalSettings::load_or_initialize_preferences(&init_root));
+                    pause.arrived(&initializer); // read an unresolved file, lock not yet taken
+                    let choice_path = path.clone();
+                    let chosen = worker(move || {
+                        GlobalSettings::save_preference(
+                            &choice_path,
+                            PreferenceChange::HideBalances(explicit),
+                        )
+                    })
+                    .join()
+                    .unwrap();
+                    assert_eq!(chosen.balances_hidden(), Some(explicit));
+                    let window_path = path.clone();
+                    worker(move || GlobalSettings::update_window_config(&window_path, &window()))
+                        .join()
+                        .unwrap();
+                    pause.release();
+                    let receipt = initializer.join().unwrap();
+                    assert_eq!(receipt.balances_hidden(), Some(explicit));
+                    assert_eq!(receipt.persistence(), &Persistence::Unchanged);
+                    let saved = raw(&path);
+                    assert_eq!(saved["hide_balances"], explicit);
+                    assert_eq!(saved["window_config"]["width"], 1024.0);
+                    if global_exists {
+                        assert_eq!(saved["account_tier"], "pro");
+                    }
+                }
+            }
+        }
+
+        #[test]
+        fn an_explicit_choice_waiting_behind_initialization_commits_after_it() {
+            for explicit in [false, true] {
+                let root = TempRoot::new("explicit-after");
+                let path = root.global();
+                let (mut pause, pause_hook) = pause_once(Stage::Rename);
+                let (attempts, attempt_hook) = arrivals(Stage::BeforeLock);
+                let _hook = install(&path, move |stage| {
+                    attempt_hook(stage)?;
+                    pause_hook(stage)
+                });
+                let init_root = root.root();
+                let initializer =
+                    worker(move || GlobalSettings::load_or_initialize_preferences(&init_root));
+                next_arrival(&attempts, "initialization");
+                pause.arrived(&initializer); // holds the global lock with true staged
+                let choice_path = path.clone();
+                let choice = worker(move || {
+                    GlobalSettings::save_preference(
+                        &choice_path,
+                        PreferenceChange::HideBalances(explicit),
+                    )
+                });
+                next_arrival(&attempts, "the explicit choice");
+                std::thread::sleep(BLOCKED);
+                choice.assert_blocked("the explicit choice");
+                pause.release();
+                let initialized = initializer.join().unwrap();
+                assert_eq!(initialized.balances_hidden(), Some(true));
+                assert!(matches!(
+                    initialized.persistence(),
+                    Persistence::Committed(_)
+                ));
+                let chosen = choice.join().unwrap();
+                assert_eq!(chosen.balances_hidden(), Some(explicit));
+                assert_eq!(hidden(&root), Some(explicit));
+            }
+        }
+
+        #[test]
+        fn an_unrelated_writer_before_initialization_takes_the_lock_is_kept() {
+            let root = TempRoot::new("unrelated-during");
+            let path = root.global();
+            let (mut pause, hook) = pause_once(Stage::BeforeLock);
+            let _hook = install(&path, hook);
+            let init_root = root.root();
+            let initializer =
+                worker(move || GlobalSettings::load_or_initialize_preferences(&init_root));
+            pause.arrived(&initializer);
+            let tier_path = path.clone();
+            worker(move || GlobalSettings::update_account_tier(&tier_path, AccountTier::Estate))
+                .join()
+                .unwrap();
+            pause.release();
+            let receipt = initializer.join().unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(true));
+            assert!(matches!(receipt.persistence(), Persistence::Committed(_)));
+            assert_eq!(raw(&path)["account_tier"], "estate");
+        }
+
+        #[test]
+        fn orphan_temporaries_are_never_authority() {
+            let root = TempRoot::new("orphans");
+            let orphan = root
+                .0
+                .join(format!(".{DEFAULT_FILE_NAME}.{}.tmp", uuid::Uuid::new_v4()));
+            // An orphaned established Show must not count as a choice.
+            std::fs::write(
+                &orphan,
+                br#"{"hide_balances":false,"balance_privacy_initialized":true}"#,
+            )
+            .unwrap();
+            let chain = root.chain(ChainId::Testnet);
+            std::fs::create_dir_all(chain.join("data")).unwrap();
+            std::fs::write(chain.join("settings.lock"), b"").unwrap();
+            // Cube files play no part, orphaned or not.
+            let chain_orphan = chain.join(format!(".settings-{}.tmp", uuid::Uuid::new_v4()));
+            std::fs::write(&chain_orphan, b"{").unwrap();
+            let receipt = initialize(&root).unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(true));
+            assert!(matches!(receipt.persistence(), Persistence::Committed(_)));
+            assert!(orphan.is_file() && chain_orphan.is_file());
+        }
+
+        // --- Independence from Cube metadata ------------------------------
+
+        #[test]
+        fn initialization_never_reads_or_changes_cube_metadata() {
+            let root = TempRoot::new("metadata-independent");
+            let broken: [&[u8]; 4] = [
+                b"{",
+                b"[]",
+                br#"{"cubes":[{"id":"a"}]}"#,
+                br#"{"cubes":[{"id":"x","name":"n","network":"signet","created_at":1,"balance_masked":"yes"}]}"#,
+            ];
+            // Broken, inconsistent or misplaced metadata on every known chain,
+            // opaque seed and wallet files, and layouts no chain owns.
+            let mut files = vec![(root.0.join(SETTINGS_FILE_NAME), b"{}".to_vec())];
+            for (chain, document) in ChainId::ALL.iter().zip(broken.iter().cycle()) {
+                let directory = root.chain(*chain);
+                files.push((directory.join(SETTINGS_FILE_NAME), document.to_vec()));
+                files.push((
+                    directory.join("mnemonics").join("slot-file"),
+                    b"seed".to_vec(),
+                ));
+                files.push((
+                    directory.join("data").join("wallet.sqlite"),
+                    b"wallet".to_vec(),
+                ));
+            }
+            files.push((
+                root.0.join("old-layout").join(SETTINGS_FILE_NAME),
+                b"{".to_vec(),
+            ));
+            for (path, bytes) in &files {
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(path, bytes).unwrap();
+            }
+            let listing = |directory: &Path| {
+                let mut names: Vec<String> = std::fs::read_dir(directory)
+                    .unwrap()
+                    .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+                    .collect();
+                names.sort();
+                names
+            };
+            let before = listing(&root.0);
+            // Unreadable Cube directories cannot matter to a global-only decision.
+            #[cfg(unix)]
+            let unreadable = [
+                root.chain(ChainId::Bitcoin),
+                root.chain(ChainId::Signet).join("mnemonics"),
+            ];
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                for directory in &unreadable {
+                    std::fs::set_permissions(directory, std::fs::Permissions::from_mode(0o000))
+                        .unwrap();
+                }
+            }
+
+            let receipt = initialize(&root).unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(true));
+            assert!(matches!(receipt.persistence(), Persistence::Committed(_)));
+            let shown = GlobalSettings::save_preference(
+                &root.global(),
+                PreferenceChange::HideBalances(false),
+            )
+            .unwrap();
+            assert_eq!(shown.balances_hidden(), Some(false));
+            assert_eq!(initialize(&root).unwrap().balances_hidden(), Some(false));
+
+            #[cfg(unix)]
+            {
+                for directory in &unreadable {
+                    restore_permissions(directory);
+                }
+            }
+            for (path, bytes) in &files {
+                assert_eq!(&std::fs::read(path).unwrap(), bytes, "{path:?} changed");
+            }
+            // Only the global file and its stable lock are new: no inventory
+            // gate, fence or epoch file.
+            let mut expected = before;
+            expected.extend([
+                DEFAULT_FILE_NAME.to_string(),
+                "global_settings.lock".to_string(),
+            ]);
+            expected.sort();
+            assert_eq!(listing(&root.0), expected);
+        }
+
+        // --- The harness itself -------------------------------------------
+
+        /// An early worker failure, a lock that is never released and a child
+        /// that never exits each end within their limits; the stuck child is
+        /// killed and reaped rather than left behind.
+        #[test]
+        fn the_test_harness_fails_within_its_limits_instead_of_hanging() {
+            const PROBE: &str = "COINCUBE_R04B_HARNESS_PROBE";
+            const PROBE_DIR: &str = "COINCUBE_R04B_HARNESS_PROBE_DIR";
+            const LIMIT: Duration = Duration::from_millis(500);
+            const NAME: &str = "the_test_harness_fails_within_its_limits_instead_of_hanging";
+            if let (Ok(probe), Some(directory)) =
+                (std::env::var(PROBE), std::env::var_os(PROBE_DIR))
+            {
+                let path = PathBuf::from(directory).join(DEFAULT_FILE_NAME);
+                match probe.as_str() {
+                    "early-failure" => {
+                        // Malformed, so the writer fails before reaching the pause.
+                        std::fs::write(&path, b"{").unwrap();
+                        let (pause, hook) = pause_within(Stage::Rename, LIMIT);
+                        let _hook = install(&path, hook);
+                        let writer = worker_within(LIMIT, move || {
+                            GlobalSettings::update_window_config(&path, &window())
+                        });
+                        pause.arrived(&writer);
+                    }
+                    "stuck-lock" | "stuck-child" => {
+                        // A second open file description, so its lock excludes
+                        // the transaction's even within this process.
+                        let lock_path = GlobalSettings::lock_path(&path).unwrap();
+                        let lock = open_or_create_lock(&lock_path).unwrap();
+                        FileExt::lock_exclusive(&lock).unwrap();
+                        std::mem::forget(lock);
+                        if probe == "stuck-lock" {
+                            worker_within(LIMIT, move || {
+                                GlobalSettings::update_window_config(&path, &window())
+                            })
+                            .join()
+                            .unwrap();
+                        } else {
+                            // Deliberately unbounded: only the parent's watchdog ends it.
+                            GlobalSettings::update_window_config(&path, &window()).unwrap();
+                        }
+                    }
+                    other => panic!("unknown probe {}", other),
+                }
+                panic!("probe {} finished instead of failing", probe);
+            }
+
+            let root = TempRoot::new("harness-probes");
+            let spawn = |probe: &str| {
+                let directory = root.0.join(probe);
+                std::fs::create_dir_all(&directory).unwrap();
+                let log = root.0.join(format!("{probe}.log"));
+                let child = ChildGuard::spawn(
+                    &this_test(NAME),
+                    &[
+                        (PROBE, OsStr::new(probe)),
+                        (PROBE_DIR, directory.as_os_str()),
+                    ],
+                    &log,
+                );
+                (child, log)
+            };
+            for (probe, expected) in [
+                ("early-failure", "worker finished before reaching the pause"),
+                ("stuck-lock", "worker did not finish within"),
+            ] {
+                let (child, log) = spawn(probe);
+                let status = child
+                    .wait(DEADLOCK)
+                    .expect("a probe child did not exit by itself and was killed");
+                let output = std::fs::read_to_string(&log).unwrap_or_default();
+                assert!(!status.success(), "{}: {}", probe, output);
+                assert!(
+                    output.contains(&format!("{HARNESS}: {expected}")),
+                    "{}: {}",
+                    probe,
+                    output
+                );
+            }
+            let (child, log) = spawn("stuck-child");
+            let killed = child
+                .wait(Duration::from_secs(5))
+                .expect_err("a child blocked on a lock exited by itself");
+            let output = std::fs::read_to_string(&log).unwrap_or_default();
+            assert!(!killed.success(), "{}", output);
+            #[cfg(unix)]
+            {
+                use std::os::unix::process::ExitStatusExt;
+                // Killed by the watchdog, and reaped: the status came from wait().
+                assert_eq!(killed.signal(), Some(9), "{output}");
+            }
+        }
+
+        #[test]
+        fn settings_errors_stay_settings_errors() {
+            let root = TempRoot::new("error-kind");
+            std::fs::write(root.global(), b"{").unwrap();
+            assert!(matches!(
+                initialize(&root),
+                Err(PrivacyInitError::Settings(SettingsError::ReadingFile(_)))
+            ));
         }
     }
 }
@@ -2637,11 +5128,17 @@ mod test {
 
     #[test]
     fn test_update_global_config() {
-        let path = env::current_dir()
+        // Writes leave a stable lock beside the file, so work on a temporary
+        // copy rather than mutating the tracked fixture in place.
+        let fixture = env::current_dir()
             .unwrap()
             .join("test_assets")
             .join("global_settings.json");
-        assert!(path.exists());
+        let dir = env::temp_dir().join(format!("coincube-global-fixture-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("global_settings.json");
+        std::fs::copy(&fixture, &path).unwrap();
+        let fixture_bytes = std::fs::read(&fixture).unwrap();
 
         // read global config file
         GlobalSettings::update(
@@ -2714,7 +5211,9 @@ mod test {
             },
             true,
         )
-        .unwrap()
+        .unwrap();
+        assert_eq!(std::fs::read(&fixture).unwrap(), fixture_bytes);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

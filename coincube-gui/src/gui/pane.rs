@@ -25,6 +25,117 @@ pub enum Message {
     },
 }
 
+#[cfg(test)]
+mod claim_owner_tests {
+    use super::*;
+    use crate::{dir::CoincubeDirectory, home};
+
+    fn home_tab(id: usize, root: &CoincubeDirectory) -> tab::Tab {
+        let (home, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        tab::Tab::new(id, tab::State::Home(home))
+    }
+
+    #[test]
+    fn closing_source_app_closes_only_its_home_claim_tab() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path = std::env::temp_dir().join(format!("claim-home-close-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let owner = source.cache().app_generation;
+        let mut pane = Pane::new_with_tab(tab::State::App(source));
+        let mut claim = home_tab(2, &root);
+        let tab::State::Home(home) = &mut claim.state else {
+            unreachable!()
+        };
+        home.set_claim_owner(owner);
+        assert_eq!(
+            home.imported_claim_owner(),
+            None,
+            "fork Claim is not an imported Claim"
+        );
+        pane.tabs.push(claim);
+        pane.tabs.push(home_tab(3, &root));
+        assert_eq!(pane.tabs[1].claim_open_owner(), Some(owner));
+        assert_eq!(pane.tabs[2].claim_open_owner(), None);
+
+        pane.close_tab(0);
+        assert_eq!(pane.tabs.len(), 1);
+        assert_eq!(pane.tabs[0].id, 3, "unrelated Home tab survives");
+        drop(pane);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
+    fn cancellation_focuses_only_the_live_matching_source_app() {
+        let _guard = app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("claim-cancel-owner-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (unrelated, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let owner = source.cache().app_generation;
+        let unrelated_owner = unrelated.cache().app_generation;
+        assert_ne!(owner, unrelated_owner);
+        let mut pane = Pane::new_with_tab(tab::State::App(unrelated));
+        pane.tabs.push(tab::Tab::new(2, tab::State::App(source)));
+        let mut temporary = home_tab(3, &root);
+        let tab::State::Home(home) = &mut temporary.state else {
+            unreachable!()
+        };
+        home.set_claim_owner(owner);
+        pane.tabs.push(temporary);
+        pane.focused_tab = 0;
+        let cfg = Config::new(root.clone(), None);
+
+        drop(pane.update(Message::ClaimInstallCancelled(3), &cfg));
+        assert_eq!(pane.focused_tab, 1, "return to exact owner, not first App");
+        assert_eq!(pane.tabs.len(), 2);
+
+        pane.tabs.push(home_tab(4, &root));
+        pane.focused_tab = 1;
+        drop(pane.update(Message::ClaimInstallCancelled(4), &cfg));
+        assert_eq!(pane.focused_tab, 1, "missing owner cannot select an App");
+
+        let mut stale = home_tab(5, &root);
+        let tab::State::Home(home) = &mut stale.state else {
+            unreachable!()
+        };
+        home.set_claim_owner(app::cache::AppGeneration::next());
+        pane.tabs.push(stale);
+        pane.focused_tab = 0;
+        drop(pane.update(Message::ClaimInstallCancelled(5), &cfg));
+        assert_eq!(pane.focused_tab, 0, "stale owner cannot select an App");
+
+        pane.close_tab(1);
+        pane.tabs.push(home_tab(6, &root));
+        let mut orphan = home_tab(7, &root);
+        let tab::State::Home(home) = &mut orphan.state else {
+            unreachable!()
+        };
+        home.set_claim_owner(owner);
+        pane.tabs.push(orphan);
+        pane.focused_tab = 1;
+        drop(pane.update(Message::ClaimInstallCancelled(7), &cfg));
+        assert_eq!(
+            pane.focused_tab, 1,
+            "closed source cannot select unrelated App"
+        );
+        drop(pane);
+        std::fs::remove_dir_all(path).ok();
+    }
+}
+
 impl Message {
     pub fn tab(id: usize, message: tab::Message) -> Self {
         Self::Tab(id, Box::new(message))
@@ -71,6 +182,7 @@ pub struct Pane {
 
     // current theme mode — applied to new tabs on creation
     theme_mode: coincube_ui::theme::palette::ThemeMode,
+    balance_privacy: Option<crate::app::state::preferences::BalancePrivacyChrome>,
 }
 
 impl Pane {
@@ -180,6 +292,7 @@ impl Pane {
         let mut tab = tab::Tab::new(id, tab::State::Installer(Box::new(installer)));
         tab.set_claim_open(intent);
         tab.set_theme_mode(self.theme_mode);
+        tab.set_balance_privacy(self.balance_privacy);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
         task.map(move |message| Message::tab(id, tab::Message::Install(message)))
@@ -193,6 +306,7 @@ impl Pane {
                 focused_tab: 0,
                 tabs_created: 1,
                 theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+                balance_privacy: None,
             },
             task.map(|msg| Message::tab(1, msg)),
         )
@@ -204,6 +318,7 @@ impl Pane {
             focused_tab: 0,
             tabs_created: 1,
             theme_mode: coincube_ui::theme::palette::ThemeMode::default(),
+            balance_privacy: None,
         }
     }
 
@@ -213,6 +328,7 @@ impl Pane {
         let id = self.tabs_created;
         let mut tab = tab::Tab::new(id, state);
         tab.set_theme_mode(self.theme_mode);
+        tab.set_balance_privacy(self.balance_privacy);
         self.tabs.push(tab);
         self.focused_tab = self.tabs.len() - 1;
         task.map(move |msg| Message::tab(id, msg))
@@ -337,6 +453,7 @@ impl Pane {
             let id = self.tabs_created;
             let mut new_tab = tab::Tab::new(id, tab.state);
             new_tab.set_theme_mode(self.theme_mode);
+            new_tab.set_balance_privacy(self.balance_privacy);
             self.tabs.push(new_tab);
         }
         if self.focused_tab + focused_tab + 1 < self.tabs.len() {
@@ -348,6 +465,16 @@ impl Pane {
         self.theme_mode = mode;
         for tab in &mut self.tabs {
             tab.set_theme_mode(mode);
+        }
+    }
+
+    pub fn set_balance_privacy(
+        &mut self,
+        chrome: Option<crate::app::state::preferences::BalancePrivacyChrome>,
+    ) {
+        self.balance_privacy = chrome;
+        for tab in &mut self.tabs {
+            tab.set_balance_privacy(chrome);
         }
     }
 
@@ -432,15 +559,21 @@ impl Pane {
                 return self.open_claim_installer(source_tab);
             }
             Message::ClaimInstallCancelled(temporary_tab) => {
+                let owner = self
+                    .tabs
+                    .iter()
+                    .find(|tab| tab.id == temporary_tab)
+                    .and_then(tab::Tab::claim_open_owner);
                 if let Some(index) = self.tabs.iter().position(|tab| tab.id == temporary_tab) {
                     self.close_tab(index);
                 }
-                if let Some(index) = self
-                    .tabs
-                    .iter()
-                    .position(|tab| matches!(tab.state, tab::State::App(_)))
-                {
-                    self.focused_tab = index;
+                if let Some(owner) = owner {
+                    if let Some(index) = self.tabs.iter().position(|tab| {
+                        matches!(&tab.state, tab::State::App(app)
+                            if app.cache().app_generation == owner)
+                    }) {
+                        self.focused_tab = index;
+                    }
                 }
                 return Task::none();
             }
@@ -484,6 +617,7 @@ impl Pane {
                 let id = self.tabs_created;
                 let mut tab = tab::Tab::new(id, tab::State::Home(home));
                 tab.set_theme_mode(self.theme_mode);
+                tab.set_balance_privacy(self.balance_privacy);
                 self.tabs.push(tab);
                 self.focused_tab = self.tabs.len() - 1;
                 return task.map(move |message| Message::tab(id, tab::Message::Launch(message)));

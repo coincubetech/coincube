@@ -31,6 +31,47 @@ fn fixture_context() -> NavContext<'static> {
     }
 }
 
+#[test]
+fn activity_only_routes_to_usable_wallets() {
+    let mut ctx = fixture_context();
+    ctx.has_vault = false;
+    ctx.network = ChainId::Testnet;
+    ctx.liquid_gate = features::LiquidGate {
+        server_enabled: true,
+        local_state_exists: false,
+    };
+    assert_eq!(
+        activity_route(&ctx),
+        None,
+        "testnet has no Spark or Liquid backend"
+    );
+
+    ctx.network = ChainId::Regtest;
+    assert_eq!(
+        activity_route(&ctx),
+        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
+    );
+
+    ctx.network = ChainId::Bitcoin;
+    assert_eq!(
+        activity_route(&ctx),
+        Some(Menu::Spark(SparkSubMenu::Transactions(None)))
+    );
+    ctx.has_imported_bitcoin = true;
+    assert_eq!(
+        activity_route(&ctx),
+        Some(Menu::Vault(VaultSubMenu::Transactions(None)))
+    );
+
+    ctx.has_imported_bitcoin = false;
+    ctx.network = ChainId::BitcoinBlake2b;
+    assert_eq!(
+        activity_route(&ctx),
+        None,
+        "the Liquid gate cannot enable Blake2b"
+    );
+}
+
 fn shell_tree<'a>(ctx: &NavContext<'a>, state: ShellState) -> Element<'a, Message> {
     let menu = Menu::Cube(CubeSubMenu::Overview);
     iced::widget::column![
