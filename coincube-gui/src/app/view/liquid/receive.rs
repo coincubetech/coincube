@@ -1390,6 +1390,7 @@ mod privacy_tests {
                 is_incoming: true,
                 status: DomainPaymentStatus::Complete,
                 details: DomainPaymentDetails::Lightning {
+                    swap_id: None,
                     description: "Bitcoin payment".into(),
                     payer_note: None,
                 },
