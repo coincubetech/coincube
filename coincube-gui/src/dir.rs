@@ -133,9 +133,11 @@ impl CoincubeDirectory {
                         valid_root(&root)?;
                         #[cfg(unix)]
                         {
-                            // Best effort directory durability. This does not
-                            // prove a power-loss-safe mkdir on every filesystem.
-                            let _ = fs::File::open(&parent).and_then(|dir| dir.sync_all());
+                            // If this supported parent sync fails, do not
+                            // commit an initial shown choice. The root remains
+                            // existing/unproven and will initialize hidden on
+                            // retry. This is not a cross-filesystem guarantee.
+                            fs::File::open(&parent)?.sync_all()?;
                         }
                         GlobalSettings::initialize_created_preferences(CreatedRoot(
                             CoincubeDirectory::new(root),
