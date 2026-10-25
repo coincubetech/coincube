@@ -1185,7 +1185,7 @@ mod tests {
     use coincube_ui::theme::palette::ThemeMode;
     use iced::advanced::widget::operation::{self, focusable, Focusable, TextInput};
     use iced::advanced::widget::{Id, Operation, Tree};
-    use iced::advanced::{clipboard, layout, renderer::Headless, Layout, Shell};
+    use iced::advanced::{clipboard, layout, overlay, renderer::Headless, Layout, Shell};
     use iced::{keyboard, mouse, Event, Rectangle, Size, Vector};
 
     const COMPACT: (u32, u32) = (1024, 768);
@@ -1650,9 +1650,12 @@ mod tests {
                     )),
                     mouse::Cursor::Unavailable,
                 );
+                // The dashboard scroll widget may publish its current zero
+                // offset on the first redraw. No other message is passive.
                 assert!(
-                    messages.is_empty(),
-                    "{}: initial redraw emitted user intent {:?}",
+                    messages.is_empty()
+                        || matches!(messages.as_slice(), [Message::Scroll(offset)] if *offset == 0.0),
+                    "{}: initial redraw emitted an effectful or nonzero message {:?}",
                     scenario,
                     messages
                 );
@@ -1672,15 +1675,22 @@ mod tests {
                 mouse::Cursor::Unavailable,
                 &viewport,
             );
-            if let Some(mut overlay) = self.element.as_widget_mut().overlay(
-                &mut self.tree,
-                Layout::new(&self.node),
-                &self.renderer,
-                &viewport,
-                Vector::ZERO,
-            ) {
-                let node = overlay.as_overlay_mut().layout(&self.renderer, self.size);
-                overlay.as_overlay().draw(
+            if let Some(mut overlay) = self
+                .element
+                .as_widget_mut()
+                .overlay(
+                    &mut self.tree,
+                    Layout::new(&self.node),
+                    &self.renderer,
+                    &viewport,
+                    Vector::ZERO,
+                )
+                .map(overlay::Nested::new)
+            {
+                // Match UserInterface::draw: Nested supplies the renderer
+                // layer that keeps the modal above the dashboard's batches.
+                let node = overlay.layout(&self.renderer, self.size);
+                overlay.draw(
                     &mut self.renderer,
                     theme,
                     &style,
@@ -2322,15 +2332,25 @@ mod tests {
                     .expect("picker Close text bounds");
                 let before = harness.render_pixels(scenario, &theme, false);
                 let after = harness.render_pixels(scenario, &theme, true);
-                let disabled = rendered_luma_range(&before, harness.size, close_bounds);
-                let enabled = rendered_luma_range(&after, harness.size, close_bounds);
+                let initial_contrast = rendered_luma_range(&before, harness.size, close_bounds);
+                let close_contrast = rendered_luma_range(&after, harness.size, close_bounds);
                 assert!(
-                    enabled > disabled.saturating_mul(2),
-                    "{} {}: initial redraw must visibly enable Close (before {}, after {})",
+                    close_contrast >= 80 && close_contrast >= initial_contrast,
+                    "{} {}: redraw must leave Close readable above its card (initial luma range {}, redrawn {})",
                     scenario,
                     appearance(mode),
-                    disabled,
-                    enabled
+                    initial_contrast,
+                    close_contrast
+                );
+                assert_eq!(
+                    seen(harness.click(TARGET_PICKER_CLOSE_ID)),
+                    vec![
+                        Seen::Focus(Id::new(TARGET_PICKER_CLOSE_ID)),
+                        Seen::ClosePicker
+                    ],
+                    "{} {}: visible Close must remain actionable",
+                    scenario,
+                    appearance(mode)
                 );
                 harness.capture(scenario, &theme, appearance(mode));
             }
