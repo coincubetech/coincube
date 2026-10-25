@@ -57,6 +57,17 @@ pub struct Context {
     pub wallet: Arc<Wallet>,
 }
 
+const OTHER_CUBE_OWNS_NODE: &str =
+    "Another Cube owns the managed node. Close it before changing node settings here.";
+
+fn record_temporary_finish_error(status: &mut Status, error: String) {
+    if error == OTHER_CUBE_OWNS_NODE {
+        tracing::debug!("Deferring temporary retention finish while another Cube owns the node");
+    } else {
+        status.error = Some(error);
+    }
+}
+
 pub fn parse_start(value: &str) -> Result<Start, String> {
     if let Ok(height) = value.trim().parse::<u32>() {
         return Ok(Start::Height(height));
@@ -493,7 +504,7 @@ impl Context {
             match self.exclusive_lifecycle().await {
                 Ok(lifecycle) => Some(lifecycle),
                 Err(error) => {
-                    tracing::debug!(%error, "Deferring temporary retention finish");
+                    record_temporary_finish_error(&mut status, error);
                     None
                 }
             }
@@ -543,6 +554,38 @@ fn now() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn temporary_finish_defers_owner_refusal_without_losing_poll_status() {
+        let mut status = Status {
+            busy: true,
+            reconciled: true,
+            error: Some("Existing recovery warning".into()),
+            ..Status::default()
+        };
+        record_temporary_finish_error(&mut status, OTHER_CUBE_OWNS_NODE.into());
+        assert!(status.busy);
+        assert!(status.reconciled);
+        assert_eq!(status.error.as_deref(), Some("Existing recovery warning"));
+    }
+
+    #[test]
+    fn temporary_finish_surfaces_unexpected_lifecycle_failure_in_status() {
+        let mut status = Status {
+            busy: true,
+            ..Status::default()
+        };
+        record_temporary_finish_error(
+            &mut status,
+            "Could not enumerate managed-node owners".into(),
+        );
+        assert!(status.busy);
+        assert_eq!(
+            status.error.as_deref(),
+            Some("Could not enumerate managed-node owners")
+        );
+    }
+
     #[test]
     fn start_accepts_exact_heights_and_calendar_dates() {
         assert!(matches!(
