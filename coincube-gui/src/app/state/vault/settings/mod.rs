@@ -269,13 +269,13 @@ impl State for ImportExportSettingsState {
             )) => {
                 self.plaintext_export_review =
                     self.modal.is_none() && self.wallet.inheritance_descriptor().is_some();
-                Task::none()
+                return Task::none();
             }
             Message::View(view::Message::Settings(
                 view::SettingsMessage::CancelPlaintextDescriptorExport,
             )) => {
                 self.plaintext_export_review = false;
-                Task::none()
+                return Task::none();
             }
             Message::View(view::Message::ImportExport(ImportExportMessage::Close)) => {
                 self.modal = None;
@@ -560,7 +560,8 @@ mod chain_tests {
             &[44; 32],
         )
         .unwrap();
-        let path = "m/84'/0'/0'".parse().unwrap();
+        let path: coincube_core::miniscript::bitcoin::bip32::DerivationPath =
+            "m/84'/0'/0'".parse().unwrap();
         let account = master.derive_priv(&secp, &path).unwrap();
         let key = format!(
             "[{}/84'/0'/0']{}",
