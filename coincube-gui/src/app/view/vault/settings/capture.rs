@@ -281,7 +281,8 @@ impl Fixture {
             menu: menu(section),
             cache: Cache {
                 cube_name: "Synthetic Cube".to_owned(),
-                has_vault: true,
+                has_vault: scenario != "wallet_imported",
+                has_imported_bitcoin: scenario == "wallet_imported",
                 ..Cache::default()
             },
             pairing: pair_state(scenario),
@@ -332,6 +333,28 @@ impl Fixture {
             }
             _ => unreachable!(),
         }
+    }
+}
+
+fn fixture_nav_context(cache: &Cache) -> crate::app::view::nav::NavContext<'_> {
+    crate::app::view::nav::NavContext {
+        has_vault: cache.has_vault,
+        has_imported_bitcoin: cache.has_imported_bitcoin,
+        has_p2p: cache.has_p2p,
+        network: cache.chain(),
+        p2p_test_coordinator: cache.p2p_test_coordinator,
+        marketplace_flags: cache.marketplace_flags,
+        liquid_gate: cache.liquid_gate,
+        btcb2_server_enabled: cache.btcb2_server_enabled,
+        btcb2_already_claimed: cache.btcb2_already_claimed,
+        btcb2_claim_resume: cache.btcb2_claim_resume,
+        cube_name: &cache.cube_name,
+        lightning_address: cache.lightning_address.as_deref(),
+        avatar: cache.avatar_handle.as_ref(),
+        theme_mode: cache.theme_mode,
+        connect_authenticated: cache.sidebar_connect_signed_in,
+        connect_email: cache.connect_email.as_deref(),
+        connect_stream_status: &cache.connect_stream_status,
     }
 }
 
@@ -637,6 +660,55 @@ async fn actual_vault_settings_capture_matrix() {
                         .open(Path::new(directory).join("manifest.jsonl"))
                         .unwrap();
                     writeln!(manifest, "{record}").unwrap();
+                }
+                if scenario == "wallet_imported" {
+                    assert!(fixture.cache.has_imported_bitcoin);
+                    assert!(!fixture.cache.has_vault);
+                    let context = fixture_nav_context(&fixture.cache);
+                    let items = crate::app::view::nav::tertiary::items_for(&fixture.menu, &context)
+                        .expect("imported wallet settings rail");
+                    let pair = items
+                        .iter()
+                        .find(|item| item.label == "Pair with Keychain")
+                        .expect("imported Pair nav item");
+                    let reason = pair
+                        .disabled_reason
+                        .as_deref()
+                        .expect("imported Pair must explain its denial");
+                    assert!(
+                        reason.contains("unavailable for imported wallets")
+                            && reason.contains("no Keychain-eligible key"),
+                        "imported Pair denial reason changed: {}",
+                        reason
+                    );
+                    let pair_bounds = labels
+                        .0
+                        .iter()
+                        .find(|(label, _)| label == "Pair with Keychain")
+                        .expect("mounted imported Pair nav label")
+                        .1;
+                    let mut messages = Vec::new();
+                    let viewport = iced::Rectangle::with_size(size);
+                    for event in [
+                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+                    ] {
+                        element.as_widget_mut().update(
+                            &mut tree,
+                            &iced::Event::Mouse(event),
+                            Layout::new(&node),
+                            iced::mouse::Cursor::Available(pair_bounds.center()),
+                            &renderer,
+                            &mut iced::advanced::clipboard::Null,
+                            &mut iced::advanced::Shell::new(&mut messages),
+                            &viewport,
+                        );
+                    }
+                    assert!(
+                        messages.is_empty(),
+                        "imported Pair nav emitted an intent: {:?}",
+                        messages
+                    );
                 }
                 if scenario == "pair_idle" || scenario == "data_rows" {
                     let target = if scenario == "pair_idle" {
