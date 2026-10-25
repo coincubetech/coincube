@@ -64,7 +64,19 @@ jobs:
             coincube-spark-bridge/target
 
       - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config protobuf-compiler libdbus-1-dev libwebkit2gtk-4.1-dev
+        run: sudo apt-get update && sudo apt-get install -y libudev-dev pkg-config libdbus-1-dev libwebkit2gtk-4.1-dev
+
+      # 22.04's apt protoc is 3.12, which rejects the proto3 `optional` fields
+      # in breez-sdk-liquid's sync.proto (needs 3.15+). Use a pinned release;
+      # include/ carries the well-known types.
+      - name: Install protoc
+        run: |
+          curl -sSfL -o protoc.zip https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
+          echo "3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a  protoc.zip" | sha256sum -c -
+          sudo unzip -o -q protoc.zip -d /usr/local bin/protoc 'include/*'
+          rm protoc.zip
+          echo "PROTOC=/usr/local/bin/protoc" >> "$GITHUB_ENV"
+          /usr/local/bin/protoc --version
 
       - name: Build
         run: |
