@@ -794,7 +794,6 @@ fn floor_cube<'a>(
     selected: bool,
     width: f32,
     light: bool,
-    dimmed: bool,
     opacity: f32,
 ) -> Element<'a, ViewMessage> {
     let glyph = cube_glyph_with_opacity(row.cube, light, opacity)
@@ -809,9 +808,7 @@ fn floor_cube<'a>(
                 Column::new()
                     .spacing(2)
                     .push(tenshu::label(row.name.clone()).wrapping(Wrapping::WordOrGlyph))
-                    .push(tenshu::caption(if dimmed {
-                        "Select Cube"
-                    } else if row.actionable {
+                    .push(tenshu::caption(if row.actionable {
                         unlock_prompt(row.cube)
                     } else {
                         "Unavailable on this network"
@@ -986,7 +983,6 @@ fn floor_layout<'a>(
                 false,
                 if compact { 200.0 } else { 250.0 },
                 light,
-                selected.is_some(),
                 if selected.is_some() {
                     motion.map_or(0.4, |m| m.peer_opacity(std::time::Instant::now()))
                 } else {
@@ -1029,6 +1025,9 @@ fn floor_layout<'a>(
                         connect: &peer.connect.1,
                         wallets: local_wallets(peer.cube),
                         passkey: peer.cube.is_passkey_cube(),
+                        vault: peer.cube.vault_wallet_id.is_some(),
+                        imported_bitcoin: peer.cube.has_imported_bitcoin(),
+                        backup_confirmed: peer.cube.backed_up || peer.cube.has_recovery_kit(),
                     },
                     m.outgoing_progress(now),
                 ))
@@ -1047,6 +1046,9 @@ fn floor_layout<'a>(
                 connect: &row.connect.1,
                 wallets: local_wallets(row.cube),
                 passkey: row.cube.is_passkey_cube(),
+                vault: row.cube.vault_wallet_id.is_some(),
+                imported_bitcoin: row.cube.has_imported_bitcoin(),
+                backup_confirmed: row.cube.backed_up || row.cube.has_recovery_kit(),
             },
             light,
             progress,
@@ -1238,6 +1240,9 @@ pub(crate) fn unlock_turn<'a, M: 'a>(
             connect: "Checking…",
             wallets: local_wallets(cube),
             passkey: cube.is_passkey_cube(),
+            vault: cube.vault_wallet_id.is_some(),
+            imported_bitcoin: cube.has_imported_bitcoin(),
+            backup_confirmed: cube.backed_up || cube.has_recovery_kit(),
         },
         progress,
     );
@@ -1786,7 +1791,10 @@ mod tests {
             assert!(mounted.contains("Network"));
             assert!(mounted.contains("Next step"));
             assert!(mounted.contains("Passkey prompt"));
-            assert!(!mounted.contains("PIN prompt"));
+            // The dimmed peer retains its own state instead of becoming a
+            // generic "Select Cube" label while Travel's face is open.
+            assert!(mounted.contains("PIN prompt"));
+            assert!(!mounted.contains("Select Cube"));
             assert!(mounted.has_focus(launcher_catalog::details_open_id(&selected)));
             assert!(mounted.has_focus(launcher_catalog::select_id(&other)));
             assert!(mounted.has_focus(launcher_catalog::close_details_id()));

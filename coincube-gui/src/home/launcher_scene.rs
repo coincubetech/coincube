@@ -26,6 +26,9 @@ pub(super) struct FaceText<'a> {
     pub connect: &'a str,
     pub wallets: &'a str,
     pub passkey: bool,
+    pub vault: bool,
+    pub imported_bitcoin: bool,
+    pub backup_confirmed: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -225,6 +228,11 @@ fn paint_cube(
         faces.push((depth, index, face.shade, vertices));
     }
     faces.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // The floor shadow belongs to this same moving Cube. Only its shadow
+    // fades as the face comes forward; the Cube's marks stay on the geometry.
+    let shadow_opacity = (1.0 - progress).clamp(0.0, 1.0) * 0.35;
+    let shadow = if light { "#4d463b" } else { "#080908" };
+    let _ = write!(svg, "<ellipse cx=\"{cx:.2}\" cy=\"{:.2}\" rx=\"60\" ry=\"10\" fill=\"{shadow}\" opacity=\"{shadow_opacity:.3}\"/>", cy + 95.0);
     for (_, index, shade, vertices) in faces {
         let color = match shade {
             "front" => colors[0],
@@ -249,6 +257,9 @@ fn paint_cube(
             svg,
             "\" fill=\"{color}\" stroke=\"{edge}\" stroke-width=\"2\"{dash}/>"
         );
+        if let Some(text) = text {
+            paint_face_marks(svg, index, projected, network, light, text);
+        }
         if index == 1 && progress > 0.5 {
             if let Some(text) = text {
                 paint_face_text(svg, projected, network, light, text);
@@ -259,6 +270,57 @@ fn paint_cube(
                 paint_unlock_text(svg, projected, light, text);
             }
         }
+    }
+}
+
+fn paint_face_marks(
+    svg: &mut String,
+    index: usize,
+    p: [(f32, f32); 4],
+    network: ChainId,
+    light: bool,
+    text: FaceText<'_>,
+) {
+    if !matches!(index, 0 | 2 | 3 | 4) {
+        return;
+    }
+    let center = (
+        p.iter().map(|point| point.0).sum::<f32>() / 4.0,
+        p.iter().map(|point| point.1).sum::<f32>() / 4.0,
+    );
+    let ink = if light { "#30302d" } else { "#ecebe6" };
+    match index {
+        4 => {
+            let edge = if network.is_blake2b() {
+                "#d4a62a"
+            } else if matches!(network, ChainId::Bitcoin) {
+                "#f3821d"
+            } else {
+                "#b9bbb5"
+            };
+            let _ = write!(
+                svg,
+                "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"13\" fill=\"{edge}\"/>",
+                center.0, center.1
+            );
+            // This is an orientation mark during the turn; the resting glyph
+            // retains the branded vector path and network-specific edge.
+            let mark = if network.is_blake2b() { "B2" } else { "₿" };
+            let _ = write!(svg, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"14\" font-weight=\"bold\" fill=\"#201407\">{mark}</text>", center.0, center.1);
+        }
+        2 if text.vault || text.imported_bitcoin => {
+            let _ = write!(svg, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"11\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"2\"/>", center.0, center.1);
+            let mark = if text.vault { "V" } else { "B" };
+            let _ = write!(svg, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"13\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
+        }
+        0 | 3 => {
+            let mark = if text.passkey { "⌁" } else { "●" };
+            let _ = write!(svg, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"17\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
+            if text.backup_confirmed {
+                let _ = write!(svg, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"7\" fill=\"none\" stroke=\"{ink}\"/><path d=\"m {:.2} {:.2} 2 2 4 -5\" fill=\"none\" stroke=\"{ink}\"/>", center.0 + 14.0, center.1 - 12.0, center.0 + 11.0, center.1 - 12.0);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -463,6 +525,9 @@ mod tests {
                 connect: "Signed in",
                 wallets: "Vault",
                 passkey: false,
+                vault: true,
+                imported_bitcoin: false,
+                backup_confirmed: false,
             },
             false,
             1.0,
@@ -471,6 +536,32 @@ mod tests {
         assert!(details.contains("Alice &amp; &lt;Bob&gt;"));
         assert!(!details.contains("Alice & <Bob>"));
         assert!(details.contains("Recorded"));
+        // The turn starts with the same marked, shadowed Cube as the floor.
+        let resting = source(
+            1000.0,
+            740.0,
+            (250.0, 265.0),
+            340.0,
+            ChainId::Bitcoin,
+            FaceText {
+                name: "Alice",
+                backup: "Confirmed",
+                connect: "Signed in",
+                wallets: "Vault",
+                passkey: false,
+                vault: true,
+                imported_bitcoin: false,
+                backup_confirmed: true,
+            },
+            false,
+            0.0,
+            None,
+        );
+        assert!(resting.contains("<ellipse"));
+        assert!(resting.contains("opacity=\"0.350\""));
+        assert!(resting.contains(">V</text>"));
+        assert!(resting.contains("stroke=\"#ecebe6\""));
+        assert!(details.contains("opacity=\"0.000\""));
         let unlock = unlock_source(ChainId::Bitcoin, false);
         assert!(unlock.contains("viewBox=\"0 0 420 420\""));
         assert!(!unlock.contains("Alice"));
@@ -485,6 +576,9 @@ mod tests {
             connect: "Signed in",
             wallets: "Vault",
             passkey: false,
+            vault: true,
+            imported_bitcoin: false,
+            backup_confirmed: false,
         };
         assert!(second_turn_source(ChainId::Bitcoin, false, face, 0.0)
             .contains("Alice &amp; &lt;Bob&gt;"));
