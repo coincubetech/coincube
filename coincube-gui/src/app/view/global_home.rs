@@ -2302,7 +2302,7 @@ mod tests {
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
 
     #[test]
-    fn pending_deposit_card_masks_passive_amount_on_both_home_wallets() {
+    fn pending_deposit_card_follows_passive_privacy_on_both_home_wallets() {
         let transfer = PendingTransfer {
             amount: Amount::from_sat(98_765_432),
             stage: TransferStage::PendingDeposit,
