@@ -255,6 +255,9 @@ pub enum Message {
     ShowError(String),
     ShowSuccess(String),
     ShowToast(log::Level, String),
+    /// Keep the incoming amount structured until the toast is rendered, so an
+    /// already-visible notice follows the current device privacy choice.
+    ShowIncomingLiquidWaitingToast(u64),
     DismissToast(usize),
     SideshiftReceive(SideshiftReceiveMessage),
     SideshiftSend(SideshiftSendMessage),

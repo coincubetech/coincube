@@ -404,15 +404,14 @@ pub fn loading_placeholder<'a, T: Into<Element<'a, Message>>>(
         .into()
 }
 
-pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, &'a str)>>(
+pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, String)>>(
     iter: I,
     theme: &coincube_ui::theme::Theme,
 ) -> coincube_ui::widget::Element<'a, Message> {
     use coincube_ui::{color, component::text, icon::cross_icon, theme::notification};
 
     // Color mapping for toast levels using the theme
-    let toast = |id: usize, level: log::Level, content: &'a str| {
-        let content_owned = content.to_string();
+    let toast = |id: usize, level: log::Level, content: String| {
         const WIDGET_HEIGHT: u32 = 80;
 
         // Use theme palette for the toast background
@@ -429,7 +428,7 @@ pub fn toast_overlay<'a, I: Iterator<Item = (usize, log::Level, &'a str)>>(
         };
 
         let inner = iced::widget::row![
-            container(text::p1_bold(content_owned).color(text_color))
+            container(text::p1_bold(content).color(text_color))
                 .width(600)
                 .height(WIDGET_HEIGHT)
                 .padding(15)
