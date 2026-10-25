@@ -17855,7 +17855,6 @@ pub(crate) mod claim_step1_tests {
 
 #[cfg(test)]
 mod received_celebration_privacy_tests {
-    use super::*;
     use crate::app::state::preferences::{BalancePrivacy, BalancePrivacyChrome};
     use crate::app::view::shared::landing::capture;
 
