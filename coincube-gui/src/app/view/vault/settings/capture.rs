@@ -444,24 +444,44 @@ async fn compact_mounted_wallet_policy_keeps_both_recovery_clauses_visible() {
         2,
         "fixture must exercise two relative recovery paths"
     );
-    let renderer = <iced::Renderer as Headless>::new(
-        coincube_ui::font::REGULAR,
-        iced::Pixels(16.0),
-        Some("tiny-skia"),
-    )
-    .await
-    .expect("software renderer");
-    let mut element = fixture.render("wallet_default");
-    let mut tree = Tree::new(element.as_widget());
-    let node = element.as_widget_mut().layout(
-        &mut tree,
-        &renderer,
-        &layout::Limits::new(iced::Size::ZERO, iced::Size::new(1024.0, 768.0)),
-    );
-    let mut labels = Labels::default();
-    element
-        .as_widget_mut()
-        .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+    for (width, height) in [(1024, 768), (1440, 900)] {
+        for theme in [theme::Theme::dark(), theme::Theme::light()] {
+            let mut renderer = <iced::Renderer as Headless>::new(
+                coincube_ui::font::REGULAR,
+                iced::Pixels(16.0),
+                Some("tiny-skia"),
+            )
+            .await
+            .expect("software renderer");
+            let mut element = fixture.render("wallet_default");
+            let mut tree = Tree::new(element.as_widget());
+            let size = iced::Size::new(width as f32, height as f32);
+            let node = element.as_widget_mut().layout(
+                &mut tree,
+                &renderer,
+                &layout::Limits::new(iced::Size::ZERO, size),
+            );
+            let mut labels = Labels::default();
+            element
+                .as_widget_mut()
+                .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+            assert_mounted_wallet_policy(&labels, width);
+            element.as_widget().draw(
+                &tree,
+                &mut renderer,
+                &theme,
+                &iced::advanced::renderer::Style {
+                    text_color: theme.colors.text.primary,
+                },
+                Layout::new(&node),
+                iced::mouse::Cursor::Unavailable,
+                &iced::Rectangle::with_size(size),
+            );
+        }
+    }
+}
+
+fn assert_mounted_wallet_policy(labels: &Labels, width: u32) {
     let heading = labels
         .0
         .iter()
@@ -523,6 +543,13 @@ async fn compact_mounted_wallet_policy_keeps_both_recovery_clauses_visible() {
             text,
             bounds,
             viewport
+        );
+        assert!(
+            bounds.x >= -1.0 && bounds.x + bounds.width <= width as f32 + 1.0,
+            "policy fragment exceeds {}px: {} {:?}",
+            width,
+            text,
+            bounds
         );
     }
 }
@@ -701,6 +728,9 @@ async fn actual_vault_settings_capture_matrix() {
                     &mut labels,
                 );
                 assert_labels(scenario, &labels, width);
+                if scenario == "wallet_default" {
+                    assert_mounted_wallet_policy(&labels, width);
+                }
                 if let Some(directory) = &directory {
                     let viewport = iced::Rectangle::with_size(size);
                     let mut redraw_messages = Vec::new();

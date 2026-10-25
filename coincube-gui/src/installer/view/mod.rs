@@ -3379,6 +3379,251 @@ mod tests {
 }
 
 #[cfg(test)]
+mod policy_layout_tests {
+    use super::*;
+    use coincube_core::miniscript::bitcoin::{
+        bip32::{ChainCode, Xpub},
+        secp256k1::PublicKey,
+        NetworkKind,
+    };
+    use iced::advanced::{
+        layout,
+        renderer::Headless,
+        widget::{Id, Operation, Tree},
+        Layout,
+    };
+
+    #[derive(Default)]
+    struct MountedPolicy {
+        labels: Vec<(String, iced::Rectangle)>,
+        containers: Vec<iced::Rectangle>,
+        scrolls: Vec<(iced::Rectangle, iced::Rectangle)>,
+    }
+
+    impl Operation for MountedPolicy {
+        fn traverse(&mut self, operate: &mut dyn FnMut(&mut dyn Operation)) {
+            operate(self);
+        }
+
+        fn text(&mut self, _: Option<&Id>, bounds: iced::Rectangle, value: &str) {
+            self.labels.push((value.to_owned(), bounds));
+        }
+
+        fn container(&mut self, _: Option<&Id>, bounds: iced::Rectangle) {
+            self.containers.push(bounds);
+        }
+
+        fn scrollable(
+            &mut self,
+            _: Option<&Id>,
+            bounds: iced::Rectangle,
+            content_bounds: iced::Rectangle,
+            _: iced::Vector,
+            _: &mut dyn iced::advanced::widget::operation::Scrollable,
+        ) {
+            self.scrolls.push((bounds, content_bounds));
+        }
+    }
+
+    fn public_xpub(chain_byte: u8) -> Xpub {
+        Xpub {
+            network: NetworkKind::Test,
+            depth: 3,
+            parent_fingerprint: [1, 2, 3, 4].into(),
+            child_number: bitcoin::bip32::ChildNumber::Hardened { index: 0 },
+            public_key: PublicKey::from_str(
+                "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798",
+            )
+            .unwrap(),
+            chain_code: ChainCode::from([chain_byte; 32]),
+        }
+    }
+
+    fn policy_fixture() -> (
+        CoincubeDescriptor,
+        HashMap<Fingerprint, settings::KeySetting>,
+    ) {
+        let first = public_xpub(3);
+        let second = public_xpub(5);
+        let third = public_xpub(7);
+        let descriptor = CoincubeDescriptor::from_str(&format!(
+            "wsh(andor(pk([01020304/48'/1'/0'/2']{first}/<0;1>/*),older(144),andor(pk([05060708/48'/1'/0'/2']{second}/<0;1>/*),older(52596),pk([090a0b0c/48'/1'/0'/2']{third}/<0;1>/*))))"
+        ))
+        .unwrap();
+        let keys = [
+            (
+                [1, 2, 3, 4],
+                "Synthetic first recovery signer with a long display name",
+            ),
+            (
+                [5, 6, 7, 8],
+                "Synthetic second recovery signer with a long display name",
+            ),
+            (
+                [9, 10, 11, 12],
+                "Synthetic primary signer with a long display name",
+            ),
+        ]
+        .into_iter()
+        .map(|(bytes, name)| {
+            let fingerprint = Fingerprint::from(bytes);
+            (
+                fingerprint,
+                settings::KeySetting {
+                    name: name.to_owned(),
+                    master_fingerprint: fingerprint,
+                    provider_key: None,
+                    is_border_wallet: false,
+                    grid_seed_source: None,
+                    replay_protected: None,
+                    keychain_key_id: None,
+                },
+            )
+        })
+        .collect();
+        (descriptor, keys)
+    }
+
+    #[tokio::test]
+    async fn mounted_installer_policy_keeps_recovery_copy_inside_card() {
+        for bytes in coincube_ui::font::load() {
+            iced::advanced::graphics::text::font_system()
+                .write()
+                .unwrap()
+                .load_font(bytes);
+        }
+        let (descriptor, keys) = policy_fixture();
+        assert_eq!(descriptor.policy().recovery_paths().len(), 2);
+        let capture_dir = std::env::var("R11A_INSTALLER_CAPTURE_DIR").ok();
+        if let Some(directory) = &capture_dir {
+            std::fs::create_dir_all(directory).unwrap();
+        }
+        for (width, height) in [(1024, 768), (1440, 900)] {
+            for (theme_name, theme) in [
+                ("dark", theme::Theme::dark()),
+                ("light", theme::Theme::light()),
+            ] {
+                let mut renderer = <iced::Renderer as Headless>::new(
+                    coincube_ui::font::REGULAR,
+                    iced::Pixels(16.0),
+                    Some("tiny-skia"),
+                )
+                .await
+                .expect("software renderer");
+                let mut element: Element<'_, Message> =
+                    card::simple(display_policy(descriptor.policy(), &keys))
+                        .width(Length::Fill)
+                        .max_width(1500)
+                        .into();
+                let mut tree = Tree::new(element.as_widget());
+                let size = iced::Size::new(width as f32, height as f32);
+                let node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(iced::Size::ZERO, size),
+                );
+                let mut mounted = MountedPolicy::default();
+                element.as_widget_mut().operate(
+                    &mut tree,
+                    Layout::new(&node),
+                    &renderer,
+                    &mut mounted,
+                );
+                for required in [
+                    "The wallet policy:",
+                    "can always spend this wallet's funds (Primary path)",
+                    "(Recovery path #1)",
+                    "(Recovery path #2)",
+                    "Synthetic first recovery signer with a long display name",
+                    "Synthetic second recovery signer with a long display name",
+                    "Synthetic primary signer with a long display name",
+                ] {
+                    assert!(
+                        mounted.labels.iter().any(|(text, _)| text == required),
+                        "{width}px {theme_name}: missing complete policy text: {required}"
+                    );
+                }
+                assert_eq!(
+                    mounted
+                        .labels
+                        .iter()
+                        .filter(|(text, _)| text == "can spend coins after a relative timelock of")
+                        .count(),
+                    2,
+                    "{width}px {theme_name}: both recovery clauses must mount"
+                );
+                for sequence in ["144 blocks (~1d)", "52596 blocks (~1y)"] {
+                    assert!(
+                        mounted.labels.iter().any(|(text, _)| text == sequence),
+                        "{width}px {theme_name}: missing recovery block delay: {sequence}"
+                    );
+                }
+                let (viewport, content) = mounted
+                    .scrolls
+                    .iter()
+                    .find(|(_, content)| {
+                        mounted.labels.iter().any(|(text, bounds)| {
+                            text == "The wallet policy:"
+                                && bounds.x >= content.x
+                                && bounds.x < content.x + content.width
+                        })
+                    })
+                    .expect("mounted policy scroll viewport");
+                assert!(
+                    viewport.x >= -1.0 && viewport.x + viewport.width <= width as f32 + 1.0,
+                    "{width}px {theme_name}: policy viewport escapes window: {viewport:?}"
+                );
+                assert!(
+                    mounted.containers.iter().any(|card| {
+                        viewport.x >= card.x - 1.0
+                            && viewport.x + viewport.width <= card.x + card.width + 1.0
+                            && viewport.y >= card.y - 1.0
+                            && viewport.y + viewport.height <= card.y + card.height + 1.0
+                    }),
+                    "{width}px {theme_name}: policy viewport escapes its card"
+                );
+                for (text, bounds) in &mounted.labels {
+                    assert!(
+                        bounds.x >= content.x - 1.0
+                            && bounds.x + bounds.width <= content.x + content.width + 1.0,
+                        "{width}px {theme_name}: policy text escapes scroll content: {text} {bounds:?} {content:?}"
+                    );
+                }
+                let screen = iced::Rectangle::with_size(size);
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &theme,
+                    &iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    },
+                    Layout::new(&node),
+                    iced::mouse::Cursor::Unavailable,
+                    &screen,
+                );
+                if let Some(directory) = &capture_dir {
+                    let pixels = renderer.screenshot(
+                        iced::Size::new(width, height),
+                        1.0,
+                        theme.colors.general.background,
+                    );
+                    image::save_buffer(
+                        std::path::Path::new(directory).join(format!(
+                            "r11a-installer-policy-{theme_name}-{width}x{height}.png"
+                        )),
+                        &pixels,
+                        width,
+                        height,
+                        image::ColorType::Rgba8,
+                    )
+                    .unwrap();
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod node_management_chain_tests {
     use super::*;
     use crate::{chain::ChainId, node::bitcoind::NodeFlavor};
