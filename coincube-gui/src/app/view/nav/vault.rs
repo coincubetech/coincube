@@ -45,7 +45,7 @@ pub fn items(ctx: &NavContext) -> Vec<SubItem> {
             "Settings",
             settings_icon,
             Menu::Vault(VaultSubMenu::Settings(Some(
-                crate::app::menu::SettingsOption::Node,
+                crate::app::menu::SettingsOption::Wallet,
             ))),
             |m| matches!(m, Menu::Vault(VaultSubMenu::Settings(_))),
         ),
@@ -137,6 +137,37 @@ mod tests {
     }
 
     #[test]
+    fn vault_settings_enters_wallet_first_and_keeps_pair_available() {
+        let status = crate::app::ConnectionStatus::default();
+        let context = ctx(&status, crate::chain::ChainId::Bitcoin, false, false);
+        let nav = items(&context);
+        assert!(matches!(
+            &nav.last().unwrap().route,
+            Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::Wallet
+            )))
+        ));
+        let sections = crate::app::view::nav::tertiary::items_for(
+            &Menu::Vault(VaultSubMenu::Settings(None)),
+            &context,
+        )
+        .unwrap();
+        assert_eq!(
+            labels(&sections),
+            [
+                "Wallet & signers",
+                "Node",
+                "Pair with Keychain",
+                "Data & exports"
+            ]
+        );
+        assert!(sections[2].disabled_reason.is_none());
+        assert!((sections[0].matches)(&Menu::Vault(VaultSubMenu::Settings(
+            None
+        ))));
+    }
+
+    #[test]
     fn imported_wallet_has_claim_without_inheritance_actions() {
         let status = crate::app::ConnectionStatus::default();
         let mut context = ctx(&status, crate::chain::ChainId::Bitcoin, true, false);
@@ -155,12 +186,27 @@ mod tests {
                 "Settings"
             ]
         );
+        assert!(matches!(
+            &items(&context).last().unwrap().route,
+            Menu::Vault(VaultSubMenu::Settings(Some(
+                crate::app::menu::SettingsOption::Wallet
+            )))
+        ));
         let settings = crate::app::view::nav::tertiary::items_for(
             &Menu::Vault(VaultSubMenu::Settings(None)),
             &context,
         )
         .unwrap();
-        assert_eq!(labels(&settings), ["Node", "Wallet", "Import/Export"]);
+        assert_eq!(
+            labels(&settings),
+            [
+                "Wallet & signers",
+                "Node",
+                "Pair with Keychain",
+                "Data & exports"
+            ]
+        );
+        assert!(settings[2].disabled_reason.is_some());
         context.btcb2_server_enabled = false;
         assert!(!labels(&items(&context)).contains(&"Claim BTCB2"));
         context.btcb2_server_enabled = true;

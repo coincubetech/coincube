@@ -6,7 +6,12 @@ use coincube_core::miniscript::bitcoin::{
     Address, Network,
 };
 use coincube_ui::widget::{modal, Element};
-use iced::{clipboard, widget::qr_code, Subscription, Task};
+use iced::{
+    advanced::widget::Id,
+    clipboard,
+    widget::{operation, qr_code},
+    Subscription, Task,
+};
 
 use crate::daemon::model::LabelsLoader;
 use crate::dir::CoincubeDirectory;
@@ -71,6 +76,7 @@ pub struct VaultReceivePanel {
     selected: HashSet<Address>,
     labels_edited: LabelsEdited,
     modal: Modal,
+    modal_origin: Option<Id>,
     warning: Option<Error>,
     processing: bool,
     generating: bool,
@@ -88,6 +94,7 @@ impl VaultReceivePanel {
             selected: HashSet::new(),
             labels_edited: LabelsEdited::default(),
             modal: Modal::None,
+            modal_origin: None,
             warning: None,
             // Starts true: the panel always fires a `reload` fetch the
             // moment it's shown, so the first render should display the
@@ -211,12 +218,21 @@ impl State for VaultReceivePanel {
             }
             Message::View(view::Message::Close) => {
                 self.modal = Modal::None;
-                Task::none()
+                self.modal_origin
+                    .take()
+                    .map(operation::focus)
+                    .unwrap_or_else(Task::none)
             }
             Message::View(view::Message::Select(i)) => {
                 let (address, index) = (
                     self.address(i).expect("Must be present"),
                     self.derivation_index(i).expect("Must be present"),
+                );
+                let origin = view::vault::receive::modal_origin_id(
+                    i,
+                    self.addresses.list.len(),
+                    address,
+                    true,
                 );
                 self.modal = Modal::VerifyAddress(VerifyAddressModal::new(
                     self.data_dir.clone(),
@@ -225,7 +241,8 @@ impl State for VaultReceivePanel {
                     address.clone(),
                     *index,
                 ));
-                Task::none()
+                self.modal_origin = Some(origin);
+                operation::focus(view::vault::receive::verify_close_id())
             }
             Message::View(view::Message::NextReceiveAddress) => {
                 // flight so we don't burn through receive addresses.
@@ -339,7 +356,14 @@ impl State for VaultReceivePanel {
             Message::View(view::Message::ShowQrCode(i)) => {
                 if let (Some(address), Some(index)) = (self.address(i), self.derivation_index(i)) {
                     if let Some(modal) = ShowQrCodeModal::new(address, *index) {
+                        self.modal_origin = Some(view::vault::receive::modal_origin_id(
+                            i,
+                            self.addresses.list.len(),
+                            address,
+                            false,
+                        ));
                         self.modal = Modal::ShowQrCode(modal);
+                        return operation::focus(view::vault::receive::qr_close_id());
                     }
                 }
                 Task::none()

@@ -151,7 +151,7 @@ fn section_routes(menu: &Menu, cache: &Cache) -> Vec<RouteChoice> {
             label,
             intent: Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(section)))),
             selected: matches!(menu, Menu::Vault(VaultSubMenu::Settings(Some(current))) if *current == section)
-                || (section == SettingsOption::Node
+                || (section == SettingsOption::Wallet
                     && matches!(menu, Menu::Vault(VaultSubMenu::Settings(None)))),
             enabled: section != SettingsOption::LocalSigning || !cache.has_imported_bitcoin,
         })
@@ -254,15 +254,15 @@ mod tests {
     }
 
     #[test]
-    fn vault_settings_default_selects_node() {
+    fn vault_settings_default_selects_wallet_and_signers() {
         let menu = Menu::Vault(VaultSubMenu::Settings(None));
         let sections = section_routes(&menu, &Cache::default());
         assert!(sections
             .iter()
-            .any(|choice| choice.label == "Node" && choice.selected));
+            .any(|choice| choice.label == "Wallet & signers" && choice.selected));
         assert!(!sections
             .iter()
-            .any(|choice| choice.label == "Wallet & signers" && choice.selected));
+            .any(|choice| choice.label == "Node" && choice.selected));
     }
 
     #[test]
