@@ -110,6 +110,16 @@ fn usdt_amount_str(payment: &DomainPayment, usdt_id: &str) -> Option<String> {
     None
 }
 
+// The SDK reports the L-BTC fee as a number of sats. Zero does not prove that
+// the fee was paid in USDt; it may also mean no fee or unavailable fee data.
+fn usdt_fee_caption(fees_sat: u64) -> &'static str {
+    if fees_sat == 0 {
+        "No L-BTC fee reported"
+    } else {
+        "Fees (L-BTC)"
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn liquid_transactions_view<'a>(
     payments: &'a [DomainPayment],
@@ -410,7 +420,7 @@ fn status_badge(label: impl Into<String>, style: StatusTextStyle) -> Element<'st
         .padding([2, 8])
         .style(|theme: &theme::Theme| iced::widget::container::Style {
             border: iced::Border {
-                color: theme.colors.shell.line,
+                color: theme.colors.rule,
                 width: 1.0,
                 radius: 10.0.into(),
             },
@@ -542,8 +552,9 @@ pub fn transaction_detail_view<'a>(
         };
         let amount_row = if is_receive {
             Row::new()
-                .spacing(10)
+                .spacing(5)
                 .align_y(Alignment::Center)
+                .push(text("+").size(H1_SIZE))
                 .push(text(usdt_num).size(H1_SIZE).bold())
                 .push(text("USDt").size(H1_SIZE).color(coincube_ui::color::GREY_3))
         } else {
@@ -620,25 +631,21 @@ pub fn transaction_detail_view<'a>(
                             )
                             .spacing(20),
                     )
-                    .push(if fees_sat.to_sat() == 0 && !is_receive {
+                    .push(if fees_sat.to_sat() == 0 {
                         Row::new()
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Fees").bold()),
+                                    .push(text(usdt_fee_caption(0)).bold()),
                             )
-                            .push(
-                                Column::new()
-                                    .width(Length::FillPortion(2))
-                                    .push(text("Paid in USDt")),
-                            )
+                            .push(Column::new().width(Length::FillPortion(2)).push(text("—")))
                             .spacing(20)
                     } else {
                         Row::new()
                             .push(
                                 Column::new()
                                     .width(Length::FillPortion(1))
-                                    .push(text("Fees (L-BTC)").bold()),
+                                    .push(text(usdt_fee_caption(fees_sat.to_sat())).bold()),
                             )
                             .push(
                                 Column::new().width(Length::FillPortion(2)).push(text(
@@ -692,9 +699,13 @@ pub fn transaction_detail_view<'a>(
                             if is_receive { btc_amount } else { total_amount };
                         let fiat = converter.convert(amount_for_conversion);
                         Row::new().align_y(Alignment::Center).push(
-                            fiat.to_text()
-                                .size(H2_SIZE)
-                                .color(coincube_ui::color::GREY_2),
+                            text(format!(
+                                "≈ {} {} · current rate",
+                                fiat.to_formatted_string(),
+                                fiat.currency()
+                            ))
+                            .size(H2_SIZE)
+                            .style(theme::text::secondary),
                         )
                     })),
             ),
@@ -1092,5 +1103,11 @@ mod tests {
             );
         }
         assert!(!refundables_visible(0, AssetFilter::All));
+    }
+
+    #[test]
+    fn zero_reported_lbtc_fee_does_not_claim_usdt_fee_payment() {
+        assert_eq!(usdt_fee_caption(0), "No L-BTC fee reported");
+        assert_eq!(usdt_fee_caption(42), "Fees (L-BTC)");
     }
 }
