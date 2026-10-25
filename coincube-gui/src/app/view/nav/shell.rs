@@ -112,8 +112,8 @@ fn status<'a>(label: impl Into<String>, good: bool) -> Text<'a> {
         })
 }
 
-/// The 56px bar contains the existing actions. The privacy eye stays out of
-/// production until every passive presenter and overlay honors the same state.
+/// Legacy entry point for callers without the GUI privacy owner. Cube routes
+/// mount `top_bar_with_privacy` from the shared dashboard shell.
 pub fn top_bar<'a>(ctx: &NavContext<'a>) -> Element<'a, Message> {
     top_bar_with_privacy(ctx, None)
 }

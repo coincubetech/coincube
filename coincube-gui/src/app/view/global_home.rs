@@ -74,6 +74,7 @@ pub struct PendingTransfer {
 fn pending_deposit_card<'a>(
     pending_transfer: PendingTransfer,
     bitcoin_unit: BitcoinDisplayUnit,
+    balance_masked: bool,
 ) -> Element<'a, Message> {
     Container::new(
         Row::new()
@@ -83,11 +84,13 @@ fn pending_deposit_card<'a>(
             .push(text("Pending deposit").size(12).color(color::GREY_2))
             .push(Space::new().width(Length::Fill))
             .push(
-                text(
+                text(if balance_masked {
+                    "••••••".to_owned()
+                } else {
                     pending_transfer
                         .amount
-                        .to_formatted_string_with_unit(bitcoin_unit),
-                )
+                        .to_formatted_string_with_unit(bitcoin_unit)
+                })
                 .size(12)
                 .color(color::ORANGE),
             ),
@@ -410,7 +413,11 @@ fn wallet_card<'a>(
     let content = if matches!(wallet_type, WalletType::Vault) && loaded {
         if let Some(pending_transfer) = pending_vault_incoming {
             if pending_transfer.stage != TransferStage::Completed {
-                content.push(pending_deposit_card(pending_transfer, bitcoin_unit))
+                content.push(pending_deposit_card(
+                    pending_transfer,
+                    bitcoin_unit,
+                    balance_masked,
+                ))
             } else {
                 content
             }
@@ -2117,7 +2124,7 @@ pub fn global_home_view<'a>(config: GlobalViewConfig<'a>) -> Element<'a, Message
             .push(spark_btc_row)
             .push_maybe(pending_spark_incoming.and_then(|pt| {
                 (pt.stage != TransferStage::Completed)
-                    .then(|| pending_deposit_card(pt, bitcoin_unit))
+                    .then(|| pending_deposit_card(pt, bitcoin_unit, balance_masked))
             }));
 
         let spark_card: Element<'a, Message> = Container::new(spark_card_content)
@@ -2280,6 +2287,7 @@ fn transfer_available(has_liquid: bool, has_vault: bool, has_spark: bool) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::app::view::shared::landing::capture;
     use crate::{
         app::{
             cache::FiatPriceRequest,
@@ -2292,6 +2300,28 @@ mod tests {
     use std::{collections::HashMap, str::FromStr};
 
     const MAINNET_ADDR: &str = "bc1qvrl2849aggm6qry9ea7xqp2kk39j8vaa8r3cwg";
+
+    #[test]
+    fn pending_deposit_card_masks_passive_amount_on_both_home_wallets() {
+        let transfer = PendingTransfer {
+            amount: Amount::from_sat(98_765_432),
+            stage: TransferStage::PendingDeposit,
+        };
+        let inspect = |masked| {
+            capture::inspect(
+                "home-pending-deposit",
+                pending_deposit_card(transfer, BitcoinDisplayUnit::Sats, masked),
+                (900, 200),
+                "dark",
+                theme::Theme::dark(),
+            )
+        };
+        let hidden = inspect(true);
+        assert!(hidden.contains("••••••"));
+        assert!(!hidden.contains("98,765,432"));
+        let shown = inspect(false);
+        assert!(shown.contains("98,765,432"));
+    }
 
     struct ViewFixture {
         entered_amount: form::Value<String>,
