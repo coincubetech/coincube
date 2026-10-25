@@ -1907,6 +1907,7 @@ impl ManagedNodeLifecycle {
         let file = std::fs::OpenOptions::new()
             .create(true)
             .write(true)
+            .truncate(false)
             .open(directory.path().join("lifecycle.lock"))
             .map_err(|e| StartInternalBitcoindError::Lock(e.to_string()))?;
         file.lock_exclusive()
