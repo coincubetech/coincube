@@ -163,6 +163,40 @@ pub(super) fn polygon_points(points: [(f32, f32); 4]) -> String {
         .join(" ")
 }
 
+pub(super) fn edge_color(network: ChainId) -> &'static str {
+    if network.is_blake2b() {
+        "#d4a62a"
+    } else if matches!(network, ChainId::Bitcoin) {
+        "#f3821d"
+    } else {
+        "#b9bbb5"
+    }
+}
+
+// Draw the same persisted-state icons on the floor and throughout the turn.
+// These coordinates are authored in the resting glyph's SVG space.
+pub(super) fn rest_side_marks(
+    index: usize,
+    vault: bool,
+    imported_bitcoin: bool,
+    passkey: bool,
+    backup_confirmed: bool,
+    light: bool,
+) -> String {
+    let ink = if light { "#30302d" } else { "#ecebe6" };
+    let mut marks = match index {
+        2 if vault => r##"<path d="M58 73 67 77V87c0 7-5 12-9 14-4-2-9-7-9-14V77Z" fill="none" stroke="{ink}" stroke-width="2" stroke-linejoin="round"/>"##.to_owned(),
+        2 if imported_bitcoin => r##"<circle cx="58" cy="85" r="12" fill="none" stroke="{ink}" stroke-width="2"/><path d="M58 78v14m-4-11h7c4 0 4 4 0 4h-7m0 0h8c4 0 4 4 0 4h-8" fill="none" stroke="{ink}" stroke-width="2"/>"##.to_owned(),
+        0 | 3 if passkey => r##"<circle cx="117" cy="82" r="6" fill="none" stroke="{ink}" stroke-width="2"/><path d="m122 86 12 12m-5-5 4-4m-1 7 4-4" fill="none" stroke="{ink}" stroke-width="2" stroke-linecap="round"/>"##.to_owned(),
+        0 | 3 => r##"<path d="M116 83v-6a7 7 0 0 1 14 0v6m-17 0h20v18h-20z" fill="none" stroke="{ink}" stroke-width="2" stroke-linejoin="round"/><circle cx="123" cy="91" r="1.5" fill="{ink}"/>"##.to_owned(),
+        _ => String::new(),
+    };
+    if matches!(index, 0 | 3) && backup_confirmed {
+        marks.push_str(r##"<circle cx="137" cy="64" r="9" fill="none" stroke="{ink}" stroke-width="1.5"/><path d="m133 64 3 3 5-6" fill="none" stroke="{ink}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"##);
+    }
+    marks.replace("{ink}", ink)
+}
+
 struct Face {
     points: [Vec3; 4],
     normal: Vec3,
@@ -248,13 +282,7 @@ fn paint_cube(
     let size = REST_SIZE + (FOCUSED_SIZE - REST_SIZE) * progress;
     let pitch = 35.0_f32.to_radians() * (1.0 - progress);
     let yaw = (45.0 + (target_yaw - 45.0) * progress).to_radians();
-    let edge = if network.is_blake2b() {
-        "#d4a62a"
-    } else if matches!(network, ChainId::Bitcoin) {
-        "#f3821d"
-    } else {
-        "#b9bbb5"
-    };
+    let edge = edge_color(network);
     let colors = if light {
         ["#c9c1b2", "#e6e0d5", "#d6cfc2", "#e6e0d5"]
     } else {
@@ -339,30 +367,43 @@ fn paint_face_marks(
     if area < 16.0 {
         return;
     }
-    let center = (
-        p.iter().map(|point| point.0).sum::<f32>() / 4.0,
-        p.iter().map(|point| point.1).sum::<f32>() / 4.0,
-    );
-    let ink = if light { "#30302d" } else { "#ecebe6" };
-    let mut marks = String::new();
-    match index {
-        4 => {
-            marks.push_str(&top_coin_markup(p, size, network, light));
+    let marks = if index == 4 {
+        top_coin_markup(p, size, network, light)
+    } else {
+        let glyph = rest_side_marks(
+            index,
+            text.vault,
+            text.imported_bitcoin,
+            text.passkey,
+            text.backup_confirmed,
+            light,
+        );
+        if glyph.is_empty() {
+            return;
         }
-        2 if text.vault || text.imported_bitcoin => {
-            let _ = write!(marks, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"11\" fill=\"none\" stroke=\"{ink}\" stroke-width=\"2\"/>", center.0, center.1);
-            let mark = if text.vault { "V" } else { "B" };
-            let _ = write!(marks, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"13\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
-        }
-        0 | 3 => {
-            let mark = if text.passkey { "⌁" } else { "●" };
-            let _ = write!(marks, "<text x=\"{:.2}\" y=\"{:.2}\" text-anchor=\"middle\" dominant-baseline=\"central\" font-family=\"sans-serif\" font-size=\"17\" fill=\"{ink}\">{mark}</text>", center.0, center.1);
-            if text.backup_confirmed {
-                let _ = write!(marks, "<circle cx=\"{:.2}\" cy=\"{:.2}\" r=\"7\" fill=\"none\" stroke=\"{ink}\"/><path d=\"m {:.2} {:.2} 2 2 4 -5\" fill=\"none\" stroke=\"{ink}\"/>", center.0 + 14.0, center.1 - 12.0, center.0 + 11.0, center.1 - 12.0);
-            }
-        }
-        _ => {}
-    }
+        // Map the authored resting face into the current projected face. This
+        // gives the first motion frame identical marks and preserves their
+        // placement as the face turns, including on the second unlock side.
+        let reference = rest_glyph_face(if index == 3 { 0 } else { index });
+        let (ux, uy) = (
+            reference[2].0 - reference[3].0,
+            reference[2].1 - reference[3].1,
+        );
+        let (vx, vy) = (
+            reference[0].0 - reference[3].0,
+            reference[0].1 - reference[3].1,
+        );
+        let determinant = ux * vy - uy * vx;
+        let (tx, ty) = (p[2].0 - p[3].0, p[2].1 - p[3].1);
+        let (sx, sy) = (p[0].0 - p[3].0, p[0].1 - p[3].1);
+        let a = (tx * vy - sx * uy) / determinant;
+        let b = (ty * vy - sy * uy) / determinant;
+        let c = (sx * ux - tx * vx) / determinant;
+        let d = (sy * ux - ty * vx) / determinant;
+        let e = p[3].0 - a * reference[3].0 - c * reference[3].1;
+        let f = p[3].1 - b * reference[3].0 - d * reference[3].1;
+        format!("<g transform=\"matrix({a:.5} {b:.5} {c:.5} {d:.5} {e:.2} {f:.2})\">{glyph}</g>")
+    };
     if marks.is_empty() {
         return;
     }
@@ -719,7 +760,9 @@ mod tests {
         );
         assert!(resting.contains("<ellipse"));
         assert!(resting.contains("opacity=\"0.350\""));
-        assert!(resting.contains(">V</text>"));
+        assert!(resting.contains("M58 73 67 77V87"));
+        assert!(resting.contains("M116 83v-6a7"));
+        assert!(resting.contains("m133 64 3 3 5-6"));
         assert!(resting.contains("stroke=\"#ecebe6\""));
         assert!(details.contains("opacity=\"0.000\""));
         let unlock = unlock_source(ChainId::Bitcoin, false);
@@ -785,7 +828,9 @@ mod tests {
             (179.0 - 45.0) / 135.0,
             None,
         );
-        let mark_at = near_edge.find(">V</text>").expect("wallet mark at 179°");
+        let mark_at = near_edge
+            .find("M58 73 67 77V87")
+            .expect("wallet mark at 179°");
         let group_at = near_edge[..mark_at].rfind("<g clip-path=").unwrap();
         assert!(near_edge[group_at..mark_at].contains("url(#launcher-face-2-"));
         assert!(near_edge[mark_at..].contains("</g>"));

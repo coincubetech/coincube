@@ -104,11 +104,7 @@ fn cube_glyph_with_opacity(
 
 pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light: bool) -> String {
     let chain = cube.network;
-    let edge = if chain.is_blake2b() {
-        "#d4a62a"
-    } else {
-        "#f3821d"
-    };
+    let edge = launcher_scene::edge_color(chain);
     let mark = launcher_scene::rest_glyph_coin(chain, light);
     let top_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(4));
     let left_points = launcher_scene::polygon_points(launcher_scene::rest_glyph_face(2));
@@ -123,34 +119,29 @@ pub(super) fn cube_glyph_source(cube: &crate::app::settings::CubeSettings, light
     } else {
         ("#41423e", "#2e2f2c", "#262724", "#ecebe6", "#080908")
     };
-    // A face mark is shown only for a fact persisted on this Cube. Spark and
-    // Liquid inventories are unknown before unlock, so neither gets a mark.
-    let wallet_mark = match wallet_face_mark(cube) {
-        WalletFaceMark::Vault => {
-            r##"<path d="M58 73 67 77V87c0 7-5 12-9 14-4-2-9-7-9-14V77Z" fill="none" stroke="{marks}" stroke-width="2" stroke-linejoin="round"/>"##
-        }
-        WalletFaceMark::ImportedBitcoin => {
-            r##"<circle cx="58" cy="85" r="12" fill="none" stroke="{marks}" stroke-width="2"/><path d="M58 78v14m-4-11h7c4 0 4 4 0 4h-7m0 0h8c4 0 4 4 0 4h-8" fill="none" stroke="{marks}" stroke-width="2"/>"##
-        }
-        WalletFaceMark::None => "",
-    };
-    let backup_mark = if cube.backed_up || cube.has_recovery_kit() {
-        r##"<circle cx="137" cy="64" r="9" fill="none" stroke="{marks}" stroke-width="1.5"/><path d="m133 64 3 3 5-6" fill="none" stroke="{marks}" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>"##
-    } else {
-        ""
-    };
-    let wallet_mark = wallet_mark.replace("{marks}", marks);
-    let backup_mark = backup_mark.replace("{marks}", marks);
-    // The right-face mark distinguishes the passkey route from the ordinary
-    // gated route. It does not establish PIN presence or a retained session.
-    let unlock_mark = if cube.is_passkey_cube() {
-        r##"<circle cx="117" cy="82" r="6" fill="none" stroke="{marks}" stroke-width="2"/><path d="m122 86 12 12m-5-5 4-4m-1 7 4-4" fill="none" stroke="{marks}" stroke-width="2" stroke-linecap="round"/>"##
-    } else {
-        r##"<path d="M116 83v-6a7 7 0 0 1 14 0v6m-17 0h20v18h-20z" fill="none" stroke="{marks}" stroke-width="2" stroke-linejoin="round"/><circle cx="123" cy="91" r="1.5" fill="{marks}"/>"##
-    }
-    .replace("{marks}", marks);
+    // Spark and Liquid inventories are unknown before unlock; only persisted
+    // Vault or imported Bitcoin facts receive a wallet mark.
+    let wallet_mark = wallet_face_mark(cube);
+    let wallet_mark = launcher_scene::rest_side_marks(
+        2,
+        wallet_mark == WalletFaceMark::Vault,
+        wallet_mark == WalletFaceMark::ImportedBitcoin,
+        cube.is_passkey_cube(),
+        cube.backed_up || cube.has_recovery_kit(),
+        light,
+    );
+    // The right face indicates the passkey route or ordinary gated route,
+    // without claiming a retained session or known PIN state.
+    let unlock_mark = launcher_scene::rest_side_marks(
+        0,
+        false,
+        false,
+        cube.is_passkey_cube(),
+        cube.backed_up || cube.has_recovery_kit(),
+        light,
+    );
     format!(
-        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="27 8 126 153"><ellipse cx="90" cy="155" rx="60" ry="10" fill="{shadow}" opacity=".35"/><polygon points="{top_points}" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{left_points}" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{right_points}" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><defs><clipPath id="launcher-top"><polygon points="{top_points}"/></clipPath></defs><g clip-path="url(#launcher-top)" color="{marks}">{mark}</g>{wallet_mark}{unlock_mark}{backup_mark}</svg>"##,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="27 8 126 153"><ellipse cx="90" cy="155" rx="60" ry="10" fill="{shadow}" opacity=".35"/><polygon points="{top_points}" fill="{top}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{left_points}" fill="{left}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><polygon points="{right_points}" fill="{right}" stroke="{edge}" stroke-width="1.25" stroke-dasharray="{dash}"/><defs><clipPath id="launcher-top"><polygon points="{top_points}"/></clipPath></defs><g clip-path="url(#launcher-top)" color="{marks}">{mark}</g>{wallet_mark}{unlock_mark}</svg>"##,
     )
 }
 
@@ -2336,6 +2327,62 @@ mod tests {
         assert!(dark.contains("stroke=\"#f3821d\""));
         assert!(light.contains("stroke=\"#f3821d\""));
         assert_ne!(dark, light);
+        for light_mode in [false, true] {
+            let static_glyph = cube_glyph_source(&cube, light_mode);
+            let first_motion = launcher_scene::source(
+                1000.0,
+                740.0,
+                (250.0, 265.0),
+                340.0,
+                cube.network,
+                launcher_scene::FaceText {
+                    name: "Marked",
+                    backup: "Confirmed",
+                    connect: "Offline",
+                    wallets: "Vault",
+                    passkey: false,
+                    vault: true,
+                    imported_bitcoin: false,
+                    backup_confirmed: true,
+                },
+                light_mode,
+                0.0,
+                None,
+            );
+            for path in ["M58 73 67 77V87", "M116 83v-6a7", "m133 64 3 3 5-6"] {
+                assert!(static_glyph.contains(path));
+                assert!(
+                    first_motion.contains(path),
+                    "mark changes at motion start: {}",
+                    path
+                );
+            }
+        }
+
+        cube.network = ChainId::Testnet4;
+        let testnet_glyph = cube_glyph_source(&cube, false);
+        let testnet_motion = launcher_scene::source(
+            1000.0,
+            740.0,
+            (250.0, 265.0),
+            340.0,
+            cube.network,
+            launcher_scene::FaceText {
+                name: "Marked",
+                backup: "Confirmed",
+                connect: "Offline",
+                wallets: "Vault",
+                passkey: false,
+                vault: true,
+                imported_bitcoin: false,
+                backup_confirmed: true,
+            },
+            false,
+            0.0,
+            None,
+        );
+        assert!(testnet_glyph.contains("stroke=\"#b9bbb5\""));
+        assert!(testnet_motion.contains("stroke=\"#b9bbb5\""));
         for (appearance, mode, palette) in [
             (
                 "dark",
