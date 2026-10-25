@@ -12801,6 +12801,9 @@ pub(crate) mod tests {
                 if error.contains("Split was cancelled"))));
         assert!(source.claim_pair_context.is_none());
         assert!(!binding.current(), "refusal revoked the old operation");
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists(), "refusal stopped its owned node");
         assert_eq!(
             target_daemon
@@ -12844,6 +12847,9 @@ pub(crate) mod tests {
             "old completion cannot stop new owner"
         );
         source.revoke_claim();
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert!(!lock_dir.exists());
         assert_eq!(
             target_daemon

@@ -3900,6 +3900,9 @@ mod local_start_cancel_tests {
             info,
         )));
         drop(completed);
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();
@@ -3935,6 +3938,9 @@ mod local_start_cancel_tests {
         received.await.unwrap();
         task.abort();
         assert!(task.await.unwrap_err().is_cancelled());
+        assert!(crate::node::bitcoind::wait_for_managed_node_cleanup(
+            std::time::Duration::from_secs(120)
+        ));
         assert_eq!(std::fs::read_dir(&locks).unwrap().count(), 1);
         assert!(other.exists());
         std::fs::remove_dir_all(path).unwrap();
