@@ -1660,6 +1660,160 @@ mod tests {
         .expect("save QR capture manifest");
     }
 
+    /// A QR's cached geometry must move with its widget without losing any
+    /// modules. Keep the same Data and widget tree through every move, then
+    /// compare the actual backend pixels with the origin frame translated by
+    /// the same physical offset. The optional captures permit independent
+    /// exact-payload decoding without changing the original diagnostic.
+    #[test]
+    fn qr_widget_tiny_skia_cached_translation_preserves_pixels() {
+        use iced::advanced::Renderer as _;
+
+        let payload = format!("bitcoin:{}?index={}", addr(3), 7);
+        let data = qr_code::Data::new(payload.as_bytes()).expect("encode synthetic receive URI");
+        let theme = theme::Theme::light();
+        let logical_size = Size::new(640_u32, 640_u32);
+        let logical_bounds = Rectangle::with_size(Size::new(640.0, 640.0));
+        let positions = [(0_u32, 0_u32), (36, 0), (0, 89), (36, 89), (0, 0)];
+        let capture_dir =
+            std::env::var_os("R08A_QR_REGRESSION_CAPTURE_DIR").map(std::path::PathBuf::from);
+        if let Some(directory) = &capture_dir {
+            std::fs::create_dir_all(directory).expect("create regression capture directory");
+        }
+
+        // One widget tree and one QR Data/cache are used for every position
+        // and scale. Reusing the renderer exercises its reset/redraw path;
+        // Headless::screenshot still paints full damage, not incremental damage.
+        let mut element: Element<'_, Message> = QRCode::<coincube_ui::theme::Theme>::new(&data)
+            .cell_size(8)
+            .into();
+        let mut tree = Tree::new(element.as_widget());
+        let mut renderer = renderer();
+        assert_eq!(renderer.name(), "tiny-skia");
+        let mut manifest = Vec::new();
+        let mut comparisons = Vec::new();
+
+        for scale in [1_u32, 2] {
+            let physical_size = Size::new(logical_size.width * scale, logical_size.height * scale);
+            let mut origin = None;
+
+            for (step, (x, y)) in positions.iter().copied().enumerate() {
+                renderer.reset(logical_bounds);
+                let mut node = element.as_widget_mut().layout(
+                    &mut tree,
+                    &renderer,
+                    &layout::Limits::new(Size::ZERO, logical_bounds.size()),
+                );
+                node.move_to_mut(iced::Point::new(x as f32, y as f32));
+                let bounds = Layout::new(&node).bounds();
+                assert_eq!(bounds.position(), iced::Point::new(x as f32, y as f32));
+                assert_eq!(bounds.size(), Size::new(328.0, 328.0));
+                assert!(bounds.x + bounds.width < logical_bounds.width);
+                assert!(bounds.y + bounds.height < logical_bounds.height);
+
+                element.as_widget().draw(
+                    &tree,
+                    &mut renderer,
+                    &theme,
+                    &iced::advanced::renderer::Style {
+                        text_color: theme.colors.text.primary,
+                    },
+                    Layout::new(&node),
+                    mouse::Cursor::Unavailable,
+                    &logical_bounds,
+                );
+                let pixels = renderer.screenshot(physical_size, scale as f32, iced::Color::WHITE);
+                assert_eq!(
+                    pixels.len(),
+                    (physical_size.width * physical_size.height * 4) as usize
+                );
+
+                if let Some(directory) = &capture_dir {
+                    let filename = format!(
+                        "qr-widget-cache-scale{}-step{}-x{}-y{}.png",
+                        scale, step, x, y
+                    );
+                    image::save_buffer(
+                        directory.join(&filename),
+                        &pixels,
+                        physical_size.width,
+                        physical_size.height,
+                        image::ColorType::Rgba8,
+                    )
+                    .expect("save unmodified regression renderer pixels");
+                    manifest.push(serde_json::json!({
+                        "scale_factor": scale,
+                        "step": step,
+                        "position": {"x": x, "y": y},
+                        "mounted_widget_bounds": {
+                            "x": bounds.x, "y": bounds.y,
+                            "width": bounds.width, "height": bounds.height
+                        },
+                        "png": filename
+                    }));
+                }
+
+                if step == 0 {
+                    let dark_pixels = pixels
+                        .chunks_exact(4)
+                        .filter(|pixel| pixel[0] < 32 && pixel[1] < 32 && pixel[2] < 32)
+                        .count();
+                    assert!(dark_pixels > 1000, "origin QR has visible dark modules");
+                    origin = Some(pixels);
+                    continue;
+                }
+                let original = origin.as_ref().expect("origin screenshot");
+                let shift_x = x * scale;
+                let shift_y = y * scale;
+                let mut mismatches = 0_u64;
+                let mut first_mismatch = None;
+                for py in 0..physical_size.height {
+                    for px in 0..physical_size.width {
+                        let offset = ((py * physical_size.width + px) * 4) as usize;
+                        let actual = &pixels[offset..offset + 4];
+                        let expected = if px >= shift_x && py >= shift_y {
+                            let original_offset = (((py - shift_y) * physical_size.width
+                                + (px - shift_x))
+                                * 4) as usize;
+                            &original[original_offset..original_offset + 4]
+                        } else {
+                            &[255, 255, 255, 255]
+                        };
+                        if actual != expected {
+                            mismatches += 1;
+                            first_mismatch.get_or_insert((px, py));
+                        }
+                    }
+                }
+                comparisons.push((scale, step, x, y, mismatches, first_mismatch));
+            }
+        }
+
+        if let Some(directory) = &capture_dir {
+            let details = serde_json::json!({
+                "payload": payload,
+                "widget": "iced_widget::qr_code::QRCode via iced::widget::qr_code",
+                "backend": "tiny-skia",
+                "cell_size_logical_px": 8,
+                "logical_framebuffer_px": {"width": 640, "height": 640},
+                "background": "#ffffff",
+                "captures": manifest
+            });
+            std::fs::write(
+                directory.join("qr-widget-cache-regression-manifest.json"),
+                serde_json::to_vec_pretty(&details).expect("serialize regression manifest"),
+            )
+            .expect("save regression manifest");
+        }
+
+        for (scale, step, x, y, mismatches, first_mismatch) in comparisons {
+            assert_eq!(
+                mismatches, 0,
+                "QR pixels differ from origin shifted to ({x},{y}) at {scale}x, step {step}; first mismatch: {first_mismatch:?}"
+            );
+        }
+    }
+
     /// sRGB relative luminance, as WCAG 2.x defines it.
     fn luminance(color: iced::Color) -> f32 {
         let linear = |v: f32| {
