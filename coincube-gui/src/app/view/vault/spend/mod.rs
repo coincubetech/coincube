@@ -2990,7 +2990,8 @@ mod tests {
                 assert_eq!(
                     probe.focused().and_then(|entry| entry.id.as_ref()),
                     Some(&add),
-                    "{size:?}"
+                    "{:?}",
+                    size
                 );
                 assert_eq!(
                     probe
@@ -3000,12 +3001,14 @@ mod tests {
                         .unwrap()
                         .bounds,
                     add_bounds,
-                    "Add recipient moved when duplicate warning changed at {size:?}"
+                    "Add recipient moved when duplicate warning changed at {:?}",
+                    size
                 );
                 assert_eq!(
                     probe.contains("Two payment addresses are the same"),
                     scenario.duplicate,
-                    "{size:?}"
+                    "{:?}",
+                    size
                 );
             }
 
@@ -3018,18 +3021,20 @@ mod tests {
             let fee_preset = preset(24);
             let mut harness = Harness::new(compose(&fixture, &self_send), size);
             harness.focus(fee_preset.clone());
-            assert_eq!(harness.focused_id(), Some(fee_preset.clone()), "{size:?}");
+            assert_eq!(harness.focused_id(), Some(fee_preset.clone()), "{:?}", size);
             harness.rebuild(compose(&fixture, &Scenario::valid_send()));
             assert_eq!(
                 harness.focused_id(),
                 Some(fee_preset.clone()),
-                "self-send to send at {size:?}"
+                "self-send to send at {:?}",
+                size
             );
             harness.rebuild(compose(&fixture, &self_send));
             assert_eq!(
                 harness.focused_id(),
                 Some(fee_preset),
-                "send to self-send at {size:?}"
+                "send to self-send at {:?}",
+                size
             );
         }
     }
