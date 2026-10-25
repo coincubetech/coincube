@@ -86,8 +86,8 @@ pub fn view<'a>(
                     .push_maybe(recovery.bitcoin_txid.map(|id| p2_regular(id.to_string())))
                     .push_maybe(recovery.bitcoin_output.as_ref().map(|output| {
                         p2_regular(format!(
-                            "Recorded Bitcoin output: {} sats",
-                            output.amount_sats
+                            "Recorded Bitcoin output: {}",
+                            passive_amount(Amount::from_sat(output.amount_sats), cache)
                         ))
                     }))
                     .push_maybe(
@@ -101,8 +101,8 @@ pub fn view<'a>(
                     .push_maybe(recovery.fork_txid.map(|id| p2_regular(id.to_string())))
                     .push_maybe(recovery.fork_output.as_ref().map(|output| {
                         p2_regular(format!(
-                            "Recorded BTCB2 output: {} sats",
-                            output.amount_sats
+                            "Recorded BTCB2 output: {}",
+                            passive_amount(Amount::from_sat(output.amount_sats), cache)
                         ))
                     }))
                     .push_maybe(
