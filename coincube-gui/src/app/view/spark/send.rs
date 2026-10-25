@@ -16,7 +16,7 @@ use coincube_ui::{
     icon,
     image::{asset_logo, asset_network_logo},
     theme,
-    widget::{action::Action, Column, ColumnExt, Container, Element, Row},
+    widget::{action::Action, Column, ColumnExt, Container, Element, Row, RowExt},
 };
 use iced::{
     widget::{container, text_input, Space},
@@ -2087,6 +2087,7 @@ mod tests {
             Some(SYNTHETIC_INVOICE)
         );
         assert_eq!(probe.input_text(AMOUNT_INPUT_ID).as_deref(), Some("1500"));
+        drop(harness);
 
         // An invoice-set amount shows and selects but does not edit.
         let invoice = Fixture::invoice(SparkSendPhase::Idle);
