@@ -3554,6 +3554,52 @@ mod lock_cube_dispatch_tests {
     use super::*;
 
     #[test]
+    fn locking_source_app_closes_owned_home_claim_but_keeps_unrelated_home() {
+        let _guard = crate::app::session::test_guard();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let _enter = runtime.enter();
+        let path =
+            std::env::temp_dir().join(format!("cube-lock-home-claim-{}", uuid::Uuid::new_v4()));
+        let root = CoincubeDirectory::new(path.clone());
+        let (source, _) = app::claim_step1_tests::bitcoin_app(&path);
+        let owner = source.cache().app_generation;
+        let source_id = source.cube_settings().id.clone();
+        let (unrelated, startup) = home::Home::new_for_chain(root.clone(), None);
+        drop(startup);
+        let (mut claim, startup) = home::Home::new_for_chain(root, None);
+        drop(startup);
+        claim.set_claim_owner(owner);
+        let mut gui = GUI::reviewer_app_home_gui(source, unrelated);
+        let pane_id = gui.focus.unwrap();
+        gui.panes
+            .get_mut(pane_id)
+            .unwrap()
+            .tabs
+            .push(tab::Tab::new(3, tab::State::Home(claim)));
+        app::session::open(source_id, zeroize::Zeroizing::new("2468".into()));
+
+        drop(gui.update(Message::Pane(
+            pane_id,
+            pane::Message::tab(1, tab::Message::LockCubeToLauncher),
+        )));
+        let pane = gui.panes.get(pane_id).unwrap();
+        assert!(pane.tabs.iter().any(|tab| tab.id == 2));
+        assert!(
+            pane.tabs.iter().all(|tab| tab.id != 3),
+            "owned Claim Home closed"
+        );
+        assert!(pane
+            .tabs
+            .iter()
+            .all(|tab| tab.claim_open_owner() != Some(owner)));
+        drop(gui);
+        std::fs::remove_dir_all(path).ok();
+    }
+
+    #[test]
     fn admitted_destination_closes_orphaned_process_session() {
         let _guard = crate::app::session::test_guard();
         let runtime = tokio::runtime::Builder::new_current_thread()

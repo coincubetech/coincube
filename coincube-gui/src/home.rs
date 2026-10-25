@@ -733,6 +733,12 @@ impl Home {
         self.claim_owner = Some(owner);
     }
 
+    /// Source App for any Claim route, including fork/return routes that do
+    /// not carry an imported-claim request.
+    pub(crate) fn claim_owner(&self) -> Option<app::cache::AppGeneration> {
+        self.claim_owner
+    }
+
     #[cfg(test)]
     pub(crate) fn is_checked_for_test(&self) -> bool {
         !matches!(self.state, State::Unchecked)

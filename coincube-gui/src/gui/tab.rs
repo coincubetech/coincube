@@ -893,7 +893,13 @@ impl Tab {
     }
 
     pub(crate) fn claim_open_owner(&self) -> Option<app::cache::AppGeneration> {
-        self.claim_open.as_ref().map(|intent| intent.owner)
+        self.claim_open
+            .as_ref()
+            .map(|intent| intent.owner)
+            .or_else(|| match &self.state {
+                State::Home(home) => home.claim_owner(),
+                _ => None,
+            })
     }
 
     pub fn cache(&self) -> Option<&Cache> {
