@@ -805,6 +805,16 @@ impl Loader {
     pub fn update(&mut self, message: Message) -> Task<Message> {
         match message {
             Message::View(ViewMessage::Retry) => {
+                if self.restricted_claim {
+                    // The first attempt consumed the scoped PIN. A rebuilt loader
+                    // would fall back to the ordinary seed-file password path.
+                    self.stop();
+                    self.fork_session_revoked = true;
+                    self.step = Step::Error(Box::new(Error::Unexpected(
+                        "Unlock the paired Cube again to retry this Claim".into(),
+                    )));
+                    return Task::none();
+                }
                 if self.cube_settings.network.is_blake2b() {
                     // Reopening must establish a fresh session after revocation.
                     // Keep the specific refusal instead of rebuilding without auth.
@@ -2177,6 +2187,35 @@ mod tests {
         );
         assert!(loader.fork_task.is_none());
         assert!(!loader.daemon_started);
+    }
+
+    #[test]
+    fn restricted_claim_error_cannot_retry_without_a_new_unlock() {
+        let mut loader = loader_without_wallet(false);
+        loader.cube_settings.network = crate::chain::ChainId::BitcoinBlake2b;
+        loader.set_scoped_seed_password(zeroize::Zeroizing::new("synthetic-pin".into()));
+        loader.claim_verified_account = Some(7);
+        // The load config takes the scoped PIN before an async load can fail.
+        drop(loader.scoped_seed_password.take());
+        assert_eq!(
+            loader
+                .update(Message::Synced(Err(Error::Unexpected(
+                    "load failed".into(),
+                ))))
+                .units(),
+            0
+        );
+        assert!(matches!(loader.step, Step::Error(_)));
+
+        for _ in 0..2 {
+            let task = loader.update(Message::View(ViewMessage::Retry));
+            assert_eq!(task.units(), 0, "Retry must not start an ordinary load");
+            assert!(loader.fork_session_revoked);
+            assert!(loader.claim_verified_account.is_none());
+            assert!(loader.scoped_seed_password.is_none());
+            assert!(matches!(&loader.step, Step::Error(error)
+                if error.to_string().contains("Unlock the paired Cube again")));
+        }
     }
 
     #[test]
