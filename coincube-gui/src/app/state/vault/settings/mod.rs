@@ -526,7 +526,6 @@ mod chain_tests {
         ))
         .is_none());
         assert!(state.modal.is_none());
-        drop(send);
 
         let mut reentered = ImportExportSettingsState::new(wallet, config.clone());
         assert!(!reentered.plaintext_export_review);
