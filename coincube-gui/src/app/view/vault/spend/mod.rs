@@ -542,7 +542,9 @@ pub fn create_spend_tx<'a>(
         },
     );
     let recipients_block: Element<'a, Message> = if is_self_send {
-        Space::new().height(Length::Fixed(0.0)).into()
+        // An empty Column has zero rendered height but a non-void size hint,
+        // so the fee section keeps its position in Iced's widget tree.
+        Column::new().width(Length::Fill).into()
     } else {
         Column::new()
             .push(compose_divider())
@@ -581,7 +583,10 @@ pub fn create_spend_tx<'a>(
                                         .style(theme::text::warning),
                                 )
                             } else {
-                                Space::new().width(Length::Fixed(0.0)).into()
+                                // Keep the warning slot in the Row even when
+                                // it draws nothing. Fixed(0) is dropped by
+                                // Row::push and would move Add recipient's state.
+                                Row::new().into()
                             })
                             .push(Space::new().width(Length::Fill))
                             // Recipients cannot be added for recovery (exactly one recipient).
@@ -2955,6 +2960,78 @@ mod tests {
             Some(ADDRESS_A),
             "focus moved during batch-to-single compose rebuild"
         );
+    }
+
+    #[test]
+    fn warning_and_self_send_rebuilds_keep_mounted_action_focus() {
+        let fixture = Fixture::new(ThemeMode::Light, 3);
+        for size in [COMPACT, WIDE] {
+            let batch = Scenario {
+                recipients: 2,
+                ..Scenario::valid_send()
+            };
+            let duplicate = Scenario {
+                duplicate: true,
+                ..batch.clone()
+            };
+            let add = Id::new(ADD_RECIPIENT_ID);
+            let mut harness = Harness::new(compose(&fixture, &batch), size);
+            harness.focus(add.clone());
+            let add_bounds = harness
+                .probe()
+                .focus
+                .iter()
+                .find(|entry| entry.id.as_ref() == Some(&add))
+                .expect("Add recipient is mounted")
+                .bounds;
+            for scenario in [&duplicate, &batch] {
+                harness.rebuild(compose(&fixture, scenario));
+                let probe = harness.probe();
+                assert_eq!(
+                    probe.focused().and_then(|entry| entry.id.as_ref()),
+                    Some(&add),
+                    "{size:?}"
+                );
+                assert_eq!(
+                    probe
+                        .focus
+                        .iter()
+                        .find(|entry| entry.id.as_ref() == Some(&add))
+                        .unwrap()
+                        .bounds,
+                    add_bounds,
+                    "Add recipient moved when duplicate warning changed at {size:?}"
+                );
+                assert_eq!(
+                    probe.contains("Two payment addresses are the same"),
+                    scenario.duplicate,
+                    "{size:?}"
+                );
+            }
+
+            // The empty self-send recipient block occupies the same tree slot
+            // as the recipient form, preserving the following fee controls.
+            let self_send = Scenario {
+                recipients: 0,
+                ..Scenario::valid_send()
+            };
+            let fee_preset = preset(24);
+            let mut harness = Harness::new(compose(&fixture, &self_send), size);
+            harness.focus(fee_preset.clone());
+            assert_eq!(harness.focused_id(), Some(fee_preset.clone()), "{size:?}");
+            harness.rebuild(compose(&fixture, &Scenario::valid_send()));
+            assert_eq!(
+                harness.focused_id(),
+                Some(fee_preset.clone()),
+                "self-send to send at {size:?}"
+            );
+            harness.rebuild(compose(&fixture, &self_send));
+            assert_eq!(
+                harness.focused_id(),
+                Some(fee_preset),
+                "send to self-send at {size:?}"
+            );
+        }
     }
 
     #[test]
