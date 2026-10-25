@@ -154,6 +154,8 @@ pub enum Message {
     /// A shared Action's pointer-down request. The App applies whole-tree
     /// focus so a captured sidebar click also blurs content controls.
     FocusAction(iced::advanced::widget::Id),
+    /// Device-wide privacy intent handled only by the GUI preferences owner.
+    ChangeDevicePreference(crate::app::settings::preferences::PreferenceChange),
     SetupVault,
     /// W15 — launch the vault installer in "restore from Connect
     /// Recovery Kit" mode. Branches off the same button the default
