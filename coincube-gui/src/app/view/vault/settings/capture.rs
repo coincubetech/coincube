@@ -528,6 +528,115 @@ async fn compact_mounted_wallet_policy_keeps_both_recovery_clauses_visible() {
 }
 
 #[tokio::test]
+async fn mounted_pair_nav_accepts_vault_and_denies_imported_wallet() {
+    load_fonts();
+    let size = iced::Size::new(1440.0, 2400.0);
+    let viewport = iced::Rectangle::with_size(size);
+    for scenario in ["wallet_default", "wallet_imported"] {
+        let fixture = Fixture::new(scenario, SettingsOption::Wallet);
+        let context = fixture_nav_context(&fixture.cache);
+        let items = crate::app::view::nav::tertiary::items_for(&fixture.menu, &context)
+            .expect("mounted Vault settings navigation");
+        let pair = items
+            .iter()
+            .find(|item| item.label == "Pair with Keychain")
+            .expect("Pair navigation item");
+        if scenario == "wallet_imported" {
+            assert_eq!(
+                pair.disabled_reason.as_deref(),
+                Some(
+                    "Pairing is unavailable for imported wallets: this wallet has no Keychain-eligible key in Tenshu."
+                )
+            );
+        } else {
+            assert!(pair.disabled_reason.is_none(), "Vault Pair must be enabled");
+        }
+
+        let renderer = <iced::Renderer as Headless>::new(
+            coincube_ui::font::REGULAR,
+            iced::Pixels(16.0),
+            Some("tiny-skia"),
+        )
+        .await
+        .expect("software renderer");
+        let mut element = fixture.render(scenario);
+        let mut tree = Tree::new(element.as_widget());
+        let node = element.as_widget_mut().layout(
+            &mut tree,
+            &renderer,
+            &layout::Limits::new(iced::Size::ZERO, size),
+        );
+        let mut labels = Labels::default();
+        element
+            .as_widget_mut()
+            .operate(&mut tree, Layout::new(&node), &renderer, &mut labels);
+        let pair_bounds = labels
+            .0
+            .iter()
+            .find(|(label, _)| label == "Pair with Keychain")
+            .expect("mounted Pair navigation label")
+            .1;
+        let pair_center = pair_bounds.center();
+        let sidebar_scroll = labels
+            .1
+            .iter()
+            .find(|bounds| {
+                bounds.width < 500.0
+                    && pair_center.x >= bounds.x
+                    && pair_center.x <= bounds.x + bounds.width
+                    && pair_center.y >= bounds.y
+                    && pair_center.y <= bounds.y + bounds.height
+            })
+            .expect("Pair must be inside the visible sidebar scroll viewport");
+        assert!(
+            pair_bounds.x >= sidebar_scroll.x
+                && pair_bounds.x + pair_bounds.width <= sidebar_scroll.x + sidebar_scroll.width
+                && pair_bounds.y >= sidebar_scroll.y
+                && pair_bounds.y + pair_bounds.height <= sidebar_scroll.y + sidebar_scroll.height
+                && pair_bounds.y + pair_bounds.height <= size.height,
+            "Pair label is clipped or offscreen: {:?} in {:?}",
+            pair_bounds,
+            sidebar_scroll
+        );
+
+        let mut messages = Vec::new();
+        for event in [
+            iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
+            iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
+        ] {
+            element.as_widget_mut().update(
+                &mut tree,
+                &iced::Event::Mouse(event),
+                Layout::new(&node),
+                iced::mouse::Cursor::Available(pair_center),
+                &renderer,
+                &mut iced::advanced::clipboard::Null,
+                &mut iced::advanced::Shell::new(&mut messages),
+                &viewport,
+            );
+        }
+        if scenario == "wallet_imported" {
+            assert!(
+                messages.is_empty(),
+                "visible imported Pair emitted an intent: {:?}",
+                messages
+            );
+        } else {
+            assert!(
+                matches!(
+                    messages.as_slice(),
+                    [Message::Menu(Menu::Vault(VaultSubMenu::Settings(Some(
+                        SettingsOption::LocalSigning
+                    ))))]
+                ),
+                "visible eligible Pair must route once: {:?}",
+                messages
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn actual_vault_settings_capture_matrix() {
     load_fonts();
     let directory = std::env::var("R11A_CAPTURE_DIR").ok();
@@ -680,34 +789,6 @@ async fn actual_vault_settings_capture_matrix() {
                             && reason.contains("no Keychain-eligible key"),
                         "imported Pair denial reason changed: {}",
                         reason
-                    );
-                    let pair_bounds = labels
-                        .0
-                        .iter()
-                        .find(|(label, _)| label == "Pair with Keychain")
-                        .expect("mounted imported Pair nav label")
-                        .1;
-                    let mut messages = Vec::new();
-                    let viewport = iced::Rectangle::with_size(size);
-                    for event in [
-                        iced::mouse::Event::ButtonPressed(iced::mouse::Button::Left),
-                        iced::mouse::Event::ButtonReleased(iced::mouse::Button::Left),
-                    ] {
-                        element.as_widget_mut().update(
-                            &mut tree,
-                            &iced::Event::Mouse(event),
-                            Layout::new(&node),
-                            iced::mouse::Cursor::Available(pair_bounds.center()),
-                            &renderer,
-                            &mut iced::advanced::clipboard::Null,
-                            &mut iced::advanced::Shell::new(&mut messages),
-                            &viewport,
-                        );
-                    }
-                    assert!(
-                        messages.is_empty(),
-                        "imported Pair nav emitted an intent: {:?}",
-                        messages
                     );
                 }
                 if scenario == "pair_idle" || scenario == "data_rows" {
