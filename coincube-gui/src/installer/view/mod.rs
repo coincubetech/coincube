@@ -3581,7 +3581,7 @@ mod node_management_chain_tests {
             &layout::Limits::new(Size::ZERO, size),
         );
         let mut focus: Box<dyn Operation<()>> =
-            Box::new(focusable::focus::<()>(Id::new(target.to_owned())));
+            Box::new(focusable::focus::<()>(Id::from(target.to_owned())));
         loop {
             element.as_widget_mut().operate(
                 &mut tree,
