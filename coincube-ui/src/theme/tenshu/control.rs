@@ -133,7 +133,8 @@ pub fn segmented_frame(theme: &Theme, frame_radius: f32) -> container::Style {
 }
 
 /// One segment (`.seg button`): muted text on no fill; the selected segment
-/// (`[aria-pressed="true"]`) takes the selected fill and ink.
+/// (`[aria-pressed="true"]`, `input:checked + label`) takes the selected fill,
+/// ink and a 1px accent outline, as App preferences draws it.
 pub fn segment(
     theme: &Theme,
     status: Status,
@@ -153,8 +154,13 @@ pub fn segment(
             .map(|fill| Background::Color(fade_if(disabled, fill))),
         text_color: fade_if(disabled, ink),
         border: Border {
+            color: if selected {
+                fade_if(disabled, shell.accent)
+            } else {
+                Color::TRANSPARENT
+            },
+            width: if selected { 1.0 } else { 0.0 },
             radius: segment_radius.into(),
-            ..Border::default()
         },
         ..button::Style::default()
     }

@@ -302,6 +302,45 @@ fn selected_segment_is_drawn_with_the_selected_fill() {
         let fill = sample(&pixels, 320, sats.x + 3.0, sats.y + 3.0);
         let rest = sample(&pixels, 320, btc.x + 3.0, btc.y + 3.0);
         assert!(near(fill, shell.selected), "{name}: selected fill {fill:?}");
+        // The selected segment's outline is the accent. Its left edge may sit
+        // between pixels, so one of the columns around it is solid.
+        let outline: Vec<_> = (-1..=1)
+            .map(|dx| sample(&pixels, 320, sats.x + dx as f32 + 0.5, sats.center_y()))
+            .collect();
+        // Anti-aliased, the stroke still sits far closer to the accent than
+        // the selected fill does.
+        let accent = shell.accent.into_rgba8();
+        let distance = |pixel: [u8; 3]| {
+            pixel
+                .iter()
+                .zip(accent)
+                .map(|(a, b)| (f32::from(*a) - f32::from(b)).powi(2))
+                .sum::<f32>()
+                .sqrt()
+        };
+        let nearest = outline
+            .iter()
+            .map(|pixel| distance(*pixel))
+            .fold(f32::MAX, f32::min);
+        assert!(
+            nearest < 0.5 * distance(fill),
+            "{name}: selected outline is not drawn in the accent: {outline:?}"
+        );
+        for status in [Status::Active, Status::Hovered, Status::Pressed] {
+            let style = control_style::segment(&theme, status, true, 6.0);
+            assert_eq!(
+                (style.border.color, style.border.width),
+                (shell.accent, 1.0),
+                "{name}: selected {status:?} outline"
+            );
+            let style = control_style::segment(&theme, status, false, 6.0);
+            assert_eq!(style.border.width, 0.0, "{name}: unselected {status:?}");
+        }
+        let unselected = sample(&pixels, 320, btc.x + 0.5, btc.center_y());
+        assert!(
+            near(unselected, shell.background),
+            "{name}: unselected segments have no outline {unselected:?}"
+        );
         assert!(near(rest, shell.background), "{name}: resting {rest:?}");
     }
 }
