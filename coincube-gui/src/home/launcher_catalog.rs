@@ -105,6 +105,28 @@ pub enum LauncherMode {
 pub(super) const FLOOR_PAGE_SIZE: usize = 4;
 pub(super) const FLOOR_MAX_CUBES: usize = 20;
 
+/// Only presentation data from the page that contained the selected Cube.
+/// The unlock state must not retain Home, Connect credentials, or wallet data.
+#[derive(Debug, Clone)]
+pub(crate) struct LauncherSceneContext {
+    pub selected: CubeCatalogKey,
+    pub page: usize,
+    pub selected_slot: usize,
+    pub backup: &'static str,
+    pub connect: String,
+    pub wallets: &'static str,
+    pub peers: Vec<LauncherScenePeer>,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct LauncherScenePeer {
+    pub key: CubeCatalogKey,
+    pub name: String,
+    pub status: &'static str,
+    pub glyph_dark: String,
+    pub glyph_light: String,
+}
+
 #[derive(Debug, Clone, Default)]
 pub(super) struct CatalogState {
     /// The selected local Cube by persisted identity, never by list position.
@@ -221,6 +243,61 @@ impl Home {
                 .selected
                 .as_ref()
                 .is_some_and(|key| key.cube_id == cube.id && key.chain == cube.network)
+    }
+
+    /// Recheck the live filtered page at the admitted handoff. An earlier
+    /// floor Open intent is provenance, not permission to revive a stale row.
+    pub(crate) fn launcher_scene_context(
+        &self,
+        cube: &crate::app::settings::CubeSettings,
+    ) -> Option<LauncherSceneContext> {
+        if !catalog_visible(self) {
+            return None;
+        }
+        let projection = project(self);
+        if !projection.floor_eligible(self.catalog.mode) {
+            return None;
+        }
+        let index = projection.selected?;
+        let selected = projection.locals.get(index)?;
+        if selected.key.cube_id != cube.id || selected.key.chain != cube.network {
+            return None;
+        }
+        let page = self.catalog.page;
+        let first = page.checked_mul(FLOOR_PAGE_SIZE)?;
+        let selected_slot = index.checked_sub(first)?;
+        if selected_slot >= FLOOR_PAGE_SIZE {
+            return None;
+        }
+        let peers = projection
+            .locals
+            .iter()
+            .skip(first)
+            .take(FLOOR_PAGE_SIZE)
+            .map(|row| LauncherScenePeer {
+                key: row.key.clone(),
+                name: row.name.clone(),
+                status: if row.actionable {
+                    super::launcher_presenter::unlock_prompt(row.cube)
+                } else {
+                    "Unavailable on this network"
+                },
+                glyph_dark: super::launcher_presenter::cube_glyph_source(row.cube, false),
+                glyph_light: super::launcher_presenter::cube_glyph_source(row.cube, true),
+            })
+            .collect::<Vec<_>>();
+        if peers.get(selected_slot)?.key != selected.key {
+            return None;
+        }
+        Some(LauncherSceneContext {
+            selected: selected.key.clone(),
+            page,
+            selected_slot,
+            backup: super::launcher_presenter::backup(cube).0,
+            connect: selected.connect.1.clone(),
+            wallets: super::launcher_presenter::local_wallets(cube),
+            peers,
+        })
     }
 
     /// The same identity check the catalog messages use, plus a nonempty ID.
@@ -3998,6 +4075,42 @@ mod tests {
         reduced.catalog.mode = LauncherMode::List;
         catalog(&mut reduced, CatalogMessage::Select(selected));
         assert!(reduced.catalog.motion.is_none());
+    }
+
+    #[test]
+    fn unlock_floor_snapshot_requires_the_current_selected_filtered_page() {
+        let mut home = rows(8);
+        home.catalog.mode = LauncherMode::Cubes;
+        let selected = key("cube-5");
+        catalog(&mut home, CatalogMessage::SelectFloor(selected.clone()));
+        let cube = match &home.state {
+            State::Cubes { cubes, .. } => cubes[5].clone(),
+            _ => unreachable!(),
+        };
+        let scene = home
+            .launcher_scene_context(&cube)
+            .expect("visible floor selection");
+        assert_eq!(scene.selected, selected);
+        assert_eq!(scene.page, 1);
+        assert_eq!(scene.selected_slot, 1);
+        assert_eq!(scene.peers.len(), 4);
+        assert_eq!(scene.peers[scene.selected_slot].name, "Cube 5");
+        assert!(scene
+            .peers
+            .iter()
+            .all(|peer| !peer.glyph_dark.contains("Cube 5")));
+
+        home.catalog.page = 0;
+        assert!(home.launcher_scene_context(&cube).is_none());
+        home.catalog.page = 1;
+        home.catalog.query = "other".into();
+        assert!(home.launcher_scene_context(&cube).is_none());
+        home.catalog.query.clear();
+        home.catalog.selected = Some(key("cube-6"));
+        assert!(home.launcher_scene_context(&cube).is_none());
+        home.catalog.selected = Some(selected);
+        home.catalog.mode = LauncherMode::List;
+        assert!(home.launcher_scene_context(&cube).is_none());
     }
 
     #[test]

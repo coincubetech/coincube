@@ -513,6 +513,34 @@ pub(super) fn second_turn_source(
     svg
 }
 
+/// Same camera and final center as the selected Launcher floor Cube. The
+/// square unlock controls are separate native widgets over the final face.
+pub(super) fn second_turn_on_floor_source(
+    width: f32,
+    height: f32,
+    target_y: f32,
+    network: ChainId,
+    light: bool,
+    text: FaceText<'_>,
+    progress: f32,
+) -> String {
+    let mut svg = format!(
+        "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width:.2} {height:.2}\">"
+    );
+    paint_cube(
+        &mut svg,
+        width * 0.5,
+        target_y,
+        1.0,
+        network,
+        light,
+        180.0 + 90.0 * progress.clamp(0.0, 1.0),
+        Some(text),
+    );
+    svg.push_str("</svg>");
+    svg
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -57,6 +57,7 @@ use coincube_core::signer::{MasterSigner, MASTER_SEED_LABEL};
 mod launcher_catalog;
 pub(crate) mod launcher_presenter;
 pub(crate) mod launcher_scene;
+pub(crate) use launcher_catalog::LauncherSceneContext;
 
 /// The firmware advisory whose one-time incident notice this install still
 /// owes the user, if any.

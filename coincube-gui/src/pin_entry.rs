@@ -430,10 +430,22 @@ impl PinEntry {
         ))
     }
 
+    pub(crate) fn is_loading(&self) -> bool {
+        self.loading
+    }
+
     pub fn view_with_theme(
         &self,
         mode: coincube_ui::theme::palette::ThemeMode,
     ) -> Element<Message> {
+        self.view_with_theme_and_floor(mode, None)
+    }
+
+    pub(crate) fn view_with_theme_and_floor<'a>(
+        &'a self,
+        mode: coincube_ui::theme::palette::ThemeMode,
+        floor: Option<&'a crate::home::LauncherSceneContext>,
+    ) -> Element<'a, Message> {
         if self.loading {
             // Full-screen loading with Kage quote while BreezClient loads
             return Container::new(
@@ -457,6 +469,19 @@ impl PinEntry {
             .into();
         }
 
+        if let Some(floor) = floor {
+            crate::home::launcher_presenter::unlock_face_on_floor(
+                &self.cube,
+                mode,
+                floor,
+                move || self.unlock_controls(),
+            )
+        } else {
+            crate::home::launcher_presenter::unlock_face(&self.cube, mode, self.unlock_controls())
+        }
+    }
+
+    fn unlock_controls(&self) -> Element<Message> {
         let back_button = button::secondary(Some(icon::previous_icon()), "Back")
             .width(Length::Fixed(150.0))
             .on_press(Message::Back);
@@ -495,19 +520,15 @@ impl PinEntry {
 
         content = content.push(submit_button);
 
-        crate::home::launcher_presenter::unlock_face(
-            &self.cube,
-            mode,
-            Column::new()
-                .spacing(24)
-                .push(header)
-                .push(content)
-                .push(
-                    p1_regular("Network checks run after your PIN is accepted.")
-                        .style(theme::text::secondary),
-                )
-                .into(),
-        )
+        Column::new()
+            .spacing(24)
+            .push(header)
+            .push(content)
+            .push(
+                p1_regular("Network checks run after your PIN is accepted.")
+                    .style(theme::text::secondary),
+            )
+            .into()
     }
 }
 
