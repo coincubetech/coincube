@@ -108,13 +108,23 @@ impl CoincubeDirectory {
     > {
         use crate::app::settings::global::GlobalSettings;
 
-        let parent = self
-            .path()
+        // Existing roots may be passed as `.` or `..`, neither of which has a
+        // `file_name`. Resolve them before deriving the neutral parent lock.
+        // Keep absent roots lexical so only the exact final-root mkdir below
+        // can grant the first-install creator proof.
+        let root_path = match fs::symlink_metadata(self.path()) {
+            Ok(_) => {
+                valid_root(self.path())?;
+                fs::canonicalize(self.path())?
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => self.path().to_path_buf(),
+            Err(error) => return Err(error),
+        };
+        let parent = root_path
             .parent()
             .filter(|path| !path.as_os_str().is_empty())
             .unwrap_or_else(|| Path::new("."));
-        let name = self
-            .path()
+        let name = root_path
             .file_name()
             .ok_or_else(|| unsafe_bootstrap("data root has no final component"))?;
         create_directory(parent).map_err(|error| io::Error::other(error.to_string()))?;
@@ -392,6 +402,26 @@ mod tests {
                 .balances_hidden(),
             Some(true)
         );
+    }
+
+    #[test]
+    fn existing_root_dot_and_dotdot_aliases_start_hidden() {
+        let parent = TestParent::new();
+        let existing = parent.root("existing");
+        fs::create_dir(existing.path()).unwrap();
+        fs::create_dir(existing.path().join("child")).unwrap();
+
+        for alias in [
+            existing.path().join("."),
+            existing.path().join("child").join(".."),
+        ] {
+            let receipt = CoincubeDirectory::new(alias)
+                .bootstrap_privacy()
+                .unwrap()
+                .unwrap();
+            assert_eq!(receipt.balances_hidden(), Some(true));
+        }
+        assert!(parent.0.join(".coincube-bootstrap.lock").is_file());
     }
 
     #[test]
