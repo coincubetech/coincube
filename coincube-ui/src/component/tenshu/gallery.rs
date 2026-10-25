@@ -11,12 +11,14 @@ use std::sync::Once;
 
 use iced::advanced::layout::{self, Layout};
 use iced::advanced::renderer::{self as core_renderer, Headless};
-use iced::advanced::widget::operation::{self, focusable, Focusable, Outcome};
+use iced::advanced::widget::operation::{self, focusable, scrollable, Focusable, Outcome};
 use iced::advanced::widget::{Id, Operation, Tree};
 use iced::advanced::{clipboard, Shell};
 use iced::keyboard::{self, key};
 use iced::widget::button::Status;
-use iced::{alignment, mouse, Background, Border, Color, Event, Length, Point, Rectangle, Size};
+use iced::{
+    alignment, mouse, Background, Border, Color, Event, Length, Point, Rectangle, Size, Vector,
+};
 
 use super::*;
 use crate::font;
@@ -25,7 +27,7 @@ use crate::image;
 use crate::theme::tenshu::button::{self as button_style, ActionShape};
 use crate::theme::tenshu::{self as tokens, size, space};
 use crate::theme::Theme;
-use crate::widget::{Column, Container, Element, Renderer, Row};
+use crate::widget::{Column, Container, Element, Renderer, Row, Scrollable};
 
 #[derive(Debug, Clone, PartialEq)]
 enum Msg {
@@ -211,6 +213,7 @@ impl Mounted {
 struct Collected {
     focusables: Vec<(Id, Rectangle)>,
     texts: Vec<(Rectangle, String)>,
+    scrollables: Vec<(Id, Rectangle, Rectangle, Vector)>,
 }
 
 impl Operation for Collected {
@@ -226,6 +229,20 @@ impl Operation for Collected {
 
     fn text(&mut self, _id: Option<&Id>, bounds: Rectangle, text: &str) {
         self.texts.push((bounds, text.to_string()));
+    }
+
+    fn scrollable(
+        &mut self,
+        id: Option<&Id>,
+        bounds: Rectangle,
+        content_bounds: Rectangle,
+        translation: Vector,
+        _state: &mut dyn scrollable::Scrollable,
+    ) {
+        if let Some(id) = id {
+            self.scrollables
+                .push((id.clone(), bounds, content_bounds, translation));
+        }
     }
 }
 
@@ -1176,10 +1193,15 @@ fn overview(visibility: AmountVisibility) -> Element<'static, Msg> {
 fn shell(page: Element<'static, Msg>) -> Element<'static, Msg> {
     Container::new(
         Row::new().push(rail()).push(
-            Container::new(page)
-                .width(Length::Fill)
-                .padding([32.0, 48.0])
-                .align_x(alignment::Horizontal::Center),
+            Scrollable::new(
+                Container::new(page)
+                    .width(Length::Fill)
+                    .padding([32.0, 48.0])
+                    .align_x(alignment::Horizontal::Center),
+            )
+            .id("gallery-overview")
+            .width(Length::Fill)
+            .height(Length::Fill),
         ),
     )
     .width(Length::Fill)
@@ -1418,6 +1440,37 @@ fn gallery_renders_overview_and_sheet_in_both_themes_and_window_sizes() {
                     bounds.x + bounds.width <= window.width + 0.5,
                     "{name} {width}x{height}: {text:?} overflows the window"
                 );
+            }
+            if (width, height) == (1024, 768) {
+                mounted.run(scrollable::snap_to::<()>(
+                    Id::new("gallery-overview"),
+                    scrollable::RelativeOffset::END.into(),
+                ));
+                let scrolled = mounted.collect();
+                let (_, viewport, content, offset) = scrolled
+                    .scrollables
+                    .iter()
+                    .find(|(id, _, _, _)| *id == Id::new("gallery-overview"))
+                    .expect("Overview must expose a mounted scrollable");
+                assert!(content.height > viewport.height && offset.y > 0.0);
+                for expected in ["Vault · Family savings", "Transfer"] {
+                    let bounds = scrolled
+                        .texts
+                        .iter()
+                        .find(|(_, text)| text == expected)
+                        .unwrap_or_else(|| panic!("missing {expected:?}"))
+                        .0;
+                    assert!(
+                        bounds.y - offset.y >= viewport.y - 0.5
+                            && bounds.y + bounds.height - offset.y
+                                <= viewport.y + viewport.height + 0.5,
+                        "{name}: {expected:?} cannot be brought into the viewport"
+                    );
+                }
+                mounted.run(scrollable::snap_to::<()>(
+                    Id::new("gallery-overview"),
+                    scrollable::RelativeOffset::START.into(),
+                ));
             }
             mounted.focus("spark-send");
             let send = collected
