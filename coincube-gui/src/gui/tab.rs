@@ -1287,8 +1287,14 @@ impl Tab {
         };
         match message {
             home::Message::Run(root, _, chain, cube)
+            | home::Message::RunFromFloor(root, _, chain, cube, _)
             | home::Message::RunToRecovery(root, _, chain, cube)
             | home::Message::RunClaim(root, _, chain, cube, _) => {
+                if let home::Message::RunFromFloor(_, _, _, _, generation) = message {
+                    if !home.floor_open_matches_queued(*generation, cube) {
+                        return Err("This Cube changed while opening. Select it again to use the current details.".into());
+                    }
+                }
                 if !crate::chain::same_path(root.path(), home.datadir_path.path()) {
                     return Err("The selected Cube belongs to another data directory.".into());
                 }
@@ -1472,6 +1478,21 @@ impl Tab {
     fn update_inner(&mut self, message: Message) -> Task<Message> {
         use crate::app::settings::global::GlobalSettings;
         let message = match message {
+            Message::Launch(floor @ home::Message::RunFromFloor(..)) => {
+                if let Err(error) = self.validate_home_exit(&floor) {
+                    if let State::Home(home) = &mut self.state {
+                        home.set_error(error);
+                    }
+                    app::split_intent::clear();
+                    self.pending_split_intent = None;
+                    return Task::none();
+                }
+                let home::Message::RunFromFloor(root, config, chain, cube, _) = floor else {
+                    unreachable!();
+                };
+                self.pending_recovery_route = None;
+                Message::Launch(home::Message::Run(root, config, chain, cube))
+            }
             Message::Launch(home::Message::RunToRecovery(root, config, chain, cube)) => {
                 self.pending_recovery_route = Some((root.clone(), chain, cube.id.clone()));
                 Message::Launch(home::Message::Run(root, config, chain, cube))

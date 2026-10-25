@@ -138,6 +138,10 @@ pub(super) struct CatalogState {
     /// Set only by the actual floor face's Open action, then consumed by the
     /// tab handoff. A List fallback can never inherit floor provenance.
     pub(super) open_from_floor: bool,
+    /// Each floor Open gets a distinct origin carried by its queued Run.
+    /// Clearing open_from_floor invalidates that origin even if the selected
+    /// identity is later selected again.
+    pub(super) floor_open_generation: u64,
     /// Name filter over the currently listed Cubes.
     pub(super) query: String,
     /// The floor pages only visible local Cubes, never Connect-only records.
@@ -228,6 +232,11 @@ pub enum CatalogMessage {
 }
 
 impl Home {
+    pub(crate) fn floor_open_matches_queued(&self, generation: u64, cube: &CubeSettings) -> bool {
+        self.catalog.open_from_floor
+            && self.catalog.floor_open_generation == generation
+            && self.floor_open_matches_current_cube(cube)
+    }
     pub(crate) fn launcher_floor_open_armed(&self) -> bool {
         self.catalog.open_from_floor
     }
@@ -4181,6 +4190,7 @@ mod tests {
         home.catalog.mode = LauncherMode::Cubes;
         catalog(&mut home, CatalogMessage::SelectFloor(key("cube-0")));
         home.catalog.open_from_floor = true;
+        home.catalog.floor_open_generation = 1;
         let queued = match &home.state {
             State::Cubes { cubes, .. } => cubes[0].clone(),
             _ => unreachable!(),
@@ -4190,18 +4200,74 @@ mod tests {
         }
         let datadir = home.datadir_path.clone();
         let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Home(home));
-        drop(tab.update(crate::gui::tab::Message::Launch(Message::Run(
+        let queued_run = Message::RunFromFloor(
             datadir,
             crate::app::config::Config::new(false),
             ChainId::Bitcoin,
             queued,
-        ))));
+            1,
+        );
+        assert!(tab.validate_home_exit(&queued_run).is_err());
+        drop(tab.update(crate::gui::tab::Message::Launch(queued_run)));
         let crate::gui::tab::State::Home(home) = &tab.state else {
             panic!("stale Cube must not enter unlock");
         };
         assert!(home
             .error()
             .is_some_and(|error| error.contains("changed while opening")));
+    }
+
+    #[test]
+    fn delayed_floor_run_refuses_intervening_selection_query_and_mode() {
+        for intervention in ["selection", "query", "mode", "second open"] {
+            let mut home = rows(2);
+            home.catalog.mode = LauncherMode::Cubes;
+            catalog(&mut home, CatalogMessage::SelectFloor(key("cube-0")));
+            home.catalog.open_from_floor = true;
+            home.catalog.floor_open_generation = 1;
+            let queued = match &home.state {
+                State::Cubes { cubes, .. } => cubes[0].clone(),
+                _ => unreachable!(),
+            };
+            match intervention {
+                "selection" => {
+                    catalog(&mut home, CatalogMessage::SelectFloor(key("cube-1")));
+                    catalog(&mut home, CatalogMessage::SelectFloor(key("cube-0")));
+                }
+                "query" => {
+                    catalog(&mut home, CatalogMessage::Query("Cube".into()));
+                    catalog(&mut home, CatalogMessage::ClearQuery);
+                    catalog(&mut home, CatalogMessage::SelectFloor(key("cube-0")));
+                }
+                "mode" => {
+                    home.catalog.mode = LauncherMode::List;
+                    home.reconcile_catalog();
+                }
+                "second open" => {
+                    home.catalog.floor_open_generation = 2;
+                }
+                _ => unreachable!(),
+            }
+            let queued_run = Message::RunFromFloor(
+                home.datadir_path.clone(),
+                crate::app::config::Config::new(false),
+                ChainId::Bitcoin,
+                queued,
+                1,
+            );
+            let mut tab = crate::gui::tab::Tab::new(0, crate::gui::tab::State::Home(home));
+            assert!(
+                tab.validate_home_exit(&queued_run).is_err(),
+                "{} must be refused before GUI retires the public owner",
+                intervention
+            );
+            drop(tab.update(crate::gui::tab::Message::Launch(queued_run)));
+            assert!(
+                matches!(tab.state, crate::gui::tab::State::Home(_)),
+                "{}",
+                intervention
+            );
+        }
     }
 
     #[test]
